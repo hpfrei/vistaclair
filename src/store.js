@@ -377,6 +377,7 @@ class InteractionStore {
     for (const id of toRemove) {
       this.interactions.delete(id);
       this.filePaths.delete(id);
+      this.bootLoadedIds.delete(id);
     }
     this.order = this.order.filter(id => !toRemove.has(id));
     for (const [id, fp] of this.diskIndex) {

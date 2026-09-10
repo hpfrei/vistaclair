@@ -1212,7 +1212,7 @@ function reconcileAnthropicCatalog(baseDir, opts = {}) {
       // stale and the API answers not_found (proxy.js sends modelId verbatim).
       // Repair here so existing installs heal on reconcile, not just new rows.
       if (existing.providerKey === 'anthropic' && ANTHROPIC_DATED_RE.test(existing.modelId || '')) {
-        existing.modelId = key;
+        existing.modelId = key.replace(ANTHROPIC_DATED_RE, '');
       }
       existing.retiresAt = lifecycle === 'deprecated' ? retiresAt : null;
       if (typeof meta.context1m === 'boolean') existing.context1m = meta.context1m;
