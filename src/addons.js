@@ -14,6 +14,8 @@
 //     authExemptPaths: [...],     // public route prefixes (e.g. OAuth callbacks)
 //     authExemptPatterns: [...],  // public route RegExps (e.g. per-app telegram mini-app assets)
 //     handleUpgrade(req, socket, head) -> bool,
+//     pinnedSessions() -> iterable of sessId,  // optional; exempt from the
+//                                              // interactions TTL sweep
 //     shutdown(), update(),    // optional lifecycle hooks
 //     _module,                 // raw module handle (licensing/lifecycle)
 //   }
@@ -83,6 +85,24 @@ function shutdownAll() {
   }
 }
 
+// Claude session ids each add-on still needs, unioned. The interactions sweep
+// treats these as pinned, so an add-on can keep the inspector timeline of a
+// headless run it still references. Optional hook — an add-on that doesn't
+// implement it simply pins nothing.
+function collectPinnedSessions() {
+  const pinned = new Set();
+  for (const a of addons) {
+    let ids;
+    try { ids = a.pinnedSessions?.(); } catch (e) {
+      console.error(`  Addon "${a.id}" pinnedSessions error:`, e.message);
+      continue;
+    }
+    if (!ids) continue;
+    for (const id of ids) if (typeof id === 'string' && id) pinned.add(id);
+  }
+  return pinned;
+}
+
 module.exports = {
   CONTRACT_VERSION,
   registerAddon,
@@ -91,5 +111,6 @@ module.exports = {
   isAuthExempt,
   handleUpgrade,
   mountRouters,
+  collectPinnedSessions,
   shutdownAll,
 };

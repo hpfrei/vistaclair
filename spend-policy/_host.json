@@ -1,7 +1,7 @@
 {
   "v": 1,
-  "mode": "auto",
-  "enforce": true,
+  "mode": "local",
+  "enforce": false,
   "unitPrices": {},
   "host": {
     "local": {
@@ -9,11 +9,13 @@
       "caps": {
         "app": {
           "day": "unlimited",
-          "month": "unlimited"
+          "month": "unlimited",
+          "subscribers": "count"
         },
         "principal": {
           "day": "unlimited",
           "month": "unlimited",
+          "subscribers": "count",
           "source": "fixed"
         },
         "unattributed": {
@@ -29,6 +31,10 @@
       "alerts": {
         "appDayPct": 80,
         "anomalyFactor": 3
+      },
+      "storage": {
+        "dailyMB": "unlimited",
+        "subscribers": "count"
       },
       "paused": false
     },
@@ -37,11 +43,13 @@
       "caps": {
         "app": {
           "day": "unlimited",
-          "month": "unlimited"
+          "month": "unlimited",
+          "subscribers": "count"
         },
         "principal": {
           "day": "unlimited",
           "month": "unlimited",
+          "subscribers": "count",
           "source": "fixed"
         },
         "unattributed": {
@@ -58,9 +66,13 @@
         "appDayPct": 80,
         "anomalyFactor": 3
       },
+      "storage": {
+        "dailyMB": "unlimited",
+        "subscribers": "count"
+      },
       "paused": false
     }
   },
   "reviewNotice": true,
-  "updatedAt": 1788610033933
+  "updatedAt": 1788954533385
 }

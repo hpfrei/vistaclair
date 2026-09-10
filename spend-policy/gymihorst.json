@@ -1,6 +1,6 @@
 {
   "v": 1,
-  "updatedAt": 1788713179305,
+  "updatedAt": 1788706855378,
   "local": {
     "preset": "unlimited",
     "caps": {
@@ -68,5 +68,7 @@
       "subscribers": "count"
     },
     "paused": false
-  }
+  },
+  "note": "Migrated on upgrade: kept unlimited (previous behaviour). Review before deploying.",
+  "migrated": 1788706855378
 }

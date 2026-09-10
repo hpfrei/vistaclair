@@ -855,7 +855,7 @@
         hint.innerHTML = 'No Claude subscription detected. Run <code>/login</code> in this CLI tab to activate your Max/Pro subscription for interactive sessions. Without a subscription, sessions fall back to the Anthropic API key.';
       }
     }
-    const modelMap = settings.modelMap || { opus: null, sonnet: null, haiku: null };
+    const modelMap = settings.modelMap || { fable: null, opus: null, sonnet: null, haiku: null };
     const hasAuth = (m) => !!m.apiKey || (hasSubscription && m.providerKey === 'anthropic');
     const isRetired = (m) => m.lifecycle === 'retired';
     const allModels = (models || []).sort((a, b) => {
@@ -867,7 +867,7 @@
       return (a.label || a.name).localeCompare(b.label || b.name);
     });
 
-    ['opus', 'sonnet', 'haiku'].forEach(family => {
+    ['fable', 'opus', 'sonnet', 'haiku'].forEach(family => {
       const sel = settingsModal.querySelector(`[data-map="${family}"]`);
       if (!sel) return;
       sel.innerHTML = '<option value="">Default (passthrough)</option>';
@@ -930,7 +930,7 @@
     const tabId = settingsModal._tabId;
     const tab = tabs.get(tabId);
     const modelMap = {};
-    ['opus', 'sonnet', 'haiku'].forEach(family => {
+    ['fable', 'opus', 'sonnet', 'haiku'].forEach(family => {
       const sel = settingsModal.querySelector(`[data-map="${family}"]`);
       modelMap[family] = sel?.value || null;
     });

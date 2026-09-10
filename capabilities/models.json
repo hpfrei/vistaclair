@@ -27,7 +27,7 @@
       "description": "Anthropic's newest and most capable model — frontier reasoning, coding, and agentic tasks",
       "providerKey": "anthropic",
       "provider": "anthropic",
-      "modelId": "claude-opus-4-7-20250715",
+      "modelId": "claude-opus-4-7",
       "systemPromptMode": "passthrough",
       "toolOverrides": {},
       "reasoning": true,
@@ -51,7 +51,7 @@
       "description": "Anthropic's most capable model for complex analysis and extended agentic tasks",
       "providerKey": "anthropic",
       "provider": "anthropic",
-      "modelId": "claude-opus-4-6-20250515",
+      "modelId": "claude-opus-4-6",
       "systemPromptMode": "passthrough",
       "toolOverrides": {},
       "reasoning": true,
@@ -75,7 +75,7 @@
       "description": "Anthropic's best balance of speed and intelligence for everyday coding tasks",
       "providerKey": "anthropic",
       "provider": "anthropic",
-      "modelId": "claude-sonnet-4-6-20250514",
+      "modelId": "claude-sonnet-4-6",
       "systemPromptMode": "passthrough",
       "toolOverrides": {},
       "reasoning": true,
@@ -99,7 +99,7 @@
       "description": "Anthropic's fastest and most compact model for high-throughput tasks",
       "providerKey": "anthropic",
       "provider": "anthropic",
-      "modelId": "claude-haiku-4-5-20251001",
+      "modelId": "claude-haiku-4-5",
       "systemPromptMode": "passthrough",
       "reasoning": false,
       "contextWindow": 200000,
@@ -790,7 +790,7 @@
       "useMaxCompletionTokens": false,
       "inputCostPerMTok": 0.25,
       "outputCostPerMTok": 1.5,
-      "cacheReadCostPerMTok": 0.025,
+      "cacheReadCostPerMTok": null,
       "cacheCreateCostPerMTok": null
     },
     {
@@ -1076,9 +1076,9 @@
       "contextWindow": 131072,
       "maxOutputTokens": 65536,
       "useMaxCompletionTokens": false,
-      "inputCostPerMTok": null,
-      "outputCostPerMTok": null,
-      "cacheReadCostPerMTok": null,
+      "inputCostPerMTok": 0.75,
+      "outputCostPerMTok": 3.75,
+      "cacheReadCostPerMTok": 0.075,
       "cacheCreateCostPerMTok": null
     },
     {
@@ -1364,7 +1364,8 @@
       "systemPromptMode": "replace",
       "toolOverrides": {},
       "reasoning": false,
-      "disabled": true,
+      "context1m": false,
+      "disabled": false,
       "contextWindow": 1048576,
       "maxOutputTokens": 65536,
       "useMaxCompletionTokens": false,
@@ -1374,7 +1375,8 @@
       "cacheCreateCostPerMTok": null,
       "lifecycle": "current",
       "retiresAt": null,
-      "isNew": false
+      "isNew": false,
+      "systemPrompt": "You are a coding assistant with direct access to the user's file system through tools. You help with software engineering tasks: writing code, debugging, refactoring, explaining code, and more.\n\n## Available Tools\n\nYou have access to file system and development tools:\n- **Read**: Read file contents by path. Always read before modifying a file.\n- **Write**: Create new files or fully rewrite existing ones.\n- **Edit**: Make targeted string replacements in existing files. Prefer this over Write for modifications.\n- **Bash**: Execute shell commands. Use for builds, tests, git, and system operations.\n- **Glob**: Find files by glob pattern (e.g. \"**/*.js\"). Use instead of find or ls commands.\n- **Grep**: Search file contents with regex. Use instead of grep or rg commands.\n- **WebSearch**: Search the web for current information.\n- **WebFetch**: Fetch content from a specific URL.\n- **Skill**: Execute a named skill (reusable prompt template). When users say \"/<name>\", call this tool with that skill name.\n- **Agent**: Launch a sub-agent for independent sub-tasks.\n- **TodoWrite**: Track task progress with a todo list.\n\n## Guidelines\n\n- Always read files before modifying them. Understand existing code first.\n- Prefer editing existing files over creating new ones.\n- Use dedicated file tools (Read, Edit, Write, Glob, Grep) instead of shell equivalents.\n- Keep responses concise and direct. Lead with the answer, not the reasoning.\n- Do not add features, refactoring, or improvements beyond what was asked.\n- Be careful about security: avoid injection vulnerabilities, validate inputs at boundaries.\n- When referencing code locations, use the format file_path:line_number.\n- If a task seems risky or destructive, confirm with the user before proceeding.\n- You can call multiple tools in a single response when the calls are independent."
     },
     {
       "name": "gemini-3.6-flash",
@@ -1465,7 +1467,7 @@
       "cacheCreateCostPerMTok": null,
       "lifecycle": "current",
       "retiresAt": null,
-      "isNew": true
+      "isNew": false
     },
     {
       "name": "gemini-3.5-transcribe",
@@ -1488,7 +1490,7 @@
       "cacheCreateCostPerMTok": null,
       "lifecycle": "current",
       "retiresAt": null,
-      "isNew": true
+      "isNew": false
     },
     {
       "name": "gemini-3.7-flash",
@@ -1511,7 +1513,7 @@
       "cacheCreateCostPerMTok": null,
       "lifecycle": "current",
       "retiresAt": null,
-      "isNew": true
+      "isNew": false
     },
     {
       "name": "deepseek-v4-flash-vision-exp",
@@ -1534,7 +1536,7 @@
       "cacheCreateCostPerMTok": null,
       "lifecycle": "current",
       "retiresAt": null,
-      "isNew": true
+      "isNew": false
     },
     {
       "name": "claude-fable-5-1",
@@ -1557,7 +1559,7 @@
       "cacheCreateCostPerMTok": 12.5,
       "lifecycle": "current",
       "retiresAt": null,
-      "isNew": true
+      "isNew": false
     },
     {
       "name": "claude-mythos-5-1",
@@ -1580,7 +1582,54 @@
       "cacheCreateCostPerMTok": 12.5,
       "lifecycle": "current",
       "retiresAt": null,
-      "isNew": true
+      "isNew": false
+    },
+    {
+      "name": "gpt-6-astra",
+      "label": "gpt-6-astra",
+      "description": "",
+      "providerKey": "openai",
+      "provider": "openai-responses",
+      "modelId": "gpt-6-astra",
+      "systemPromptMode": "replace",
+      "toolOverrides": {},
+      "reasoning": false,
+      "context1m": false,
+      "disabled": true,
+      "contextWindow": null,
+      "maxOutputTokens": null,
+      "useMaxCompletionTokens": false,
+      "inputCostPerMTok": 10,
+      "outputCostPerMTok": 50,
+      "cacheReadCostPerMTok": 1,
+      "cacheCreateCostPerMTok": null,
+      "lifecycle": "current",
+      "retiresAt": null,
+      "isNew": false
+    },
+    {
+      "name": "gemini-3.8-flash",
+      "label": "Gemini 3.8 Flash",
+      "description": "Gemini 3.8 Flash",
+      "providerKey": "google",
+      "provider": "gemini",
+      "modelId": "gemini-3.8-flash",
+      "systemPromptMode": "replace",
+      "toolOverrides": {},
+      "reasoning": false,
+      "context1m": false,
+      "disabled": false,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 65536,
+      "useMaxCompletionTokens": false,
+      "inputCostPerMTok": 0.75,
+      "outputCostPerMTok": 3.75,
+      "cacheReadCostPerMTok": 0.075,
+      "cacheCreateCostPerMTok": null,
+      "lifecycle": "current",
+      "retiresAt": null,
+      "isNew": false,
+      "systemPrompt": "You are a coding assistant with direct access to the user's file system through tools. You help with software engineering tasks: writing code, debugging, refactoring, explaining code, and more.\n\n## Available Tools\n\nYou have access to file system and development tools:\n- **Read**: Read file contents by path. Always read before modifying a file.\n- **Write**: Create new files or fully rewrite existing ones.\n- **Edit**: Make targeted string replacements in existing files. Prefer this over Write for modifications.\n- **Bash**: Execute shell commands. Use for builds, tests, git, and system operations.\n- **Glob**: Find files by glob pattern (e.g. \"**/*.js\"). Use instead of find or ls commands.\n- **Grep**: Search file contents with regex. Use instead of grep or rg commands.\n- **WebSearch**: Search the web for current information.\n- **WebFetch**: Fetch content from a specific URL.\n- **Skill**: Execute a named skill (reusable prompt template). When users say \"/<name>\", call this tool with that skill name.\n- **Agent**: Launch a sub-agent for independent sub-tasks.\n- **TodoWrite**: Track task progress with a todo list.\n\n## Guidelines\n\n- Always read files before modifying them. Understand existing code first.\n- Prefer editing existing files over creating new ones.\n- Use dedicated file tools (Read, Edit, Write, Glob, Grep) instead of shell equivalents.\n- Keep responses concise and direct. Lead with the answer, not the reasoning.\n- Do not add features, refactoring, or improvements beyond what was asked.\n- Be careful about security: avoid injection vulnerabilities, validate inputs at boundaries.\n- When referencing code locations, use the format file_path:line_number.\n- If a task seems risky or destructive, confirm with the user before proceeding.\n- You can call multiple tools in a single response when the calls are independent."
     }
   ]
 }

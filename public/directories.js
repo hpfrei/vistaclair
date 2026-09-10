@@ -12,6 +12,33 @@
   let tabCounter = 0;
   let _pendingTerminalRestores = [];
 
+  // At the filesystem root `cwd` is '/', so plain concatenation yields '//name'.
+  // Both the builders and the comparers below must agree, or a rebuilt key stops
+  // matching the stored one.
+  function joinPath(cwd, name) {
+    return cwd === '/' ? '/' + name : cwd + '/' + name;
+  }
+
+  // Selection is keyed by absolute path; `tab.entries` is the source of truth for
+  // what each one actually is. Shared by both right-panel modes so neither has to
+  // re-derive it from the DOM.
+  function getSelectedEntries(tab) {
+    const files = [], dirs = [];
+    for (const entry of tab.entries) {
+      const path = joinPath(tab.cwd, entry.name);
+      if (!tab.selectedPaths.has(path)) continue;
+      (entry.isDirectory ? dirs : files).push({ entry, path });
+    }
+    return { files, dirs, paths: [...dirs, ...files].map(x => x.path) };
+  }
+
+  function describeSelection(sel) {
+    const f = sel.files.length, d = sel.dirs.length;
+    if (f && d) return (f + d) + ' items';
+    if (d) return d + ' folder' + (d > 1 ? 's' : '');
+    return f + ' file' + (f > 1 ? 's' : '');
+  }
+
   function _saveDirTabs() {
     const entries = [];
     let activeIndex = -1, i = 0;
@@ -136,9 +163,12 @@
       const tab = tabs.get(tabId);
       if (!tab) return;
       tab.showPreviews = e.target.checked;
+      // Clear unconditionally: the two modes sort differently, so a selection
+      // (and its shift-range anchor) carried across a mode flip refers to rows
+      // that no longer line up.
+      tab.selectedPaths.clear();
+      tab._lastSelectedIndex = -1;
       if (!tab.selectedFile) {
-        tab.selectedPaths.clear();
-        tab._lastSelectedIndex = -1;
         if (tab.showPreviews) renderPreviews(tab);
         else renderDirListing(tab);
       }
@@ -394,7 +424,7 @@
     }
 
     for (const entry of tab.entries) {
-      const fullPath = tab.cwd + '/' + entry.name;
+      const fullPath = joinPath(tab.cwd, entry.name);
       const row = document.createElement('div');
       row.className = 'dir-entry' + (entry.isDirectory ? ' dir-folder' : '');
       if (!entry.isDirectory && tab.selectedFile === fullPath) row.classList.add('selected');
@@ -449,7 +479,7 @@
 
   function getFileIndex(tab, filePath) {
     const files = getFileList(tab);
-    return files.findIndex(e => tab.cwd + '/' + e.name === filePath);
+    return files.findIndex(e => joinPath(tab.cwd, e.name) === filePath);
   }
 
   function openFile(tab, filePath, entry) {
@@ -471,7 +501,7 @@
     closeOverlay();
 
     const files = getFileList(tab);
-    const currentIdx = files.findIndex(e => tab.cwd + '/' + e.name === filePath);
+    const currentIdx = files.findIndex(e => joinPath(tab.cwd, e.name) === filePath);
     const hasPrev = currentIdx > 0;
     const hasNext = currentIdx < files.length - 1;
 
@@ -505,7 +535,7 @@
       const newIdx = currentIdx + dir;
       if (newIdx < 0 || newIdx >= files.length) return;
       const e = files[newIdx];
-      const p = tab.cwd + '/' + e.name;
+      const p = joinPath(tab.cwd, e.name);
       tab.selectedFile = p;
       showOverlay(tab, p, e);
     }
@@ -603,6 +633,7 @@
   // ── Preview grid ───────────────────────────────────────────────────
 
   const BINARY_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="4" width="32" height="40" rx="3"/><text x="24" y="28" text-anchor="middle" font-size="8" stroke="none" fill="currentColor" font-family="monospace">01 10</text><text x="24" y="36" text-anchor="middle" font-size="8" stroke="none" fill="currentColor" font-family="monospace">11 00</text></svg>`;
+  const FOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12a2 2 0 0 1 2-2h11l4 5h19a2 2 0 0 1 2 2v20a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2z"/></svg>`;
 
   function resetPreviewPanel(tab) {
     closeOverlay();
@@ -635,9 +666,10 @@
     content.innerHTML = '';
     empty.style.display = 'none';
 
-    const files = tab.entries.filter(e => !e.isDirectory);
-    if (files.length === 0) {
-      content.innerHTML = '<div style="padding:16px;color:var(--text-dim);font-size:12px">No files to preview</div>';
+    // Folders render here too, so they can be selected and deleted in this mode.
+    const items = [...tab.entries];
+    if (items.length === 0) {
+      content.innerHTML = '<div style="padding:16px;color:var(--text-dim);font-size:12px">Empty directory</div>';
       return;
     }
 
@@ -662,7 +694,11 @@
     }
     content.appendChild(sortBar);
 
-    const sortedFiles = [...files].sort((a, b) => {
+    const sortedItems = items.sort((a, b) => {
+      // Folders first, mirroring the listing mode: size and date are meaningless
+      // on a directory, and a divergent order would desync _lastSelectedIndex,
+      // which both modes share.
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
       const dir = previewSortDir === 'desc' ? -1 : 1;
       if (previewSortKey === 'name') return dir * a.name.localeCompare(b.name);
       if (previewSortKey === 'date') return dir * (new Date(a.mtime) - new Date(b.mtime));
@@ -675,21 +711,26 @@
     const grid = document.createElement('div');
     grid.className = 'dir-preview-grid';
 
-    for (let i = 0; i < sortedFiles.length; i++) {
-      const entry = sortedFiles[i];
-      const fullPath = tab.cwd + '/' + entry.name;
-      const ext = (entry.name.match(/\.([^.]+)$/) || [])[1]?.toLowerCase() || '';
-      const category = getFileCategory(ext);
+    for (let i = 0; i < sortedItems.length; i++) {
+      const entry = sortedItems[i];
+      const fullPath = joinPath(tab.cwd, entry.name);
+      // Decide on isDirectory before any extension sniffing: a folder named
+      // "assets.css" must not be categorised as text and then fetched as a file.
+      const ext = entry.isDirectory ? '' : (entry.name.match(/\.([^.]+)$/) || [])[1]?.toLowerCase() || '';
+      const category = entry.isDirectory ? 'folder' : getFileCategory(ext);
 
       const card = document.createElement('div');
-      card.className = 'dir-preview-card' + (tab.selectedPaths.has(fullPath) ? ' selected' : '');
+      card.className = 'dir-preview-card' + (entry.isDirectory ? ' dir-folder' : '')
+        + (tab.selectedPaths.has(fullPath) ? ' selected' : '');
       card.dataset.index = i;
       card.dataset.path = fullPath;
 
       const thumb = document.createElement('div');
       thumb.className = 'dir-preview-thumb';
 
-      if (category === 'image') {
+      if (category === 'folder') {
+        thumb.innerHTML = FOLDER_SVG;
+      } else if (category === 'image') {
         const img = document.createElement('img');
         img.src = '/api/raw-file?path=' + encodeURIComponent(fullPath);
         img.alt = entry.name;
@@ -734,12 +775,15 @@
         else tab.selectedPaths.delete(fullPath);
         tab._lastSelectedIndex = idx;
         syncCardSelection(grid, tab);
-        updateDeleteBar(tab, content, sortBar);
+        updateDeleteBar(tab, sortBar, gridBarOpts(tab, content));
       });
 
       const label = document.createElement('div');
       label.className = 'dir-preview-label';
       label.textContent = entry.name;
+      label.title = entry.isDirectory && entry.childCount != null
+        ? `${entry.name} — ${entry.childCount} item${entry.childCount !== 1 ? 's' : ''}`
+        : entry.name;
 
       card.appendChild(cb);
       card.appendChild(thumb);
@@ -749,6 +793,10 @@
         if (tab.selectedPaths.size > 0) {
           cb.checked = !cb.checked;
           cb.dispatchEvent(new Event('change'));
+          return;
+        }
+        if (entry.isDirectory) {
+          loadDir(tab.id, fullPath);
           return;
         }
         tab.leftPanel.querySelectorAll('.dir-entry.selected').forEach(el => el.classList.remove('selected'));
@@ -765,7 +813,7 @@
     if (tab.selectedPaths.size > 0) {
       grid.classList.add('selecting');
     }
-    updateDeleteBar(tab, content, sortBar);
+    updateDeleteBar(tab, sortBar, gridBarOpts(tab, content));
   }
 
   function syncCardSelection(grid, tab) {
@@ -779,64 +827,119 @@
     });
   }
 
-  function updateDeleteBar(tab, content, sortBar) {
-    let bar = sortBar ? sortBar.querySelector('.dir-preview-delete-bar') : content.querySelector('.dir-preview-delete-bar');
-    if (tab.selectedPaths.size === 0) {
+  // One delete bar serves both panel modes: they differ only in where it hangs,
+  // its class, and how the mode re-syncs its rows.
+  function gridBarOpts(tab, content) {
+    return {
+      barClass: 'dir-preview-delete-bar',
+      resync: () => {
+        const grid = content.querySelector('.dir-preview-grid');
+        if (grid) syncCardSelection(grid, tab);
+      },
+    };
+  }
+
+  function listingBarOpts(tab, content) {
+    return {
+      barClass: 'dir-listing-delete-bar',
+      resync: () => {
+        const wrap = content.querySelector('.dir-listing-wrap');
+        if (wrap) syncListingSelection(wrap, tab);
+      },
+    };
+  }
+
+  function updateDeleteBar(tab, hostEl, opts) {
+    let bar = hostEl.querySelector('.' + opts.barClass);
+    const sel = getSelectedEntries(tab);
+    if (sel.paths.length === 0) {
       if (bar) bar.remove();
       return;
     }
     if (!bar) {
       bar = document.createElement('div');
-      bar.className = 'dir-preview-delete-bar';
+      bar.className = opts.barClass;
       const clearBtn = document.createElement('button');
       clearBtn.className = 'dir-preview-clear-btn';
       clearBtn.textContent = 'Cancel';
       clearBtn.addEventListener('click', () => {
         tab.selectedPaths.clear();
         tab._lastSelectedIndex = -1;
-        const grid = content.querySelector('.dir-preview-grid');
-        if (grid) syncCardSelection(grid, tab);
-        updateDeleteBar(tab, content, sortBar);
+        opts.resync();
+        updateDeleteBar(tab, hostEl, opts);
       });
       const delBtn = document.createElement('button');
       delBtn.className = 'dir-preview-delete-btn';
-      delBtn.addEventListener('click', () => deleteSelectedFiles(tab));
       bar.appendChild(clearBtn);
       bar.appendChild(delBtn);
-      if (sortBar) sortBar.appendChild(bar);
-      else content.appendChild(bar);
+      hostEl.appendChild(bar);
     }
-    const btn = bar.querySelector('.dir-preview-delete-btn');
-    const n = tab.selectedPaths.size;
-    btn.textContent = `Delete ${n} file${n > 1 ? 's' : ''}`;
+    const delBtn = bar.querySelector('.dir-preview-delete-btn');
+    // The breakdown stays off the button — it overflows the 11px pill in a
+    // narrow panel. The confirm dialog carries the detail instead.
+    delBtn.textContent = 'Delete ' + describeSelection(sel);
+    delBtn.onclick = () => deleteSelected(tab);
   }
 
-  function deleteSelectedFiles(tab) {
-    const paths = [...tab.selectedPaths].filter(p => {
-      const entry = tab.entries.find(e => tab.cwd + '/' + e.name === p);
-      return entry && !entry.isDirectory;
+  // toast.js may not have attached showToast when this module evaluates, so it
+  // is resolved at call time rather than destructured at the top.
+  function notifyDelete(level, message) {
+    window.dashboard.showToast?.({ message, level, sender: 'Directories' });
+  }
+
+  function buildDeleteMessage(sel) {
+    const listed = [...sel.dirs, ...sel.files];
+    const total = listed.length;
+    const warn = sel.dirs.length
+      ? 'Folders and all their contents will be permanently deleted.\nThis cannot be undone.'
+      : 'This cannot be undone.';
+    if (total === 1) return `Delete "${listed[0].entry.name}"?\n\n${warn}`;
+
+    // .confirm-modal-message is pre-wrap, so multi-line copy needs no changes.
+    const lines = listed.slice(0, 10).map(({ entry }) => {
+      if (!entry.isDirectory) return `  ${entry.name}`;
+      const n = entry.childCount;
+      return `  ${entry.name}/` + (n != null ? `  (${n} item${n !== 1 ? 's' : ''})` : '');
     });
-    if (paths.length === 0) return;
-    const msg = paths.length === 1
-      ? `Delete "${paths[0].split('/').pop()}"?`
-      : `Delete ${paths.length} files?`;
-    showConfirmModal(msg, async () => {
+    if (total > 10) lines.push(`  …and ${total - 10} more`);
+    return `Delete ${total} items?\n\n${lines.join('\n')}\n\n${warn}`;
+  }
+
+  function deleteSelected(tab) {
+    const sel = getSelectedEntries(tab);
+    if (sel.paths.length === 0) return;
+    // Snapshot both: the dialog is async and the panel can navigate under it.
+    const cwd = tab.cwd;
+    const paths = sel.paths;
+
+    showConfirmModal(buildDeleteMessage(sel), async () => {
       try {
         const resp = await fetch('/api/delete-files', {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ paths }),
+          body: JSON.stringify({ paths, cwd }),
         });
-        const result = await resp.json();
-        if (result.errors?.length) {
-          console.warn('Some files could not be deleted:', result.errors);
+        const result = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          // Without this an expired session returns {error} and no errors[],
+          // so the reload below would look exactly like a successful delete.
+          notifyDelete('error', result.error || `Delete failed (${resp.status})`);
+        } else if (result.errors?.length) {
+          const names = result.errors.slice(0, 3).map(e => String(e.path).split('/').pop());
+          const more = result.errors.length > 3 ? `, +${result.errors.length - 3} more` : '';
+          notifyDelete('error', `Could not delete ${names.join(', ')}${more}`);
+        } else {
+          notifyDelete('success', `Deleted ${describeSelection(sel)}`);
         }
       } catch (err) {
-        console.error('Delete failed:', err);
+        notifyDelete('error', 'Delete failed: ' + err.message);
+      } finally {
+        // Refresh even on throw: a network error otherwise leaves the panel
+        // showing entries that may already be gone.
+        tab.selectedPaths.clear();
+        tab._lastSelectedIndex = -1;
+        loadDir(tab.id, cwd);
       }
-      tab.selectedPaths.clear();
-      tab._lastSelectedIndex = -1;
-      loadDir(tab.id, tab.cwd);
     });
   }
 
@@ -904,7 +1007,7 @@
     let totalSize = 0;
     for (let i = 0; i < sorted.length; i++) {
       const entry = sorted[i];
-      const fullPath = tab.cwd + '/' + entry.name;
+      const fullPath = joinPath(tab.cwd, entry.name);
       if (!entry.isDirectory) totalSize += entry.size || 0;
 
       const row = document.createElement('div');
@@ -965,7 +1068,7 @@
         }
         tab._lastSelectedIndex = idx;
         syncListingSelection(wrap, tab);
-        updateListingDeleteBar(tab, content, header);
+        updateDeleteBar(tab, header, listingBarOpts(tab, content));
       });
 
       row.addEventListener('dblclick', () => {
@@ -993,47 +1096,13 @@
     statusBar.textContent = parts.join(', ');
     content.appendChild(statusBar);
 
-    updateListingDeleteBar(tab, content, header);
+    updateDeleteBar(tab, header, listingBarOpts(tab, content));
   }
 
   function syncListingSelection(wrap, tab) {
     for (const row of wrap.children) {
       row.classList.toggle('selected', tab.selectedPaths.has(row.dataset.path));
     }
-  }
-
-  function updateListingDeleteBar(tab, content, headerEl) {
-    let bar = headerEl.querySelector('.dir-listing-delete-bar');
-    const filePaths = [...tab.selectedPaths].filter(p => {
-      const row = content.querySelector(`.dir-listing-entry[data-path="${CSS.escape(p)}"]`);
-      return row && !row.dataset.isDir;
-    });
-    if (filePaths.length === 0) {
-      if (bar) bar.remove();
-      return;
-    }
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.className = 'dir-listing-delete-bar';
-      const clearBtn = document.createElement('button');
-      clearBtn.className = 'dir-preview-clear-btn';
-      clearBtn.textContent = 'Cancel';
-      clearBtn.addEventListener('click', () => {
-        tab.selectedPaths.clear();
-        tab._lastSelectedIndex = -1;
-        const wrap = content.querySelector('.dir-listing-wrap');
-        if (wrap) syncListingSelection(wrap, tab);
-        updateListingDeleteBar(tab, content, headerEl);
-      });
-      const delBtn = document.createElement('button');
-      delBtn.className = 'dir-preview-delete-btn';
-      bar.appendChild(clearBtn);
-      bar.appendChild(delBtn);
-      headerEl.appendChild(bar);
-    }
-    const delBtn = bar.querySelector('.dir-preview-delete-btn');
-    delBtn.textContent = `Delete ${filePaths.length} file${filePaths.length > 1 ? 's' : ''}`;
-    delBtn.onclick = () => deleteSelectedFiles(tab);
   }
 
   // ── Confirm modal ─────────────────────────────────────────────────
@@ -1400,8 +1469,10 @@
 
       const name = document.createElement('span');
       name.className = 'dir-entry-name';
-      const relPath = file.path.startsWith(tab.cwd + '/')
-        ? file.path.slice(tab.cwd.length + 1)
+      // Not a join: a prefix test plus a slice, so both must use the same string.
+      const prefix = tab.cwd === '/' ? '/' : tab.cwd + '/';
+      const relPath = file.path.startsWith(prefix)
+        ? file.path.slice(prefix.length)
         : file.name;
       name.textContent = relPath;
       name.title = file.path;
@@ -1510,7 +1581,7 @@
       const path = rows[idx].dataset.path;
       const isDir = rows[idx].dataset.isDir === '1';
       if (!isDir) {
-        const entry = tab.entries.find(e => tab.cwd + '/' + e.name === path);
+        const entry = tab.entries.find(e => joinPath(tab.cwd, e.name) === path);
         if (entry) openFile(tab, path, entry);
       }
     }
@@ -1518,6 +1589,10 @@
 
   document.addEventListener('keydown', e => {
     if (activeOverlay) return;
+    // The confirm dialog's Delete button is a BUTTON, so it clears none of the
+    // guards below: Enter on a highlighted folder row would navigate and wipe
+    // the selection while the dialog is still open.
+    if (document.querySelector('.confirm-modal-backdrop')) return;
     if (activeTabId === null) return;
     const dirView = document.getElementById('view-directories');
     if (!dirView || dirView.style.display === 'none') return;

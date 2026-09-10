@@ -72,7 +72,17 @@ class DashboardBroadcaster {
     this.registerHandler(cliHandler.PREFIXES, cliHandler);
 
     this.wss.on('connection', (ws) => {
+      // At boot the store loads whichever session dirs were touched most
+      // recently, which has nothing to do with the tabs that came back —
+      // shipping all of it rebuilds inspector tabs for dead sessions, labelled
+      // by cwd so they look like the real thing. Drop that carried-over history
+      // unless its instance is still around; anything this process produced is
+      // kept, so an exited ai.prompt run stays inspectable for the rest of the
+      // run. Older sessions remain reachable through inspector:loadSession
+      // (clicking a saved session) and inspector:loadAll.
+      const live = this.liveInstanceIds();
       const interactions = this.store.getAll().map(i => {
+        if (this.store.bootLoadedIds.has(i.id) && !live.has(i.instanceId)) return null;
         const s = sanitizeForDashboard(i);
         if (!s) return null;
         if (s.response) s.response = { ...s.response, sseEvents: undefined };
@@ -220,6 +230,20 @@ class DashboardBroadcaster {
         } catch (err) { console.error('WS message handling error:', err); }
       });
     });
+  }
+
+  // Instance ids that currently exist: registered inspector sessions (CLI tabs
+  // and headless ai.prompt runs), live CLI tabs, and tracked child processes.
+  // The three overlap; the union is what "not a dead session" means.
+  liveInstanceIds() {
+    const live = new Set(this.store.sessionMap.keys());
+    for (const tab of this.cliSessionManager?.list() || []) {
+      if (tab.instanceId) live.add(tab.instanceId);
+    }
+    for (const inst of getInstances()) {
+      if (inst.instanceId) live.add(inst.instanceId);
+    }
+    return live;
   }
 
   registerHandler(prefix, handler) {

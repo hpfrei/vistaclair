@@ -353,7 +353,7 @@ You don't have to use an external terminal. The CLI tab gives you Claude Code ri
 
 ### Per-session model routing
 
-Each tab carries a **model map**: when Claude asks for a tier (opus, sonnet, or haiku), the proxy looks it up here and substitutes the model you chose. Leave an entry blank to forward that tier to Anthropic unchanged.
+Each tab carries a **model map**: when Claude asks for a tier (fable, opus, sonnet, or haiku), the proxy looks it up here and substitutes the model you chose. Leave an entry blank to forward that tier to Anthropic unchanged.
 
 \`\`\`svg
 <svg viewBox="0 0 600 130" xmlns="http://www.w3.org/2000/svg" style="max-width:600px;font-family:system-ui,sans-serif">
@@ -443,7 +443,7 @@ vistaclair ships with six rules you can flip on without writing any code. They c
 
 | Rule | What it does | Default |
 |------|--------------|---------|
-| **Model Override** | Pin or swap the model for every request — map a tier (opus/sonnet/haiku) or an exact id to another version or another provider. Edit the map inside. | **on** |
+| **Model Override** | Pin or swap the model for every request — map a tier (fable/opus/sonnet/haiku) or an exact id to another version or another provider. Edit the map inside. | **on** |
 | **AskUserQuestion → MCP** | Reroute Claude's native question tool to vistaclair's own, so prompts pop up in this dashboard instead of the terminal. | **on** |
 | **Tool Filter** | Remove specific tools from the request by name, so the model simply can't call them. Edit the block-list inside. | **on** |
 | **Strip Git Status** | Delete the large git-status block Claude Code injects into the system prompt — saves tokens on every turn. | **on** |

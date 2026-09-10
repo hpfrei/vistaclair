@@ -16,7 +16,7 @@
   {
     "id": "auq-mcp-rewrite",
     "name": "AskUserQuestion MCP Rewrite",
-    "slug": "Rewrites AskUserQuestion \u2194 vista-AskUserQuestion between CLI and API for the MCP tool handler",
+    "slug": "Rewrites AskUserQuestion ↔ vista-AskUserQuestion between CLI and API for the MCP tool handler",
     "enabled": true,
     "builtin": true
   },
@@ -30,8 +30,8 @@
   {
     "id": "model-override",
     "name": "Model Override",
-    "slug": "Global model override \u2014 rewrites claude-opus-4-7 \u2192 claude-opus-4-6. Runs after per-tab overrides (tab settings take priority).",
-    "enabled": true,
+    "slug": "Global model override — rewrites claude-opus-4-7 → claude-opus-4-6. Runs after per-tab overrides (tab settings take priority).",
+    "enabled": false,
     "builtin": true
   },
   {
@@ -44,7 +44,7 @@
   {
     "id": "strip-git-status",
     "name": "Strip Git Status",
-    "slug": "Removes the gitStatus block (and everything after it) from system prompt messages \u2014 strips branch, status, and recent commits info injected by Claude Code",
+    "slug": "Removes the gitStatus block (and everything after it) from system prompt messages — strips branch, status, and recent commits info injected by Claude Code",
     "enabled": true,
     "builtin": true
   },

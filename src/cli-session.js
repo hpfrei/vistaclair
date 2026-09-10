@@ -10,7 +10,7 @@ const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
 const PROJECT_ROOT = PACKAGE_ROOT;
 
 const DEFAULT_SETTINGS = {
-  modelMap: { opus: null, sonnet: null, haiku: null },
+  modelMap: { fable: null, opus: null, sonnet: null, haiku: null },
   showThinking: false,
 };
 

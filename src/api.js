@@ -423,33 +423,71 @@ function createApiRouter({ broadcaster, store, proxyPort, dashboardPort, authTok
     }
   });
 
-  // ── DELETE /api/delete-files — delete one or more files ────
+  // ── DELETE /api/delete-files — delete files/folders inside one directory ────
+  // Deletion is confined to a single directory: every entry must sit directly
+  // inside `cwd`. Nothing else in this app confines paths, so without that bound
+  // a recursive delete would reach anywhere the owner can read.
   router.delete('/delete-files', async (req, res) => {
-    const { paths } = req.body || {};
+    const { paths, cwd } = req.body || {};
     if (!Array.isArray(paths) || paths.length === 0) {
       return res.status(400).json({ error: 'paths array required' });
     }
+    // Fail closed when cwd is absent: the only client ships from this process.
+    if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) {
+      return res.status(400).json({ error: 'cwd must be an absolute path' });
+    }
+    const parent = path.resolve(cwd);
+    let realParent;
+    try {
+      if (!fs.lstatSync(parent).isDirectory()) {
+        return res.status(400).json({ error: 'cwd is not a directory' });
+      }
+      realParent = fs.realpathSync(parent);
+    } catch (err) {
+      return res.status(400).json({ error: 'cwd is not accessible: ' + err.message });
+    }
+
     const deleted = [];
     const errors = [];
+    const summary = { files: 0, dirs: 0, links: 0 };
+
     for (const p of paths) {
-      const resolved = path.resolve(p);
-      if (resolved !== p) {
+      if (typeof p !== 'string' || !path.isAbsolute(p)) {
         errors.push({ path: p, error: 'Must be an absolute path' });
         continue;
       }
+      const resolved = path.resolve(p);
       try {
-        const stat = fs.statSync(resolved);
-        if (!stat.isFile()) {
-          errors.push({ path: p, error: 'Not a file' });
+        // Lexical check first (cheap), then realpath the *parent* only. A
+        // symlinked path component must not become a way out of cwd, while a
+        // symlink entry itself stays deletable as a link.
+        if (path.dirname(resolved) !== parent
+            || fs.realpathSync(path.dirname(resolved)) !== realParent) {
+          errors.push({ path: p, error: 'Outside the current directory' });
           continue;
         }
-        fs.unlinkSync(resolved);
+        // lstat, not stat: a symlink to a directory must be unlinked, never
+        // followed and recursed into. It also keeps a genuine ENOENT visible,
+        // which rm's force:true would otherwise swallow.
+        const st = fs.lstatSync(resolved);
+        if (st.isSymbolicLink()) {
+          fs.unlinkSync(resolved);
+          summary.links++;
+        } else if (st.isDirectory()) {
+          // Async: a sync recursive delete of a large tree blocks the event
+          // loop and stalls the WebSocket and every other request.
+          await fs.promises.rm(resolved, { recursive: true, force: true });
+          summary.dirs++;
+        } else {
+          fs.unlinkSync(resolved);
+          summary.files++;
+        }
         deleted.push(p);
       } catch (err) {
         errors.push({ path: p, error: err.message });
       }
     }
-    res.json({ deleted, errors });
+    res.json({ deleted, errors, summary });
   });
 
   return router;

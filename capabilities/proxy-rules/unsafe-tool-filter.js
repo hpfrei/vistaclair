@@ -9,7 +9,11 @@ module.exports = function(ctx) {
     'RemoteTrigger',
     'ScheduleWakeup',
     'ShareOnboardingGuide',
-    'CronList'
+    'CronList',
+    'Artifact',
+    'SendFeedback',
+    'DesignSync',
+    'EndConversation'
   ]);
   const REMOVED_PREFIXES = ['mcp__claude_ai_'];
 

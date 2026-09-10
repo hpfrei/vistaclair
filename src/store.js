@@ -20,6 +20,12 @@ class InteractionStore {
     this.requestIdIndex = new Map(); // request-id → filePath (survives eviction)
     this.diskIndex = new Map();    // interaction id → file path (any file ever parsed; survives memory eviction)
 
+    // Ids _loadFromDisk pulled in at boot, i.e. history from previous processes
+    // rather than anything this one produced. The dashboard's `init` payload
+    // uses this to tell "a session that is still around" from "whichever dirs
+    // happened to have the newest mtime".
+    this.bootLoadedIds = new Set();
+
     // Authoritative subagent attribution from Claude's trace files.
     this.traceIndexes = new Map();   // sessId → TraceIndex
     this.pendingRequestEnrich = new Map(); // request-id → true (awaiting trace resolution)
@@ -243,6 +249,7 @@ class InteractionStore {
       const dup = this.interactions.has(interaction.id);
       this.interactions.set(interaction.id, interaction);
       if (!dup) this.order.push(interaction.id);
+      this.bootLoadedIds.add(interaction.id);
       this.filePaths.set(interaction.id, filePath);
       const reqId = interaction.response?.headers?.['request-id'];
       if (reqId) this.requestIdIndex.set(reqId, filePath);
@@ -251,11 +258,31 @@ class InteractionStore {
     this.seq = this.order.length;
   }
 
+  // Highest turn number already written to a session's dir, or 0 when it has
+  // none. Read straight off disk so it is correct even for a session
+  // _loadFromDisk skipped (it stops at maxSize interactions).
+  _maxSeqOnDisk(sessId) {
+    let files;
+    try { files = fs.readdirSync(path.join(INTERACTIONS_DIR, sessId)); } catch { return 0; }
+    let max = 0;
+    for (const f of files) {
+      if (!/^\d+\.json$/.test(f)) continue;
+      const n = parseInt(f, 10);
+      if (n > max) max = n;
+    }
+    return max;
+  }
+
   registerSession(instanceId, sessId) {
     this.sessionMap.set(instanceId, sessId);
-    this.sessionSeqs.set(sessId, 0);
     const dir = path.join(INTERACTIONS_DIR, sessId);
     fs.mkdirSync(dir, { recursive: true });
+    // Continue the session's existing numbering rather than restarting at 0.
+    // A resumed CLI tab (and a headless spawn sharing a tab's sessId) registers
+    // against a dir that already holds turns; starting from 0 would overwrite
+    // them, and leave the in-memory ids pointing at files holding other turns'
+    // bodies.
+    this.sessionSeqs.set(sessId, this._maxSeqOnDisk(sessId));
   }
 
   unregisterSession(instanceId) {
@@ -279,6 +306,85 @@ class InteractionStore {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {}
     this.sessionSeqs.delete(sessId);
+  }
+
+  // Drop headless (`claude -p` / ai.prompt) session dirs that have been idle
+  // longer than ttlMs. Interactive CLI tabs are exempt by construction — they
+  // write an internal.json at spawn, and their dirs are owned by the tab/saved-
+  // session lifecycle instead. Returns { swept: [sessId], bytes }.
+  //
+  // Never sweeps a session that is live (registered in sessionMap) or pinned by
+  // the caller (open-tab manifest, CLI history, add-ons), so a long-running
+  // headless job whose last write predates the TTL keeps its dir.
+  sweepStaleSessions({ ttlMs, pinned } = {}) {
+    const ttl = Number.isFinite(ttlMs) ? ttlMs : 60 * 60 * 1000;
+    const pins = pinned instanceof Set ? pinned : new Set(pinned || []);
+    const live = new Set(this.sessionMap.values());
+    const cutoff = Date.now() - ttl;
+
+    let names;
+    try { names = fs.readdirSync(INTERACTIONS_DIR); } catch { return { swept: [], bytes: 0 }; }
+
+    const swept = [];
+    let bytes = 0;
+    for (const sessId of names) {
+      if (sessId.startsWith('.')) continue;
+      if (pins.has(sessId) || live.has(sessId)) continue;
+      const dir = path.join(INTERACTIONS_DIR, sessId);
+
+      let entries;
+      let newest;
+      try {
+        const st = fs.statSync(dir);
+        if (!st.isDirectory()) continue;
+        newest = st.mtimeMs;
+        entries = fs.readdirSync(dir);
+      } catch { continue; }
+
+      // An internal.json means a PTY tab spawned here — not a headless run.
+      if (entries.includes('internal.json')) continue;
+
+      let size = 0;
+      for (const name of entries) {
+        try {
+          const st = fs.statSync(path.join(dir, name));
+          if (st.mtimeMs > newest) newest = st.mtimeMs;
+          size += st.size;
+        } catch {}
+      }
+      if (newest > cutoff) continue;
+
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { continue; }
+      swept.push(sessId);
+      bytes += size;
+      this.sessionSeqs.delete(sessId);
+    }
+
+    if (swept.length) this._evictSweptFromMemory(swept);
+    return { swept, bytes };
+  }
+
+  // Drop in-memory interactions whose backing file lived in a swept dir, so
+  // `order`/`filePaths`/`diskIndex` never hand out a path that no longer exists.
+  _evictSweptFromMemory(sessIds) {
+    const prefixes = sessIds.map(s => path.join(INTERACTIONS_DIR, s) + path.sep);
+    const under = fp => typeof fp === 'string' && prefixes.some(p => fp.startsWith(p));
+
+    const toRemove = new Set();
+    for (const [id, fp] of this.filePaths) {
+      if (under(fp)) toRemove.add(id);
+    }
+    for (const id of toRemove) {
+      this.interactions.delete(id);
+      this.filePaths.delete(id);
+    }
+    this.order = this.order.filter(id => !toRemove.has(id));
+    for (const [id, fp] of this.diskIndex) {
+      if (under(fp)) this.diskIndex.delete(id);
+    }
+    for (const [reqId, fp] of this.requestIdIndex) {
+      if (under(fp)) this.requestIdIndex.delete(reqId);
+    }
   }
 
   // Flag every interaction in a session at or after `cutTimestamp` as deleted:
@@ -630,6 +736,12 @@ class InteractionStore {
   }
 
   loadSessionIntoMemory(sessId) {
+    // Anchor the turn counter to the session's dir before anything can return
+    // early — every path out of here must leave the next save numbered after
+    // the turns already on disk, never on top of them.
+    const onDisk = this._maxSeqOnDisk(sessId);
+    if (onDisk > (this.sessionSeqs.get(sessId) || 0)) this.sessionSeqs.set(sessId, onDisk);
+
     const instanceId = `cli-${sessId}`;
     const existing = this.order.filter(id => {
       const i = this.interactions.get(id);
@@ -642,10 +754,8 @@ class InteractionStore {
     try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch { return []; }
 
     const loaded = [];
-    let maxSeq = 0;
     for (const file of files) {
       const seqNum = parseInt(file);
-      if (seqNum > maxSeq) maxSeq = seqNum;
       const filePath = path.join(dir, file);
       const interaction = this._parseInteractionFile(sessId, seqNum, filePath);
       if (!interaction) continue;
@@ -665,7 +775,6 @@ class InteractionStore {
       loaded.push(interaction);
     }
 
-    if (maxSeq > 0) this.sessionSeqs.set(sessId, maxSeq);
     return loaded;
   }
 

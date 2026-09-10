@@ -29,3 +29,10 @@ mcp-servers/*/logs/
 mcp-servers/*/package-lock.json
 mcp-servers/*/workflows/
 mcp-servers/blank/
+
+# Sessions — live auth state (session hashes, IPs, user agents)
+sessions.json
+mcp-broker/
+
+# Spend — track policy definitions, ignore accumulating ledgers
+spend-ledger/*.json

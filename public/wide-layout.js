@@ -5,7 +5,12 @@
     RULER_WIDTH: 52,
     COLUMN_WIDTH: 240,
     COLUMN_GAP: 16,
-    MIN_ENTRY_HEIGHT: 52,
+    // Height of a turn node's header, exactly. Tool rows are placed at
+    // y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT (both for stacking and for the
+    // fork/merge anchors), so this must equal the rendered height of
+    // .turn-entry in style.css — 44px — or rows drift under the next node.
+    MIN_ENTRY_HEIGHT: 44,
+    NODE_BORDER: 2,
     TOOL_HEIGHT: 24,
     MIN_GAP: 6,
     HEADER_HEIGHT: 30,
@@ -103,89 +108,110 @@
     return { foldedIds, hookParentInfo };
   }
 
-  // --- Clamped hooks: collapse rapid PreToolUse/PostToolUse/PostToolBatch into anchor LLM turn ---
+  // --- Clamped hooks: collapse a turn's tool-lifecycle hooks into its node ---
 
+  // Tool lifecycle plus the ambient environment events a turn's tools cause
+  // (a Bash cd emits CwdChanged, an Edit emits FileChanged). These are
+  // side effects of the anchor turn, not events in their own right, so they
+  // belong inside its node rather than as full-width rows below it.
+  const CLAMP_EVENTS = /^(PreToolUse|PostToolUse|PostToolBatch|PostToolUseFailure|TaskCreated|TaskCompleted|CwdChanged|FileChanged|ConfigChange|InstructionsLoaded|Notification)$/i;
+
+  // Could this entry end up inside some turn's node? The live append path asks
+  // before deciding whether it may place the entry itself: which turn owns it
+  // is only knowable from the full interaction list, so a candidate always has
+  // to hand off to a rebuild.
+  function isClampCandidate(interaction) {
+    if (interaction.isHook) {
+      return CLAMP_EVENTS.test(interaction.hookEvent || '') && interaction.toolName !== 'Agent';
+    }
+    return !interaction.isMcp && !isStandardLlm(interaction);
+  }
+
+  // Assignment is by OWNERSHIP, not by scanning outward from the anchor. A
+  // PreToolUse/PostToolUse hook carries the tool_use_id of the call that fired
+  // it, so the turn whose response emitted that tool_use block owns it — no
+  // matter what else landed in between. The old forward scan stopped dead at
+  // the first boundary hook (SubagentStop, UserPromptSubmit), interleaved turn,
+  // or zero-tool narration turn in the column and orphaned the entire tail
+  // behind it into full-height rows; that is why identical hook runs collapsed
+  // in one place and not in another.
+  //
+  // Ambient events (PostToolBatch, CwdChanged, FileChanged, ...) carry no
+  // tool_use_id. They fall back to proximity: they join whichever anchor their
+  // column is currently filling — the owner of the last hook clamped there,
+  // else the last turn seen in that column.
   function buildClampGroups(interactions, columnFor) {
-    const CLAMP_WINDOW = 5000;
-    const CLAMP_EVENTS = /^(PreToolUse|PostToolUse|PostToolBatch|PostToolUseFailure|TaskCreated|TaskCompleted)$/i;
+    // A hook landing more than a minute after its anchor finished is far enough
+    // down the timeline that burying it in that node would misplace it in time,
+    // so ownership yields and it keeps its own row.
+    const PROXIMITY_WINDOW = 60000;
 
     for (const interaction of interactions) {
       if (interaction._clampedHooks) delete interaction._clampedHooks;
     }
 
+    // tool_use_id -> the turn that emitted it. Anchors are always real LLM
+    // turns; count_tokens sidecars and MCP calls are clampable, never anchors.
+    const ownerByToolUseId = new Map();
+    for (const interaction of interactions) {
+      if (interaction.isHook || interaction.isMcp || !isStandardLlm(interaction)) continue;
+      for (const tc of extractToolCalls(interaction)) {
+        if (tc.id && !ownerByToolUseId.has(tc.id)) ownerByToolUseId.set(tc.id, interaction);
+      }
+    }
+
     const clampedIds = new Set();
     const clampParentInfo = new Map();
+    const groups = new Map();
+    // Per column: the anchor that column is currently filling, for ambient events.
+    const fillingAnchor = new Map();
 
-    for (let i = 0; i < interactions.length; i++) {
-      const anchor = interactions[i];
-      if (anchor.isHook || anchor.isMcp || !isStandardLlm(anchor)) continue;
-      const tools = extractToolCalls(anchor);
-      if (tools.length === 0) continue;
+    for (const candidate of interactions) {
+      const col = columnFor.get(candidate.id) || 0;
 
-      const anchorCol = columnFor.get(anchor.id) || 0;
-      const anchorEndTs = anchor.timestamp + (anchor.timing?.duration || 0);
-      const toolUseIds = new Set(tools.map(tc => tc.id).filter(Boolean));
-      const group = [];
-
-      // Backward scan: hooks delivered before this turn but belonging to it (by toolUseId).
-      // Non-standard LLM entries (count_tokens) are also clampable.
-      // In parallel columns, entries from other columns are interleaved — only
-      // break on same-column boundaries so clamping works independently per column.
-      for (let j = i - 1; j >= 0; j--) {
-        const candidate = interactions[j];
-        const candCol = columnFor.get(candidate.id) || 0;
-        if (!candidate.isHook) {
-          if (!candidate.isMcp && !isStandardLlm(candidate)) {
-            if (candCol !== anchorCol) continue;
-            if (clampedIds.has(candidate.id)) continue;
-            group.unshift(candidate);
-            continue;
-          }
-          if (candCol === anchorCol) break;
-          continue;
-        }
-        if (!CLAMP_EVENTS.test(candidate.hookEvent)) continue;
-        if (_foldedHookIds.has(candidate.id) || clampedIds.has(candidate.id)) continue;
-        if (candidate.toolName === 'Agent') continue;
-        if (candCol !== anchorCol) continue;
-        if (!candidate.toolUseId || !toolUseIds.has(candidate.toolUseId)) continue;
-        group.unshift(candidate);
+      if (!candidate.isHook && !candidate.isMcp && isStandardLlm(candidate)) {
+        // A real turn: from here on this column's ambient events belong to it.
+        fillingAnchor.set(col, candidate);
+        continue;
       }
 
-      // Forward scan: hooks after this turn within the clamp window.
-      // Non-standard LLM entries (count_tokens) are also clampable.
-      // Same column-aware logic: skip entries from other columns so interleaved
-      // parallel interactions don't break the scan.
-      for (let j = i + 1; j < interactions.length; j++) {
-        const candidate = interactions[j];
-        const candCol = columnFor.get(candidate.id) || 0;
-        if (!candidate.isHook) {
-          if (!candidate.isMcp && !isStandardLlm(candidate)) {
-            if (candCol !== anchorCol) continue;
-            if (candidate.timestamp - anchorEndTs > CLAMP_WINDOW) break;
-            group.push(candidate);
-            continue;
-          }
-          if (candCol === anchorCol) break;
-          continue;
-        }
+      let owned = false;
+      if (candidate.isHook) {
         if (_foldedHookIds.has(candidate.id)) continue;
-        if (!CLAMP_EVENTS.test(candidate.hookEvent)) {
-          if (candCol === anchorCol) break;
-          continue;
-        }
+        if (!CLAMP_EVENTS.test(candidate.hookEvent || '')) continue;
         if (candidate.toolName === 'Agent') continue;
-        if (candCol !== anchorCol) continue;
-        if (candidate.timestamp - anchorEndTs > CLAMP_WINDOW) break;
-        group.push(candidate);
+      } else if (candidate.isMcp) {
+        continue;
       }
+      // else: a non-standard LLM entry (count_tokens) — proximity only.
 
-      if (group.length === 0) continue;
+      let anchor = null;
+      if (candidate.isHook && candidate.toolUseId) {
+        anchor = ownerByToolUseId.get(candidate.toolUseId) || null;
+        owned = !!anchor;
+      }
+      // The owning turn may not be rendered yet (still streaming, so absent from
+      // this pass) — fall back to proximity rather than orphaning the hook.
+      if (!anchor) anchor = fillingAnchor.get(col) || null;
+      if (!anchor || anchor === candidate) continue;
 
-      anchor._clampedHooks = group;
-      for (let k = 0; k < group.length; k++) {
-        clampedIds.add(group[k].id);
-        clampParentInfo.set(group[k].id, { parentId: anchor.id, hookIndex: k });
+      const anchorEndTs = anchor.timestamp + (anchor.timing?.duration || 0);
+      if (candidate.timestamp - anchorEndTs > PROXIMITY_WINDOW) continue;
+
+      if (!groups.has(anchor.id)) groups.set(anchor.id, { anchor, entries: [] });
+      groups.get(anchor.id).entries.push(candidate);
+      clampedIds.add(candidate.id);
+      // An owned hook re-points its column at that owner, so the PostToolBatch
+      // closing the run joins the same group even when a narration turn or a
+      // sibling lane's turn was the last thing seen in this column.
+      if (owned) fillingAnchor.set(col, anchor);
+    }
+
+    for (const { anchor, entries } of groups.values()) {
+      entries.sort((a, b) => a.timestamp - b.timestamp);
+      anchor._clampedHooks = entries;
+      for (let k = 0; k < entries.length; k++) {
+        clampParentInfo.set(entries[k].id, { parentId: anchor.id, hookIndex: k });
       }
     }
 
@@ -690,9 +716,13 @@
     const tools = extractToolCalls(interaction);
     const foldedCount = interaction._foldedPreHooks?.length || 0;
     const clampedCount = interaction._clampedHooks?.length || 0;
-    const clampedRows = clampedCount > 2 ? 1 : clampedCount;
+    // more than one clamped item collapses to a single summary row
+    const clampedRows = clampedCount > 1 ? 1 : clampedCount;
     const clampedPad = clampedCount > 0 ? 4 : 0;
-    return D3_CONST.MIN_ENTRY_HEIGHT + (tools.length + foldedCount + clampedRows) * D3_CONST.TOOL_HEIGHT + clampedPad;
+    // + NODE_BORDER: the node box is border-box, so its 1px top/bottom border
+    // eats into the content area the header and tool rows have to fit in.
+    return D3_CONST.MIN_ENTRY_HEIGHT + D3_CONST.NODE_BORDER
+      + (tools.length + foldedCount + clampedRows) * D3_CONST.TOOL_HEIGHT + clampedPad;
   }
 
   // --- Column width ---
@@ -1353,6 +1383,7 @@
     allocateColumn,
     buildFoldedHooksMap,
     buildClampGroups,
+    isClampCandidate,
     buildColumnAssignment,
     computeNodeHeight,
     computeColumnWidth,

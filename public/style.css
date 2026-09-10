@@ -737,107 +737,178 @@ aside#timeline {
 .timeline-entry:hover { background: var(--bg-hover); }
 .timeline-entry.selected { background: var(--bg-selected); }
 
-/* Turn header (top-level) */
-.turn-entry .entry-header {
+/* ============================================================
+   TURN NODE HEADER — fixed 44px, two lines
+   ------------------------------------------------------------
+   6 + 16 (identity) + 2 (gap) + 14 (instruments) + 6 = 44px, which is
+   wide-layout's D3_CONST.MIN_ENTRY_HEIGHT. The parallel view places tool
+   rows at y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT and anchors the fork/merge
+   curves there too, so this box must not grow. New data goes on the hover
+   deck (.turn-tip), never on a third line.
+
+     line 1   #123  opus-5  [chips]      ▰▰▱ 11.0s   ● STREAMING
+     line 2   ↑2 ↓738 ⊞1.4kw ⊟91.5kr                 ▰▱▱ $0.073
+
+   Vocabulary is the Apps tab's: mono tabular numerals so peer nodes in
+   parallel lanes line up digit-for-digit, .vc-chip-shaped tags, a status
+   lamp instead of a full-width badge.
+   ============================================================ */
+.timeline-entry.turn-entry:not(.endpoint-call-entry):not(.mcp-call-entry) {
+  height: 44px;
+  box-sizing: border-box;
+  padding: 6px 10px;
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 2px;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* --- line 1: identity --- */
+.turn-entry .entry-idrow {
+  display: flex;
   align-items: center;
-  margin-bottom: 4px;
+  gap: 6px;
+  height: 16px;
+  margin-bottom: 0;
+  min-width: 0;
+  overflow: hidden;
 }
-
-.turn-entry .entry-num {
-  font-weight: 600;
-  color: var(--text-dim);
+.turn-entry .entry-idrow .entry-num {
+  font-family: var(--vc-mono);
   font-size: 11px;
-}
-
-.entry-badge {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 3px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--vc-ink);
+  flex: none;
 }
-.badge-streaming { background: var(--chat-user-bg); color: var(--blue); animation: badge-pulse 1.5s infinite; }
-.badge-complete { background: var(--status-connected-bg); color: var(--green); }
-.badge-error { background: var(--status-disconnected-bg); color: var(--red); }
-.badge-pending { background: var(--request-panel-bg); color: var(--yellow); }
-
-@keyframes badge-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-.turn-entry .entry-model {
-  font-size: 12px;
-  color: var(--text);
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
+.turn-entry .entry-idrow .entry-model {
+  min-width: 0;
+  flex: 0 1 auto;
+  display: block;
 }
 .entry-model-label {
+  display: block;
+  font-family: var(--vc-mono);
+  font-size: 11px;
+  color: var(--vc-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
 }
-.entry-duration {
+
+/* the gauges keep their hue ramp but move onto the header rows; both are
+   pushed to the right edge so elapsed and price sit in one vertical column */
+.turn-entry .entry-idrow .entry-duration {
+  margin-left: auto;
+  flex: none;
   font-size: 10px;
-  color: var(--text-dim);
+  color: var(--vc-dim);
+}
+.entry-duration-gauge,
+.entry-cost-gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
-  margin-left: 8px;
 }
-.entry-endpoint-label {
-  font-size: 10px;
-  color: var(--yellow);
-  background: color-mix(in srgb, var(--yellow) 12%, transparent);
-  padding: 1px 5px;
-  border-radius: 3px;
-}
-.entry-step {
-  font-size: 10px;
-  font-weight: 400;
-  color: var(--purple);
-  background: color-mix(in srgb, var(--purple) 12%, transparent);
-  padding: 0 4px;
-  border-radius: 3px;
-  margin-left: 4px;
-}
-.entry-subagent {
-  font-size: 10px;
-  color: var(--cyan);
-  background: color-mix(in srgb, var(--cyan) 12%, transparent);
-  padding: 0 4px;
-  border-radius: 3px;
-  margin-left: 4px;
-}
-.subagent-info {
-  border-left: 3px solid var(--cyan);
-  padding-left: 8px;
-  margin: 8px 0;
+.entry-duration-gauge svg,
+.entry-cost-gauge svg { vertical-align: middle; }
+.entry-duration-label,
+.entry-cost-label {
+  font-family: var(--vc-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.turn-entry .entry-meta {
-  display: flex;
-  justify-content: space-between;
+/* --- status lamp ---
+   Same element the streaming patcher rewrites (.entry-badge + badge-<state>),
+   restyled as a lamp. 'complete' is the boring default, so its word collapses
+   to zero and only the dot remains; every other state keeps its label. */
+.turn-entry .entry-idrow .entry-badge {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
+  flex: none;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  font-family: var(--vc-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  animation: none;
+}
+.turn-entry .entry-idrow .entry-badge::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--lamp, var(--vc-faint));
+  box-shadow: 0 0 0 3px var(--lamp-halo, transparent);
+}
+.turn-entry .entry-idrow .entry-badge.badge-complete {
+  --lamp: var(--vc-ok);
+  --lamp-halo: var(--vc-ok-bg);
+  font-size: 0;
+  gap: 0;
+}
+.turn-entry .entry-idrow .entry-badge.badge-error {
+  --lamp: var(--vc-bad);
+  --lamp-halo: var(--vc-bad-bg);
+  color: var(--vc-bad);
+}
+.turn-entry .entry-idrow .entry-badge.badge-pending {
+  --lamp: var(--yellow);
+  --lamp-halo: var(--vc-warn-bg);
+  color: var(--yellow);
+}
+.turn-entry .entry-idrow .entry-badge.badge-streaming {
+  --lamp: var(--accent);
+  --lamp-halo: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  animation: badge-pulse 1.5s infinite;
+}
+
+/* --- line 2: instruments --- */
+/* MCP rows reuse .entry-meta at their own 42px budget — leave them alone */
+.turn-entry:not(.mcp-call-entry) .entry-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 14px;
+  margin-top: 0;
   font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 4px;
+  color: var(--vc-dim);
+  min-width: 0;
 }
 .entry-tokens {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  font-family: var(--vc-mono);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
+  flex: 1 1 auto;
   min-width: 0;
+}
+.turn-entry:not(.mcp-call-entry) .entry-cost {
+  margin-left: auto;
+  flex: none;
 }
 .et-in, .et-out, .et-cw, .et-cr {
   display: inline-flex;
   align-items: center;
   gap: 2px;
   font-size: 10px;
+  flex: none;
 }
 .et-in { color: var(--blue, #4488cc); }
 .et-out { color: var(--green, #44aa66); }
@@ -845,20 +916,50 @@ aside#timeline {
 .et-cw { color: var(--orange, #cc8833); }
 .et-cr { color: var(--cyan, #22aacc); }
 .et-cw svg, .et-cr svg { opacity: 0.7; }
-.entry-duration-gauge,
-.entry-cost-gauge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  flex-shrink: 0;
-}
-.entry-duration-gauge svg,
-.entry-cost-gauge svg { vertical-align: middle; }
-.entry-duration-label,
-.entry-cost-label {
-  font-size: 10px;
-  font-weight: 600;
+/* the cache counters are the first to go when a lane is narrow — they are the
+   least decision-relevant, and the exact figures live on the hover deck */
+.et-cw, .et-cr { overflow: hidden; }
+
+/* --- chips (Apps-tab .vc-chip vocabulary) --- */
+.entry-step,
+.entry-subagent,
+.entry-instance {
+  font-family: var(--vc-mono);
+  font-size: 9.5px;
+  line-height: 14px;
+  padding: 0 6px;
+  border-radius: 999px;
+  /* shrinkable, so a long agent name ellipsizes instead of shoving the
+     elapsed gauge and the lamp off the right edge */
+  flex: 0 1 auto;
+  min-width: 22px;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  margin-left: 0;
+}
+.entry-step {
+  color: var(--purple);
+  background: color-mix(in srgb, var(--purple) 12%, transparent);
+  font-weight: 400;
+}
+.entry-subagent {
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 12%, transparent);
+}
+
+.entry-endpoint-label {
+  font-size: 10px;
+  color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 12%, transparent);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.subagent-info {
+  border-left: 3px solid var(--cyan);
+  padding-left: 8px;
+  margin: 8px 0;
 }
 
 /* Tool call entries (indented under turns) */
@@ -922,12 +1023,20 @@ aside#timeline {
 }
 
 /* MCP tool call entries in timeline */
+/* MCP keeps the old stacked header (label | badge); only turn nodes moved to
+   the fixed two-line .entry-idrow layout above. */
+.turn-entry .entry-header:not(.entry-idrow) {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
 .mcp-call-group { border-left: 2px solid var(--green); }
 .mcp-call-entry { background: color-mix(in srgb, var(--green) 5%, transparent); }
 .mcp-call-entry:hover { background: color-mix(in srgb, var(--green) 10%, transparent); }
 .mcp-call-entry.selected { background: color-mix(in srgb, var(--green) 15%, transparent); }
 .mcp-label { color: var(--green); font-weight: 700; font-size: 10px; letter-spacing: 0.5px; }
-.mcp-tool-name { color: var(--green); font-weight: 600; }
+.mcp-tool-name { color: var(--green); font-weight: 600; font-size: 12px; }
 .hook-call-group {
   max-height: 28px;
   overflow: hidden;
@@ -959,8 +1068,19 @@ aside#timeline {
 .clamped-endpoint-entry .endpoint-label { font-size: 10px; }
 .clamped-endpoint-entry .entry-tokens { color: var(--text-dim); font-size: 10px; }
 .clamped-hooks-group.collapsed .clamped-hook-entry { display: none; }
+/* the collapse affordance: one 24px row standing in for every ambient hook
+   the turn caused, so a `cd` that fires CwdChanged + PostToolUse + PreToolUse
+   + PostToolBatch costs one row instead of four full-width nodes */
 .clamped-hooks-summary { cursor: pointer; }
-.clamped-hooks-summary .hook-entry-name { color: var(--magenta, #c084fc); font-size: 11px; }
+.clamped-hooks-summary:hover .hook-entry-name { color: var(--cyan); }
+.clamped-hooks-summary .hook-entry-name {
+  color: var(--magenta, #c084fc);
+  font-family: var(--vc-mono);
+  font-size: 10.5px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--magenta, #c084fc) 10%, transparent);
+}
 .clamped-hooks-summary .hook-connector { background: var(--magenta, #c084fc); }
 .clamped-chevron { transition: transform 0.15s ease; }
 .clamped-hooks-group:not(.collapsed) .clamped-chevron { transform: rotate(90deg); }
@@ -5706,19 +5826,67 @@ aside#timeline.parallel-mode {
   z-index: 1;
 }
 
+/* --- the node: an Apps-tab instrument, sized by the layout ---
+   Glass + hairline + tick corners, the same shell the app cards use. The tick
+   brackets are background layers rather than pseudo-elements because ::after
+   is already spoken for by .turn-deleted's strike-through.
+   overflow:hidden is a guard, not the fix: computeNodeHeight and the 44px
+   header agree, so nothing should ever need clipping — but if they ever drift
+   again, a node clips its own tail instead of drawing over its neighbour. */
 .tl-nodes-layer > .turn-group {
+  --tick: var(--vc-faint);
+  --tick-len: 12px;
   position: absolute;
   left: 0;
   box-sizing: border-box;
   margin: 0;
   border-left: none;
   cursor: pointer;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--bg-surface) 60%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border) 40%, transparent);
-  transition: opacity 0.15s ease, min-height 0.3s ease;
+  border-radius: 8px;
+  border: 1px solid var(--vc-hair);
+  background-color: var(--vc-glass);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: var(--vc-shadow);
+  background-image:
+    linear-gradient(to top, var(--node-glow, transparent), transparent 55%),
+    linear-gradient(var(--tick) 0 0), linear-gradient(var(--tick) 0 0),
+    linear-gradient(var(--tick) 0 0), linear-gradient(var(--tick) 0 0);
+  background-size:
+    100% 100%,
+    var(--tick-len) 1.5px, 1.5px var(--tick-len),
+    var(--tick-len) 1.5px, 1.5px var(--tick-len);
+  background-position: 0 0, 0 0, 0 0, 100% 100%, 100% 100%;
+  background-repeat: no-repeat;
+  overflow: hidden;
+  transition: opacity .15s ease, min-height .3s ease,
+              box-shadow .2s, border-color .2s, background-size .25s;
   display: flex;
   flex-direction: column;
+}
+
+/* status reads as illumination from below, as on a running app card */
+.tl-nodes-layer > .turn-group.status-complete  { --node-glow: color-mix(in srgb, var(--green) 7%, transparent); }
+.tl-nodes-layer > .turn-group.status-streaming { --node-glow: color-mix(in srgb, var(--accent) 10%, transparent); }
+.tl-nodes-layer > .turn-group.status-pending   { --node-glow: color-mix(in srgb, var(--yellow) 8%, transparent); }
+
+/* the tick corners carry lane identity — agent colour wins over status, an
+   error wins over everything */
+.tl-nodes-layer > .turn-group[data-agent-id] { --tick: var(--subagent-color, var(--vc-faint)); }
+.tl-nodes-layer > .turn-group.status-error {
+  --node-glow: color-mix(in srgb, var(--red) 10%, transparent);
+  --tick: var(--vc-bad);
+  border-color: color-mix(in srgb, var(--red) 35%, var(--vc-hair));
+}
+
+/* Hover: brackets extend, never a lift — a 2px rise would be a 2px lie about
+   when the turn started, and peers on the same time must stay level. */
+.tl-nodes-layer > .turn-group:hover {
+  --tick-len: 18px;
+  --tick: var(--cyan);
+  border-color: color-mix(in srgb, var(--cyan) 45%, var(--vc-hair));
+  box-shadow: var(--vc-shadow-hi);
+  z-index: 60;
 }
 .tl-nodes-layer > .turn-group.subagent-group,
 .tl-nodes-layer > .turn-group.sidechain-group {
@@ -5729,9 +5897,10 @@ aside#timeline.parallel-mode {
 
 
 /* Selection highlight */
+/* background-color, not the shorthand — the shorthand would wipe the tick layers */
 .tl-nodes-layer.has-selection > .turn-group.selected {
-  background: var(--bg-selected);
-  border-radius: 6px;
+  background-color: var(--bg-selected);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--vc-hair));
 }
 
 /* Streaming glow */
@@ -6321,6 +6490,108 @@ aside#timeline.parallel-mode {
 .vc-detail .content-block-body { max-height: none; }
 .vc-detail .content-block-body.tool-use > .json-block { max-height: none; }
 
+/* --- sheet: messages / tools as an expandable spreadsheet -----
+   Row number, size gauge, first chars of the content. Column widths
+   live in one custom property so the sticky header and every row stay
+   on the same grid. Opening a row reveals the JSON tree in a capped,
+   scrollable cell — a 200-message request stays navigable. */
+.vc-sheet {
+  --vc-sheet-cols: 40px 92px minmax(0, 1fr);
+  font-size: 12px;
+}
+/* The sheet is the pane's whole surface. Full-bleed, and no overflow
+   clipping anywhere above the header: the body's padding would leave a
+   strip of scrolled rows above the sticky header, and an overflow:hidden
+   wrapper would make itself the scrollport and strand it entirely. */
+.vc-sec-body:has(> .vc-sheet) { padding: 0; }
+.vc-sheet-head,
+.vc-sheet-row > summary {
+  display: grid;
+  grid-template-columns: var(--vc-sheet-cols);
+  align-items: center;
+}
+.vc-sheet-c {
+  min-width: 0;
+  padding: 4px 8px;
+  border-right: 1px solid var(--vc-hair-2);
+}
+.vc-sheet-c:last-child { border-right: none; }
+.vc-sheet-n {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--vc-faint);
+}
+.vc-sheet-size { text-align: right; white-space: nowrap; }
+.vc-sheet-body { display: flex; align-items: baseline; gap: 6px; overflow: hidden; }
+.vc-sheet-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.vc-sheet-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--vc-hair);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--vc-faint);
+}
+
+/* Rows drop the global <details> card chrome — they are table rows. */
+.vc-sheet-row {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  border-top: 1px solid var(--vc-hair-2);
+  overflow: visible;
+}
+.vc-sheet-row:first-of-type { border-top: none; }
+.vc-sheet-row > summary { padding: 0; background: transparent; list-style: none; }
+.vc-sheet-row > summary::-webkit-details-marker { display: none; }
+.vc-sheet-row:nth-of-type(even) > summary {
+  background: color-mix(in srgb, var(--bg-surface) 55%, transparent);
+}
+.vc-sheet-row[open] > summary {
+  border-bottom: 1px solid var(--vc-hair-2);
+  background: var(--bg-hover);
+}
+.vc-sheet-row[open] > summary .vc-sheet-text { color: var(--text); }
+.vc-sheet-row > summary:hover { background: var(--bg-hover); }
+.vc-sheet-row > summary:hover .vc-sheet-text { color: var(--text); }
+
+.vc-sheet-tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--accent);
+}
+.vc-sheet-tag.is-user { color: var(--blue); }
+.vc-sheet-tag.is-assistant { color: var(--purple); }
+.vc-sheet-tag.is-system { color: var(--text-dim); }
+.vc-sheet-tag.is-tool {
+  font-family: var(--font-mono);
+  text-transform: none;
+  color: var(--cyan);
+}
+
+/* The opened cell: bounded and scrollable, JSON tree as everywhere else. */
+.vc-sheet-detail {
+  max-height: 300px;
+  overflow: auto;
+  background: var(--bg);
+}
+.vc-sheet-detail > .json-block { padding: 8px 10px; }
+
 /* The raw-SSE section is a normal section now, not a bottom drawer. */
 .vc-detail #raw-sse-details {
   display: block;
@@ -6806,3 +7077,110 @@ button:disabled { opacity: .5; cursor: not-allowed; }
    bare header strip with no visible content. */
 .vc-split[data-layout="stacked"] > .vc-pane { min-height: 104px; }
 .vc-split[data-layout="columns"] > .vc-pane { min-width: 240px; }
+
+
+/* ============================================================
+   TURN HOVER DECK
+   Everything the 44px header can't carry. Fixed-position (the trick Pro's
+   .vc-remote-tip uses) so it costs the timeline zero vertical space and no
+   node box, lane, or scroll container can clip it.
+   ============================================================ */
+.turn-tip {
+  position: fixed;
+  z-index: 10000;
+  min-width: 210px;
+  max-width: 300px;
+  padding: 9px 11px;
+  border: 1px solid var(--vc-hair);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  box-shadow: var(--vc-shadow-hi);
+  color: var(--vc-ink);
+  font-family: var(--vc-sans);
+  font-size: 11px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.turn-tip.visible { opacity: 1; }
+
+.turn-tip .tt-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--vc-hair-2);
+}
+.turn-tip .tt-head b {
+  font-family: var(--vc-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vc-ink);
+}
+.turn-tip .tt-model {
+  font-family: var(--vc-mono);
+  font-size: 10px;
+  color: var(--vc-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.turn-tip .tt-sec {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--vc-hair-2);
+}
+.turn-tip .tt-sec:last-of-type { border-bottom: 0; }
+
+.turn-tip .tt-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  line-height: 1.65;
+}
+.turn-tip .tt-k {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--vc-dim);
+  font-size: 10.5px;
+  flex: 1;
+  min-width: 0;
+}
+.turn-tip .tt-v {
+  font-family: var(--vc-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vc-ink-2);
+  white-space: nowrap;
+}
+.turn-tip .tt-v small { color: var(--vc-faint); font-size: 9.5px; }
+.turn-tip .tt-hi .tt-k { color: var(--vc-ink-2); }
+.turn-tip .tt-hi .tt-v { color: var(--vc-ink); font-weight: 600; }
+/* the swatch reuses the token strip's colour classes so the panel and the
+   header row name the same four numbers the same way */
+.turn-tip .tt-d {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: currentColor;
+  flex: none;
+}
+.turn-tip .tt-foot {
+  padding-top: 7px;
+  border-top: 1px solid var(--vc-hair-2);
+  font-size: 10.5px;
+  color: var(--vc-dim);
+  line-height: 1.5;
+}
+.turn-tip .tt-foot b { color: var(--cyan); font-weight: 600; }
+.turn-tip .entry-badge {
+  flex: none;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}

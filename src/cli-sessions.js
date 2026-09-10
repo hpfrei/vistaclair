@@ -277,6 +277,24 @@ class CliSessionManager {
     });
   }
 
+  // Session ids the interactions sweep must not touch: everything the restore
+  // manifest will bring back, plus everything still listed as a saved session.
+  // Deliberately lighter than getSavedSessions(), which stats every transcript.
+  getPinnedSessionIds() {
+    const pinned = new Set();
+    for (const session of this.sessions.values()) {
+      if (session.sessId) pinned.add(session.sessId);
+    }
+    const entries = readJSON(OPEN_TABS_FILE, []);
+    if (Array.isArray(entries)) {
+      for (const e of entries) if (e?.sessId) pinned.add(e.sessId);
+    }
+    for (const h of this._loadHistory()) {
+      if (h?.id) pinned.add(h.id);
+    }
+    return pinned;
+  }
+
   getSavedSessions() {
     const history = this._loadHistory();
     const runningIds = new Set();
@@ -551,7 +569,20 @@ class CliSessionManager {
     if (opts.hidden != null) session.hidden = opts.hidden;
 
     let resumeSessionId;
-    if (opts.spawnOpts?.resume) {
+    const so = opts.spawnOpts || {};
+    if (so.resumeSessionId) {
+      // Explicit resume target (Pro's storybook "open step as tab"): the caller
+      // names the session; we only verify Claude's native transcript exists so
+      // the tab does not die on open ("No conversation found").
+      const cwd = opts.cwd || session.cwd;
+      if (!/^[0-9a-f-]{36}$/i.test(String(so.resumeSessionId))) {
+        throw new Error('resumeSessionId must be a UUID');
+      }
+      if (!this._transcriptExists(cwd, so.resumeSessionId, so.isolated === true)) {
+        throw new Error(`no transcript for session ${so.resumeSessionId} in ${cwd}`);
+      }
+      resumeSessionId = so.resumeSessionId;
+    } else if (so.resume) {
       const cwd = opts.cwd || session.cwd;
       if (session.sessId && this._transcriptExists(cwd, session.sessId, session.isolated)) {
         resumeSessionId = session.sessId;

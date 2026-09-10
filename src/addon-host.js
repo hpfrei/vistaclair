@@ -54,6 +54,10 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     exportKeyBundle: () => caps.exportKeyBundle(home),
     importKeyBundle: (bundle, opts) => caps.importKeyBundle(home, bundle, opts),
     listModels: () => caps.listModels(home),
+    // Install the dashboard's hook reporters into <cwd>/.claude/settings.local.json
+    // so a headless `claude -p` spawned by an addon reports hook events exactly
+    // like an interactive tab does (cli-session.js does the same before spawning).
+    ensureHookReporters: (cwd) => caps.ensureHookReporters(cwd, path.join(utils.PACKAGE_ROOT, 'lib', 'hook-reporter.js')),
     claudeAuthInfo: () => ({
       hasSubscription: caps.hasClaudeSubscription(),
       pref: caps.getClaudeAuthPref(home),
@@ -78,10 +82,12 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // Inspector session lifecycle for headless ai.prompt spawns: registering an
       // instanceId gives its interactions a persistent per-session timeline on
       // disk (data/interactions/<sessId>/), exactly like CLI tabs.
-      registerAiSession: (instanceId) => {
-        const sessId = crypto.randomUUID();
-        store.registerSession(instanceId, sessId);
-        return sessId;
+      // An explicit UUID lets a headless spawn share its timeline with the
+      // interactive tab that later resumes the same Claude session (cli-<uuid>).
+      registerAiSession: (instanceId, sessId) => {
+        const id = (typeof sessId === 'string' && /^[0-9a-f-]{36}$/i.test(sessId)) ? sessId : crypto.randomUUID();
+        store.registerSession(instanceId, id);
+        return id;
       },
       unregisterAiSession: (instanceId) => {
         const sessId = store.sessionMap.get(instanceId);
@@ -112,7 +118,7 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     // Inspector session registration is dashboard-process state; headless
     // spawns still work (the proxy tags them by instanceId), they just don't
     // get a persistent per-session timeline.
-    registerAiSession: () => crypto.randomUUID(),
+    registerAiSession: (instanceId, sessId) => (typeof sessId === 'string' && sessId) ? sessId : crypto.randomUUID(),
     unregisterAiSession: () => {},
   });
 }

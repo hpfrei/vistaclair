@@ -181,14 +181,77 @@ function getInstanceContext(instanceId) {
   return entry?.sourceContext || null;
 }
 
+// An isolated session gets its own config root inside the project (transcripts,
+// todos, file-history, settings) but NOT its own login: the credentials file is
+// SYMLINKED to the global one, so a token refresh — or a `/login` run inside the
+// tab — writes through to ~/.claude, the single source of truth that
+// caps.hasClaudeSubscription() reads. Copying it (as this used to) let the two
+// diverge: the copy rotated its own refresh token, the global file went stale,
+// and the dashboard reported "no subscription" for a CLI that was logged in.
 function prepareLocalConfigDir(cwd) {
   const localConfigDir = path.join(cwd, '.claude');
   fs.mkdirSync(localConfigDir, { recursive: true });
   const globalCreds = path.join(os.homedir(), '.claude', '.credentials.json');
   if (fs.existsSync(globalCreds)) {
-    fs.copyFileSync(globalCreds, path.join(localConfigDir, '.credentials.json'));
+    linkCredentials(globalCreds, path.join(localConfigDir, '.credentials.json'));
   }
   return localConfigDir;
+}
+
+// Point localCreds at globalCreds. Re-checked on every spawn because an atomic
+// write (write-temp + rename) by the CLI replaces the symlink with a regular
+// file; the next spawn restores the link. Replacing whatever is there is no more
+// destructive than the unconditional copy this replaces. Falls back to a copy
+// where symlinks aren't available.
+function linkCredentials(globalCreds, localCreds) {
+  try {
+    if (fs.readlinkSync(localCreds) === globalCreds) return; // throws unless it is a symlink
+  } catch {}
+  try { fs.unlinkSync(localCreds); } catch {}
+  try {
+    fs.symlinkSync(globalCreds, localCreds);
+  } catch {
+    try { fs.copyFileSync(globalCreds, localCreds); } catch {}
+  }
+}
+
+// One-time-per-boot sweep for the pre-symlink shape. Isolated spawns used to drop
+// a COPY of ~/.claude/.credentials.json into <cwd>/.claude; a copy refreshes and
+// ROTATES its own token, so it drifts from the global file and can invalidate it.
+// Any copy still lying around is dead weight at best — remove it. An isolated
+// session recreates the symlink through prepareLocalConfigDir on its next spawn.
+//
+// Bounded to directories this install already knows about (package root, data
+// home, the CLI's recent-dirs list, the cwds in CLI session history), so it never
+// walks the filesystem. Idempotent and cheap: after the first pass there is
+// nothing left to find. Running it from server.js boot is also how a slave
+// install picks it up — a slave runs this same server.
+function pruneLegacyCredentialCopies() {
+  const globalCreds = path.join(os.homedir(), '.claude', '.credentials.json');
+  // Never prune the last remaining login: with no global file, a local copy may
+  // be the only credentials on the box.
+  if (!fs.existsSync(globalCreds)) return { removed: 0, paths: [], skipped: 'no-global-credentials' };
+
+  const dirs = new Set([PACKAGE_ROOT, DATA_HOME]);
+  for (const e of readJSON(path.join(DATA_HOME, 'data', 'cli-recent-dirs.json'), []) || []) {
+    if (e && typeof e.path === 'string') dirs.add(e.path);
+  }
+  for (const e of readJSON(path.join(DATA_HOME, 'data', 'cli-history.json'), []) || []) {
+    if (e && typeof e.cwd === 'string') dirs.add(e.cwd);
+  }
+
+  const paths = [];
+  for (const dir of dirs) {
+    const creds = path.join(dir, '.claude', '.credentials.json');
+    try {
+      if (path.resolve(creds) === path.resolve(globalCreds)) continue; // never the global file
+      const st = fs.lstatSync(creds);  // throws when absent
+      if (!st.isFile()) continue;      // a symlink is the fixed shape — leave it
+      fs.unlinkSync(creds);
+      paths.push(creds);
+    } catch {}
+  }
+  return { removed: paths.length, paths };
 }
 
 /**
@@ -207,7 +270,11 @@ function buildClaudeEnv({ cwd, proxyPort, dashboardPort, authToken, instanceId, 
   } else {
     delete env.ANTHROPIC_BASE_URL;
   }
-  if (isolated !== false) env.CLAUDE_CONFIG_DIR = prepareLocalConfigDir(cwd);
+  // Only an EXPLICITLY isolated session gets a project-local config root. Every
+  // other site branches on `isolated === true`; defaulting to isolation here sent
+  // headless spawns' transcripts to <cwd>/.claude while the session record said
+  // ~/.claude, so --resume / rollback / delete looked in the wrong place.
+  if (isolated === true) env.CLAUDE_CONFIG_DIR = prepareLocalConfigDir(cwd);
   if (!autoMemory) env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
   if (dashboardPort) env.VISTACLAIR_DASHBOARD_PORT = String(dashboardPort);
   if (authToken) env.VISTACLAIR_AUTH_TOKEN = authToken;
@@ -591,6 +658,7 @@ module.exports = {
   sanitizeForDashboard,
   buildClaudeArgs,
   spawnClaude,
+  pruneLegacyCredentialCopies,
   buildCliArgs,
   spawnClaudePty,
   setProcessBroadcaster,

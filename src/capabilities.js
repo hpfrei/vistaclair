@@ -801,6 +801,13 @@ function validateModel(m) {
     retiresAt: (typeof m.retiresAt === 'string' && m.retiresAt) ? m.retiresAt : null,
     isNew: !!m.isNew,
   };
+  // Anthropic routes by the undated family name — a dated snapshot id is never
+  // routable (the API answers not_found). Normalise at every write so nothing
+  // reintroduces one: manual edits, and bundle imports from an unrepaired Pro
+  // master. Strip the suffix rather than assuming modelId tracks name.
+  if (result.providerKey === 'anthropic' && ANTHROPIC_DATED_RE.test(result.modelId)) {
+    result.modelId = result.modelId.replace(ANTHROPIC_DATED_RE, '');
+  }
   // Retired models are always hidden from selection
   if (result.lifecycle === 'retired') result.disabled = true;
   // Custom provider models can have their own apiBaseUrl/apiKey
@@ -1201,6 +1208,12 @@ function reconcileAnthropicCatalog(baseDir, opts = {}) {
       result.added.push(entry.label || key);
     } else {
       existing.lifecycle = lifecycle;
+      // Anthropic routes by the undated family name; a dated snapshot id goes
+      // stale and the API answers not_found (proxy.js sends modelId verbatim).
+      // Repair here so existing installs heal on reconcile, not just new rows.
+      if (existing.providerKey === 'anthropic' && ANTHROPIC_DATED_RE.test(existing.modelId || '')) {
+        existing.modelId = key;
+      }
       existing.retiresAt = lifecycle === 'deprecated' ? retiresAt : null;
       if (typeof meta.context1m === 'boolean') existing.context1m = meta.context1m;
       if (typeof meta.contextWindow === 'number') existing.contextWindow = meta.contextWindow;

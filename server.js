@@ -6,7 +6,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
-const { OUTPUTS_DIR, DATA_HOME, ensureDir, setProcessBroadcaster, spawnClaude, buildClaudeArgs } = require('./src/utils');
+const { OUTPUTS_DIR, DATA_HOME, ensureDir, setProcessBroadcaster, spawnClaude, buildClaudeArgs, pruneLegacyCredentialCopies } = require('./src/utils');
 const InteractionStore = require('./src/store');
 const DashboardBroadcaster = require('./src/dashboard-ws');
 const createProxyRouter = require('./src/proxy');
@@ -471,6 +471,21 @@ function scheduleRestart() {
   }, 300);
 }
 
+// How long an idle headless (`claude -p` / ai.prompt) interaction dir is kept.
+// Interactive CLI tabs are exempt — their dirs live and die with the tab and
+// its saved-session entry.
+const INTERACTIONS_TTL_MS = Number(process.env.VISTACLAIR_INTERACTIONS_TTL_MS) || 60 * 60 * 1000;
+const INTERACTIONS_SWEEP_MS = 15 * 60 * 1000;
+
+function sweepInteractions() {
+  const pinned = cliSessionManager.getPinnedSessionIds();
+  for (const id of addons.collectPinnedSessions()) pinned.add(id);
+  const { swept, bytes } = store.sweepStaleSessions({ ttlMs: INTERACTIONS_TTL_MS, pinned });
+  if (swept.length) {
+    console.log(`  Interactions: swept ${swept.length} idle session dir(s), reclaimed ${(bytes / 1048576).toFixed(1)} MB`);
+  }
+}
+
 // Broadcast relay for out-of-process addon hosts (Pro app-runners). Reachable
 // only via loopback + internal header (the auth middleware admits nothing else
 // here from outside, and this re-checks to be explicit).
@@ -579,12 +594,26 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
   dashboardServer.listen(DASHBOARD_PORT, DASHBOARD_HOST, () => {
     mcp.autoStart();
 
+    // Legacy per-project credential COPIES drift from ~/.claude (each refreshes
+    // and rotates its own token) and can invalidate the global login. Isolated
+    // sessions symlink instead now; clear anything left from before.
+    const creds = pruneLegacyCredentialCopies();
+    if (creds.removed) {
+      console.log(`  Credentials: removed ${creds.removed} stale copy/copies (isolated sessions now symlink ~/.claude)`);
+    }
+
     // Bring back the CLI tabs that were open when the previous process stopped.
     // Server-owned, so it happens whether or not a dashboard is connected.
     const restore = cliSessionManager.restoreOpenTabs();
     if (restore.restored || restore.dropped) {
       console.log(`  CLI tabs: restoring ${restore.restored}${restore.dropped ? `, dropped ${restore.dropped}` : ''}`);
     }
+
+    // Reclaim idle headless (`claude -p`) interaction dirs. Runs after the tab
+    // restore so those sessions are already registered, and on a timer well
+    // under the TTL so a dir is never much more than an hour past its last use.
+    sweepInteractions();
+    setInterval(sweepInteractions, INTERACTIONS_SWEEP_MS);
 
     console.log('');
     console.log('  Claude Code API Proxy running.');

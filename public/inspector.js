@@ -525,6 +525,20 @@
     showCurlModal(buildCurlCommand(interaction));
   });
 
+  /* --- Sheet rows: seed the JSON tree on first expand ---
+     autoExpandSmallJsonBlocks() already unfolds anything under ~50 lines,
+     so what is left is the big ones, which would otherwise open onto a
+     single collapsed `{ role, content }` line. Unfold their outermost
+     node once so the row shows something. `toggle` does not bubble —
+     hence the capture-phase listener. */
+  document.addEventListener('toggle', (e) => {
+    const row = e.target;
+    if (!row.classList?.contains('vc-sheet-row') || !row.open || row.dataset.seeded) return;
+    row.dataset.seeded = '1';
+    const node = row.querySelector('.jt-root > details.jt-node');
+    if (node) node.open = true;
+  }, true);
+
   // --- Collapse/expand a tool-use card by clicking its name header ---
   document.addEventListener('click', (e) => {
     const name = e.target.closest('.content-block-body.tool-use > .tool-name');
@@ -740,6 +754,19 @@
     return document.getElementById(id);
   }
 
+  // Sticky bottom: follow the stream only while the reader is already at the
+  // bottom. Scrolling up to read something, or selecting text to copy it,
+  // pauses the follow until they scroll back down.
+  const FOLLOW_SLACK_PX = 48;
+
+  function _stickToBottom(el) {
+    if (!el) return;
+    if (_selectionInside(el)) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distance > FOLLOW_SLACK_PX) return;
+    el.scrollTop = el.scrollHeight;
+  }
+
   // Keep the streaming response in view. Blocks now flow at natural height
   // inside the scrollable response panel, so we follow at the panel level.
   function _followResponse(scope) {
@@ -751,12 +778,15 @@
     const panel = blocks?.closest('.vc-sec-body')
       || root.querySelector('.response-panel')
       || blocks;
-    if (panel) panel.scrollTop = panel.scrollHeight;
+    _stickToBottom(panel);
   }
 
   function appendSSEToDetail(event, interaction, scope) {
     const { eventType, data } = event;
     scope = scope || (_splitMode && _splitPanes.has(interaction.id) ? _splitPanes.get(interaction.id).pane : null) || document;
+    // Once a turn has streamed into the panel, #response-blocks and #raw-sse-pre
+    // are ours — patchTurnDetail must not rebuild them from the buffer.
+    if (scope === document && _detailView?.id === interaction.id) _detailView.streamed = true;
     const ss = _getStreamState(interaction.id);
     const blockMap = ss.blockMap;
     const thinkingTokens = ss.thinkingTokens;
@@ -835,7 +865,7 @@
         const bodyEl = _scopeFind(scope, `block-body-${data.index}`);
         if (!bodyEl) return;
         bodyEl.appendChild(document.createTextNode(delta.thinking || ''));
-        if (_liveMode) { bodyEl.scrollTop = bodyEl.scrollHeight; _followResponse(scope); }
+        if (_liveMode) { _stickToBottom(bodyEl); _followResponse(scope); }
         if (delta.estimated_tokens) {
           const total = (thinkingTokens.get(data.index) || 0) + delta.estimated_tokens;
           thinkingTokens.set(data.index, total);
@@ -855,8 +885,17 @@
         }
         bodyEl._rawText = (bodyEl._rawText || '') + (delta.text || '');
         bodyEl.classList.add('markdown-body');
-        renderMarkdownDebounced(bodyEl._rawText, bodyEl);
-        if (_liveMode) { bodyEl.scrollTop = bodyEl.scrollHeight; _followResponse(scope); }
+        // Re-parsing replaces the block's innerHTML, so hold off while the user
+        // is selecting inside it — _rawText keeps accumulating and the deferred
+        // flush renders the lot once the selection collapses.
+        if (_selectionInside(bodyEl)) {
+          cancelRenderDebounce(bodyEl);
+          _deferredMarkdown.add(bodyEl);
+        } else {
+          _deferredMarkdown.delete(bodyEl);
+          renderMarkdownDebounced(bodyEl._rawText, bodyEl);
+        }
+        if (_liveMode) { _stickToBottom(bodyEl); _followResponse(scope); }
       } else if (delta.type === 'input_json_delta') {
         const inputEl = _scopeFind(scope, `tool-input-${data.index}`);
         if (inputEl) inputEl.appendChild(document.createTextNode(delta.partial_json || ''));
@@ -881,7 +920,9 @@
         const rawText = bodyEl._rawText || bodyEl.textContent;
         if (rawText) {
           bodyEl.classList.add('markdown-body');
-          renderMarkdown(rawText, bodyEl);
+          bodyEl._rawText = rawText;
+          if (_selectionInside(bodyEl)) _deferredMarkdown.add(bodyEl);
+          else renderMarkdown(rawText, bodyEl);
         }
         ss.setPendingMd(bodyEl);
       }
@@ -941,7 +982,9 @@
       const rawText = el._rawText || el.textContent;
       if (rawText) {
         el.classList.add('markdown-body');
-        renderMarkdown(rawText, el);
+        el._rawText = rawText;
+        if (_selectionInside(el)) _deferredMarkdown.add(el);
+        else renderMarkdown(rawText, el);
       }
       ss.setPendingMd(null);
     }
@@ -1150,7 +1193,11 @@
       const localEvents = state.interactions[idx].response?.sseEvents || [];
       const localInstanceId = state.interactions[idx].instanceId;
       const localSubagent = state.interactions[idx].subagent;
+      // Client-side running counter behind the response char gauge — the server
+      // doesn't send it, so a wholesale replace would reset the gauge to zero.
+      const localRespChars = state.interactions[idx]._respChars;
       state.interactions[idx] = { ...updated, response: { ...updated.response, sseEvents: localEvents } };
+      if (localRespChars) state.interactions[idx]._respChars = localRespChars;
       // Preserve locally-stamped ext instanceId (server sends null for external sessions)
       if (!updated.instanceId && localInstanceId) {
         state.interactions[idx].instanceId = localInstanceId;
@@ -1168,11 +1215,7 @@
 
     const sel = state.selection;
     if (sel?.type === 'turn' && sel.id === updated.id) {
-      const ttfbEl = document.getElementById('resp-ttfb');
-      const durationEl = document.getElementById('resp-duration');
-      if (ttfbEl && updated.timing?.ttfb) ttfbEl.textContent = formatDuration(updated.timing.ttfb);
-      if (durationEl && updated.timing?.duration) durationEl.textContent = formatDuration(updated.timing.duration);
-      if (updated.usage) updateUsageDisplay(updated.usage, updated.pricing);
+      refreshDetailIfShowing(state.interactions[idx] || updated);
     }
 
     const uStatus = updated.status || 'complete';
@@ -1189,6 +1232,7 @@
       interaction.response.error = error;
     }
     updateTurnBadge(id, 'error');
+    if (interaction) refreshDetailIfShowing(interaction);
     if (_splitMode && _splitInteractions.has(id)) {
       _removeSplitPane(id);
     }
@@ -1204,10 +1248,29 @@
     return false;
   }
 
+  // Did this request actually come back with an assistant message? A 429 or a
+  // dropped connection is still recorded as an interaction, but no turn ever
+  // happened, so it must not consume a turn number — otherwise the count jumps
+  // and every turn after a rate-limited retry disagrees with the transcript.
+  function hasAssistantMessage(interaction) {
+    const resp = interaction.response || {};
+    if (resp.sseEvents?.length) {
+      for (const event of resp.sseEvents) {
+        if (event.eventType === 'message_start') return true;
+      }
+    }
+    const body = resp.body;
+    if (!body) return false;
+    return body.role === 'assistant' || Array.isArray(body.content);
+  }
+
+  // null when this interaction never produced a turn of its own, so callers
+  // render no number rather than borrowing the previous turn's.
   function llmTurnNumber(interaction) {
+    if (!isStandardLlm(interaction) || !hasAssistantMessage(interaction)) return null;
     let n = 0;
     for (const i of state.interactions) {
-      if (!i.isMcp && !i.isHook && isStandardLlm(i)) n++;
+      if (!i.isMcp && !i.isHook && isStandardLlm(i) && hasAssistantMessage(i)) n++;
       if (i === interaction) return n;
     }
     return n;
@@ -1276,6 +1339,48 @@
 
   // --- Build node HTML elements (reusing existing patterns) ---
 
+  // --- Turn node header -------------------------------------------------
+  // Two lines, FIXED at 44px (see .turn-entry in style.css). This height is a
+  // contract with wide-layout's MIN_ENTRY_HEIGHT: the parallel view positions
+  // tool rows at y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT, so a header that
+  // renders taller than it budgets pushes tool rows out of their own node and
+  // under the next one. Add data here, never a third line.
+  //   line 1  #123  opus-5  [chips]        <duration gauge>  <state lamp>
+  //   line 2  in/out/cache tokens                            <cost gauge>
+  function turnHeaderHtml(interaction, turnNum, isSubagentTurn, opts) {
+    const o = opts || {};
+    const statusClass = badgeClass(interaction.status);
+    const status = interaction.status || 'pending';
+    const model = interaction.request?.model || 'unknown';
+    const shortModel = model.replace('claude-', '').split('-202')[0];
+    const durationHtml = interaction.timing?.duration ? durationGauge(interaction.timing.duration) : '--';
+    const turnLabel = turnNum != null ? `${isSubagentTurn ? '#S' : '#'}${turnNum}` : '';
+    const stepChip = interaction.stepId
+      ? `<span class="entry-step">${escHtml(interaction.stepId)}</span>` : '';
+
+    const subagentLabel = interaction.subagent ? getSubagentLabel(interaction.subagent) : '';
+    const subagentColor = interaction.subagent?.agentId ? getSubagentColor(interaction.subagent) : '';
+    const subagentTag = (interaction.subagent && (interaction.subagent.agentType || interaction.subagent.agentId || interaction.subagent.description))
+      ? `<span class="entry-subagent" title="${escHtml(interaction.subagent.description || '')}"${subagentColor ? ` style="color:${subagentColor};background:color-mix(in srgb, ${subagentColor} 12%, transparent)"` : ''}>${escHtml(subagentLabel)}</span>`
+      : '';
+
+    const cost = computeCost(interaction.usage, interaction.pricing);
+
+    return `
+      <div class="entry-header entry-idrow">
+        <span class="entry-num">${turnLabel}</span>
+        <span class="entry-model" data-model="${interaction.id}"><span class="entry-model-label" title="${escHtml(model)}">${escHtml(shortModel)}</span></span>
+        ${stepChip}${subagentTag}${o.instanceTag || ''}
+        <span class="entry-duration" data-duration="${interaction.id}">${durationHtml}</span>
+        <span class="entry-badge ${statusClass}" data-badge="${interaction.id}">${status}</span>
+      </div>
+      <div class="entry-meta" data-tokens="${interaction.id}">
+        <span class="entry-tokens" data-tokenlabel="${interaction.id}">${compactTokens(interaction.usage)}</span>
+        <span class="entry-cost" data-costgauge="${interaction.id}">${turnCostGauge(cost)}</span>
+      </div>
+    `;
+  }
+
   function buildD3TurnEl(interaction, turnNum, isSubagentTurn) {
     const stdLlm = isStandardLlm(interaction);
 
@@ -1323,42 +1428,7 @@
     el.className = 'timeline-entry turn-entry';
     el.dataset.id = interaction.id;
 
-    const statusClass = badgeClass(interaction.status);
-    const stepId = interaction.stepId || '';
-    const model = interaction.request?.model || 'unknown';
-    const shortModel = model.replace('claude-', '').split('-202')[0];
-    const durationHtml = interaction.timing?.duration ? durationGauge(interaction.timing.duration) : '--';
-
-    const modelLabel = escHtml(shortModel);
-    let turnLabel = '';
-    if (turnNum != null) {
-      const turnPrefix = isSubagentTurn ? 'Turn S' : 'Turn ';
-      turnLabel = stepId ? `${turnPrefix}${turnNum} <span class="entry-step">${escHtml(stepId)}</span>` : `${turnPrefix}${turnNum}`;
-    }
-    const subagentLabel = interaction.subagent ? getSubagentLabel(interaction.subagent) : '';
-    const subagentColor = interaction.subagent?.agentId ? getSubagentColor(interaction.subagent) : '';
-    const subagentTag = (interaction.subagent && (interaction.subagent.agentType || interaction.subagent.agentId || interaction.subagent.description))
-      ? `<span class="entry-subagent" title="${escHtml(interaction.subagent.description || '')}"${subagentColor ? ` style="color:${subagentColor};background:color-mix(in srgb, ${subagentColor} 12%, transparent)"` : ''}>${escHtml(subagentLabel)}</span>`
-      : '';
-    const tokenSummary = compactTokens(interaction.usage);
-    const cost = computeCost(interaction.usage, interaction.pricing);
-    const costHtml = turnCostGauge(cost);
-
-    el.innerHTML = `
-      <div class="entry-header">
-        <span class="entry-num">${turnLabel}</span>
-        <span class="entry-badge ${statusClass}" data-badge="${interaction.id}">${interaction.status || 'pending'}</span>
-        ${subagentTag}
-      </div>
-      <div class="entry-model" data-model="${interaction.id}">
-        <span class="entry-model-label">${modelLabel}</span>
-        <span class="entry-duration" data-duration="${interaction.id}">${durationHtml}</span>
-      </div>
-      <div class="entry-meta" data-tokens="${interaction.id}">
-        <span class="entry-tokens" data-tokenlabel="${interaction.id}">${tokenSummary}</span>
-        <span class="entry-cost" data-costgauge="${interaction.id}">${costHtml}</span>
-      </div>
-    `;
+    el.innerHTML = turnHeaderHtml(interaction, turnNum, isSubagentTurn);
 
     el.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1446,7 +1516,7 @@
         return el;
       }
 
-      if (clamped.length > 2) {
+      if (clamped.length > 1) {
         const clampGroup = document.createElement('div');
         clampGroup.className = 'clamped-hooks-group collapsed';
 
@@ -1463,7 +1533,9 @@
           clampGroup.classList.toggle('collapsed');
           const groupEl = summaryEl.closest('.turn-group');
           if (groupEl) {
-            const delta = (clamped.length - 1) * 24;
+            // collapsed shows the summary row alone; expanded shows the
+            // summary row plus one row per entry
+            const delta = clamped.length * 24;
             const h = parseFloat(groupEl.style.height) || 0;
             groupEl.style.height = (wasCollapsed ? h + delta : h - delta) + 'px';
           }
@@ -1977,7 +2049,7 @@
         el = buildD3HookEl(interaction);
       } else {
         let num, isSub = false;
-        if (!isStandardLlm(interaction)) {
+        if (!isStandardLlm(interaction) || !hasAssistantMessage(interaction)) {
           num = undefined;
         } else {
           const agentId = interaction.subagent?.agentId;
@@ -2078,6 +2150,19 @@
 
   // --- Incremental append ---
 
+  /* Subagent resolution enriches a turn and each of its related hooks in one
+     burst (src/store.js applyResolution), and every one of them clears
+     timelineList wholesale. Coalesce a burst into a single rebuild. */
+  let _tlRebuildQueued = null;
+
+  function queueTimelineParallelRebuild() {
+    if (_tlRebuildQueued) return;
+    _tlRebuildQueued = requestAnimationFrame(() => {
+      _tlRebuildQueued = null;
+      renderTimelineParallel();
+    });
+  }
+
   function appendToParallelTimeline(interaction) {
     if (!_d3State) {
       renderTimelineParallel();
@@ -2124,18 +2209,16 @@
       return;
     }
 
-    // Clamp candidates: re-render so they collapse into the anchor turn
-    const isClampCandidate = (interaction.isHook && /^(PreToolUse|PostToolUse|PostToolBatch|PostToolUseFailure|TaskCreated|TaskCompleted)$/i.test(interaction.hookEvent)
-        && interaction.toolName !== 'Agent')
-      || (!interaction.isHook && !interaction.isMcp && !isStandardLlm(interaction));
-    if (isClampCandidate) {
-      const lastItem = ds.layout[ds.layout.length - 1];
-      if (lastItem && !lastItem.interaction.isHook && !lastItem.interaction.isMcp
-          && isStandardLlm(lastItem.interaction)
-          && interaction.timestamp - (lastItem.interaction.timestamp + (lastItem.interaction.timing?.duration || 0)) <= 5000) {
-        renderTimelineParallel();
-        return;
-      }
+    // A clamp candidate collapses into whichever turn OWNS it, and ownership is
+    // only resolvable from the whole interaction list — which already contains
+    // this entry by the time we get here. So hand off to a rebuild rather than
+    // placing it as a standalone row. Gating this on "the previous item is a
+    // recent LLM turn" is what used to leave hook runs expanded in live mode
+    // whenever a SubagentStop, a user prompt, or a text-only turn landed in
+    // between; the rebuild is rAF-coalesced, so a burst still costs one pass.
+    if (wl.isClampCandidate(interaction)) {
+      queueTimelineParallelRebuild();
+      return;
     }
 
     // Sequential compact stacking for single-column appends
@@ -2174,7 +2257,7 @@
       el = buildD3HookEl(interaction);
     } else {
       let num, isSub = false;
-      if (!isStandardLlm(interaction)) {
+      if (!isStandardLlm(interaction) || !hasAssistantMessage(interaction)) {
         num = undefined;
       } else if (agentId) {
         const n = (ds.subagentTurnCounts.get(agentId) || 0) + 1;
@@ -2444,45 +2527,10 @@
     el.className = 'timeline-entry turn-entry';
     el.dataset.id = interaction.id;
 
-    const statusClass = badgeClass(interaction.status);
-    const stepId = interaction.stepId || '';
-    const model = interaction.request?.model || 'unknown';
-    const shortModel = model.replace('claude-', '').split('-202')[0];
-    const durationHtml = interaction.timing?.duration ? durationGauge(interaction.timing.duration) : '--';
-
-    const modelLabel = escHtml(shortModel);
-    let turnLabel = '';
-    if (turnNum != null) {
-      const turnPrefix = isSubagentTurn ? 'Turn S' : 'Turn ';
-      turnLabel = stepId ? `${turnPrefix}${turnNum} <span class="entry-step">${escHtml(stepId)}</span>` : `${turnPrefix}${turnNum}`;
-    }
     const instanceTag = (activeInstanceTab === 'all' && interaction.instanceId)
       ? `<span class="entry-instance">${escHtml(instanceDisplayLabel(interaction.instanceId))}</span>` : '';
-    const subagentLabel = interaction.subagent ? getSubagentLabel(interaction.subagent) : '';
-    const subagentColor = interaction.subagent?.agentId ? getSubagentColor(interaction.subagent) : '';
-    const subagentTag = (interaction.subagent && (interaction.subagent.agentType || interaction.subagent.agentId || interaction.subagent.description))
-      ? `<span class="entry-subagent" title="${escHtml(interaction.subagent.description || '')}"${subagentColor ? ` style="color:${subagentColor};background:color-mix(in srgb, ${subagentColor} 12%, transparent)"` : ''}>${escHtml(subagentLabel)}</span>`
-      : '';
-    const tokenSummary = compactTokens(interaction.usage);
-    const cost = computeCost(interaction.usage, interaction.pricing);
-    const costHtml = turnCostGauge(cost);
 
-    el.innerHTML = `
-      <div class="entry-header">
-        <span class="entry-num">${turnLabel}</span>
-        <span class="entry-badge ${statusClass}" data-badge="${interaction.id}">${interaction.status || 'pending'}</span>
-        ${subagentTag}
-        ${instanceTag}
-      </div>
-      <div class="entry-model" data-model="${interaction.id}">
-        <span class="entry-model-label">${modelLabel}</span>
-        <span class="entry-duration" data-duration="${interaction.id}">${durationHtml}</span>
-      </div>
-      <div class="entry-meta" data-tokens="${interaction.id}">
-        <span class="entry-tokens" data-tokenlabel="${interaction.id}">${tokenSummary}</span>
-        <span class="entry-cost" data-costgauge="${interaction.id}">${costHtml}</span>
-      </div>
-    `;
+    el.innerHTML = turnHeaderHtml(interaction, turnNum, isSubagentTurn, { instanceTag });
 
     el.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -2677,6 +2725,132 @@
     return toolEl;
   }
 
+  // --- Turn hover deck ----------------------------------------------------
+  // The 44px header is a hard budget, so everything that doesn't fit lives
+  // here: exact token counts, the cost split, wall-clock span, full model id.
+  // Fixed-position (like Pro's .vc-remote-tip) so it costs the timeline no
+  // vertical space and no node box can clip it.
+  let _turnTipEl = null;
+  let _turnTipFor = null;
+
+  function _tipRow(label, value, cls) {
+    return `<div class="tt-row${cls ? ' ' + cls : ''}"><span class="tt-k">${label}</span><span class="tt-v">${value}</span></div>`;
+  }
+
+  function turnTipHtml(interaction, turnLabel) {
+    const model = interaction.request?.model || 'unknown';
+    const status = interaction.status || 'pending';
+    const u = interaction.usage || {};
+    const t = interaction.timing || {};
+
+    let head = `<div class="tt-head"><b>${escHtml(turnLabel || '')}</b>`
+      + `<span class="tt-model">${escHtml(model)}</span>`
+      + `<span class="entry-badge ${badgeClass(status)}">${escHtml(status)}</span></div>`;
+
+    let time = '';
+    if (t.duration != null || t.startedAt) {
+      const start = t.startedAt || interaction.timestamp;
+      const rows = [];
+      if (t.duration != null) rows.push(_tipRow('elapsed', formatDuration(t.duration), 'tt-hi'));
+      if (t.ttfb) rows.push(_tipRow('first byte', formatDuration(t.ttfb)));
+      if (start) {
+        const a = new Date(start), b = new Date(start + (t.duration || 0));
+        const hhmmss = d => d.toTimeString().slice(0, 8);
+        rows.push(_tipRow('span', `${hhmmss(a)} &rarr; ${hhmmss(b)}`));
+      }
+      time = `<div class="tt-sec">${rows.join('')}</div>`;
+    }
+
+    let tokens = '';
+    const n = v => (v || 0).toLocaleString();
+    if (u.input_tokens != null || u.output_tokens != null || u.cache_read_input_tokens) {
+      const cached = u.cache_read_input_tokens || 0;
+      const context = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + cached;
+      const hit = context ? Math.round(cached / context * 100) : 0;
+      tokens = '<div class="tt-sec">'
+        + _tipRow('<i class="tt-d et-in"></i>input', n(u.input_tokens))
+        + _tipRow('<i class="tt-d et-out"></i>output', n(u.output_tokens))
+        + (u.cache_creation_input_tokens ? _tipRow('<i class="tt-d et-cw"></i>cache write', n(u.cache_creation_input_tokens)) : '')
+        + (cached ? _tipRow('<i class="tt-d et-cr"></i>cache read', n(cached)) : '')
+        + (u.reasoning_tokens ? _tipRow('reasoning', n(u.reasoning_tokens)) : '')
+        + _tipRow('context', `${n(context)}<small> ${hit}% cached</small>`, 'tt-hi')
+        + '</div>';
+    }
+
+    let cost = '';
+    const pr = interaction.pricing;
+    const total = computeCost(u, pr);
+    if (total != null) {
+      const part = (tok, rate) => (tok || 0) * (rate || 0) / 1e6;
+      const cIn = part(u.input_tokens, pr.inputCostPerMTok);
+      const cOut = part(u.output_tokens, pr.outputCostPerMTok);
+      const cCw = part(u.cache_creation_input_tokens, pr.cacheCreateCostPerMTok || pr.inputCostPerMTok);
+      const cCr = part(u.cache_read_input_tokens, pr.cacheReadCostPerMTok || pr.inputCostPerMTok);
+      cost = '<div class="tt-sec">'
+        + _tipRow('cost', formatCost(total), 'tt-hi')
+        + _tipRow('input', formatCost(cIn))
+        + _tipRow('output', formatCost(cOut))
+        + (cCw ? _tipRow('cache write', formatCost(cCw)) : '')
+        + (cCr ? _tipRow('cache read', formatCost(cCr)) : '')
+        + '</div>';
+    }
+
+    let foot = '';
+    const stop = interaction.response?.body?.stop_reason;
+    const sub = interaction.subagent;
+    if (sub || stop) {
+      const bits = [];
+      if (sub) bits.push(`<b>${escHtml(getSubagentLabel(sub))}</b>${sub.description ? ' &middot; ' + escHtml(sub.description) : ''}`);
+      if (stop) bits.push(`stop: ${escHtml(stop)}`);
+      foot = `<div class="tt-foot">${bits.join('<br>')}</div>`;
+    }
+
+    return head + time + tokens + cost + foot;
+  }
+
+  function showTurnTip(group) {
+    const id = group.dataset.turnId;
+    if (!id || _turnTipFor === id) return;
+    const interaction = state.interactions.find(i => i.id === id);
+    if (!interaction) return;
+
+    if (!_turnTipEl) {
+      _turnTipEl = document.createElement('div');
+      _turnTipEl.className = 'turn-tip';
+      document.body.appendChild(_turnTipEl);
+    }
+    _turnTipFor = id;
+    _turnTipEl.innerHTML = turnTipHtml(interaction, group.querySelector('.entry-num')?.textContent);
+
+    const r = group.getBoundingClientRect();
+    const tr = _turnTipEl.getBoundingClientRect();
+    const gap = 10;
+    let left = r.right + gap;
+    if (left + tr.width > window.innerWidth - 8) left = r.left - tr.width - gap;
+    if (left < 8) left = 8;
+    let top = r.top;
+    if (top + tr.height > window.innerHeight - 8) top = window.innerHeight - tr.height - 8;
+    if (top < 8) top = 8;
+    _turnTipEl.style.left = left + 'px';
+    _turnTipEl.style.top = top + 'px';
+    _turnTipEl.classList.add('visible');
+  }
+
+  function hideTurnTip() {
+    _turnTipFor = null;
+    if (_turnTipEl) _turnTipEl.classList.remove('visible');
+  }
+
+  // mouseover bubbles and fires for every element under the pointer, so this
+  // one listener both opens and closes the deck. A capturing mouseleave would
+  // also fire moving between a node's own two rows, flickering the panel.
+  document.addEventListener('mouseover', (e) => {
+    const group = e.target.closest?.('.turn-group[data-turn-id]');
+    if (!group || !group.querySelector('.entry-idrow')) { hideTurnTip(); return; }
+    showTurnTip(group);
+  });
+  window.addEventListener('scroll', hideTurnTip, true);
+
   function rebuildToolEntries(interactionId) {
     const container = document.querySelector(`[data-tools-for="${interactionId}"]`);
     if (!container) return;
@@ -2755,9 +2929,9 @@
         badge.style.color = color;
         badge.style.background = `color-mix(in srgb, ${color} 12%, transparent)`;
       }
-      const instanceEl = header.querySelector('.entry-instance');
-      if (instanceEl) {
-        header.insertBefore(badge, instanceEl);
+      const anchor = header.querySelector('.entry-instance') || header.querySelector('.entry-duration');
+      if (anchor) {
+        header.insertBefore(badge, anchor);
       } else {
         header.appendChild(badge);
       }
@@ -2942,6 +3116,83 @@
   const _pendingSseRequests = new Set();
   const _pendingDetailRequests = new Set();
 
+  /* What detailContent currently shows. A re-select of the same target patches
+     the parts that moved instead of rebuilding the panel — during a live
+     session every hook, usage update and enrichment re-selects, and a rebuild
+     drops the user's text selection, closes what they just opened, and replays
+     the whole SSE buffer.
+     { key, kind, id, toolIndex, root, sig, streamed } */
+  let _detailView = null;
+
+  const _detailKey = sel => sel.type === 'tool'
+    ? `tool:${sel.interactionId}:${sel.toolIndex}` : `turn:${sel.id}`;
+
+  /* True while the user has text selected inside `el` — replacing its innerHTML
+     would silently drop the selection mid-copy. */
+  function _selectionInside(el) {
+    if (!el) return false;
+    const s = window.getSelection();
+    if (!s || s.isCollapsed || s.rangeCount === 0) return false;
+    return el.contains(s.anchorNode) || el.contains(s.focusNode);
+  }
+
+  // A rebuild blocked by an active selection, replayed once it collapses.
+  let _deferredRender = null;
+  // Streaming markdown blocks whose re-parse was held back for the same reason.
+  const _deferredMarkdown = new Set();
+
+  document.addEventListener('selectionchange', () => {
+    const s = window.getSelection();
+    if (s && !s.isCollapsed) return;
+    if (_deferredMarkdown.size) {
+      for (const el of _deferredMarkdown) {
+        if (el.isConnected && el._rawText) renderMarkdown(el._rawText, el);
+      }
+      _deferredMarkdown.clear();
+    }
+    if (_deferredRender) {
+      const sel = _deferredRender;
+      _deferredRender = null;
+      if (state.selection && _detailKey(state.selection) === _detailKey(sel)) select(sel);
+    }
+  });
+
+  /* Patch the panel in place if it happens to be showing this interaction.
+     Used by the update/error paths, which must never rebuild — they fire while
+     a turn streams. */
+  function refreshDetailIfShowing(interaction) {
+    if (_detailView?.kind !== 'llm') return;
+    if (_detailView.id !== interaction.id || !_detailView.root?.isConnected) return;
+    patchTurnDetail(interaction);
+  }
+
+  /* Choose between patching what's on screen, leaving it alone, and a full
+     rebuild. Only a genuine target change — or content the patch path can't
+     express — costs a rebuild. */
+  function _renderDetail(sel, interaction) {
+    const key = _detailKey(sel);
+    const same = _detailView && _detailView.key === key && _detailView.root?.isConnected;
+
+    if (same && _detailView.kind === 'llm') {
+      patchTurnDetail(interaction);
+      return;
+    }
+    if (same) {
+      // Tool, MCP and hook panels are static once rendered — only a content
+      // change (a lazily-fetched detail landing) is worth the rebuild.
+      const sig = _detailSig(interaction);
+      if (JSON.stringify(sig) === JSON.stringify(_detailView.sig)) return;
+    }
+    // Rebuilding under an active selection would drop it mid-copy. The same
+    // target is still there once the selection collapses.
+    if (same && _selectionInside(detailContent)) {
+      _deferredRender = sel;
+      return;
+    }
+    if (sel.type === 'tool') renderToolDetail(interaction, sel.toolIndex);
+    else renderTurnDetail(interaction);
+  }
+
   function select(sel, { userClick = false } = {}) {
     state.selection = sel;
 
@@ -2990,7 +3241,7 @@
 
       emptyState.classList.add('hidden');
       detailContent.classList.remove('hidden');
-      renderTurnDetail(interaction);
+      _renderDetail(sel, interaction);
     } else if (sel.type === 'tool') {
       const el = document.querySelector(`[data-tool-id="${sel.interactionId}-${sel.toolIndex}"]`);
       if (el) {
@@ -3025,7 +3276,7 @@
 
       emptyState.classList.add('hidden');
       detailContent.classList.remove('hidden');
-      renderToolDetail(interaction, sel.toolIndex);
+      _renderDetail(sel, interaction);
     }
   }
 
@@ -3084,6 +3335,8 @@
     autoExpandSmallJsonBlocks(detailContent);
     processMarkdownBlocks(detailContent);
     linkifyDetail(detailContent);
+    _detailView = { key: `turn:${interaction.id}`, kind: 'mcp', id: interaction.id,
+                    root: detailContent.firstElementChild, sig: _detailSig(interaction) };
   }
 
   function renderHookCallDetail(interaction) {
@@ -3123,6 +3376,8 @@
     detailContent.innerHTML = html;
     autoExpandSmallJsonBlocks(detailContent);
     linkifyDetail(detailContent);
+    _detailView = { key: `turn:${interaction.id}`, kind: 'hook', id: interaction.id,
+                    root: detailContent.firstElementChild, sig: _detailSig(interaction) };
   }
 
   /* ============================================================
@@ -3183,38 +3438,40 @@
     };
   }
 
-  function renderTurnDetail(interaction) {
-    if (interaction.isMcp) {
-      return renderMcpCallDetail(interaction);
-    }
-    if (interaction.isHook) {
-      return renderHookCallDetail(interaction);
-    }
+  const _isLiveInteraction = i => i.status === 'pending' || i.status === 'streaming';
 
-    const req = interaction.request || {};
+  const _REQ_KNOWN_KEYS = new Set(['model', 'system', 'messages', 'tools', 'tool_choice',
+                                   'max_tokens', 'temperature', 'stream', 'thinking']);
+
+  function _otherReqParams(req) {
+    const other = {};
+    for (const [k, v] of Object.entries(req)) {
+      if (!_REQ_KNOWN_KEYS.has(k)) other[k] = v;
+    }
+    return other;
+  }
+
+  function _respCharCount(interaction) {
     const resp = interaction.response || {};
-    const timing = interaction.timing || {};
+    if (interaction._respChars) return interaction._respChars;
+    if (resp.body) return JSON.stringify(resp.body).length;
+    if (resp.sseEvents) return resp.sseEvents.reduce((n, e) => n + JSON.stringify(e.data || '').length, 0);
+    return 0;
+  }
 
-    const model = req.model || 'unknown';
-    const shortModel = model.replace('claude-', '').split('-202')[0];
-    const maxTokens = req.max_tokens || '--';
-    const temperature = req.temperature !== undefined ? req.temperature : '--';
-    const stream = interaction.isStreaming ? 'yes' : 'no';
-
-    /* ---------------- request sections ---------------- */
-    const reqChips = [];
-    const reqSecs = [];
-    const pushReq = (key, label, body, opts) => {
-      const { chip, sec } = _secHtml(key, label, body, opts);
-      reqChips.push(chip);
-      reqSecs.push(sec);
-    };
+  /* The request pane's sections as descriptors. Kept separate from the markup
+     so patchTurnDetail can rebuild a single one without a second copy of any
+     of this. */
+  function _requestSections(interaction) {
+    const req = interaction.request || {};
+    const out = [];
+    const push = (key, label, body, opts) => out.push({ key, label, body, opts });
 
     let infoBody = `<div class="info-grid">
-      <span class="info-label">Model</span><span class="info-value">${escHtml(model)}</span>
-      <span class="info-label">Max tokens</span><span class="info-value">${maxTokens}</span>
-      <span class="info-label">Temperature</span><span class="info-value">${temperature}</span>
-      <span class="info-label">Stream</span><span class="info-value">${stream}</span>
+      <span class="info-label">Model</span><span class="info-value">${escHtml(req.model || 'unknown')}</span>
+      <span class="info-label">Max tokens</span><span class="info-value">${req.max_tokens || '--'}</span>
+      <span class="info-label">Temperature</span><span class="info-value">${req.temperature !== undefined ? req.temperature : '--'}</span>
+      <span class="info-label">Stream</span><span class="info-value">${interaction.isStreaming ? 'yes' : 'no'}</span>
       <span class="info-label">Endpoint</span><span class="info-value">${escHtml(interaction.originalEndpoint || interaction.endpoint || '/v1/messages')}</span>
       <span class="info-label">Bare</span><span class="info-value">${interaction.bare ? 'yes' : 'no'}</span>
       <span class="info-label">Auto-memory</span><span class="info-value">${interaction.disableAutoMemory ? 'disabled' : 'enabled'}</span>
@@ -3230,77 +3487,72 @@
         <span class="info-label">Sidechain</span><span class="info-value">${sa.isSidechain ? 'yes' : 'no'}</span>
       </div>`;
     }
-    pushReq('req:info', 'Info', infoBody, { size: 'compact' });
+    push('req:info', 'Info', infoBody, { size: 'compact' });
 
     if (req.system) {
       const charLen = typeof req.system === 'string' ? req.system.length : JSON.stringify(req.system).length;
-      pushReq('req:system', 'System', jsonBlock(req.system), { count: charGauge(charLen) });
+      push('req:system', 'System', jsonBlock(req.system), { count: charGauge(charLen) });
     } else if (req._systemChars) {
-      pushReq('req:system', 'System', '<div class="json-block" style="opacity:0.5">Loading...</div>',
+      push('req:system', 'System', '<div class="json-block" style="opacity:0.5">Loading...</div>',
         { count: charGauge(req._systemChars), lazyId: interaction.id });
     } else {
-      pushReq('req:system', 'System', '', { empty: true });
+      push('req:system', 'System', '', { empty: true });
     }
 
     if (req.messages?.length > 0) {
       const msgChars = JSON.stringify(req.messages).length;
-      pushReq('req:messages', 'Messages', `<div class="json-block">${renderMessages(req.messages)}</div>`,
+      push('req:messages', 'Messages', renderMessages(req.messages),
         { count: `${req.messages.length} ${charGauge(msgChars)}` });
     } else if (req._messageCount > 0) {
-      pushReq('req:messages', 'Messages', '<div class="json-block" style="opacity:0.5">Loading...</div>',
+      push('req:messages', 'Messages', '<div class="json-block" style="opacity:0.5">Loading...</div>',
         { count: String(req._messageCount), lazyId: interaction.id });
     } else {
-      pushReq('req:messages', 'Messages', '', { empty: true });
+      push('req:messages', 'Messages', '', { empty: true });
     }
 
     if (req.tools?.length > 0) {
       const toolChars = JSON.stringify(req.tools).length;
-      pushReq('req:tools', 'Tools', `<div class="json-block">${renderTools(req.tools)}</div>`,
+      push('req:tools', 'Tools', renderTools(req.tools),
         { count: `${req.tools.length} ${charGauge(toolChars)}` });
     } else if (req._toolCount > 0) {
-      pushReq('req:tools', 'Tools', '<div class="json-block" style="opacity:0.5">Loading...</div>',
+      push('req:tools', 'Tools', '<div class="json-block" style="opacity:0.5">Loading...</div>',
         { count: String(req._toolCount), lazyId: interaction.id });
     } else {
-      pushReq('req:tools', 'Tools', '', { empty: true });
+      push('req:tools', 'Tools', '', { empty: true });
     }
 
-    pushReq('req:thinking', 'Thinking', req.thinking ? jsonBlock(req.thinking) : '', { empty: !req.thinking });
+    push('req:thinking', 'Thinking', req.thinking ? jsonBlock(req.thinking) : '', { empty: !req.thinking });
 
-    const knownKeys = new Set(['model', 'system', 'messages', 'tools', 'tool_choice', 'max_tokens', 'temperature', 'stream', 'thinking']);
-    const otherParams = {};
-    for (const [k, v] of Object.entries(req)) {
-      if (!knownKeys.has(k)) otherParams[k] = v;
-    }
+    const otherParams = _otherReqParams(req);
     const hasOther = Object.keys(otherParams).length > 0;
-    pushReq('req:other', 'Other', hasOther ? jsonBlock(otherParams) : '', { empty: !hasOther });
+    push('req:other', 'Other', hasOther ? jsonBlock(otherParams) : '', { empty: !hasOther });
 
-    /* ---------------- response sections ---------------- */
-    const respChips = [];
-    const respSecs = [];
-    const pushResp = (key, label, body, opts) => {
-      const { chip, sec } = _secHtml(key, label, body, opts);
-      respChips.push(chip);
-      respSecs.push(sec);
-    };
+    return out;
+  }
 
-    const respChars = interaction._respChars || (resp.body ? JSON.stringify(resp.body).length : (resp.sseEvents ? resp.sseEvents.reduce((n, e) => n + JSON.stringify(e.data || '').length, 0) : 0));
+  /* The response pane's sections. `resp:blocks` comes back empty while the turn
+     is live — appendSSEToDetail fills #response-blocks as deltas arrive. */
+  function _responseSections(interaction) {
+    const resp = interaction.response || {};
+    const timing = interaction.timing || {};
     const statusOk = resp.status >= 200 && resp.status < 300;
+    const isLive = _isLiveInteraction(interaction);
+    const out = [];
+    const push = (key, label, body, opts) => out.push({ key, label, body, opts });
 
-    pushResp('resp:info', 'Info', `<div class="info-grid">
+    push('resp:info', 'Info', `<div class="info-grid">
       <span class="info-label">Status</span><span class="info-value ${statusOk ? 'status-ok' : 'status-err'}" id="resp-status">${resp.status || '--'}</span>
       <span class="info-label">TTFB</span><span class="info-value" id="resp-ttfb">${timing.ttfb ? formatDuration(timing.ttfb) : '--'}</span>
       <span class="info-label">Duration</span><span class="info-value" id="resp-duration">${timing.duration ? formatDuration(timing.duration) : '--'}</span>
     </div>`, { size: 'compact' });
 
     let blocksHtml = '';
-    const stdLlmResp = isStandardLlm(interaction);
-    const _isLive = interaction.status === 'pending' || interaction.status === 'streaming';
-    if (_isLive) {
+    if (isLive) {
       // Left empty — replayed via appendSSEToDetail after DOM insertion
     } else if (interaction.isStreaming && resp.sseEvents?.length > 0) {
       blocksHtml += renderAccumulatedBlocks(resp.sseEvents);
     } else if (resp.body) {
-      if (!stdLlmResp) {
+      if (!isStandardLlm(interaction)) {
         blocksHtml += `<div class="content-block">
           <div class="content-block-header">Response Body</div>
           <pre class="content-block-body json-block">${escHtml(JSON.stringify(resp.body, null, 2))}</pre>
@@ -3325,10 +3577,11 @@
 
     // Blocks is the response's main content: never chip-disabled, since it
     // fills in live while streaming.
-    const blocksPlaceholder = _isLive
-      ? 'Waiting for the first response block\u2026'
-      : (interaction._summary ? 'Loading response\u2026' : 'No response content.');
-    pushResp('resp:blocks', 'Blocks',
+    const respChars = _respCharCount(interaction);
+    const blocksPlaceholder = isLive
+      ? 'Waiting for the first response block…'
+      : (interaction._summary ? 'Loading response…' : 'No response content.');
+    push('resp:blocks', 'Blocks',
       `<div id="response-blocks">${blocksHtml}</div>`,
       { count: respChars ? charGauge(respChars) : '', countId: 'resp-char-gauge',
         placeholder: blocksHtml.trim() ? '' : blocksPlaceholder });
@@ -3339,14 +3592,227 @@
     ).join('\n') : '';
     // Kept as <details open> so the existing streaming code that unhides it
     // and appends to #raw-sse-pre keeps working unchanged.
-    pushResp('resp:sse', 'Raw SSE', `<details id="raw-sse-details" open>
+    push('resp:sse', 'Raw SSE', `<details id="raw-sse-details" open>
         <summary>Raw SSE Events (<span id="raw-sse-count">${sseCount}</span>)</summary>
         <pre class="json-block no-linkify" id="raw-sse-pre">${ssePre}</pre>
-      </details>`, { count: sseCount ? String(sseCount) : '', countId: 'sse-chip-count', empty: !_isLive && sseCount === 0 });
+      </details>`, { count: sseCount ? String(sseCount) : '', countId: 'sse-chip-count', empty: !isLive && sseCount === 0 });
+
+    return out;
+  }
+
+  /* Fingerprint of every part the detail frame shows, so a re-select can patch
+     the few that moved instead of rebuilding the panel. Deliberately shallow:
+     this runs on every inbound hook, so it counts and flags rather than
+     serialising the request — a turn's messages and tools are fixed once sent,
+     and the only transition that matters is a trimmed summary being replaced by
+     the real thing. */
+  function _detailSig(interaction) {
+    const req = interaction.request || {};
+    const resp = interaction.response || {};
+    const timing = interaction.timing || {};
+    const bulk = v => v == null ? 'none'
+      : (typeof v === 'string' ? `s${v.length}` : `o${Object.keys(v).length}`);
+    const sub = interaction.subagent;
+    return {
+      status: interaction.status || '',
+      respStatus: resp.status || 0,
+      ttfb: timing.ttfb || 0,
+      duration: timing.duration || 0,
+      usage: interaction.usage ? JSON.stringify(interaction.usage) : '',
+      respChars: _respCharCount(interaction),
+      sseCount: resp.sseEvents?.length || 0,
+      subagent: sub ? `${sub.agentId}|${sub.agentType}|${sub.description}|${sub.isSidechain}` : '',
+      model: req.model || '',
+      secs: {
+        'req:info': `${req.model}|${req.max_tokens}|${req.temperature}|${interaction.isStreaming}|${sub ? sub.agentId : ''}`,
+        'req:system': `${bulk(req.system)}|${req._systemChars || 0}`,
+        'req:messages': `${req.messages?.length ?? -1}|${req._messageCount || 0}`,
+        'req:tools': `${req.tools?.length ?? -1}|${req._toolCount || 0}`,
+        'req:thinking': req.thinking ? '1' : '0',
+        'req:other': String(Object.keys(_otherReqParams(req)).length),
+        'resp:blocks': `${bulk(resp.body)}|${resp.error ? 1 : 0}|${resp.sseEvents?.length || 0}|${interaction._summary ? 1 : 0}`,
+        'resp:sse': String(resp.sseEvents?.length || 0),
+      },
+    };
+  }
+
+  /* Run the post-insert passes over a freshly written subtree. */
+  function _decorateSection(el) {
+    autoExpandSmallJsonBlocks(el);
+    processMarkdownBlocks(el);
+    linkifyDetail(el);
+    _bindLazySections(el, true);
+  }
+
+  /* Opening a section whose data was trimmed re-requests it. `self` covers the
+     single-section rebuild, where the .vc-sec element *is* the root. */
+  function _bindLazySections(root, self = false) {
+    const els = self && root.matches?.('[data-lazy-detail]')
+      ? [root] : root.querySelectorAll('[data-lazy-detail]');
+    for (const el of els) {
+      el.addEventListener('vc-sec-open', () => {
+        const id = el.dataset.lazyDetail;
+        if (!_pendingDetailRequests.has(id)) {
+          _pendingDetailRequests.add(id);
+          sendWs({ type: 'interaction:getDetail', id });
+        }
+      }, { once: true });
+      // Already open on render — fetch straight away
+      if (el.classList.contains('is-open')) el.dispatchEvent(new CustomEvent('vc-sec-open'));
+    }
+  }
+
+  /* Rewrite one already-rendered section in place: body, chip count and the
+     empty/open state. The .vc-sec element itself is kept, so an open section
+     holds its scroll position instead of jumping back to the top. */
+  function _applySection(root, { key, body, opts = {} }) {
+    const sec = root.querySelector(`.vc-sec[data-sec="${CSS.escape(key)}"]`);
+    const chip = root.querySelector(`.vc-chip[data-sec="${CSS.escape(key)}"]`);
+    if (!sec || !chip) return;
+    const { count = '', empty = false, countId = '', placeholder = '' } = opts;
+
+    const bodyEl = sec.querySelector('.vc-sec-body');
+    if (bodyEl) {
+      bodyEl.innerHTML = body + (placeholder ? `<div class="vc-sec-placeholder">${escHtml(placeholder)}</div>` : '');
+    }
+
+    if (opts.lazyId) sec.dataset.lazyDetail = opts.lazyId;
+    else delete sec.dataset.lazyDetail;
+
+    chip.classList.toggle('is-empty', empty);
+    chip.disabled = empty;
+    let countEl = chip.querySelector('.vc-chip-count');
+    if (count || countId) {
+      if (!countEl) {
+        countEl = document.createElement('span');
+        countEl.className = 'vc-chip-count';
+        chip.appendChild(countEl);
+      }
+      if (countId) countEl.id = countId;
+      countEl.innerHTML = count;
+    } else if (countEl) {
+      countEl.remove();
+    }
+
+    const open = !empty && _isSecOpen(key);
+    sec.classList.toggle('is-open', open);
+    chip.classList.toggle('is-open', open);
+
+    _decorateSection(sec);
+  }
+
+  /* Update the parts of an already-rendered turn that actually changed. Called
+     instead of renderTurnDetail whenever the same turn is re-selected — an
+     inbound hook, a usage update or a lazy detail arriving must not tear down
+     a panel the user is reading from. */
+  function patchTurnDetail(interaction) {
+    const view = _detailView;
+    const root = view?.root;
+    if (!root) return;
+
+    const sig = _detailSig(interaction);
+    const prev = view.sig;
+    const resp = interaction.response || {};
+    const timing = interaction.timing || {};
+    const isLive = _isLiveInteraction(interaction);
+    const statusOk = resp.status >= 200 && resp.status < 300;
+
+    if (sig.status !== prev.status || sig.respStatus !== prev.respStatus) {
+      const dot = root.querySelector('.vc-dot');
+      if (dot) dot.className = `vc-dot ${isLive ? 'is-live' : (statusOk ? 'is-ok' : 'is-bad')}`;
+      const chipEl = root.querySelector('#resp-status-chip');
+      if (chipEl) { chipEl.textContent = resp.status || '--'; chipEl.className = statusOk ? 'status-ok' : 'status-err'; }
+      const statusEl = root.querySelector('#resp-status');
+      if (statusEl) { statusEl.textContent = resp.status || '--'; statusEl.className = `info-value ${statusOk ? 'status-ok' : 'status-err'}`; }
+    }
+
+    if (sig.model !== prev.model) {
+      const modelEl = root.querySelector('.vc-detail-model');
+      if (modelEl) modelEl.textContent = interaction.request?.model
+        ? interaction.request.model.replace('claude-', '').split('-202')[0] : 'unknown';
+    }
+
+    if (sig.subagent !== prev.subagent) {
+      const titleEl = root.querySelector('.vc-detail-title');
+      const modelEl = titleEl?.querySelector('.vc-detail-model');
+      if (titleEl && modelEl) {
+        const label = interaction.subagent
+          ? (getSubagentLabel(interaction.subagent) || interaction.subagent.agentType || 'Agent')
+          : 'Main Thread';
+        // The label is the bare text node between the dot and the model chip.
+        for (const node of [...titleEl.childNodes]) {
+          if (node.nodeType === Node.TEXT_NODE) node.remove();
+        }
+        modelEl.before(document.createTextNode(` ${label} `));
+      }
+    }
+
+    if (sig.ttfb !== prev.ttfb) {
+      const el = root.querySelector('#resp-ttfb');
+      if (el) el.textContent = timing.ttfb ? formatDuration(timing.ttfb) : '--';
+    }
+    if (sig.duration !== prev.duration) {
+      const el = root.querySelector('#resp-duration');
+      if (el) el.textContent = timing.duration ? formatDuration(timing.duration) : '--';
+    }
+    if (sig.usage !== prev.usage && interaction.usage) {
+      updateUsageDisplay(interaction.usage, interaction.pricing);
+    }
+    if (sig.respChars !== prev.respChars) {
+      const el = root.querySelector('#resp-char-gauge');
+      if (el && sig.respChars) el.innerHTML = charGauge(sig.respChars);
+    }
+
+    /* #response-blocks and #raw-sse-pre belong to appendSSEToDetail once a turn
+       has streamed into this panel — rebuilding them would drop the live content
+       and the gauges it maintains. Only a view that never streamed here (a
+       completed turn whose body or SSE log arrived afterwards) gets them
+       replaced. resp:info is patched field-by-field above. */
+    const skip = key => key === 'resp:info' || (view.streamed && key.startsWith('resp:'));
+    const changed = Object.keys(sig.secs)
+      .filter(key => !skip(key) && sig.secs[key] !== prev.secs[key]);
+
+    // Section bodies are only built when one actually moved — the usual trigger
+    // being a lazily-fetched detail replacing a "Loading..." body.
+    if (changed.length) {
+      const byKey = new Map();
+      for (const desc of _requestSections(interaction)) byKey.set(desc.key, desc);
+      if (!view.streamed) for (const desc of _responseSections(interaction)) byKey.set(desc.key, desc);
+      for (const key of changed) {
+        const desc = byKey.get(key);
+        if (desc) _applySection(root, desc);
+      }
+    }
+
+    view.sig = sig;
+  }
+
+  function renderTurnDetail(interaction) {
+    if (interaction.isMcp) {
+      return renderMcpCallDetail(interaction);
+    }
+    if (interaction.isHook) {
+      return renderHookCallDetail(interaction);
+    }
+
+    const req = interaction.request || {};
+    const resp = interaction.response || {};
+    const shortModel = (req.model || 'unknown').replace('claude-', '').split('-202')[0];
+    const statusOk = resp.status >= 200 && resp.status < 300;
+    const _isLive = _isLiveInteraction(interaction);
+
+    const reqChips = [], reqSecs = [], respChips = [], respSecs = [];
+    for (const { key, label, body, opts } of _requestSections(interaction)) {
+      const { chip, sec } = _secHtml(key, label, body, opts);
+      reqChips.push(chip); reqSecs.push(sec);
+    }
+    for (const { key, label, body, opts } of _responseSections(interaction)) {
+      const { chip, sec } = _secHtml(key, label, body, opts);
+      respChips.push(chip); respSecs.push(sec);
+    }
 
     /* ---------------- frame ---------------- */
     const layout = _detailPrefs.layout;
-    const pct = Math.round(_detailPrefs.ratio * 1000) / 10;
 
     const html = `
       <div class="vc-detail">
@@ -3405,19 +3871,13 @@
     autoExpandSmallJsonBlocks(detailContent);
     processMarkdownBlocks(detailContent);
     linkifyDetail(detailContent);
+    _bindLazySections(detailContent);
 
-    // Lazy-load: opening a section whose data was trimmed re-requests it
-    for (const el of detailContent.querySelectorAll('[data-lazy-detail]')) {
-      el.addEventListener('vc-sec-open', () => {
-        const id = el.dataset.lazyDetail;
-        if (!_pendingDetailRequests.has(id)) {
-          _pendingDetailRequests.add(id);
-          sendWs({ type: 'interaction:getDetail', id });
-        }
-      }, { once: true });
-      // Already open on render — fetch straight away
-      if (el.classList.contains('is-open')) el.dispatchEvent(new CustomEvent('vc-sec-open'));
-    }
+    _detailView = {
+      key: `turn:${interaction.id}`, kind: 'llm', id: interaction.id,
+      root: detailContent.querySelector('.vc-detail'),
+      sig: _detailSig(interaction), streamed: false,
+    };
 
     if (_isLive && interaction.response?.sseEvents?.length > 0) {
       for (const event of interaction.response.sseEvents) {
@@ -3593,8 +4053,9 @@
     if (isSkill && tc.input.args) {
       html += `<span class="info-label">Arguments</span><span class="info-value">${escHtml(tc.input.args)}</span>`;
     }
+    const turnNo = llmTurnNumber(interaction);
     html += `<span class="info-label">Status</span><span class="info-value">${tc.status}</span>
-      <span class="info-label">Turn</span><span class="info-value"><a href="#" class="turn-link" data-turn-id="${interaction.id}">Turn ${llmTurnNumber(interaction)}</a></span>
+      <span class="info-label">Turn</span><span class="info-value"><a href="#" class="turn-link" data-turn-id="${interaction.id}">${turnNo != null ? 'Turn ' + turnNo : 'this turn'}</a></span>
     </div>`;
 
     const media = toolMediaPaths(tc.input);
@@ -3653,6 +4114,8 @@
     processMarkdownBlocks(detailContent);
     linkifyDetail(detailContent);
     bindMediaPreviews(detailContent);
+    _detailView = { key: `tool:${interaction.id}:${toolIndex}`, kind: 'tool', id: interaction.id,
+                    toolIndex, root: detailContent.firstElementChild, sig: _detailSig(interaction) };
 
     const link = detailContent.querySelector('.turn-link');
     if (link) {
@@ -3815,8 +4278,10 @@
     </div>`;
   }
 
-  function msgSizeGauge(chars) {
-    const max = 80000;
+  /* Inline size bar for a sheet row. `max` is the chars value the bar is
+     full at — messages and tool schemas live on very different scales, so
+     each caller picks the one that makes its bars readable. */
+  function msgSizeGauge(chars, max = 80000) {
     const pct = Math.min(chars / max, 1);
     const w = 30, h = 8, fill = Math.max(pct * w, 1);
     const hue = Math.round((1 - pct) * 120);
@@ -3827,12 +4292,41 @@
     return `<span class="msg-size-gauge" title="${chars.toLocaleString()} chars"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="vertical-align:middle;margin:0 4px"><rect width="${w}" height="${h}" rx="2" fill="var(--bg)" stroke="var(--border)" stroke-width="0.5"/><rect width="${fill}" height="${h}" rx="2" fill="${color}"/></svg><span style="font-size:10px;color:${color}">${label}</span></span>`;
   }
 
+  /* ---- sheet: messages and tools share one spreadsheet render ----
+     Three columns — row number, size gauge, first chars of the content —
+     and a row expands in place into the same JSON tree used elsewhere in
+     the frame, capped and scrollable so one big row can't take the pane. */
+  function sheet(contentLabel, rows) {
+    return `<div class="vc-sheet">
+      <div class="vc-sheet-head">
+        <span class="vc-sheet-c vc-sheet-n">#</span>
+        <span class="vc-sheet-c vc-sheet-size">chars</span>
+        <span class="vc-sheet-c vc-sheet-body">${escHtml(contentLabel)}</span>
+      </div>
+      ${rows.join('')}
+    </div>`;
+  }
+
+  function sheetRow(idx, chars, max, tag, tagCls, text, detailHtml) {
+    return `<details class="vc-sheet-row">
+      <summary>
+        <span class="vc-sheet-c vc-sheet-n">${idx}</span>
+        <span class="vc-sheet-c vc-sheet-size">${msgSizeGauge(chars, max)}</span>
+        <span class="vc-sheet-c vc-sheet-body">${tag ? `<span class="vc-sheet-tag ${tagCls}">${escHtml(tag)}</span>` : ''}<span class="vc-sheet-text">${escHtml(text)}</span></span>
+      </summary>
+      <div class="vc-sheet-detail">${detailHtml}</div>
+    </details>`;
+  }
+
+  const MSG_GAUGE_MAX = 80000;
+  const TOOL_GAUGE_MAX = 8000;
+
   function renderMessages(messages) {
-    return messages.map((msg, idx) => {
+    const rows = messages.map((msg, idx) => {
       const role = msg.role || 'unknown';
       let preview = '';
       if (typeof msg.content === 'string') {
-        preview = msg.content.slice(0, 150);
+        preview = msg.content.slice(0, 200);
       } else if (Array.isArray(msg.content)) {
         preview = msg.content.map(b => {
           if (b.type === 'text') return (b.text || '').slice(0, 80);
@@ -3842,23 +4336,19 @@
           return `[${b.type}]`;
         }).join(' | ');
       }
-      const msgChars = JSON.stringify(msg).length;
-      return `<details>
-        <summary>${msgSizeGauge(msgChars)} <strong>${escHtml(role)}</strong> [${idx}]: ${escHtml(truncate(preview, 120))}</summary>
-        ${jsonBlock(msg)}
-      </details>`;
-    }).join('');
+      return sheetRow(idx, JSON.stringify(msg).length, MSG_GAUGE_MAX,
+        role, `is-${role.replace(/[^a-z]/gi, '').toLowerCase()}`,
+        truncate(preview, 200), jsonBlock(msg));
+    });
+    return sheet('role / content', rows);
   }
 
   function renderTools(tools) {
-    return tools.map(tool => {
-      const name = tool.name || 'unnamed';
-      const desc = tool.description ? truncate(tool.description, 90) : '';
-      return `<details>
-        <summary><strong>${escHtml(name)}</strong>${desc ? ` <span style="color:var(--text-dim)">— ${escHtml(desc)}</span>` : ''}</summary>
-        ${jsonBlock(tool)}</pre>
-      </details>`;
-    }).join('');
+    const rows = tools.map((tool, idx) => sheetRow(
+      idx, JSON.stringify(tool).length, TOOL_GAUGE_MAX,
+      tool.name || 'unnamed', 'is-tool',
+      truncate(tool.description || '', 200), jsonBlock(tool)));
+    return sheet('name / description', rows);
   }
 
   function compactTokens(usage) {
@@ -3867,11 +4357,12 @@
     const arrowUp = '<svg width="7" height="7" viewBox="0 0 8 8"><path d="M4 1L7 5H1Z" fill="currentColor"/></svg>';
     const arrowDn = '<svg width="7" height="7" viewBox="0 0 8 8"><path d="M4 7L1 3H7Z" fill="currentColor"/></svg>';
     const cacheIcon = '<svg width="8" height="8" viewBox="0 0 10 10"><ellipse cx="5" cy="2.5" rx="4" ry="1.8" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 2.5v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V2.5" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 4.7v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V4.7" fill="none" stroke="currentColor" stroke-width="0.9"/></svg>';
+    const exact = (n, what) => ` title="${n.toLocaleString()} ${what}"`;
     let html = '';
-    if (usage.input_tokens != null) html += `<span class="et-in">${arrowUp} ${fmt(usage.input_tokens)}</span>`;
-    if (usage.output_tokens != null) html += `<span class="et-out">${arrowDn} ${fmt(usage.output_tokens)}</span>`;
-    if (usage.cache_creation_input_tokens) html += `<span class="et-cw">${cacheIcon} ${fmt(usage.cache_creation_input_tokens)}w</span>`;
-    if (usage.cache_read_input_tokens) html += `<span class="et-cr">${cacheIcon} ${fmt(usage.cache_read_input_tokens)}r</span>`;
+    if (usage.input_tokens != null) html += `<span class="et-in"${exact(usage.input_tokens, 'input')}>${arrowUp} ${fmt(usage.input_tokens)}</span>`;
+    if (usage.output_tokens != null) html += `<span class="et-out"${exact(usage.output_tokens, 'output')}>${arrowDn} ${fmt(usage.output_tokens)}</span>`;
+    if (usage.cache_creation_input_tokens) html += `<span class="et-cw"${exact(usage.cache_creation_input_tokens, 'cache write')}>${cacheIcon} ${fmt(usage.cache_creation_input_tokens)}w</span>`;
+    if (usage.cache_read_input_tokens) html += `<span class="et-cr"${exact(usage.cache_read_input_tokens, 'cache read')}>${cacheIcon} ${fmt(usage.cache_read_input_tokens)}r</span>`;
     return html;
   }
 
@@ -3879,7 +4370,7 @@
     if (ms == null) return '--';
     const secs = ms / 1000;
     const pct = Math.max(0, Math.min(secs / 500, 1));
-    const w = 32, h = 8, fill = pct * w;
+    const w = 24, h = 7, fill = pct * w;
     const hue = Math.round((1 - pct) * 120);
     const sat = pct > 0.9 ? '80%' : '70%';
     const lit = pct > 0.9 ? '30%' : '45%';
@@ -3890,7 +4381,7 @@
   function turnCostGauge(cost) {
     if (cost == null) return '';
     const pct = Math.min(cost / 1, 1);
-    const w = 32, h = 8, fill = pct * w;
+    const w = 24, h = 7, fill = pct * w;
     const hue = Math.round((1 - pct) * 120);
     const sat = pct > 0.9 ? '80%' : '70%';
     const lit = pct > 0.9 ? '30%' : '45%';
@@ -4076,6 +4567,17 @@
   }
 
   // --- Message handler ---
+  /* Every Claude Code hook and MCP call arrives as its own interaction, so in
+     live mode they used to yank the detail panel away from the turn that is
+     still streaming — several times per turn. They stay in the timeline and
+     stay clickable; they just don't steal the panel mid-stream. */
+  function _wouldInterruptStream(incoming) {
+    if (!incoming.isHook && !incoming.isMcp) return false;
+    const current = state.selection?.type === 'turn'
+      ? state.interactions.find(i => i.id === state.selection.id) : null;
+    return !!current && _isLiveInteraction(current);
+  }
+
   function handleMessage(msg) {
     switch (msg.type) {
       case 'init':
@@ -4149,7 +4651,7 @@
           } else {
             appendTurnToTimeline(msg.interaction);
           }
-          if (_liveMode && !_splitMode) {
+          if (_liveMode && !_splitMode && !_wouldInterruptStream(msg.interaction)) {
             // While split mode is active, the panes ARE the live view — auto-selecting
             // each new interaction (incl. hooks) would tear the split down. New parallel
             // streamers get their own pane via the message_start SSE routing instead.
@@ -4191,8 +4693,10 @@
         if (dIdx >= 0 && msg.interaction) {
           const localEvents = state.interactions[dIdx].response?.sseEvents;
           const localSubagent = state.interactions[dIdx].subagent;
+          const localRespChars = state.interactions[dIdx]._respChars;
           state.interactions[dIdx] = { ...msg.interaction };
           if (localEvents?.length) state.interactions[dIdx].response.sseEvents = localEvents;
+          if (localRespChars) state.interactions[dIdx]._respChars = localRespChars;
           if (localSubagent && !state.interactions[dIdx].subagent) state.interactions[dIdx].subagent = localSubagent;
           if (state.selection?.id === msg.id || state.selection?.interactionId === msg.id) {
             select(state.selection);
@@ -4347,7 +4851,7 @@
         if (interaction) {
           interaction.subagent = msg.subagent;
           if (_timelineMode === 'parallel') {
-            renderTimelineParallel();
+            queueTimelineParallelRebuild();
           } else {
             updateTurnSubagentBadge(interaction);
           }

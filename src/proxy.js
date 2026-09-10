@@ -140,7 +140,7 @@ async function* resumeWebStream(firstChunk, reader) {
 }
 
 // Resolve a CLI tab's per-session model override (modelMap, family-substring
-// match opus/sonnet/haiku). Anthropic targets are applied in-place to
+// match fable/opus/sonnet/haiku). Anthropic targets are applied in-place to
 // body.model; non-Anthropic targets are returned as tabModelDef for the
 // translation path. Shared by /v1/messages and /v1/messages/count_tokens so a
 // remapped model is honored consistently and never reaches Anthropic with an
@@ -148,7 +148,8 @@ async function* resumeWebStream(firstChunk, reader) {
 function resolveTabModel(body, cliSettings) {
   if (!cliSettings || !body.model || !cliSettings.modelMap) return { tabModelDef: null };
   const lower = body.model.toLowerCase();
-  const family = lower.includes('opus') ? 'opus'
+  const family = lower.includes('fable') ? 'fable'
+    : lower.includes('opus') ? 'opus'
     : lower.includes('sonnet') ? 'sonnet'
     : lower.includes('haiku') ? 'haiku'
     : null;

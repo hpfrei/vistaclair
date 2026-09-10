@@ -56,7 +56,8 @@
   ],
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js dev"
+    "dev": "node server.js dev",
+    "test": "node --test \"test/*.test.js\""
   },
   "dependencies": {
     "dotenv": "^17.4.2",
