@@ -1,0 +1,90 @@
+{
+  "v": 1,
+  "updatedAt": 1789224017338,
+  "local": {
+    "preset": "unlimited",
+    "caps": {
+      "app": {
+        "day": "unlimited",
+        "month": "unlimited",
+        "subscribers": "count"
+      },
+      "principal": {
+        "day": "unlimited",
+        "month": "unlimited",
+        "subscribers": "count",
+        "source": "fixed"
+      },
+      "unattributed": {
+        "day": "unlimited",
+        "month": "unlimited"
+      }
+    },
+    "overrides": {},
+    "rate": {
+      "principalPerMinute": "unlimited",
+      "appPerMinute": "unlimited"
+    },
+    "alerts": {
+      "appDayPct": 80,
+      "anomalyFactor": 3
+    },
+    "storage": {
+      "dailyMB": "unlimited",
+      "subscribers": "count"
+    },
+    "paused": false,
+    "grants": {
+      "email": false,
+      "calendar": false,
+      "google": false,
+      "telegram": false,
+      "whatsapp": false,
+      "apps": false,
+      "governance": false
+    }
+  },
+  "deployed": {
+    "preset": "metered",
+    "caps": {
+      "app": {
+        "day": 2000,
+        "month": 30000,
+        "subscribers": "count"
+      },
+      "principal": {
+        "day": 100,
+        "month": 1500,
+        "subscribers": "count",
+        "source": "fixed"
+      },
+      "unattributed": {
+        "day": 0,
+        "month": 0
+      }
+    },
+    "overrides": {},
+    "rate": {
+      "principalPerMinute": 30,
+      "appPerMinute": 300
+    },
+    "alerts": {
+      "appDayPct": 80,
+      "anomalyFactor": 3
+    },
+    "storage": {
+      "dailyMB": "unlimited",
+      "subscribers": "count"
+    },
+    "paused": false,
+    "grants": {
+      "email": false,
+      "calendar": false,
+      "google": false,
+      "telegram": false,
+      "whatsapp": false,
+      "apps": false,
+      "governance": false
+    }
+  }
+}
