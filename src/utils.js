@@ -110,7 +110,7 @@ function _promptArg(args, flag, prompt) {
 /**
  * Append the flag block shared verbatim by headless (buildClaudeArgs) and
  * interactive (buildCliArgs) arg builders: model, effort, slash-commands,
- * bare, turn/budget limits, and system-prompt flags.
+ * bare, turn/budget limits, system-prompt flags, and a settings file.
  */
 function _appendCommonFlags(args, p) {
   if (p.model) args.push('--model', p.model);
@@ -121,6 +121,11 @@ function _appendCommonFlags(args, p) {
   if (p.maxBudgetUsd) args.push('--max-budget-usd', String(p.maxBudgetUsd));
   if (p.appendSystemPrompt) _promptArg(args, '--append-system-prompt', p.appendSystemPrompt);
   if (p.systemPrompt) _promptArg(args, '--system-prompt', p.systemPrompt);
+  // A caller-supplied Claude Code settings file (hooks, permissions) layered on
+  // top of the user's own settings. Add-ons use it to install per-session hooks
+  // without generating a project `.claude/settings.json` that would travel with
+  // the directory; the file is theirs to write and to keep current.
+  if (p.settingsFile) args.push('--settings', p.settingsFile);
   return args;
 }
 
