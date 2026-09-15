@@ -5,8 +5,9 @@ const { spawn } = require('child_process');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const path = require('path');
+const os = require('os');
 const rateLimit = require('express-rate-limit');
-const { OUTPUTS_DIR, DATA_HOME, ensureDir, setProcessBroadcaster, spawnClaude, buildClaudeArgs, pruneLegacyCredentialCopies } = require('./src/utils');
+const { OUTPUTS_DIR, DATA_HOME, PACKAGE_ROOT, ensureDir, setProcessBroadcaster, spawnClaude, buildClaudeArgs } = require('./src/utils');
 const InteractionStore = require('./src/store');
 const DashboardBroadcaster = require('./src/dashboard-ws');
 const createProxyRouter = require('./src/proxy');
@@ -594,12 +595,15 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
   dashboardServer.listen(DASHBOARD_PORT, DASHBOARD_HOST, () => {
     mcp.autoStart();
 
-    // Legacy per-project credential COPIES drift from ~/.claude (each refreshes
-    // and rotates its own token) and can invalidate the global login. Isolated
-    // sessions symlink instead now; clear anything left from before.
-    const creds = pruneLegacyCredentialCopies();
-    if (creds.removed) {
-      console.log(`  Credentials: removed ${creds.removed} stale copy/copies (isolated sessions now symlink ~/.claude)`);
+    // Hook reporters live once at user scope (~/.claude/settings.json), which
+    // every `claude` spawn on this box reads — interactive tab or headless, any
+    // cwd. Installed at boot so a slave install (same server) gets them too.
+    // Reporters used to be written per project dir before each tab spawn; sweep
+    // those copies out so the Hooks page and the project dirs stay clean.
+    caps.ensureHookReporters(path.join(os.homedir(), '.claude', 'settings.json'), path.join(PACKAGE_ROOT, 'lib', 'hook-reporter.js'));
+    const swept = caps.pruneProjectHookReporters();
+    if (swept.removed) {
+      console.log(`  Hooks: removed project-scope reporter copies from ${swept.removed} dir(s) (reporters now live in ~/.claude/settings.json)`);
     }
 
     // Bring back the CLI tabs that were open when the previous process stopped.

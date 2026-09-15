@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { ensureDir, safeJoin, readJSON, writeJSON, tryRm } = require('./utils');
+const { ensureDir, safeJoin, readJSON, writeJSON, tryRm, PACKAGE_ROOT, DATA_HOME } = require('./utils');
 const secretStore = require('./secret-store');
 
 const KNOWN_TOOLS = [
@@ -176,18 +176,26 @@ function settingsLocalPath(cwd) {
   return path.join(cwd, '.claude', 'settings.local.json');
 }
 
-function readSettingsLocal(cwd) {
-  const p = settingsLocalPath(cwd);
+// Any Claude Code settings file (user-scope ~/.claude/settings.json or a
+// project's .claude/settings.local.json): unparseable or absent reads as {}.
+function readSettingsFile(p) {
   try {
     if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf-8'));
   } catch {}
   return {};
 }
 
+function writeSettingsFile(p, settings) {
+  ensureDir(path.dirname(p));
+  fs.writeFileSync(p, JSON.stringify(settings, null, 2));
+}
+
+function readSettingsLocal(cwd) {
+  return readSettingsFile(settingsLocalPath(cwd));
+}
+
 function writeSettingsLocal(cwd, settings) {
-  const dir = path.join(cwd, '.claude');
-  ensureDir(dir);
-  fs.writeFileSync(settingsLocalPath(cwd), JSON.stringify(settings, null, 2));
+  writeSettingsFile(settingsLocalPath(cwd), settings);
 }
 
 function listHooks(cwd) {
@@ -266,24 +274,31 @@ function deleteHook(cwd, event, entryIndex) {
 
 const HOOK_REPORTER_MARKER = '__vistaclair_reporter__';
 
-function ensureHookReporters(cwd, reporterPath) {
-  const settings = readSettingsLocal(cwd);
+function _isReporterEntry(entry) {
+  return !!entry?.hooks?.some(h => typeof h.command === 'string' && h.command.includes(HOOK_REPORTER_MARKER));
+}
+
+// Install the dashboard's hook reporter for every HOOK_EVENTS entry in one
+// settings file — in practice the user-scope ~/.claude/settings.json, which every
+// `claude` spawn on the box reads (interactive tab or headless, any cwd). Claude
+// Code runs identical handlers found in several scope files once, so a single
+// user-scope copy is the whole installation. Read-mutate-write: every other key
+// in the file (model, permissions, statusLine, the owner's own hooks) is kept
+// as-is; only entries carrying HOOK_REPORTER_MARKER are ever replaced. No write
+// when nothing changed.
+function ensureHookReporters(settingsPath, reporterPath) {
+  const settings = readSettingsFile(settingsPath);
   if (!settings.hooks) settings.hooks = {};
-  const events = HOOK_EVENTS;
+  const expectedCmd = `node "${reporterPath}" # ${HOOK_REPORTER_MARKER}`;
   let changed = false;
-  for (const event of events) {
-    if (!settings.hooks[event]) settings.hooks[event] = [];
-    const expectedCmd = `node "${reporterPath}" # ${HOOK_REPORTER_MARKER}`;
+  for (const event of HOOK_EVENTS) {
+    if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
     const hasCorrectReporter = settings.hooks[event].some(e =>
       e.hooks?.some(h => h.command === expectedCmd)
     );
     if (!hasCorrectReporter) {
-      const stale = settings.hooks[event].filter(e =>
-        e.hooks?.some(h => h.command?.includes(HOOK_REPORTER_MARKER))
-      );
-      if (stale.length > 0) {
-        settings.hooks[event] = settings.hooks[event].filter(e => !stale.includes(e));
-      }
+      // A stale reporter (older path) is replaced, never doubled.
+      settings.hooks[event] = settings.hooks[event].filter(e => !_isReporterEntry(e));
       settings.hooks[event].push({
         hooks: [{
           type: 'command',
@@ -294,7 +309,57 @@ function ensureHookReporters(cwd, reporterPath) {
       changed = true;
     }
   }
-  if (changed) writeSettingsLocal(cwd, settings);
+  if (changed) writeSettingsFile(settingsPath, settings);
+}
+
+// Once-per-boot sweep of the project-scope reporter copies an earlier version
+// wrote into <cwd>/.claude/settings.local.json before every tab spawn. Bounded
+// to directories this install already knows about (package root, data home, the
+// CLI's recent-dirs list, the cwds in CLI session history) — never a filesystem
+// walk. Strips only marker entries; whatever else the file holds (permissions,
+// the owner's hooks, disabledMcpjsonServers) stays. A file that is left empty
+// is deleted, and its .claude/ directory with it when that leaves nothing behind.
+// Idempotent: after the first pass there is nothing left to find.
+function pruneProjectHookReporters() {
+  const dirs = new Set([PACKAGE_ROOT, DATA_HOME]);
+  for (const e of readJSON(path.join(DATA_HOME, 'data', 'cli-recent-dirs.json'), []) || []) {
+    if (e && typeof e.path === 'string') dirs.add(e.path);
+  }
+  for (const e of readJSON(path.join(DATA_HOME, 'data', 'cli-history.json'), []) || []) {
+    if (e && typeof e.cwd === 'string') dirs.add(e.cwd);
+  }
+
+  const paths = [];
+  for (const dir of dirs) {
+    const p = settingsLocalPath(dir);
+    let settings;
+    try { settings = JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { continue; } // absent or not ours to parse
+    if (!settings || typeof settings !== 'object' || !settings.hooks || typeof settings.hooks !== 'object') continue;
+
+    let changed = false;
+    for (const event of Object.keys(settings.hooks)) {
+      const entries = settings.hooks[event];
+      if (!Array.isArray(entries)) continue;
+      const kept = entries.filter(e => !_isReporterEntry(e));
+      if (kept.length === entries.length) continue;
+      changed = true;
+      if (kept.length) settings.hooks[event] = kept;
+      else delete settings.hooks[event];
+    }
+    if (!changed) continue;
+    if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
+
+    try {
+      if (Object.keys(settings).length === 0) {
+        fs.unlinkSync(p);
+        try { fs.rmdirSync(path.dirname(p)); } catch {} // only succeeds when empty
+      } else {
+        fs.writeFileSync(p, JSON.stringify(settings, null, 2));
+      }
+      paths.push(p);
+    } catch {}
+  }
+  return { removed: paths.length, paths };
 }
 
 // --- System prompt constants ---
@@ -484,15 +549,25 @@ function resolveModel(model, providers, secrets) {
   };
 }
 
+// True when the `claude` CLI holds usable subscription credentials.
+//
+// Deliberately keyed on the REFRESH token's expiry, not the access token's. The
+// access token is short-lived (hours) and the CLI refreshes it transparently on
+// the next spawn, so treating an expired access token as "no subscription" made
+// every Anthropic model blink out of the pickers on a few-hour timer and
+// silently moved live sessions onto the API key. The subscription is gone only
+// once the refresh token itself has lapsed (or was never there).
 function hasClaudeSubscription() {
   try {
     const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
     const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
     const oauth = creds?.claudeAiOauth;
     if (!oauth?.accessToken) return false;
-    // Treat an expired OAuth token as no active subscription so headless runs
-    // fall back to the API key (Anthropic disallows -p on a subscription anyway).
-    if (oauth.expiresAt && Date.now() >= oauth.expiresAt) return false;
+    // No refresh token → the access token is all there is, so its expiry rules.
+    if (!oauth.refreshToken) {
+      return !(oauth.expiresAt && Date.now() >= oauth.expiresAt);
+    }
+    if (oauth.refreshTokenExpiresAt && Date.now() >= oauth.refreshTokenExpiresAt) return false;
     return true;
   } catch { return false; }
 }
@@ -674,61 +749,99 @@ function setCliModelPref(baseDir, value) {
   return true;
 }
 
-// Record (once) that a subscription has been seen, so the UI can prompt the user
-// to choose a preference the first time after they run `/login`. Returns true if
-// the prefs were changed (i.e. this is a newly observed subscription).
-function noteSubscriptionState(baseDir) {
-  const active = hasClaudeSubscription();
-  const prefs = readAppPrefs(baseDir);
-  if (active && !prefs.subscriptionSeen) {
-    prefs.subscriptionSeen = true;
-    writeAppPrefs(baseDir, prefs);
-    return true;
-  }
-  return false;
-}
-
-// True when a subscription is active but the user has not yet chosen how they
-// want Claude calls authenticated. Drives the one-time "choose auth" prompt.
-function needsClaudeAuthChoice(baseDir) {
-  return hasClaudeSubscription() && !getClaudeAuthPref(baseDir);
-}
-
-// Decide which Anthropic API key (if any) a HEADLESS `claude -p` spawn should use.
-// Returns the key string to inject, or '' to run on the subscription OAuth.
+// THE credential decision for any `claude` spawn, headless or interactive.
 //
-// Default is the API key: Anthropic does NOT permit `claude -p` on a Max/Pro
-// subscription, and doing so may result in account bans. Subscription-headless
-// is therefore an explicit, gated opt-in.
+// This is the single join between what the credential store holds and what the
+// caller asked for. Headless and interactive used to resolve auth through two
+// separate functions with opposite defaults, which is how the platform ended up
+// telling the model pickers "no Anthropic model is usable" while every spawn
+// happily ran on the subscription. One function, one answer.
 //
-// authMode (per-call flag from ai.prompt; undefined => default):
-//   'apikey' / default -> always use the API key
-//   'subscription'     -> ONLY honored when the stored user preference is also
-//                         'subscription' AND a subscription is active; otherwise
-//                         falls back to the API key.
-function resolveHeadlessAuth(baseDir, authMode) {
+// Returns { credential, key }:
+//   credential: 'subscription' -> run on the CLI's OAuth login (key is '')
+//               'api-key'      -> inject `key`
+//               null           -> neither is available; the spawn will fail
+//
+// The `claudeAuth` preference is honoured for BOTH kinds of spawn (interactive
+// previously ignored it, so a user who chose "API key" still had every session
+// billed to their subscription):
+//   'apikey'              -> the stored key wins when there is one
+//   'subscription'/unset  -> the subscription wins when one is active
+// Unset defaults to the subscription because that is what the CLI itself does
+// when no key is in the environment, and what a subscriber is paying for.
+//
+// `authMode` is an optional per-call override (from ai.prompt) using the same
+// vocabulary; it takes precedence over the stored preference.
+function resolveAuth(baseDir, opts) {
+  const want = (opts && opts.authMode) || getClaudeAuthPref(baseDir) || 'subscription';
   const apiKey = getAnthropicApiKey(baseDir);
-  if (authMode === 'subscription'
-      && getClaudeAuthPref(baseDir) === 'subscription'
-      && hasClaudeSubscription()) {
-    return ''; // run on subscription OAuth (opt-in feature)
+  const subscription = hasClaudeSubscription();
+  if (want === 'apikey') {
+    if (apiKey) return { credential: 'api-key', key: apiKey };
+    return subscription ? { credential: 'subscription', key: '' } : { credential: null, key: '' };
   }
-  return apiKey;
+  if (subscription) return { credential: 'subscription', key: '' };
+  return apiKey ? { credential: 'api-key', key: apiKey } : { credential: null, key: '' };
 }
 
-// Decide auth for INTERACTIVE (PTY) sessions. These always PREFER the
-// subscription when one is active (interactive use is allowed on a
-// subscription); the API key is only used as a fallback when there is no
-// active subscription. Returns the key string to inject, or '' for OAuth.
+// Key string for a HEADLESS `claude -p` spawn ('' => run on subscription OAuth).
+// Thin wrapper over resolveAuth for the buildClaudeEnv call sites.
+function resolveHeadlessAuth(baseDir, authMode) {
+  return resolveAuth(baseDir, { authMode }).key;
+}
+
+// Key string for an INTERACTIVE (PTY) session ('' => run on subscription OAuth).
 function getInteractiveAuth(baseDir) {
-  if (hasClaudeSubscription()) return '';
-  return getAnthropicApiKey(baseDir);
+  return resolveAuth(baseDir).key;
+}
+
+// Whether a single registry model can actually be called right now, and why not
+// when it can't. THE definition of "usable" — every picker, payload and prompt
+// reads this rather than re-deriving it from key presence. `hasApiKey` remains a
+// true statement about the secrets store, but it is not a capability: Anthropic
+// models route through the `claude` CLI and are callable on an OAuth login with
+// no stored key at all.
+//
+// reason is ordered deliberately: capabilities.js forces `disabled` on retired
+// models, so retirement has to be checked first or every retired model would
+// report 'disabled'.
+function resolveAvailability(baseDir, model) {
+  if (!model) return { usable: false, reason: 'retired', credential: null };
+  if ((model.lifecycle || 'current') === 'retired') {
+    return { usable: false, reason: 'retired', credential: null };
+  }
+  if (model.disabled) return { usable: false, reason: 'disabled', credential: null };
+  const credential = model.providerKey === 'anthropic'
+    ? resolveAuth(baseDir).credential
+    : (model.apiKey ? 'api-key' : null);
+  if (!credential) return { usable: false, reason: 'no-credential', credential: null };
+  return { usable: true, reason: null, credential };
 }
 
 function listModels(baseDir) {
   const data = readModelsFile(baseDir);
   const secrets = readSecrets(baseDir);
   return data.models.map(m => resolveModel(m, data.providers, secrets));
+}
+
+// listModels + the availability join, with the credential lookup hoisted so the
+// whole catalog costs one credential-store read instead of one per model.
+// Every model gains { usable, unusableReason, credential }.
+function listModelsWithAvailability(baseDir) {
+  const anthropic = resolveAuth(baseDir).credential;
+  return listModels(baseDir).map((m) => {
+    const credential = m.providerKey === 'anthropic' ? anthropic : (m.apiKey ? 'api-key' : null);
+    let reason = null;
+    if ((m.lifecycle || 'current') === 'retired') reason = 'retired';
+    else if (m.disabled) reason = 'disabled';
+    else if (!credential) reason = 'no-credential';
+    return {
+      ...m,
+      usable: reason === null,
+      unusableReason: reason,
+      credential: reason === null ? credential : null,
+    };
+  });
 }
 
 function loadModel(baseDir, name) {
@@ -1424,7 +1537,9 @@ module.exports = {
   saveHook,
   deleteHook,
   ensureHookReporters,
+  pruneProjectHookReporters,
   listModels,
+  listModelsWithAvailability,
   loadModel,
   saveModel,
   deleteModel,
@@ -1450,6 +1565,8 @@ module.exports = {
   setProviderKey,
   exportKeyBundle,
   importKeyBundle,
+  resolveAuth,
+  resolveAvailability,
   resolveHeadlessAuth,
   getInteractiveAuth,
   readAppPrefs,
@@ -1459,6 +1576,4 @@ module.exports = {
   CLI_MODEL_ALIASES,
   getCliModelPref,
   setCliModelPref,
-  noteSubscriptionState,
-  needsClaudeAuthChoice,
 };

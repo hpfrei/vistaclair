@@ -48,13 +48,12 @@ class CliSession {
     return this.status === 'running' && this.pty !== null;
   }
 
-  spawn(cwd, cols, rows, { resumeSessionId, isolated, autoMemory } = {}) {
+  spawn(cwd, cols, rows, { resumeSessionId, autoMemory } = {}) {
     this._spawnGen++;
     if (this.running) this.kill();
 
     this.cwd = cwd;
     this.kind = 'cli';
-    this.isolated = isolated === true;
     this.autoMemory = autoMemory === true;
     this.status = 'running';
 
@@ -101,10 +100,6 @@ class CliSession {
     const mcpConfigFile = this._buildMcpConfig();
     if (mcpConfigFile) args.push('--mcp-config', mcpConfigFile);
 
-    // Hook reporters
-    const reporterPath = path.join(PROJECT_ROOT, 'lib', 'hook-reporter.js');
-    caps.ensureHookReporters(cwd, reporterPath);
-
     this.pty = spawnClaudePty(args, {
       cwd,
       proxyPort: this.proxyPort,
@@ -115,10 +110,9 @@ class CliSession {
       dashboardPort: this._dashboardPort,
       authToken: this._authToken,
       extraEnv: { GIT_CEILING_DIRECTORIES: cwd },
-      isolated: this.isolated,
       autoMemory: this.autoMemory,
-      // Interactive sessions prefer the subscription (allowed); fall back to the
-      // API key only when no subscription is active.
+      // Follows the owner's Claude credential preference (Models page), with
+      // automatic fallback to whichever credential is actually configured.
       anthropicApiKey: caps.getInteractiveAuth(DATA_HOME),
     });
 
@@ -149,7 +143,6 @@ class CliSession {
       cwd: this.cwd,
       title: this.title,
       settings: this.settings,
-      isolated: this.isolated,
       autoMemory: this.autoMemory,
       hidden: this.hidden,
     });
@@ -158,7 +151,6 @@ class CliSession {
       mode: 'cli',
       resumed: !!resumeSessionId,
       resumedFrom: resumeSessionId || null,
-      isolated: this.isolated,
       autoMemory: this.autoMemory,
     });
   }

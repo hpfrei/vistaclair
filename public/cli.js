@@ -327,7 +327,6 @@
       if (!picked) return;
       _requestNewTab({
         cwd: picked.dir,
-        isolated: picked.isolated,
         autoMemory: picked.autoMemory,
       });
     });
@@ -381,10 +380,6 @@
         dirLine.className = 'cli-new-menu-meta cli-new-menu-path';
         dirLine.textContent = sess.cwd;
         metaRow.appendChild(dirLine);
-        const badge = document.createElement('span');
-        badge.className = 'cli-new-menu-badge';
-        badge.textContent = sess.isolated === true ? 'isolated' : 'shared';
-        metaRow.appendChild(badge);
         if (sess.autoMemory === true) {
           const memBadge = document.createElement('span');
           memBadge.className = 'cli-new-menu-badge';
@@ -425,7 +420,6 @@
             cwd: sess.cwd,
             resumeSessionId: sess.id,
             settings: sess.settings,
-            isolated: sess.isolated === true,
             autoMemory: sess.autoMemory === true,
           });
         });
@@ -467,7 +461,7 @@
       value: a.value, label: a.label, group: a.group || 'Aliases', price: '',
     }));
     const catalog = (state.models || [])
-      .filter(m => m.providerKey === 'anthropic' && m.lifecycle !== 'retired' && !m.disabled)
+      .filter(m => m.providerKey === 'anthropic' && m.usable)
       .sort((a, b) => (a.label || a.name).localeCompare(b.label || b.name));
     // The CLI takes `<full model name>[1m]`; the API does not, so these exist
     // only here — never as routable models.json entries.
@@ -660,7 +654,7 @@
         pick.innerHTML = `<span class="dir-picker-recent-icon">📁</span><span class="dir-picker-recent-name">${escHtml(name)}</span><span class="dir-picker-recent-path">${escHtml(d.path)}</span>`;
         pick.addEventListener('click', () => {
           cleanup();
-          resolve({ dir: d.path, isolated: isolatedCheckbox.checked, autoMemory: autoMemoryCheckbox.checked });
+          resolve({ dir: d.path, autoMemory: autoMemoryCheckbox.checked });
         });
         row.appendChild(pick);
 
@@ -785,10 +779,9 @@
       newCancelBtn.removeEventListener('click', onNewCancel);
       newNameInput.removeEventListener('keydown', onNewKey);
     }
-    const isolatedCheckbox = document.getElementById('dirPickerIsolated');
     const autoMemoryCheckbox = document.getElementById('dirPickerAutoMemory');
     function onClose() { cleanup(); resolve(null); }
-    function onSelect() { cleanup(); resolve({ dir: currentDir, isolated: isolatedCheckbox.checked, autoMemory: autoMemoryCheckbox.checked }); }
+    function onSelect() { cleanup(); resolve({ dir: currentDir, autoMemory: autoMemoryCheckbox.checked }); }
 
     closeBtn.addEventListener('click', onClose);
     cancelBtn.addEventListener('click', onClose);
@@ -856,7 +849,10 @@
       }
     }
     const modelMap = settings.modelMap || { fable: null, opus: null, sonnet: null, haiku: null };
-    const hasAuth = (m) => !!m.apiKey || (hasSubscription && m.providerKey === 'anthropic');
+    // Server-decided (capabilities.listModelsWithAvailability). This file used
+    // to carry the only correct copy of this predicate on the platform; it is
+    // now the payload's, and every surface reads the same one.
+    const hasAuth = (m) => !!m.usable;
     const isRetired = (m) => m.lifecycle === 'retired';
     const allModels = (models || []).sort((a, b) => {
       // Retired models sink to the bottom, then unauthenticated, then alphabetical.
@@ -1020,7 +1016,6 @@
             tab.instanceId = msg.instanceId;
             tab.sessId = msg.instanceId.replace(/^cli-/, '');
           }
-          if (msg.isolated != null) tab.isolated = msg.isolated;
           if (msg.autoMemory != null) tab.autoMemory = msg.autoMemory;
           if (msg.title) tab.title = msg.title;
           tab.settings = msg.settings || {};
@@ -1049,14 +1044,12 @@
         }
         const tab = tabs.get(tabId);
         if (tab) {
-          tab.isolated = intent.isolated === true;
           tab.autoMemory = intent.autoMemory === true;
           if (intent.resumeSessionId) tab.sessId = intent.resumeSessionId;
         }
         const { cols, rows } = tab ? { cols: tab.terminal.cols, rows: tab.terminal.rows } : { cols: 80, rows: 24 };
         const spawnMsg = {
           type: 'cli:spawn', tabId, cwd: intent.cwd, cols, rows,
-          isolated: intent.isolated === true,
           autoMemory: intent.autoMemory === true,
         };
         if (intent.resumeSessionId) spawnMsg.resumeSessionId = intent.resumeSessionId;
@@ -1171,7 +1164,6 @@
       tab.settings = st.settings || {};
       if (st.instanceId) tab.instanceId = st.instanceId;
       if (st.sessId) tab.sessId = st.sessId;
-      if (st.isolated != null) tab.isolated = st.isolated;
       if (st.autoMemory != null) tab.autoMemory = st.autoMemory;
     }
     if (!activeTabId && tabs.size > 0) {

@@ -68,12 +68,12 @@ function handleMessage(ws, msg, bc) {
 
     // --- Models ---
     case 'model:list':
-      send({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) });
+      send({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
       break;
     case 'model:save': {
       const ok = caps.saveModel(PROJECT_ROOT, msg.model);
       if (ok) {
-        bc.broadcast({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) });
+        bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
       } else {
         send({ type: 'chat:error', text: `Cannot save model: ${msg.model?.name} (invalid)` });
       }
@@ -82,7 +82,7 @@ function handleMessage(ws, msg, bc) {
     case 'model:delete': {
       const ok = caps.deleteModel(PROJECT_ROOT, msg.name);
       if (ok) {
-        bc.broadcast({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) });
+        bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
       } else {
         send({ type: 'chat:error', text: `Cannot delete model: ${msg.name}` });
       }
@@ -94,7 +94,7 @@ function handleMessage(ws, msg, bc) {
         model.disabled = !!msg.disabled;
         model.isNew = false;
         caps.saveModel(PROJECT_ROOT, model);
-        bc.broadcast({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) });
+        bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
       }
       break;
     }
@@ -111,7 +111,7 @@ function handleMessage(ws, msg, bc) {
       if (ok) {
         bc.broadcast({ type: 'provider:list', providers: caps.listProviders(PROJECT_ROOT) });
         // Resolved models include provider apiKey, so refresh models too
-        bc.broadcast({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) });
+        bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
       } else {
         send({ type: 'chat:error', text: `Cannot save provider: ${msg.key}` });
       }
@@ -129,7 +129,6 @@ function handleMessage(ws, msg, bc) {
 
     // --- Preferences (Claude auth choice) ---
     case 'prefs:get':
-      caps.noteSubscriptionState(PROJECT_ROOT);
       send({ type: 'prefs:claudeAuth', ...claudeAuthState() });
       send({ type: 'prefs:cliModel', ...cliModelState() });
       break;
@@ -168,7 +167,6 @@ function claudeAuthState() {
   return {
     pref: caps.getClaudeAuthPref(PROJECT_ROOT) || null,
     hasSubscription: caps.hasClaudeSubscription(),
-    needsChoice: caps.needsClaudeAuthChoice(PROJECT_ROOT),
   };
 }
 
@@ -324,7 +322,7 @@ function handleModelRefresh(ws, bc) {
   send({ type: 'model:refresh:status', text: 'Scanning providers for new models...' });
   caps.scanProviderModels(PROJECT_ROOT).then(async (scanResults) => {
     send({ type: 'model:refresh:scanned', results: scanResults });
-    bc.broadcast({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) });
+    bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
 
     const allModels = caps.listModels(PROJECT_ROOT);
     const providers = caps.listProviders(PROJECT_ROOT);
@@ -373,14 +371,14 @@ function handleModelRefresh(ws, bc) {
       } catch (err) {
         pushStatus(`${task.label}: could not apply pricing — ${err.message || err}`);
       }
-      bc.broadcast({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) });
+      bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
     }));
 
     const lifecycleNote = recon
       ? ` Anthropic catalog: +${recon.added.length} new, ${recon.deprecated.length} deprecated, ${recon.retired.length} retired.`
       : '';
     send({ type: 'model:refresh:done', text: `Refresh complete.${lifecycleNote}`, lines: [...lines] });
-    bc.broadcast({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) });
+    bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
   }).catch(err => {
     send({ type: 'model:refresh:error', error: err.message });
   });

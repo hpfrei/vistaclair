@@ -108,12 +108,10 @@ class DashboardBroadcaster {
       ws.send(JSON.stringify({ type: 'hook:list', hooks: caps.listHooks(PROJECT_ROOT) }));
       ws.send(JSON.stringify({ type: 'model:list', models: caps.listModels(PROJECT_ROOT) }));
       ws.send(JSON.stringify({ type: 'provider:list', providers: caps.listProviders(PROJECT_ROOT) }));
-      caps.noteSubscriptionState(PROJECT_ROOT);
       ws.send(JSON.stringify({
         type: 'prefs:claudeAuth',
         pref: caps.getClaudeAuthPref(PROJECT_ROOT) || null,
         hasSubscription: caps.hasClaudeSubscription(),
-        needsChoice: caps.needsClaudeAuthChoice(PROJECT_ROOT),
       }));
       ws.send(JSON.stringify({
         type: 'prefs:cliModel',

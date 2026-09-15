@@ -910,13 +910,6 @@ jq -r '.tool_input.command' |
       </div>
       <div class="dir-picker-options">
         <label class="dir-picker-option">
-          <input type="checkbox" id="dirPickerIsolated">
-          <span class="dir-picker-option-text">
-            <span class="dir-picker-option-label">Isolated</span>
-            <span class="dir-picker-option-help">Store config in a local .claude directory inside the project instead of ~/.claude</span>
-          </span>
-        </label>
-        <label class="dir-picker-option">
           <input type="checkbox" id="dirPickerAutoMemory">
           <span class="dir-picker-option-text">
             <span class="dir-picker-option-label">Auto-memory</span>
@@ -1004,6 +997,8 @@ jq -r '.tool_input.command' |
     var portalUrl = null;
     var cachedLicenseInfo = null;
     var cachedUpdateInfo = null;
+    // The server's verdict; updateInfo is only detail for tooltips/the modal.
+    var cachedUpdateAvailable = false;
     var cachedUpdateLock = null;
 
     var proHeaderBtn = document.getElementById('proHeaderBtn');
@@ -1212,9 +1207,15 @@ jq -r '.tool_input.command' |
         .then(function(data) {
           if (data.updateInfo) cachedUpdateInfo = data.updateInfo;
           if (data.updateLock) cachedUpdateLock = data.updateLock;
+          cachedUpdateAvailable = !!data.updateAvailable;
           renderUpdateBtn();
-          var hasUpdate = cachedUpdateInfo && cachedUpdateInfo.behind > 0;
-          proCheckBtn.innerHTML = hasUpdate ? '&#8635; Check' : '&#10003; Up to date';
+          if (data.updateError) {
+            proCheckBtn.innerHTML = 'Check failed';
+            proCheckBtn.title = data.updateError;
+          } else {
+            proCheckBtn.title = 'Check now whether a new pro version is available';
+            proCheckBtn.innerHTML = cachedUpdateAvailable ? '&#8635; Check' : '&#10003; Up to date';
+          }
         })
         .catch(function() { proCheckBtn.innerHTML = 'Check failed'; })
         .finally(function() {
@@ -1227,14 +1228,15 @@ jq -r '.tool_input.command' |
       if (!proUpdateBtn) return;
       var info = cachedUpdateInfo;
       var locked = cachedUpdateLock && cachedUpdateLock.disabled;
-      var hasUpdate = info && info.behind > 0;
+      var hasUpdate = cachedUpdateAvailable && !!info;
       proUpdateBtn.style.display = hasUpdate ? '' : 'none';
       if (!hasUpdate) return;
       proUpdateBtn.classList.toggle('locked', !!locked);
       proUpdateBtn.innerHTML = locked ? '&#8593; Update &#128274;' : '&#8593; Update';
-      var t = 'vc-pro ' + (info.local && info.local.hash) + ' → ' + (info.remote && info.remote.hash)
-        + ' (' + info.behind + ' commit' + (info.behind === 1 ? '' : 's') + ' behind'
-        + (info.ahead > 0 ? ', ' + info.ahead + ' ahead' : '') + ')';
+      var detail = info.behind > 0
+        ? info.behind + ' commit' + (info.behind === 1 ? '' : 's') + ' behind' + (info.ahead > 0 ? ', ' + info.ahead + ' ahead' : '')
+        : (info.dirty ? 'locally modified' : 'differs from the server version');
+      var t = 'vc-pro ' + (info.local && info.local.hash) + ' → ' + (info.remote && info.remote.hash) + ' (' + detail + ')';
       if (locked) t += ' — updates disabled on this machine';
       proUpdateBtn.title = t + '. Click for details.';
     }
@@ -1265,6 +1267,7 @@ jq -r '.tool_input.command' |
       if (s.customerPortalUrl) portalUrl = s.customerPortalUrl;
       if (s.licenseInfo) cachedLicenseInfo = s.licenseInfo;
       if (s.updateInfo) cachedUpdateInfo = s.updateInfo;
+      cachedUpdateAvailable = !!s.updateAvailable;
       if (s.updateLock) cachedUpdateLock = s.updateLock;
       renderUpdateBtn();
 

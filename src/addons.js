@@ -20,7 +20,7 @@
 //     _module,                 // raw module handle (licensing/lifecycle)
 //   }
 
-const CONTRACT_VERSION = 1;
+const CONTRACT_VERSION = 2;
 
 const addons = [];
 

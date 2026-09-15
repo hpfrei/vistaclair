@@ -54,14 +54,14 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     exportKeyBundle: () => caps.exportKeyBundle(home),
     importKeyBundle: (bundle, opts) => caps.importKeyBundle(home, bundle, opts),
     listModels: () => caps.listModels(home),
-    // Install the dashboard's hook reporters into <cwd>/.claude/settings.local.json
-    // so a headless `claude -p` spawned by an addon reports hook events exactly
-    // like an interactive tab does (cli-session.js does the same before spawning).
-    ensureHookReporters: (cwd) => caps.ensureHookReporters(cwd, path.join(utils.PACKAGE_ROOT, 'lib', 'hook-reporter.js')),
+    // The same catalog with the credential join already applied — every entry
+    // carries { usable, unusableReason, credential }. Pro projects these through
+    // publicModelShape rather than re-deriving availability from key presence.
+    listModelsWithAvailability: () => caps.listModelsWithAvailability(home),
+    resolveAuth: (authMode) => caps.resolveAuth(home, { authMode }),
     claudeAuthInfo: () => ({
       hasSubscription: caps.hasClaudeSubscription(),
       pref: caps.getClaudeAuthPref(home),
-      needsChoice: caps.needsClaudeAuthChoice(home),
     }),
   };
 

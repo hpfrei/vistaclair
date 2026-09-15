@@ -296,12 +296,16 @@ Available templates in this skill directory:
 
   let activeProviderTab = null;
 
-  // Claude auth preference UI (Anthropic provider only). Lets the user choose
-  // whether Claude calls use the API key or their Max/Pro subscription, with the
-  // Anthropic ToS warning for subscription-based headless use.
+  // Claude auth preference UI (Anthropic provider only). Which credential Claude
+  // calls use when both are available. Both options are fully supported; this is
+  // a routing/billing choice, not a risk decision:
+  //   Subscription — calls run on the `claude` CLI's login and draw on the
+  //                  subscription's usage allowance (shared with interactive use).
+  //   API key      — calls are billed per token to the Anthropic account.
+  // With only one credential present the choice is moot and that one is used.
   function renderClaudeAuthSection() {
     const ca = state.claudeAuth || {};
-    const pref = ca.pref || 'apikey'; // default shown selection
+    const pref = ca.pref || 'subscription'; // default shown selection
     const subBadge = ca.hasSubscription
       ? '<span class="mm-key-ok">subscription active</span>'
       : '<span class="mm-key-missing">no subscription &mdash; run <code>/login</code> in a CLI tab</span>';
@@ -311,50 +315,16 @@ Available templates in this skill directory:
         <strong>Claude auth for app/automation calls</strong> ${subBadge}
       </div>
       <label class="claude-auth-opt">
-        <input type="radio" name="claudeAuthPref" value="apikey" ${checked('apikey')}>
-        <span><strong>API key</strong> (recommended) &mdash; headless <code>claude -p</code> calls use the API key above.</span>
+        <input type="radio" name="claudeAuthPref" value="subscription" ${checked('subscription')}>
+        <span><strong>Subscription</strong> &mdash; calls run on your Max/Pro login (OAuth) and draw on its usage allowance.</span>
       </label>
       <label class="claude-auth-opt">
-        <input type="radio" name="claudeAuthPref" value="subscription" ${checked('subscription')}>
-        <span><strong>Subscription</strong> &mdash; allow apps to opt headless calls onto your Max/Pro subscription (OAuth).</span>
+        <input type="radio" name="claudeAuthPref" value="apikey" ${checked('apikey')}>
+        <span><strong>API key</strong> &mdash; calls are billed per token to the API key above.</span>
       </label>
-      <div class="provider-hint claude-auth-warning">&#9888; Anthropic's terms do <strong>not</strong> permit non-interactive <code>claude -p</code> usage on a Max/Pro subscription. Enabling Subscription lets apps request it anyway (via an explicit per-call flag) and <strong>may result in account bans</strong>. Interactive CLI sessions always use the subscription when active and are unaffected.</div>
+      <div class="provider-hint">Applies to interactive sessions and headless app/automation calls alike. Whichever credential you pick, the other is used automatically if the chosen one isn't configured.</div>
     </div>`;
   }
-
-  // One-time prompt shown the first time a subscription is detected and the user
-  // has not yet chosen how Claude calls should authenticate.
-  let _claudeAuthBannerShown = false;
-  function maybeShowClaudeAuthBanner() {
-    const ca = state.claudeAuth || {};
-    if (!ca.needsChoice || _claudeAuthBannerShown) return;
-    _claudeAuthBannerShown = true;
-
-    const backdrop = document.createElement('div');
-    backdrop.className = 'alert-modal-backdrop';
-    const modal = document.createElement('div');
-    modal.className = 'alert-modal claude-auth-modal';
-    modal.innerHTML = `
-      <div class="alert-modal-message">
-        <strong>Claude subscription detected</strong>
-        <p>How should app and automation (headless) Claude calls authenticate?</p>
-        <p class="claude-auth-warning">&#9888; Anthropic's terms do <strong>not</strong> permit non-interactive <code>claude -p</code> usage on a Max/Pro subscription, and doing so <strong>may result in account bans</strong>. The API key is recommended for headless calls. Interactive CLI sessions always use your subscription and are unaffected.</p>
-      </div>
-      <div class="claude-auth-modal-actions">
-        <button class="alert-modal-ok" data-choice="apikey">Use API key (recommended)</button>
-        <button class="claude-auth-sub-btn" data-choice="subscription">Use subscription</button>
-      </div>`;
-    backdrop.appendChild(modal);
-    document.body.appendChild(backdrop);
-    const choose = (value) => { sendWs({ type: 'prefs:claudeAuth:set', value }); backdrop.remove(); };
-    modal.querySelector('[data-choice="apikey"]').addEventListener('click', () => choose('apikey'));
-    modal.querySelector('[data-choice="subscription"]').addEventListener('click', () => choose('subscription'));
-  }
-
-  // The subscription/headless warning used to also fire as a toast here. Every
-  // `prefs:claudeAuth` broadcast re-fired it, so it read as a permanent banner
-  // rather than a notice. The warning still lives where it's actionable: the
-  // one-time choice modal above and the Models page auth section.
 
   function renderModelsPanel() {
     const nav = document.getElementById('modelsNav');
@@ -385,7 +355,7 @@ Available templates in this skill directory:
     let html = `<div class="provider-header">
       <span class="provider-url">${escHtml(prov.apiBaseUrl || '')}</span>
       <span class="provider-key-area">
-        ${prov.key === 'anthropic' ? '<span class="provider-hint">Required for headless/automation (e.g. the email classifier): Anthropic does not allow <code>claude -p</code> to run on a Max/Pro subscription, so those runs need this API key. Interactive sessions still work on a Max/Pro subscription &mdash; run <code>claude login</code> in a terminal; a key is only needed for headless runs.</span>' : ''}
+        ${prov.key === 'anthropic' ? '<span class="provider-hint">Optional. Claude calls run on your Max/Pro login when one is active &mdash; run <code>/login</code> in a CLI tab. Add a key to bill per token to the API instead, or to use Claude without a subscription.</span>' : ''}
         <input type="password" id="${keyId}" class="provider-key-input" value="${escHtml(prov.apiKey || '')}" placeholder="Paste API key..." autocomplete="off">
         <button type="button" class="provider-key-toggle" data-target="${keyId}" title="Show/hide key">&#128065;</button>
         <button type="button" class="provider-key-save" data-provider="${escHtml(prov.key)}" title="Save key">${hasKey ? 'Update' : 'Set key'}</button>
@@ -858,10 +828,8 @@ Available templates in this skill directory:
         state.claudeAuth = {
           pref: msg.pref || null,
           hasSubscription: !!msg.hasSubscription,
-          needsChoice: !!msg.needsChoice,
         };
         renderModelsPanel();
-        maybeShowClaudeAuthBanner();
         break;
       case 'model:refresh:scanned':
         showScanResults(msg.results);

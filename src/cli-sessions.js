@@ -14,18 +14,23 @@ const RESTORE_STAGGER_MS = 500;
 const RECENT_DIRS_FILE = path.join(DATA_HOME, 'data', 'cli-recent-dirs.json');
 const MAX_RECENT_DIRS = 12;
 
-function deleteFullSessionData(store, sessId, cwd, isolated) {
+// Claude Code's own config root; every spawn reads and writes it (core never
+// sets CLAUDE_CONFIG_DIR).
+const CLAUDE_CONFIG_DIR = path.join(os.homedir(), '.claude');
+
+// The native transcript `--resume` reads for a session started in `cwd`.
+function _jsonlPath(cwd, sessId) {
+  return path.join(CLAUDE_CONFIG_DIR, 'projects', cwd.replace(/\//g, '-'), `${sessId}.jsonl`);
+}
+
+function deleteFullSessionData(store, sessId, cwd) {
   store.deleteSessionData(sessId);
 
-  const configDir = (isolated === true)
-    ? path.join(cwd, '.claude')
-    : path.join(os.homedir(), '.claude');
+  const configDir = CLAUDE_CONFIG_DIR;
+  const jsonlPath = _jsonlPath(cwd, sessId);
 
-  const slug = cwd.replace(/\//g, '-');
-  const projectDir = path.join(configDir, 'projects', slug);
-
-  tryRm(path.join(projectDir, `${sessId}.jsonl`));
-  tryRm(path.join(projectDir, sessId));
+  tryRm(jsonlPath);
+  tryRm(path.join(path.dirname(jsonlPath), sessId));
   tryRm(path.join(configDir, 'file-history', sessId));
   tryRm(path.join(configDir, 'tasks', sessId));
   tryRm(path.join(configDir, 'session-env', sessId));
@@ -44,13 +49,9 @@ function deleteFullSessionData(store, sessId, cwd, isolated) {
 // the rollback needs to be undone. Returns { ok, reason?, cutTimestamp? } where
 // cutTimestamp is the epoch-ms time of the removed user prompt, used to flag the
 // matching inspector interactions.
-function rollbackTranscript(cwd, sessId, isolated) {
+function rollbackTranscript(cwd, sessId) {
   if (!cwd || !sessId) return { ok: false, reason: 'no-session' };
-  const configDir = (isolated === true)
-    ? path.join(cwd, '.claude')
-    : path.join(os.homedir(), '.claude');
-  const slug = cwd.replace(/\//g, '-');
-  const jsonlPath = path.join(configDir, 'projects', slug, `${sessId}.jsonl`);
+  const jsonlPath = _jsonlPath(cwd, sessId);
 
   let raw;
   try { raw = fs.readFileSync(jsonlPath, 'utf8'); } catch { return { ok: false, reason: 'no-transcript' }; }
@@ -131,7 +132,7 @@ class CliSessionManager {
   _onSessionExit(tabId) {
     const session = this.sessions.get(tabId);
     if (session?.sessId && session.cwd) {
-      this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), isolated: session.isolated, autoMemory: session.autoMemory });
+      this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
     }
     const cb = this._exitCallbacks.get(tabId);
     if (cb) {
@@ -146,7 +147,7 @@ class CliSessionManager {
   saveAllToHistory() {
     for (const [, session] of this.sessions) {
       if (session?.sessId && session.cwd) {
-        this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), isolated: session.isolated, autoMemory: session.autoMemory });
+        this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
       }
     }
   }
@@ -168,7 +169,6 @@ class CliSessionManager {
       cwd: entry.cwd,
       title: entry.title || null,
       settings: entry.settings || {},
-      isolated: entry.isolated === true,
       autoMemory: entry.autoMemory === true,
       startedAt: existing?.startedAt || now,
       savedAt: now,
@@ -203,7 +203,6 @@ class CliSessionManager {
         cwd: session.cwd,
         title: session.title || null,
         settings: session.getSettings(),
-        isolated: session.isolated === true,
         autoMemory: session.autoMemory === true,
       });
     }
@@ -232,7 +231,7 @@ class CliSessionManager {
       if (!e.sessId) continue;
       // `claude --resume <id>` exits immediately when the native transcript is
       // missing, which the UI reads as the tab dying the moment it opened.
-      if (!this._transcriptExists(e.cwd, e.sessId, e.isolated === true)) {
+      if (!this._transcriptExists(e.cwd, e.sessId)) {
         this.droppedTabs.push({ reason: 'no-transcript', title: label, cwd: e.cwd });
         continue;
       }
@@ -272,7 +271,6 @@ class CliSessionManager {
     if (entry.settings) session.updateSettings(entry.settings);
     this.spawn(tabId, entry.cwd, 80, 24, {
       resumeSessionId: entry.sessId,
-      isolated: entry.isolated === true,
       autoMemory: entry.autoMemory === true,
     });
   }
@@ -312,22 +310,13 @@ class CliSessionManager {
     return history;
   }
 
-  _transcriptExists(cwd, sessId, isolated) {
+  _transcriptExists(cwd, sessId) {
     if (!cwd || !sessId) return false;
-    const configDir = (isolated === true)
-      ? path.join(cwd, '.claude')
-      : path.join(os.homedir(), '.claude');
-    const slug = cwd.replace(/\//g, '-');
-    const jsonlPath = path.join(configDir, 'projects', slug, `${sessId}.jsonl`);
-    try { return fs.statSync(jsonlPath).size > 0; } catch { return false; }
+    try { return fs.statSync(_jsonlPath(cwd, sessId)).size > 0; } catch { return false; }
   }
 
   _getJsonlStat(entry) {
-    const configDir = (entry.isolated === true)
-      ? path.join(entry.cwd, '.claude')
-      : path.join(os.homedir(), '.claude');
-    const slug = entry.cwd.replace(/\//g, '-');
-    const jsonlPath = path.join(configDir, 'projects', slug, `${entry.id}.jsonl`);
+    const jsonlPath = _jsonlPath(entry.cwd, entry.id);
     try {
       const st = fs.statSync(jsonlPath);
       return { size: st.size, mtime: st.mtimeMs, lastEntrySize: this._getLastEntrySize(jsonlPath, st.size) };
@@ -389,7 +378,7 @@ class CliSessionManager {
     const filtered = history.filter(s => s.id !== id);
     writeJSON(HISTORY_FILE, filtered);
     if (entry) {
-      deleteFullSessionData(this.store, id, entry.cwd, entry.isolated);
+      deleteFullSessionData(this.store, id, entry.cwd);
     } else {
       this.store.deleteSessionData(id);
     }
@@ -410,10 +399,10 @@ class CliSessionManager {
     return this.sessions.get(tabId) || null;
   }
 
-  spawn(tabId, cwd, cols, rows, { resumeSessionId, isolated, autoMemory } = {}) {
+  spawn(tabId, cwd, cols, rows, { resumeSessionId, autoMemory } = {}) {
     const session = this.getOrCreate(tabId);
     if (session.sessId && session.cwd) {
-      this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), isolated: session.isolated, autoMemory: session.autoMemory });
+      this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
     }
     this._assignTitle(session, cwd, resumeSessionId);
     // Pin the model into the tab's own settings so the spawn always carries an
@@ -423,9 +412,9 @@ class CliSessionManager {
     if (!session.getSettings().model) {
       session.updateSettings({ model: caps.getCliModelPref(DATA_HOME) });
     }
-    session.spawn(cwd, cols, rows, { resumeSessionId, isolated, autoMemory });
+    session.spawn(cwd, cols, rows, { resumeSessionId, autoMemory });
     // Persist immediately so session survives ungraceful server death
-    this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), isolated: session.isolated, autoMemory: session.autoMemory });
+    this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
     this._persistOpenTabs();
     this.broadcastTabs();
   }
@@ -454,7 +443,7 @@ class CliSessionManager {
     const session = this.sessions.get(tabId);
     if (session) {
       if (session.sessId && session.cwd) {
-        this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), isolated: session.isolated });
+        this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
       }
       if (session.sessId) {
         this.store.deleteSessionData(session.sessId);
@@ -484,7 +473,6 @@ class CliSessionManager {
         tabId,
         instanceId: session.instanceId,
         sessId: session.sessId,
-        isolated: session.isolated,
         autoMemory: session.autoMemory,
         status: session.status,
         cwd: session.cwd,
@@ -578,13 +566,13 @@ class CliSessionManager {
       if (!/^[0-9a-f-]{36}$/i.test(String(so.resumeSessionId))) {
         throw new Error('resumeSessionId must be a UUID');
       }
-      if (!this._transcriptExists(cwd, so.resumeSessionId, so.isolated === true)) {
+      if (!this._transcriptExists(cwd, so.resumeSessionId)) {
         throw new Error(`no transcript for session ${so.resumeSessionId} in ${cwd}`);
       }
       resumeSessionId = so.resumeSessionId;
     } else if (so.resume) {
       const cwd = opts.cwd || session.cwd;
-      if (session.sessId && this._transcriptExists(cwd, session.sessId, session.isolated)) {
+      if (session.sessId && this._transcriptExists(cwd, session.sessId)) {
         resumeSessionId = session.sessId;
       } else if (opts.cwd) {
         const history = this._loadHistory();
@@ -592,7 +580,7 @@ class CliSessionManager {
         // Only resume if Claude's native transcript actually exists — otherwise
         // `claude --resume <id>` exits immediately ("No conversation found"),
         // which the client reads as the tab dying right after it opened.
-        if (match && this._transcriptExists(opts.cwd, match.id, match.isolated)) {
+        if (match && this._transcriptExists(opts.cwd, match.id)) {
           resumeSessionId = match.id;
         }
       }
@@ -618,7 +606,7 @@ class CliSessionManager {
     if (!session || !session.sessId || !session.cwd) return { ok: false, reason: 'no-session' };
     const sessId = session.sessId;
 
-    const result = rollbackTranscript(session.cwd, sessId, session.isolated);
+    const result = rollbackTranscript(session.cwd, sessId);
     if (!result.ok) return result;
 
     const deletedIds = this.store.markSessionTurnDeleted(sessId, result.cutTimestamp);

@@ -28,6 +28,7 @@ function createLicensing({ dataHome, isDev, env = process.env }) {
   let licenseInfo = null;
   let proUpdateAvailable = false;
   let proUpdateInfo = null;
+  let proUpdateError = null;
 
   function getMachineId() {
     const os = require('os');
@@ -297,7 +298,9 @@ function createLicensing({ dataHome, isDev, env = process.env }) {
       // left = commits only in upstream (behind), right = only in HEAD (ahead)
       const counts = execSync('git rev-list --left-right --count @{u}...HEAD', { cwd: proDir, encoding: 'utf-8' }).trim();
       const [behind, ahead] = counts.split(/\s+/).map(n => parseInt(n, 10) || 0);
-      const dirty = execSync('git status --porcelain', { cwd: proDir, encoding: 'utf-8' }).trim().length > 0;
+      // Tracked changes only: untracked files (e.g. a .claude/ dir) survive a
+      // reset, so counting them would flag an update forever.
+      const dirty = execSync('git status --porcelain --untracked-files=no', { cwd: proDir, encoding: 'utf-8' }).trim().length > 0;
       // Compare CONTENT, not history: the update server republishes its
       // release commit, so a clone can be "1 behind, 1 ahead" while holding
       // byte-identical files. Equal tree hashes ⇒ nothing to update.
@@ -330,7 +333,13 @@ function createLicensing({ dataHome, isDev, env = process.env }) {
       // checkout only counts commits it lacks; being ahead is unpushed work.
       proUpdateAvailable = mirror ? (dirty || !sameContent) : behind > 0;
       if (proUpdateAvailable) console.log(`[pro] Update available: ${behind} commit(s) behind${ahead ? `, ${ahead} ahead` : ''}${mirror && ahead ? ' (mirror — will reset to server)' : ''}`);
-    } catch {}
+      proUpdateError = null;
+    } catch (err) {
+      // Surface the failure: swallowing it left the UI showing "Up to date"
+      // while every fetch was failing.
+      proUpdateError = ((err.stderr && err.stderr.toString()) || err.message || 'check failed').trim().slice(0, 400);
+      console.warn('[pro] Update check failed:', proUpdateError);
+    }
   }
 
   // Claim/activate share the same flow: POST to the license server, install on success.
@@ -452,7 +461,7 @@ function createLicensing({ dataHome, isDev, env = process.env }) {
 
     router.post('/pro/update-check', (req, res) => {
       checkProUpdates();
-      res.json({ ok: true, updateAvailable: proUpdateAvailable, updateInfo: proUpdateInfo, updateLock: getUpdateLock() });
+      res.json({ ok: true, updateAvailable: proUpdateAvailable, updateInfo: proUpdateInfo, updateError: proUpdateError, updateLock: getUpdateLock() });
     });
 
     router.get('/pro/status', async (req, res) => {
@@ -470,6 +479,7 @@ function createLicensing({ dataHome, isDev, env = process.env }) {
         needsRestart: installed && proLicenseValid && !loaded,
         updateAvailable: proUpdateAvailable,
         updateInfo: proUpdateInfo,
+        updateError: proUpdateError,
         updateLock: installed ? getUpdateLock() : undefined,
         customerPortalUrl: proLicenseValid ? customerPortalUrl : undefined,
         licenseInfo: proLicenseValid ? licenseInfo : undefined,
@@ -500,6 +510,7 @@ function createLicensing({ dataHome, isDev, env = process.env }) {
     createLicenseRouter,
     get proUpdateAvailable() { return proUpdateAvailable; },
     get proUpdateInfo() { return proUpdateInfo; },
+    get proUpdateError() { return proUpdateError; },
     get productInfo() { return productInfo; },
   };
 }
