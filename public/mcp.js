@@ -29,8 +29,11 @@
     return t === 'dark' ? 'vs-dark' : 'vs';
   }
 
+  // Phones never load Monaco; createEditor mounts a plain textarea instead.
+  const editorReady = () => monacoReady || window.dashboard.wantsPlainEditor();
+
   function ensureMonaco() {
-    if (monacoReady) return Promise.resolve();
+    if (monacoReady || window.dashboard.wantsPlainEditor()) return Promise.resolve();
     if (monacoReadyPromise) return monacoReadyPromise;
     monacoReadyPromise = new Promise((resolve) => {
       if (typeof window.require === 'undefined' || !window.require.config) {
@@ -64,6 +67,18 @@
     disposeEditor();
     currentEditorSlug = slug;
     isEditorDirty = false;
+
+    if (window.dashboard.wantsPlainEditor()) {
+      currentEditor = window.dashboard.createPlainEditor(container, source, readOnly);
+      if (!readOnly) {
+        currentEditor.onDidChangeModelContent(() => {
+          isEditorDirty = true;
+          const saveBtn = document.querySelector(`.rule-save-btn[data-slug="${slug}"]`);
+          if (saveBtn) saveBtn.disabled = false;
+        });
+      }
+      return;
+    }
 
     currentEditor = monaco.editor.create(container, {
       value: source,
@@ -149,7 +164,7 @@
       case 'mcp:tool:source': {
         if (msg.slug !== mcp.expandedSlug) break;
         const container = document.querySelector(`.rule-editor-container[data-slug="${msg.slug}"]`);
-        if (!container || !monacoReady) break;
+        if (!container || !editorReady()) break;
         container.innerHTML = '';
         createEditor(container, msg.source, msg.slug, false);
         break;
@@ -250,7 +265,7 @@
 
     if (mcp.expandedSlug) {
       ensureMonaco().then(() => {
-        if (mcp.expandedSlug && monacoReady) {
+        if (mcp.expandedSlug && editorReady()) {
           sendWs({ type: 'mcp:tool:source', slug: mcp.expandedSlug });
         }
       });

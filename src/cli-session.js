@@ -38,6 +38,11 @@ class CliSession {
     this._dashboardPort = opts.dashboardPort || 3457;
     this._spawnGen = 0;
     this.hidden = false;
+    // The one PTY has one size, but every open dashboard tab renders it. The
+    // viewer that last typed (or tapped in) owns the size; the others reflow
+    // to whatever it chose instead of fighting over it. Keyed by WebSocket.
+    this.owner = null;
+    this._viewerSizes = new WeakMap();
   }
 
   get instanceId() {
@@ -252,6 +257,30 @@ class CliSession {
 
   resize(cols, rows) {
     if (this.pty) this.pty.resize(cols, rows);
+  }
+
+  // A viewer announces the size its terminal would like. Applied only when
+  // that viewer owns the session (or nobody live does); otherwise remembered,
+  // so claiming later switches the PTY to it without another round trip.
+  resizeFrom(ws, cols, rows) {
+    if (!cols || !rows) return;
+    this._viewerSizes.set(ws, { cols, rows });
+    if (this._ownerIsLive() && this.owner !== ws) return;
+    this.owner = ws;
+    this.resize(cols, rows);
+  }
+
+  // Typing or tapping into the terminal makes that viewer the owner and
+  // gives the PTY its geometry. Cheap when the owner is unchanged.
+  claim(ws) {
+    if (this.owner === ws) return;
+    this.owner = ws;
+    const size = this._viewerSizes.get(ws);
+    if (size) this.resize(size.cols, size.rows);
+  }
+
+  _ownerIsLive() {
+    return !!this.owner && this.owner.readyState === 1; // WebSocket.OPEN
   }
 
   kill() {

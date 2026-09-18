@@ -1,9 +1,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="vistaclair">
   <title>vistaclair</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="apple-touch-icon" href="favicon.svg">
+  <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
   <!-- The kit faces. Every rule declares a system fallback stack, so offline
        hosts just look plainer. (vistaclair-pro adds only its display face.) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,6 +21,8 @@
   <link rel="stylesheet" id="themeLink" href="theme-bright.css">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="mcp.css">
+  <!-- Phone skin: loads last so its narrow-viewport overrides win. -->
+  <link rel="stylesheet" href="mobile.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
@@ -760,6 +768,7 @@ jq -r '.tool_input.command' |
     </div>
   </div>
 
+
   <!-- Pro Teaser Modal -->
   <div id="proModal" class="pro-modal-backdrop" style="display:none">
     <div class="pro-modal">
@@ -886,6 +895,45 @@ jq -r '.tool_input.command' |
     <a class="footer-credit" href="https://hpfreilabs.com" target="_blank" rel="noopener">&copy; hpfreilabs.com</a>
   </footer>
 
+  <!-- ===== MOBILE TAB BAR (phones only; see mobile.css / mobile.js) =====
+       The four views you reach for one-handed live here; everything else
+       is behind "More". Buttons carry data-view so switchView() treats them
+       exactly like the header tabs. -->
+  <nav class="mobile-tabbar" id="mobileTabbar" aria-label="Views">
+    <button class="mobile-tab active" data-view="home">
+      <svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>
+      <span>Home</span>
+    </button>
+    <button class="mobile-tab" data-view="dashboard">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.5-4.5"/></svg>
+      <span>Inspector</span>
+    </button>
+    <button class="mobile-tab" data-view="claude">
+      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+      <span>CLIs</span>
+    </button>
+    <button class="mobile-tab" data-view="directories">
+      <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <span>Dirs</span>
+    </button>
+    <button class="mobile-tab" id="mobileMoreBtn" aria-haspopup="dialog" aria-controls="mobileMore">
+      <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+      <span>More</span>
+    </button>
+  </nav>
+  <div class="mobile-sheet-backdrop hidden" id="mobileMore" role="dialog" aria-label="More">
+    <div class="mobile-sheet">
+      <div class="mobile-sheet-grip"></div>
+      <button class="mobile-sheet-item" data-view="models">Models</button>
+      <button class="mobile-sheet-item" data-view="rules">Rules</button>
+      <button class="mobile-sheet-item" data-view="capabilities">Tools &amp; MCP</button>
+      <button class="mobile-sheet-item" data-view="home" data-home-section="security">Security</button>
+      <div class="mobile-sheet-sep"></div>
+      <button class="mobile-sheet-item" data-proxy="themeToggle">Theme: <span id="mobileThemeLabel">bright</span></button>
+      <button class="mobile-sheet-item" data-proxy="restartServerBtn">Restart server</button>
+    </div>
+  </div>
+
   <!-- Directory Picker Modal -->
   <div class="cap-modal-backdrop hidden" id="dirPickerModal">
     <div class="cap-modal dir-picker-modal">
@@ -937,6 +985,7 @@ jq -r '.tool_input.command' |
   <script src="security.js"></script>
   <script src="rules.js"></script>
   <script src="directories.js"></script>
+  <script src="mobile.js"></script>
   <script>
   function applyProUpdate() {
     var btn = document.getElementById('updApplyBtn');

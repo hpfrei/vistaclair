@@ -110,6 +110,114 @@
     }, true);
   }
 
+  // ---- Phone bar: key row + composer + "new output" pill -----------------
+  // Soft keyboards autocorrect and swallow control keys, so on a phone the
+  // terminal is read-only-by-default and input goes through a composer that
+  // sends whole lines. The key row covers what a TUI needs beyond text:
+  // Esc, Tab, Shift-Tab, arrows, Ctrl-C, Enter, y/n. Built only at phone
+  // width (mobile.css hides it elsewhere); all through the same cli:input.
+  const _mobileBar = (() => {
+    const view = document.getElementById('view-claude');
+    if (!view) return null;
+    const FONT_KEY = 'cliMobileFontSize';
+    let fontSize = Math.min(20, Math.max(9, parseInt(localStorage.getItem(FONT_KEY), 10) || 12));
+
+    const bar = document.createElement('div');
+    bar.className = 'mobile-cli-bar';
+    bar.innerHTML = `
+      <button class="mobile-cli-pill hidden" type="button">↓ new output</button>
+      <div class="mobile-cli-keys">
+        <button type="button" data-seq="">Esc</button>
+        <button type="button" data-seq="\t">Tab</button>
+        <button type="button" data-seq="[Z">⇧Tab</button>
+        <button type="button" data-seq="[A">↑</button>
+        <button type="button" data-seq="[B">↓</button>
+        <button type="button" data-seq="\r">↵</button>
+        <button type="button" data-seq="" class="is-danger">^C</button>
+        <button type="button" data-seq="y">y</button>
+        <button type="button" data-seq="n">n</button>
+        <span class="mobile-cli-keys-sep"></span>
+        <button type="button" data-font="-1">A−</button>
+        <button type="button" data-font="1">A+</button>
+      </div>
+      <div class="mobile-cli-compose">
+        <textarea rows="1" placeholder="Type a message…" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+        <button type="button" class="mobile-cli-send" aria-label="Send">➤</button>
+      </div>`;
+    view.appendChild(bar);
+
+    const pill = bar.querySelector('.mobile-cli-pill');
+    const input = bar.querySelector('textarea');
+    const sendBtn = bar.querySelector('.mobile-cli-send');
+    const active = () => tabs.get(activeTabId);
+    const atBottom = t => t.buffer.active.viewportY >= t.buffer.active.baseY;
+
+    function sendSeq(seq) {
+      const tab = active();
+      if (!tab) return;
+      sendWs({ type: 'cli:claim', tabId: activeTabId, cols: tab.terminal.cols, rows: tab.terminal.rows });
+      sendWs({ type: 'cli:input', tabId: activeTabId, data: seq });
+      tab.terminal.scrollToBottom();
+    }
+    function submit() {
+      const text = input.value.replace(/\r?\n$/, '');
+      if (!text.trim() || !active()) return;
+      // Text first, Enter a beat later — the way a paste-then-Enter lands,
+      // so a multi-line message is not submitted at its first newline.
+      sendSeq(text.replace(/\n/g, '\r'));
+      setTimeout(() => sendSeq('\r'), 60);
+      input.value = '';
+      input.style.height = '';
+      input.focus();
+    }
+
+    bar.querySelector('.mobile-cli-keys').addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.seq != null) { sendSeq(b.dataset.seq); return; }
+      if (b.dataset.font) {
+        fontSize = Math.min(20, Math.max(9, fontSize + Number(b.dataset.font)));
+        localStorage.setItem(FONT_KEY, String(fontSize));
+        for (const tab of tabs.values()) tab.terminal.options.fontSize = fontSize;
+        const tab = active();
+        if (tab) try { tab.fitAddon.fit(); } catch {}
+      }
+    });
+    sendBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+    });
+    // Grow with the text, up to a few lines.
+    input.addEventListener('input', () => {
+      input.style.height = '';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    });
+    pill.addEventListener('click', () => {
+      const tab = active();
+      if (tab) tab.terminal.scrollToBottom();
+      pill.classList.add('hidden');
+    });
+
+    // The pill shows when output lands while the viewer is scrolled up
+    // (reading history); scrolling back to the bottom clears it.
+    function onOutput(tab) {
+      if (!window.dashboard.isPhone?.()) return;
+      // write() is async; look once the buffer has the new lines.
+      requestAnimationFrame(() => {
+        if (tab !== active()) return;
+        pill.classList.toggle('hidden', atBottom(tab.terminal));
+      });
+    }
+    function onTabChange(tab) {
+      pill.classList.add('hidden');
+      if (tab && !tab._mobileScrollHooked) {
+        tab._mobileScrollHooked = true;
+        tab.terminal.onScroll(() => { if (atBottom(tab.terminal)) pill.classList.add('hidden'); });
+      }
+    }
+    return { onOutput, onTabChange, fontSize: () => (window.dashboard.isPhone?.() ? fontSize : 14) };
+  })();
+
   function createTab(tabId) {
     const wrap = document.createElement('div');
     wrap.className = 'cli-terminal-wrap';
@@ -117,7 +225,7 @@
 
     const terminal = new Terminal({
       cursorBlink: true,
-      fontSize: 14,
+      fontSize: _mobileBar?.fontSize() ?? 14,
       fontFamily: '"Cascadia Code", Menlo, Monaco, "Courier New", monospace',
       theme: getTheme(),
       convertEol: true,
@@ -166,6 +274,12 @@
     terminal.onResize(({ cols, rows }) => {
       sendWs({ type: 'cli:resize', tabId, cols, rows });
     });
+    // The server only honours resizes from the viewer that owns the session
+    // (the last one to type). Tapping into the terminal claims it, so a phone
+    // that has not typed yet still gets the PTY reflowed to its width.
+    wrap.addEventListener('pointerdown', () => {
+      sendWs({ type: 'cli:claim', tabId, cols: terminal.cols, rows: terminal.rows });
+    });
 
     _setupDropOverlay(wrap, tabId);
 
@@ -200,8 +314,11 @@
       }
       setTimeout(() => {
         try { tab.fitAddon.fit(); } catch {}
-        tab.terminal.focus();
+        // Focusing xterm's hidden textarea would raise the soft keyboard on
+        // every tab switch; phones type through the composer instead.
+        if (!window.dashboard.isPhone?.()) tab.terminal.focus();
       }, 50);
+      _mobileBar?.onTabChange(tab);
     }
   }
 
@@ -979,7 +1096,10 @@
       }
       case 'cli:output': {
         const tab = tabs.get(msg.tabId);
-        if (tab) tab.terminal.write(msg.data);
+        if (tab) {
+          tab.terminal.write(msg.data);
+          if (tab === tabs.get(activeTabId)) _mobileBar?.onOutput(tab);
+        }
         break;
       }
       case 'cli:exit': {

@@ -17,8 +17,11 @@
     return t === 'dark' ? 'vs-dark' : 'vs';
   }
 
+  // Phones never load Monaco; createEditor mounts a plain textarea instead.
+  const editorReady = () => monacoReady || window.dashboard.wantsPlainEditor();
+
   function ensureMonaco() {
-    if (monacoReady) return Promise.resolve();
+    if (monacoReady || window.dashboard.wantsPlainEditor()) return Promise.resolve();
     if (monacoReadyPromise) return monacoReadyPromise;
 
     monacoReadyPromise = new Promise((resolve) => {
@@ -53,6 +56,18 @@
     disposeEditor();
     currentEditorRuleId = ruleId;
     isEditorDirty = false;
+
+    if (window.dashboard.wantsPlainEditor()) {
+      currentEditor = window.dashboard.createPlainEditor(container, source, readOnly);
+      if (!readOnly) {
+        currentEditor.onDidChangeModelContent(() => {
+          isEditorDirty = true;
+          const saveBtn = document.querySelector(`.rule-save-btn[data-id="${ruleId}"]`);
+          if (saveBtn) saveBtn.disabled = false;
+        });
+      }
+      return;
+    }
 
     currentEditor = monaco.editor.create(container, {
       value: source,
@@ -111,6 +126,10 @@
       item.innerHTML = `
         <div class="rule-item-header">
           <span class="rule-drag-handle" title="Drag to reorder">&#9776;</span>
+          <span class="rule-move">
+            <button class="rule-move-btn" data-move="-1" data-id="${escHtml(rule.id)}" title="Move up" aria-label="Move up">&#9650;</button>
+            <button class="rule-move-btn" data-move="1" data-id="${escHtml(rule.id)}" title="Move down" aria-label="Move down">&#9660;</button>
+          </span>
           <label class="rule-toggle" title="${rule.enabled ? 'Enabled' : 'Disabled'}">
             <input type="checkbox" ${rule.enabled ? 'checked' : ''} data-id="${escHtml(rule.id)}">
             <span class="rule-toggle-slider"></span>
@@ -143,7 +162,7 @@
 
     if (expandedId) {
       ensureMonaco().then(() => {
-        if (expandedId && monacoReady) {
+        if (expandedId && editorReady()) {
           sendWs({ type: 'rule:source', id: expandedId });
         }
       });
@@ -262,6 +281,19 @@
     if (e.target.closest('.rule-item-detail')) return;
     if (e.target.closest('.rule-drag-handle')) return;
 
+    // ▲▼ stand in for drag-and-drop where there is no mouse (mobile.css
+    // shows them for coarse pointers only). Same rule:reorder as a drop.
+    const moveBtn = e.target.closest('.rule-move-btn');
+    if (moveBtn) {
+      const ids = state.rules.map(r => r.id);
+      const from = ids.indexOf(moveBtn.dataset.id);
+      const to = from + Number(moveBtn.dataset.move);
+      if (from < 0 || to < 0 || to >= ids.length) return;
+      [ids[from], ids[to]] = [ids[to], ids[from]];
+      sendWs({ type: 'rule:reorder', ids });
+      return;
+    }
+
     // Click on header row -> expand/collapse
     const item = e.target.closest('.rule-item');
     if (item) {
@@ -352,7 +384,7 @@
       case 'rule:source': {
         if (msg.id !== expandedId) break;
         const container = document.querySelector(`.rule-editor-container[data-id="${msg.id}"]`);
-        if (!container || !monacoReady) break;
+        if (!container || !editorReady()) break;
         container.innerHTML = '';
         createEditor(container, msg.source, msg.id, false);
         break;

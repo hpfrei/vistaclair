@@ -1,0 +1,639 @@
+/* ============================================================
+   MOBILE SKIN
+   Loaded after style.css / mcp.css so the narrow-viewport rules win.
+
+   Two axes, kept separate on purpose:
+     - LAYOUT follows width:        @media (max-width: 640px)
+     - INTERACTION follows pointer: @media (hover: none) and (pointer: coarse)
+   A narrow desktop window gets the phone layout but keeps hover; a
+   tablet keeps the desktop layout but gets tap-sized targets.
+
+   Portrait only. VC Pro chrome is simply hidden here, never restyled.
+   ============================================================ */
+
+/* Resizers were mouse-only; now they use Pointer Events, so the browser
+   must not claim the gesture for scrolling. Applies at every width. */
+#timeline-resizer,
+.dir-resizer,
+.dir-h-resizer,
+.vc-split-resizer {
+  touch-action: none;
+}
+
+/* Phone-only chrome, switched on inside the width query below. */
+.mobile-tabbar,
+.mobile-sheet-backdrop,
+.mobile-detail-back,
+.mobile-pane-toggle,
+.mobile-cli-bar,
+.rule-move {
+  display: none;
+}
+
+/* ============================================================
+   INTERACTION — coarse pointer
+   ============================================================ */
+@media (hover: none) and (pointer: coarse) {
+  body { -webkit-tap-highlight-color: transparent; }
+
+  /* Hover-reveal controls have no hover to reveal them. Show them
+     dimmed and always present. */
+  .jt-copy,
+  .jt-expand-btn,
+  .cli-new-menu-del,
+  .dir-picker-recent-del,
+  .dir-preview-cb {
+    opacity: 0.55;
+  }
+
+  /* Comfortable tap targets on the chrome that gets tapped most. */
+  .view-tab { min-height: 40px; padding: 8px 14px; font-size: 13px; }
+  .view-tab-close { padding: 6px; margin: -6px; font-size: 16px; }
+  .view-tab-new, .cli-model-cog { min-width: 40px; min-height: 40px; }
+  .toast-item-close { font-size: 20px; padding: 6px 8px; }
+  .modal-close, .cap-modal-close { min-width: 40px; min-height: 40px; }
+
+  /* Rules reorder by HTML5 drag-and-drop, which touch does not have.
+     Swap the grip for ▲▼ buttons (rules.js sends the same rule:reorder). */
+  .rule-drag-handle { display: none; }
+  .rule-move { display: flex; flex-direction: column; flex-shrink: 0; }
+  .rule-move-btn {
+    width: 32px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1;
+  }
+  .rule-move-btn:active { color: var(--accent); }
+
+  /* The turn stats popover opens on mouseover. A tap synthesises that
+     event but nothing ever moves the "pointer" away, so it would stay
+     stuck over the detail pane. The same numbers are in the detail. */
+  .turn-tip { display: none !important; }
+
+  /* Resizers are fiddly at 4px; fatten the hit area without moving the seam. */
+  #timeline-resizer, .dir-resizer { position: relative; }
+  #timeline-resizer::before, .dir-resizer::before {
+    content: '';
+    position: absolute;
+    inset: 0 -8px;
+  }
+}
+
+/* ============================================================
+   LAYOUT — phone width
+   ============================================================ */
+@media (max-width: 640px) {
+  /* --- App shell -------------------------------------------- */
+  html, body {
+    height: 100dvh;
+  }
+  body {
+    /* mobile.js shrinks this while the soft keyboard is open. */
+    height: var(--mobile-vh, 100dvh);
+  }
+
+  /* Fixed grid-paper repaints every layer on iOS scroll. */
+  .view-body,
+  .inspector-body,
+  .header-tab.active,
+  .header-gradient-bar,
+  #timeline-resizer {
+    background-attachment: scroll;
+  }
+
+  /* --- Header: brand + status + bell. Nav moves to the tab bar. -- */
+  header {
+    align-items: center;
+    padding: 6px 10px;
+    padding-top: calc(6px + env(safe-area-inset-top));
+    gap: 8px;
+  }
+  .header-left { align-items: center; flex: 1; min-width: 0; }
+  #headerTabs { display: none; }
+  h1.header-brand,
+  h1.header-brand.active {
+    font-size: 15px;
+    padding: 4px 0;
+    background: none !important;
+    margin-bottom: 0;
+    -webkit-text-fill-color: var(--text);
+  }
+  .header-actions { padding-bottom: 0; gap: 6px; }
+  /* Restart and theme live in the "More" sheet; Pro chrome (subscription,
+     update, spend pill) is out of scope on phones. */
+  .header-actions .restart-server-btn,
+  .header-actions .theme-toggle,
+  .header-actions .pro-header-btn,
+  .header-actions .pro-check-btn,
+  .header-actions .pro-update-btn,
+  .header-actions .spend-pill {
+    display: none !important;
+  }
+
+  /* The stats footer duplicates the Inspector's timeline footer and
+     would sit under the tab bar; the tab bar takes its place. */
+  footer,
+  .footer-gradient-bar { display: none; }
+  .status { font-size: 10px; padding: 3px 7px; }
+  .toast-bell-btn { padding: 6px 9px; font-size: 15px; }
+
+  /* --- Bottom tab bar ---------------------------------------- */
+  .mobile-tabbar {
+    display: flex;
+    flex-shrink: 0;
+    align-items: stretch;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--vc-hair, var(--border));
+    padding-bottom: env(safe-area-inset-bottom);
+    z-index: 3;
+  }
+  .mobile-tab {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 54px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 0;
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    position: relative;
+    cursor: pointer;
+  }
+  .mobile-tab:hover { background: none; }
+  .mobile-tab svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .mobile-tab.active { color: var(--accent); font-weight: 600; }
+  .mobile-tab.active::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 25%;
+    right: 25%;
+    height: 2px;
+    border-radius: 0 0 2px 2px;
+    background: var(--accent);
+  }
+  /* Loading / running dots inherited from .header-tab semantics. */
+  .mobile-tab.tab-loading > span::after,
+  .mobile-tab.instance-running > span::after {
+    content: '';
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    margin-left: 4px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    vertical-align: middle;
+    animation: tab-pulse 1s ease-in-out infinite;
+  }
+  .mobile-tab.instance-running > span::after { animation: streaming-pulse 1.4s ease-in-out infinite; }
+
+  /* --- "More" sheet ------------------------------------------ */
+  .mobile-sheet-backdrop {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    z-index: 400;
+    align-items: flex-end;
+    background: color-mix(in srgb, var(--bg-deep, #000) 62%, transparent);
+    backdrop-filter: blur(3px);
+  }
+  .mobile-sheet-backdrop.hidden { display: none; }
+  .mobile-sheet {
+    width: 100%;
+    background: var(--bg-surface);
+    border-top: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+    border-radius: 16px 16px 0 0;
+    padding: 6px 12px calc(12px + env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    animation: mobile-sheet-up 0.22s ease;
+  }
+  @keyframes mobile-sheet-up {
+    from { transform: translateY(24px); opacity: 0; }
+    to   { transform: none; opacity: 1; }
+  }
+  .mobile-sheet-grip {
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    margin: 4px auto 10px;
+  }
+  .mobile-sheet-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 13px 12px;
+    font-size: 15px;
+    font-family: inherit;
+    background: none;
+    border: none;
+    border-radius: 10px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .mobile-sheet-item:hover,
+  .mobile-sheet-item:active { background: var(--bg-hover); }
+  .mobile-sheet-item.active { color: var(--accent); font-weight: 600; }
+  .mobile-sheet-sep {
+    height: 1px;
+    margin: 6px 0;
+    background: var(--vc-hair, var(--border));
+  }
+
+  /* --- Sub-nav (.view-nav) → snap-scrolling pill row ----------- */
+  .view-nav {
+    padding: 6px 10px 0;
+    gap: 4px;
+    scrollbar-width: none;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+  }
+  .view-nav::-webkit-scrollbar { display: none; }
+  .view-tab { scroll-snap-align: start; }
+  .view-body { padding: 12px; }
+  /* Inspector's pinned "Clear inactive" steals a third of the strip;
+     trim it, and fade the tab row into it instead of a hard cut. */
+  .view-tab-action { padding: 5px 8px 5px 12px; }
+  .inspector-tab-pinned { padding-right: 6px; }
+  .inspector-tab-scroll {
+    mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  }
+
+  /* --- Toasts: bottom, above the tab bar ---------------------- */
+  .toast-container {
+    top: auto;
+    bottom: calc(62px + env(safe-area-inset-bottom));
+    width: calc(100vw - 16px);
+  }
+  .toast-item { animation: toast-slide-up 0.22s ease; touch-action: pan-y; }
+  .toast-item.toast-out { transform: translateY(8px); }
+  @keyframes toast-slide-up {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .toast-detail,
+  .toast-center { min-width: 0; max-width: none; }
+
+  /* --- Every dialog becomes a bottom sheet -------------------- */
+  .modal-overlay,
+  .cap-modal-backdrop,
+  .confirm-modal-backdrop,
+  .alert-modal-backdrop,
+  .curl-modal-overlay,
+  .dir-overlay {
+    align-items: flex-end;
+  }
+  .modal-box,
+  .cap-modal,
+  .cap-modal-wide,
+  .confirm-modal,
+  .alert-modal,
+  .curl-modal,
+  .rule-create-modal,
+  .dir-search-modal,
+  .dir-overlay-panel {
+    width: 100% !important;
+    max-width: none !important;
+    max-height: 92dvh;
+    height: auto;
+    border-radius: 16px 16px 0 0;
+    border-bottom: none;
+    animation: mobile-sheet-up 0.22s ease;
+  }
+  .dir-overlay-panel { height: 92dvh; }
+  .cap-modal { max-height: 92dvh; }
+  .cap-modal-body,
+  .modal-body { overflow-y: auto; }
+  /* Two-column modal bodies stack (extends the 800px rule to the
+     ones it missed). */
+  .cap-modal-columns { flex-direction: column; }
+  .cap-modal-docs { width: 100% !important; max-height: 30vh; }
+
+  /* --- Home / docs content ------------------------------------ */
+  .markdown-body table,
+  .ref-params {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .markdown-body pre {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  /* Diagrams keep a readable minimum width and pan instead of shrinking
+     their labels to 4px. */
+  .rendered-svg {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .rendered-svg svg {
+    min-width: 640px;
+    max-width: none !important;
+    height: auto;
+  }
+  .home-section .markdown-body,
+  .ref-container { padding: 0; }
+  .ref-container { padding: 8px; }
+
+  /* --- Inspector: one pane at a time --------------------------- */
+  .inspector-body { position: relative; }
+  .inspector-body aside#timeline {
+    width: 100% !important;   /* beats the desktop drag width */
+    max-width: none;
+    min-width: 0;
+  }
+  .inspector-body #timeline-resizer,
+  .inspector-body #detail,
+  .detail-focus-btn { display: none; }
+  .inspector-body.mobile-detail aside#timeline { display: none; }
+  .inspector-body.mobile-detail #detail {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    animation: mobile-slide-in 0.2s ease;
+  }
+  @keyframes mobile-slide-in {
+    from { transform: translateX(24px); opacity: 0; }
+    to   { transform: none; opacity: 1; }
+  }
+  .mobile-detail-back {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+    align-self: flex-start;
+    margin: 6px 6px 0;
+    padding: 6px 10px 6px 4px;
+    background: none;
+    border: none;
+    border-radius: 8px;
+    color: var(--accent);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .mobile-detail-back svg {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  /* Request/response halves are each too short on a phone. mobile.js adds
+     a Request | Response toggle and sets data-mobile-pane; the other pane
+     hides and the visible one takes the full height. */
+  .vc-split[data-layout] { flex-direction: column; }
+  .vc-split > .vc-split-resizer { display: none; }
+  .vc-split > .vc-pane { flex: 1 1 auto !important; }
+  .vc-split[data-mobile-pane="request"]  > .vc-pane-response,
+  .vc-split[data-mobile-pane="response"] > .vc-pane-request { display: none; }
+  .mobile-pane-toggle {
+    display: flex;
+    flex-shrink: 0;
+    margin: 6px 10px;
+    padding: 2px;
+    border: 1px solid var(--vc-hair, var(--border));
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .mobile-pane-toggle button {
+    flex: 1;
+    padding: 6px 0;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .mobile-pane-toggle button.active {
+    background: var(--bg-surface);
+    color: var(--text);
+    font-weight: 600;
+    box-shadow: var(--vc-shadow, 0 1px 2px rgba(0,0,0,.2));
+  }
+  #vc-layout-toggle { display: none; }
+  /* Label, meta and chips do not fit one row; drop the chips to a
+     second row that scrolls sideways across the full pane width. */
+  .vc-pane-head { flex-wrap: wrap; row-gap: 4px; }
+  .vc-chips { flex-basis: 100%; margin-left: 0; }
+  .vc-sheet { --vc-sheet-cols: 72px minmax(0, 1fr); }
+  .vc-sheet-n { display: none; }
+
+  /* --- CLIs: read-only terminal + key row + composer ------------ */
+  .cli-terminal-wrap { touch-action: pan-y; }
+  .cli-terminal-wrap .xterm { padding: 4px 2px; }
+  .mobile-cli-bar {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    position: relative;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border);
+  }
+  .mobile-cli-pill {
+    position: absolute;
+    left: 50%;
+    top: -38px;
+    transform: translateX(-50%);
+    padding: 6px 14px;
+    border: none;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #fff;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+    animation: toast-slide-up .18s ease-out;
+    z-index: 1;
+  }
+  .mobile-cli-keys {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .mobile-cli-keys::-webkit-scrollbar { display: none; }
+  .mobile-cli-keys button {
+    flex-shrink: 0;
+    min-width: 40px;
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--vc-mono, ui-monospace, monospace);
+    font-size: 13px;
+  }
+  .mobile-cli-keys button:active { background: var(--bg-hover, var(--border)); }
+  .mobile-cli-keys button.is-danger { color: var(--red); }
+  .mobile-cli-keys-sep { flex-shrink: 0; width: 1px; height: 20px; background: var(--border); }
+  .mobile-cli-compose {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 8px;
+  }
+  .mobile-cli-compose textarea {
+    flex: 1;
+    min-height: 38px;
+    max-height: 120px;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 15px;
+    line-height: 1.3;
+    resize: none;
+  }
+  .mobile-cli-compose textarea:focus { outline: none; border-color: var(--accent); }
+  .mobile-cli-send {
+    flex-shrink: 0;
+    width: 40px;
+    height: 38px;
+    border: none;
+    border-radius: 12px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 16px;
+  }
+  .mobile-cli-send:active { filter: brightness(.85); }
+  /* Keyboard up: the key row is what matters, hide chrome that isn't. */
+  body.keyboard-open .mobile-tabbar { display: none; }
+  body.keyboard-open #view-claude .view-nav { display: none; }
+
+  /* --- Directories: one panel at a time ------------------------ */
+  /* The two panels list the same directory (compact list vs. detail
+     table / thumbnail grid). A phone shows the list — with its
+     breadcrumbs, sort and command buttons — and swaps in the grid when
+     "Previews" is ticked. Files open in the (sheet) overlay as before. */
+  .dir-file-panel {
+    width: 100% !important;
+    max-width: none;
+    min-width: 0;
+    flex: 1;
+  }
+  .dir-resizer,
+  .dir-viewer-panel { display: none; }
+  .dir-browser-wrap.previews-on .dir-file-panel .dir-file-list { display: none; }
+  .dir-browser-wrap.previews-on .dir-file-panel { flex: 0 0 auto; }
+  /* The grid brings its own sort bar; the list's would be a duplicate. */
+  .dir-browser-wrap.previews-on .dir-sort-btn { display: none; }
+  .dir-browser-wrap.previews-on .dir-viewer-panel { display: flex; flex: 1; min-height: 0; }
+  /* Header above, grid below: the wrap (or, with the shell open, the
+     content row inside it) goes vertical. */
+  .dir-browser-wrap.previews-on,
+  .dir-browser-wrap.previews-on .dir-browser-content { flex-direction: column; }
+  .dir-entry { padding: 8px 10px; font-size: 13px; }
+  .dir-cmd-btn, .dir-search-btn { min-height: 32px; padding: 4px 10px; }
+  .dir-preview-grid { grid-template-columns: repeat(3, 1fr) !important; }
+  /* File overlay: arrows would cover the content; swipe is not wired,
+     so drop them and let the header close button do the job. */
+  .dir-overlay-nav { display: none; }
+  /* Shell drawer under the listing keeps a fixed share of the height. */
+  .dir-terminal-panel { height: 40% !important; }
+  .dir-h-resizer { display: none; }
+
+  /* --- Capabilities / Models / Rules -------------------------- */
+  .model-card-grid { grid-template-columns: 1fr; }
+  /* Source editor: a textarea in Monaco's place (core.js createPlainEditor). */
+  .plain-editor {
+    display: block;
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--vc-mono, ui-monospace, monospace);
+    font-size: 12px;
+    line-height: 1.45;
+    tab-size: 2;
+    white-space: pre;
+    overflow: auto;
+    resize: vertical;
+  }
+  .plain-editor:focus { outline: none; border-color: var(--accent); }
+  .rule-editor-container { height: auto !important; }
+  .rule-item-detail,
+  .mcp-tool-item-detail { padding: 0 10px 12px; }
+  /* Tool rows: name + badge on one line, description underneath. */
+  .mcp-tool-item-header { flex-wrap: wrap; gap: 6px 12px; }
+  .mcp-tool-item-info { flex: 1 1 auto; }
+  .mcp-tool-item-info .ref-tag { white-space: nowrap; }
+  .mcp-tool-item-header > .cap-item-desc,
+  .mcp-tool-item-header > .mcp-claude-tool-desc {
+    flex-basis: 100%;
+    order: 10;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  /* Provider key bar: url, hint and key controls stack instead of one row. */
+  .provider-header { flex-wrap: wrap; }
+  .provider-url { word-break: break-all; }
+  .provider-key-area { flex-wrap: wrap; width: 100%; gap: 6px; }
+  .provider-hint { flex-basis: 100%; }
+  .provider-key-input { flex: 1 1 140px; width: auto; min-width: 0; min-height: 32px; font-size: 13px; }
+  .provider-key-toggle, .provider-key-save { min-height: 32px; }
+  .ref-grid { grid-template-columns: 1fr; }
+
+  /* --- Security ------------------------------------------------ */
+  #home-security form,
+  #sessionsList { max-width: none; }
+
+  /* --- Forms: 16px stops iOS zooming into a focused field; 40px is a
+     finger-sized row. Terminal and inspector search stay as they are. --- */
+  #home-security input:not([type="checkbox"]):not([type="radio"]),
+  #home-security select,
+  #home-security button,
+  .modal-box input:not([type="checkbox"]):not([type="radio"]),
+  .modal-box select,
+  .modal-box textarea,
+  .cap-modal input:not([type="checkbox"]):not([type="radio"]),
+  .cap-modal select,
+  .cap-modal textarea,
+  .rule-create-input,
+  .rule-create-textarea,
+  .rule-edit-input,
+  .provider-key-input {
+    font-size: 16px;
+    min-height: 40px;
+  }
+}

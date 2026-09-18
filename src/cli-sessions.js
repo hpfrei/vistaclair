@@ -434,6 +434,16 @@ class CliSessionManager {
     if (session) session.resize(cols, rows);
   }
 
+  resizeFrom(ws, tabId, cols, rows) {
+    const session = this.sessions.get(tabId);
+    if (session) session.resizeFrom(ws, cols, rows);
+  }
+
+  claim(ws, tabId) {
+    const session = this.sessions.get(tabId);
+    if (session) session.claim(ws);
+  }
+
   kill(tabId) {
     const session = this.sessions.get(tabId);
     if (session) session.kill();

@@ -333,6 +333,9 @@ dashboardApp.use((req, res, next) => {
   // aren't sent on cross-site redirects, so these must bypass auth. Declarative
   // per-add-on list, no hardcoded product knowledge here.
   if (addons.isAuthExempt(req.path)) return next();
+  // PWA metadata: the browser fetches the manifest and its icons without
+  // cookies when installing to a home screen. Nothing sensitive in them.
+  if (req.path === '/manifest.webmanifest' || /^\/(icon-\d+|apple-touch-icon)\.png$/.test(req.path)) return next();
   // App-tool-call uses ephemeral per-session tokens validated by its own handler
   if (isLoopback(req) && req.path === '/api/app-tool-call') return next();
   // Internal header (MCP tools), Telegram session, or the static token where

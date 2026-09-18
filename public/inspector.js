@@ -3195,6 +3195,8 @@
 
   function select(sel, { userClick = false } = {}) {
     state.selection = sel;
+    // Phones show timeline and detail one at a time; a tap drills in.
+    if (userClick) window.dashboard.mobileShowDetail?.();
 
     document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
 
@@ -4006,18 +4008,20 @@
       dragging = false;
       resizer.classList.remove('dragging');
       document.body.style.userSelect = '';
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
       _saveDetailPrefs();
     };
 
-    resizer.addEventListener('mousedown', (e) => {
+    resizer.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       dragging = true;
       resizer.classList.add('dragging');
       document.body.style.userSelect = 'none';
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      document.addEventListener('pointercancel', onUp);
     });
 
     resizer.addEventListener('dblclick', () => {

@@ -163,6 +163,8 @@
       const tab = tabs.get(tabId);
       if (!tab) return;
       tab.showPreviews = e.target.checked;
+      // Phones show one panel: the list, or the preview grid when it is on.
+      tab.wrap.classList.toggle('previews-on', tab.showPreviews);
       // Clear unconditionally: the two modes sort differently, so a selection
       // (and its shift-range anchor) carried across a mode flip refers to rows
       // that no longer line up.
@@ -251,16 +253,18 @@
     }
     function onUp() {
       resizer.classList.remove('dragging');
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
     }
-    resizer.addEventListener('mousedown', e => {
+    resizer.addEventListener('pointerdown', e => {
       e.preventDefault();
       startX = e.clientX;
       startW = leftPanel.offsetWidth;
       resizer.classList.add('dragging');
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      document.addEventListener('pointercancel', onUp);
     });
     return resizer;
   }
@@ -1204,16 +1208,18 @@
     }
     function onUp() {
       hResizer.classList.remove('dragging');
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
     }
-    hResizer.addEventListener('mousedown', e => {
+    hResizer.addEventListener('pointerdown', e => {
       e.preventDefault();
       startY = e.clientY;
       startH = termPanel.offsetHeight;
       hResizer.classList.add('dragging');
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      document.addEventListener('pointercancel', onUp);
     });
 
     const terminal = new Terminal({

@@ -55,6 +55,8 @@ function handleMessage(ws, msg, bc) {
       break;
     case 'cli:spawn':
       if (msg.tabId && msg.cwd) {
+        // The spawning viewer sized the PTY, so it starts as the owner.
+        mgr.getOrCreate(msg.tabId).resizeFrom(ws, msg.cols || 80, msg.rows || 24);
         if (msg.shell) {
           const session = mgr.getOrCreate(msg.tabId);
           session.spawnShell(msg.cwd, msg.cols || 80, msg.rows || 24);
@@ -74,7 +76,18 @@ function handleMessage(ws, msg, bc) {
       }
       break;
     case 'cli:input':
-      if (msg.tabId) mgr.write(msg.tabId, msg.data || '');
+      if (msg.tabId) {
+        // Whoever types owns the PTY size (see CliSession.claim).
+        mgr.claim(ws, msg.tabId);
+        mgr.write(msg.tabId, msg.data || '');
+      }
+      break;
+    case 'cli:claim':
+      // Focus/tap without a keystroke — a phone viewer wants the reflow.
+      if (msg.tabId) {
+        if (msg.cols && msg.rows) mgr.resizeFrom(ws, msg.tabId, msg.cols, msg.rows);
+        mgr.claim(ws, msg.tabId);
+      }
       break;
     case 'cli:uploadFile':
       if (msg.tabId && msg.data) {
@@ -105,7 +118,9 @@ function handleMessage(ws, msg, bc) {
       }
       break;
     case 'cli:resize':
-      if (msg.tabId) mgr.resize(msg.tabId, msg.cols || 80, msg.rows || 24);
+      // Honoured only from the viewer that owns the session; a second
+      // browser opening the tab must not reflow the first one's terminal.
+      if (msg.tabId) mgr.resizeFrom(ws, msg.tabId, msg.cols || 80, msg.rows || 24);
       break;
     case 'cli:kill':
       if (msg.tabId) {

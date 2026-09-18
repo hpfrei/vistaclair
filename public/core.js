@@ -166,6 +166,37 @@ function _ensureMonaco() {
   return _monacoReadyPromiseCore;
 }
 
+// Monaco is ~4 MB and built for a mouse; on a phone a source view is a
+// monospace <textarea>. The shim covers the slice of the editor API the
+// rule / MCP editors touch (value, dirty events, dispose), so the callers
+// branch once at creation and are otherwise unchanged.
+function wantsPlainEditor() {
+  return window.matchMedia('(max-width: 640px)').matches;
+}
+function createPlainEditor(container, source, readOnly) {
+  const ta = document.createElement('textarea');
+  ta.className = 'plain-editor';
+  ta.value = source || '';
+  ta.readOnly = !!readOnly;
+  ta.spellcheck = false;
+  ta.setAttribute('autocapitalize', 'off');
+  ta.setAttribute('autocorrect', 'off');
+  const size = () => { ta.style.height = ''; ta.style.height = Math.min(500, Math.max(120, ta.scrollHeight + 4)) + 'px'; };
+  const listeners = [];
+  ta.addEventListener('input', () => { size(); for (const fn of listeners) fn(); });
+  container.innerHTML = '';
+  container.style.height = '';
+  container.appendChild(ta);
+  size();
+  return {
+    getValue: () => ta.value,
+    setValue: v => { ta.value = v; size(); },
+    onDidChangeModelContent: fn => { listeners.push(fn); return { dispose() { const i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1); } }; },
+    getDomNode: () => ta,
+    layout() { size(); },
+    dispose() { ta.remove(); listeners.length = 0; },
+  };
+}
 // --- File preview modal (images, video, audio, text, pdf) ---
 
 const _TEXT_PREVIEW_MAX = 5 * 1024 * 1024;   // beyond this, offer download instead
@@ -1197,6 +1228,8 @@ function askFormBind(container, formData, callbacks) {
 
 window.dashboard = {
   showAlert,
+  wantsPlainEditor,
+  createPlainEditor,
   state,
   sendWs(msg) { if (state.ws) state.ws.send(JSON.stringify(msg)); },
   escHtml,
@@ -1381,9 +1414,14 @@ function handleMessage(msg) {
 // ============================================================
 
 function switchView(view) {
-  document.querySelectorAll('.header-tab').forEach(t => t.classList.remove('active'));
-  const activeBtn = document.querySelector(`.header-tab[data-view="${view}"]`);
-  if (activeBtn) activeBtn.classList.add('active');
+  // Header tabs and the phone tab bar share data-view; light up both.
+  document.querySelectorAll('.header-tab, .mobile-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll(`.header-tab[data-view="${view}"], .mobile-tab[data-view="${view}"]`)
+    .forEach(t => t.classList.add('active'));
+  // Views that live behind the phone "More" sheet light up that button instead.
+  if (!document.querySelector('.mobile-tab.active')) {
+    document.getElementById('mobileMoreBtn')?.classList.add('active');
+  }
 
   document.querySelectorAll('[id^="view-"]').forEach(el => {
     if (el.id === `view-${view}`) {
@@ -1453,14 +1491,16 @@ document.addEventListener('keydown', e => {
   window.__timelineUserWidth = null;
   window.__timelineDragging = false;
 
-  resizer.addEventListener('mousedown', (e) => {
+  // Pointer events so the same handler serves mouse and touch.
+  resizer.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     startX = e.clientX;
     startW = timeline.offsetWidth;
     window.__timelineDragging = true;
     resizer.classList.add('dragging');
-    document.addEventListener('mousemove', onDrag);
-    document.addEventListener('mouseup', onUp);
+    document.addEventListener('pointermove', onDrag);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
   });
 
   function onDrag(e) {
@@ -1472,8 +1512,9 @@ document.addEventListener('keydown', e => {
   function onUp() {
     window.__timelineDragging = false;
     resizer.classList.remove('dragging');
-    document.removeEventListener('mousemove', onDrag);
-    document.removeEventListener('mouseup', onUp);
+    document.removeEventListener('pointermove', onDrag);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onUp);
   }
 })();
 
