@@ -235,7 +235,10 @@ class InteractionStore {
     for (const sess of sessions) {
       if (toLoad.length + sess.files.length > this.maxSize && toLoad.length > 0) break;
       sess.files.sort((a, b) => a.mtime - b.mtime);
-      toLoad.push(...sess.files);
+      // A session bigger than maxSize on its own (a long-running tab can hold
+      // tens of thousands of turns) contributes only its newest turns; parsing
+      // all of them at boot exhausts the heap.
+      toLoad.push(...sess.files.slice(-this.maxSize));
     }
     // Final sort chronologically across all loaded sessions
     toLoad.sort((a, b) => a.mtime - b.mtime);
