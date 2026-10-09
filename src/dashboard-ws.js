@@ -36,6 +36,9 @@ function summarizeForInit(interaction) {
     }
     if (interaction.isHook) {
       if (s.request.tool_response !== undefined) {
+        // An Agent result names the agent it ran — the inspector keys lanes on it.
+        const agentId = s.request.tool_response?.agentId;
+        if (typeof agentId === 'string') s.request._agentId = agentId;
         s.request._toolResponseChars = JSON.stringify(s.request.tool_response).length;
         delete s.request.tool_response;
       }
@@ -48,8 +51,20 @@ function summarizeForInit(interaction) {
       if (s.response) s.response = { ...s.response, body: undefined };
     }
   }
+  // A provider-translated turn carries its own copy of the whole request.
+  delete s.translatedBody;
   s._summary = true;
   return s;
+}
+
+// Browsers already hold each stream event (sent one by one as sse_event) and
+// keep their own copy when an interaction updates, so the finished list is
+// dead weight on the wire. In-process listeners still get the full message.
+function forClients(message) {
+  if ((message.type !== 'interaction:complete' && message.type !== 'interaction:update')
+      || !message.interaction?.response?.sseEvents) return message;
+  const { interaction } = message;
+  return { ...message, interaction: { ...interaction, response: { ...interaction.response, sseEvents: undefined } } };
 }
 
 
@@ -181,6 +196,12 @@ class DashboardBroadcaster {
               return summarizeForInit(s);
             }).filter(Boolean);
             ws.send(JSON.stringify({ type: 'inspector:allLoaded', interactions: all }));
+          } else if (msg.type === 'inspector:getSessionTotals') {
+            // CLI tab ids are cli-<session dir>. Later progress and every new
+            // turn arrive as broadcast inspector:sessionTotals.
+            const m = /^cli-([0-9a-f-]{36})$/i.exec(msg.instanceId || '');
+            const totals = m ? this.store.totals.get(m[1]) : null;
+            ws.send(JSON.stringify({ type: 'inspector:sessionTotals', instanceId: msg.instanceId, totals }));
           } else if (msg.type === 'inspector:setSensitiveHeaders') {
             createProxyRouter._showSensitiveHeaders = !!msg.value;
             this.broadcast({ type: 'inspector:sensitiveHeaders', value: !!msg.value });
@@ -272,7 +293,7 @@ class DashboardBroadcaster {
     for (const fn of this._broadcastListeners) {
       try { fn(message); } catch (err) { console.error('broadcast listener error:', err); }
     }
-    const data = JSON.stringify(message);
+    const data = JSON.stringify(forClients(message));
     for (const client of this.wss.clients) {
       if (client.readyState === WebSocket.OPEN) {
         try {

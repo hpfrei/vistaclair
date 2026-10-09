@@ -108,3 +108,47 @@ test('init keeps interactions this process produced, even once they exit', () =>
   const init = sent.find(m => m.type === 'init');
   assert.deepStrictEqual(init.interactions.map(i => i.id), ['ai-turn']);
 });
+
+test('live completions leave the stream events off the wire, not off listeners', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vistaclair-test-'));
+  const { InteractionStore, DashboardBroadcaster } = freshModules(home);
+  const store = new InteractionStore(200);
+
+  const WebSocket = require('ws');
+  const sent = [];
+  const wss = new EventEmitter();
+  wss.clients = new Set([{ readyState: WebSocket.OPEN, send: (raw) => sent.push(JSON.parse(raw)) }]);
+  const bc = new DashboardBroadcaster(wss, store, {});
+  const heard = [];
+  bc._broadcastListeners.add(m => heard.push(m));
+
+  const events = [{ eventType: 'message_start', data: {} }];
+  bc.broadcast({ type: 'interaction:complete', interaction: { id: 'x', response: { status: 200, body: { role: 'assistant' }, sseEvents: events } } });
+  bc.broadcast({ type: 'interaction:start', interaction: { id: 'y', response: { sseEvents: events } } });
+
+  assert.strictEqual(sent[0].interaction.response.sseEvents, undefined);
+  assert.deepStrictEqual(sent[0].interaction.response.body, { role: 'assistant' });
+  assert.deepStrictEqual(sent[1].interaction.response.sseEvents, events, 'start is untouched');
+  assert.strictEqual(heard[0].interaction.response.sseEvents, events, 'listeners get the full message');
+});
+
+test('an Agent hook summary keeps the agent id its result names', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vistaclair-test-'));
+  const { InteractionStore, DashboardBroadcaster } = freshModules(home);
+  const store = new InteractionStore(200);
+  store.add({
+    id: 'post-agent', timestamp: 1, isHook: true, hookEvent: 'PostToolUse', toolName: 'Agent', toolUseId: 'toolu_1',
+    request: { tool_response: { status: 'async_launched', agentId: 'a1b2c3', prompt: 'x'.repeat(5000) } },
+    response: { status: 200 }, status: 'complete',
+  });
+
+  const wss = new EventEmitter();
+  wss.clients = new Set();
+  new DashboardBroadcaster(wss, store, {});
+  const sent = [];
+  wss.emit('connection', fakeSocket(sent));
+
+  const hook = sent.find(m => m.type === 'init').interactions.find(i => i.id === 'post-agent');
+  assert.strictEqual(hook.request.tool_response, undefined, 'the payload itself stays off the summary');
+  assert.strictEqual(hook.request._agentId, 'a1b2c3');
+});

@@ -44,6 +44,13 @@
 
   // --- Hook agent resolution ---
 
+  // The agent a PostToolUse/Agent hook reports it ran. Trimmed hooks keep it
+  // as request._agentId (see summarizeForInit / _compactInteraction).
+  function agentIdFromResult(hook) {
+    const tr = hook.request?.tool_response ?? hook.response?.body;
+    return hook.request?._agentId || (tr && typeof tr.agentId === 'string' ? tr.agentId : null);
+  }
+
   function resolveHookAgentId(hookInteraction, interactions) {
     if (!hookInteraction.toolUseId) return null;
     for (let i = interactions.length - 1; i >= 0; i--) {
@@ -233,7 +240,8 @@
 
   function turnUserText(interaction) {
     const msgs = interaction.request?.messages;
-    if (!Array.isArray(msgs)) return '';
+    // A trimmed interaction keeps just its first user message's text.
+    if (!Array.isArray(msgs)) return interaction.request?._firstUserText || '';
     const parts = [];
     for (const m of msgs) {
       if (m.role !== 'user') continue;
@@ -255,6 +263,15 @@
         delete interaction.subagent;
         delete interaction._subagentInferred;
       }
+    }
+
+    // agentId -> the label the server stamped, preferring one with a description.
+    const knownSubagent = new Map();
+    for (const interaction of interactions) {
+      const sub = interaction.subagent;
+      if (!sub?.agentId) continue;
+      const have = knownSubagent.get(sub.agentId);
+      if (!have || (!have.description && sub.description)) knownSubagent.set(sub.agentId, sub);
     }
 
     const columnFor = new Map();
@@ -321,19 +338,40 @@
     // Resolve every Agent tool call's toolUseId to a real agentId, and use the
     // spawning-prompt probe to attribute unenriched subagent turns to a column.
 
-    // toolUseId -> real agentId. Two sources, both reliable:
-    //  1. FIFO pairing of PreToolUse/Agent hooks with the next SubagentStart.
-    //  2. An enriched turn whose user text contains a tool call's prompt probe.
+    // toolUseId -> real agentId, most reliable source first:
+    //  1. Exact: the Agent tool's own result (PostToolUse) names the agent it
+    //     ran, and a SubagentStart enriched from the agent's meta file names
+    //     the tool call that spawned it.
+    //  2. FIFO pairing of main-thread PreToolUse/Agent hooks with the next
+    //     SubagentStart of an agent not seen before. A SendMessage resume fires
+    //     SubagentStart with no PreToolUse, and an Agent call made inside a
+    //     subagent gets no SubagentStart — either would shift every later pair.
+    //  3. An enriched turn whose user text contains a tool call's prompt probe.
     const realAgentForToolUse = new Map();
     {
+      for (const int of interactions) {
+        if (!int.isHook) continue;
+        if (/PostToolUse/i.test(int.hookEvent) && int.toolName === 'Agent' && int.toolUseId) {
+          const aid = agentIdFromResult(int);
+          if (aid) realAgentForToolUse.set(int.toolUseId, aid);
+        } else if (int.hookEvent === 'SubagentStart' && int.hookAgentId && int.subagent?.toolUseId) {
+          realAgentForToolUse.set(int.subagent.toolUseId, int.hookAgentId);
+        }
+      }
+      const exactAgents = new Set(realAgentForToolUse.values());
+      const started = new Set();
       const preQueue = [];
       for (const int of interactions) {
         if (!int.isHook) continue;
-        if (/PreToolUse/i.test(int.hookEvent) && int.toolName === 'Agent' && int.toolUseId) {
-          preQueue.push(int.toolUseId);
+        if (/PreToolUse/i.test(int.hookEvent) && int.toolName === 'Agent' && int.toolUseId && !int.hookAgentId) {
+          if (!realAgentForToolUse.has(int.toolUseId)) preQueue.push(int.toolUseId);
         } else if (int.hookEvent === 'SubagentStart' && int.hookAgentId) {
+          const aid = int.hookAgentId;
+          const fresh = !started.has(aid) && !exactAgents.has(aid);
+          started.add(aid);
+          if (!fresh) continue;
           const tuid = preQueue.shift();
-          if (tuid) realAgentForToolUse.set(tuid, int.hookAgentId);
+          if (tuid) realAgentForToolUse.set(tuid, aid);
         }
       }
     }
@@ -407,12 +445,13 @@
             } else {
               agentId = inferred.agentId;
             }
-            const col = activeColumns.get(agentId) ?? historicalColumns.get(agentId);
-            const agentSub = col != null ? columnAgents.get(col) : null;
-            if (agentSub) {
-              interaction.subagent = { ...agentSub };
-              interaction._subagentInferred = true;
-            }
+            // Label from the matched Agent call and the resolved agent — not
+            // from the column, which may hold another agent's label or a
+            // placeholder mixing one agent's id with another call's text.
+            const call = toolUseToEagerAgent.get(inferred.toolUseId);
+            interaction.subagent = { ...(knownSubagent.get(agentId)
+              || { agentId, agentType: call?.subagentType || 'agent', description: call?.description || null }) };
+            interaction._subagentInferred = true;
           }
         }
       }
@@ -439,7 +478,7 @@
           nextColumn = alloc.nextColumn;
           activeColumns.set(eagerAid, alloc.col);
           historicalColumns.set(eagerAid, alloc.col);
-          const synSub = { agentId: eagerAid, agentType: eager.subagentType || 'agent', description: eager.description };
+          const synSub = knownSubagent.get(eagerAid) || { agentId: eagerAid, agentType: eager.subagentType || 'agent', description: eager.description };
           if (registerSubagentFn) registerSubagentFn(synSub);
           columnAgents.set(alloc.col, synSub);
           let startHookId = null;
@@ -574,7 +613,7 @@
           closed = true;
         }
         if (!closed) {
-          const respAgentId = interaction.response?.body?.agentId;
+          const respAgentId = agentIdFromResult(interaction);
           if (respAgentId && activeColumns.has(respAgentId)) {
             const closedCol = activeColumns.get(respAgentId);
             const seg = activeSegments.get(respAgentId);

@@ -116,6 +116,8 @@
   const knownInstances = new Map(); // instanceId -> { instanceId, status, spawnedAt }
   let activeInstanceTab = 'all';
   const inspectorTabStrip = document.getElementById('inspectorTabStrip');
+  const _sessionTotals = new Map();     // CLI instanceId → whole-session totals from the server
+  const _sessionTotalsAsked = new Set();
 
   // --- External session tabs ---
   let extTabCounter = 0;
@@ -600,7 +602,8 @@
 
   function findToolResult(toolUseId) {
     for (const interaction of state.interactions) {
-      const msgs = interaction.request?.messages;
+      const req = interaction.request;
+      const msgs = req?.messages || (req?._toolResults && [{ role: 'user', content: req._toolResults }]);
       if (!msgs) continue;
       for (const msg of msgs) {
         if (msg.role !== 'user') continue;
@@ -1193,6 +1196,7 @@
       const localEvents = state.interactions[idx].response?.sseEvents || [];
       const localInstanceId = state.interactions[idx].instanceId;
       const localSubagent = state.interactions[idx].subagent;
+      const localInferred = state.interactions[idx]._subagentInferred;
       // Client-side running counter behind the response char gauge — the server
       // doesn't send it, so a wholesale replace would reset the gauge to zero.
       const localRespChars = state.interactions[idx]._respChars;
@@ -1204,6 +1208,8 @@
       }
       if (localSubagent && !state.interactions[idx].subagent) {
         state.interactions[idx].subagent = localSubagent;
+        // A guess stays a guess — the next column pass may revise it.
+        if (localInferred) state.interactions[idx]._subagentInferred = true;
       }
     }
 
@@ -3116,6 +3122,109 @@
   const _pendingSseRequests = new Set();
   const _pendingDetailRequests = new Set();
 
+  /* Every turn's request carries the whole conversation so far, so holding
+     each one at full size grows quadratically over a long session. Past a
+     small budget of recently used items, a finished interaction is trimmed
+     back to the summary shape the server sends on connect (summarizeForInit
+     in src/dashboard-ws.js) — the state every item is in after a page
+     reload. Selecting it again refetches the detail. */
+  const FULL_DETAIL_BUDGET = 10;
+  const _recentFull = [];              // ids, least recently used first
+  const _internedText = new Map();     // turns of one conversation share its first message
+  let _compactTimer = null;
+
+  function _touchFull(id) {
+    const at = _recentFull.indexOf(id);
+    if (at >= 0) _recentFull.splice(at, 1);
+    _recentFull.push(id);
+    _scheduleCompaction();
+  }
+
+  function _scheduleCompaction() {
+    if (_compactTimer) return;
+    _compactTimer = setTimeout(() => { _compactTimer = null; _compactInteractions(); }, 1000);
+  }
+
+  function _compactInteractions() {
+    _recentFull.splice(0, Math.max(0, _recentFull.length - FULL_DETAIL_BUDGET));
+    const keep = new Set(_recentFull);
+    const sel = state.selection;
+    if (sel) keep.add(sel.type === 'tool' ? sel.interactionId : sel.id);
+    for (const id of _splitInteractions) keep.add(id);
+    for (const i of state.interactions) {
+      if (i._summary || keep.has(i.id) || _isLiveInteraction(i)) continue;
+      _compactInteraction(i);
+    }
+  }
+
+  function _intern(s) {
+    const hit = _internedText.get(s);
+    if (hit !== undefined) return hit;
+    _internedText.set(s, s);
+    return s;
+  }
+
+  function _compactInteraction(i) {
+    const req = i.request;
+    if (req) {
+      const r = { ...req };
+      if (Array.isArray(r.messages)) {
+        const msgs = r.messages;
+        const last = msgs[msgs.length - 1];
+        const lastContent = Array.isArray(last?.content) ? last.content : [];
+        r._messageCount = msgs.length;
+        r._lastMessage = last ? {
+          role: last.role,
+          hasText: typeof last.content === 'string' || lastContent[lastContent.length - 1]?.type === 'text',
+        } : null;
+        // Tool results only ever arrive in the newest user message — keep
+        // them for findToolResult. The first user message's text is what
+        // wide-layout matches an Agent call's prompt against.
+        const results = last?.role === 'user' ? lastContent.filter(b => b.type === 'tool_result') : [];
+        if (results.length) r._toolResults = results;
+        const first = msgs.find(m => m.role === 'user');
+        if (first) {
+          const text = typeof first.content === 'string' ? first.content
+            : (Array.isArray(first.content) ? first.content.filter(b => b.type === 'text' && b.text).map(b => b.text).join('\n') : '');
+          r._firstUserText = _intern(text.replace(/\s+/g, ' ').trim());
+        }
+        delete r.messages;
+      }
+      if (Array.isArray(r.tools)) {
+        r._toolCount = r.tools.length;
+        delete r.tools;
+      }
+      if (r.system) {
+        r._systemChars = typeof r.system === 'string' ? r.system.length : JSON.stringify(r.system).length;
+        delete r.system;
+      }
+      if (i.isHook) {
+        if (r.tool_response !== undefined) {
+          if (typeof r.tool_response?.agentId === 'string') r._agentId = r.tool_response.agentId;
+          r._toolResponseChars = JSON.stringify(r.tool_response).length;
+          delete r.tool_response;
+        }
+        if (Array.isArray(r.tool_calls)) {
+          r.tool_calls = r.tool_calls.map(tc => tc.tool_response
+            ? { ...tc, tool_response: undefined, _toolResponseChars: JSON.stringify(tc.tool_response).length }
+            : tc);
+        }
+        if (i.response) i.response = { ...i.response, body: undefined };
+      }
+      i.request = r;
+    }
+    delete i.translatedBody;
+    // The stream is a second copy of the response; drop it once the body
+    // tells the same story (the select path lazy-loads it back).
+    const resp = i.response;
+    if (resp?.body && resp.sseEvents?.length
+        && hasAssistantMessage({ response: { body: resp.body } }) === hasAssistantMessage(i)) {
+      if (!i._respChars) i._respChars = _respCharCount(i);
+      i.response = { ...resp, sseEvents: undefined };
+    }
+    i._summary = true;
+  }
+
   /* What detailContent currently shows. A re-select of the same target patches
      the parts that moved instead of rebuilding the panel — during a live
      session every hook, usage update and enrichment re-selects, and a rebuild
@@ -3453,6 +3562,16 @@
     return other;
   }
 
+  /* One `id ±chars` per enabled proxy rule, in run order — a rule that never
+     moves the number is dead. Zero is printed as such, not hidden. */
+  function _rulesSummary(rules) {
+    return rules.map(r => {
+      const d = Number(r.delta) || 0;
+      const n = d === 0 ? '0' : (d > 0 ? '+' : '\u2212') + Math.abs(d).toLocaleString();
+      return `${escHtml(r.id)} <span style="opacity:${d === 0 ? 0.5 : 1}">${n}</span>`;
+    }).join(' \u00b7 ');
+  }
+
   function _respCharCount(interaction) {
     const resp = interaction.response || {};
     if (interaction._respChars) return interaction._respChars;
@@ -3478,6 +3597,7 @@
       <span class="info-label">Bare</span><span class="info-value">${interaction.bare ? 'yes' : 'no'}</span>
       <span class="info-label">Auto-memory</span><span class="info-value">${interaction.disableAutoMemory ? 'disabled' : 'enabled'}</span>
       <span class="info-label">Time</span><span class="info-value">${new Date(interaction.timestamp).toLocaleTimeString()}</span>
+      ${Array.isArray(interaction.rules) && interaction.rules.length ? `<span class="info-label">Rules</span><span class="info-value">${_rulesSummary(interaction.rules)}</span>` : ''}
     </div>`;
 
     if (interaction.subagent && (interaction.subagent.agentType || interaction.subagent.agentId || interaction.subagent.description)) {
@@ -3486,7 +3606,7 @@
         <span class="info-label">Agent</span><span class="info-value" style="color:var(--cyan)">${escHtml(sa.agentType || 'unknown')}</span>
         <span class="info-label">Agent ID</span><span class="info-value">${escHtml(sa.agentId || '--')}</span>
         <span class="info-label">Description</span><span class="info-value">${escHtml(sa.description || '--')}</span>
-        <span class="info-label">Sidechain</span><span class="info-value">${sa.isSidechain ? 'yes' : 'no'}</span>
+        <span class="info-label">Attributed</span><span class="info-value"${interaction._subagentInferred ? ' style="color:var(--text-dim)"' : ''}>${interaction._subagentInferred ? 'guessed from spawn prompt' : 'by server'}</span>
       </div>`;
     }
     push('req:info', 'Info', infoBody, { size: 'compact' });
@@ -3623,10 +3743,10 @@
       usage: interaction.usage ? JSON.stringify(interaction.usage) : '',
       respChars: _respCharCount(interaction),
       sseCount: resp.sseEvents?.length || 0,
-      subagent: sub ? `${sub.agentId}|${sub.agentType}|${sub.description}|${sub.isSidechain}` : '',
+      subagent: sub ? `${sub.agentId}|${sub.agentType}|${sub.description}|${interaction._subagentInferred ? 1 : 0}` : '',
       model: req.model || '',
       secs: {
-        'req:info': `${req.model}|${req.max_tokens}|${req.temperature}|${interaction.isStreaming}|${sub ? sub.agentId : ''}`,
+        'req:info': `${req.model}|${req.max_tokens}|${req.temperature}|${interaction.isStreaming}|${sub ? sub.agentId : ''}|${(interaction.rules || []).map(r => `${r.id}:${r.delta}`).join(',')}`,
         'req:system': `${bulk(req.system)}|${req._systemChars || 0}`,
         'req:messages': `${req.messages?.length ?? -1}|${req._messageCount || 0}`,
         'req:tools': `${req.tools?.length ?? -1}|${req._toolCount || 0}`,
@@ -4458,25 +4578,92 @@
     return `<span class="footer-cost-gauge"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" rx="2" fill="var(--bg)" stroke="var(--border)" stroke-width="0.5"/><rect width="${fill}" height="${h}" rx="2" fill="${color}"/></svg><span class="footer-cost-label" style="color:${color}">${formatCost(cost)}</span></span>`;
   }
 
+  /* A CLI tab's footer and \u03a3 figures cover every turn of its session, not
+     just the ones held here \u2014 the server keeps only its newest few hundred
+     in memory, and a long-running tab has far more on disk. The server adds
+     them up (src/session-totals.js) and pushes updates as turns land. */
+  function _activeSessionTotals() {
+    const id = activeInstanceTab;
+    if (typeof id !== 'string' || !id.startsWith('cli-')) return null;
+    // Not connected yet: the `init` that follows connecting clears the set.
+    if (!_sessionTotalsAsked.has(id)) {
+      _sessionTotalsAsked.add(id);
+      try { sendWs({ type: 'inspector:getSessionTotals', instanceId: id }); } catch {}
+    }
+    return _sessionTotals.get(id) || null;
+  }
+
+  function _formatLongDuration(ms) {
+    if (ms < 60000) return formatDuration(ms);
+    const m = Math.round(ms / 60000);
+    return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+  }
+
+  /* A turn is a prompt the user sent, not a timeline entry: one prompt fans
+     out into many model calls (every agentic step and subagent is its own)
+     and many hook events. CLI tabs report each prompt as a UserPromptSubmit
+     hook; an instance without hooks (an external client on the proxy) falls
+     back to main-thread requests that end in the user's text. */
+  function _countTurns(list) {
+    const prompts = new Map(), starts = new Map();
+    let apiCalls = 0, hookEvents = 0;
+    for (const i of list) {
+      const key = i.instanceId || '';
+      if (i.isHook) {
+        if (i.hookEvent === 'UserPromptSubmit') prompts.set(key, (prompts.get(key) || 0) + 1);
+        else hookEvents++;
+        continue;
+      }
+      if (i.isMcp) continue;
+      apiCalls++;
+      if (!i.subagent && isNewUserTurn(i)) starts.set(key, (starts.get(key) || 0) + 1);
+    }
+    let turns = 0;
+    for (const n of prompts.values()) turns += n;
+    for (const [key, n] of starts) if (!prompts.has(key)) turns += n;
+    return { turns, apiCalls, hookEvents };
+  }
+
   function updateStats() {
     const source = state.interactions;
-    const total = source.length;
     let inputTokens = 0, outputTokens = 0, cacheRead = 0, cacheCreate = 0, toolCallCount = 0, totalCost = 0;
     let hasCost = false;
-    for (const i of source) {
-      if (i.usage) {
-        inputTokens += i.usage.input_tokens || 0;
-        outputTokens += i.usage.output_tokens || 0;
-        cacheRead += i.usage.cache_read_input_tokens || 0;
-        cacheCreate += i.usage.cache_creation_input_tokens || 0;
-        const cost = computeCost(i.usage, i.pricing);
-        if (cost != null) { totalCost += cost; hasCost = true; }
+    const sess = _activeSessionTotals();
+    const counts = sess || _countTurns(source);
+    if (sess) {
+      ({ toolCalls: toolCallCount, inputTokens, outputTokens, cacheRead, cacheCreate, hasCost } = sess);
+      totalCost = sess.cost;
+    } else {
+      for (const i of source) {
+        if (i.usage) {
+          inputTokens += i.usage.input_tokens || 0;
+          outputTokens += i.usage.output_tokens || 0;
+          cacheRead += i.usage.cache_read_input_tokens || 0;
+          cacheCreate += i.usage.cache_creation_input_tokens || 0;
+          const cost = computeCost(i.usage, i.pricing);
+          if (cost != null) { totalCost += cost; hasCost = true; }
+        }
+        toolCallCount += extractToolCalls(i).length;
       }
-      toolCallCount += extractToolCalls(i).length;
     }
+    // While the server is still reading the session's files the figures only grow.
+    const approx = sess && !sess.complete ? '\u2248 ' : '';
+    const scanNote = sess && !sess.complete
+      ? `Whole session, still counting: ${sess.scanned.toLocaleString()} of ${sess.toScan.toLocaleString()} turn files read`
+      : (sess ? 'Whole session, every turn on disk' : '');
 
-    // Footer stats section
-    statsEl.textContent = `${total} turn${total !== 1 ? 's' : ''} \u00b7 ${toolCallCount} tool call${toolCallCount !== 1 ? 's' : ''}`;
+    // Footer stats section. A session that never reported a prompt (no
+    // hooks reached the server) can only be counted in model calls.
+    const byCalls = counts.turns === 0 && counts.apiCalls > 0;
+    const n = byCalls ? counts.apiCalls : counts.turns;
+    const unit = byCalls ? 'API call' : 'turn';
+    statsEl.textContent = `${approx}${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''} \u00b7 ${toolCallCount.toLocaleString()} tool call${toolCallCount !== 1 ? 's' : ''}`;
+    statsEl.title = [
+      scanNote,
+      `${counts.turns.toLocaleString()} prompt${counts.turns !== 1 ? 's' : ''} sent`,
+      `${counts.apiCalls.toLocaleString()} API call${counts.apiCalls !== 1 ? 's' : ''}`,
+      `${counts.hookEvents.toLocaleString()} hook event${counts.hookEvents !== 1 ? 's' : ''}`,
+    ].filter(Boolean).join('\n');
 
     // Footer tokens section — arrows for in/out
     const tokensEl = document.getElementById('footerTokens');
@@ -4508,6 +4695,7 @@
     const costEl = document.getElementById('footerCost');
     if (costEl) {
       costEl.innerHTML = hasCost ? costGauge(totalCost) : '<span class="footer-placeholder">price</span>';
+      costEl.title = scanNote;
     }
 
     // Timeline footer — total busy time and cost of visible turns
@@ -4515,17 +4703,28 @@
     const tlCostEl = document.getElementById('timeline-total-cost');
     let visibleCost = 0, visibleTime = 0;
     let hasVisibleCost = false, hasVisibleTime = false;
-    for (const i of source) {
-      if (!isVisibleInTimeline(i)) continue;
-      const c = computeCost(i.usage, i.pricing);
-      if (c != null) { visibleCost += c; hasVisibleCost = true; }
-      if (i.timing?.duration) { visibleTime += i.timing.duration; hasVisibleTime = true; }
+    if (sess) {
+      // A CLI tab shows its whole session here too.
+      visibleCost = sess.cost; hasVisibleCost = sess.hasCost;
+      visibleTime = sess.duration; hasVisibleTime = sess.duration > 0;
+    } else {
+      for (const i of source) {
+        if (!isVisibleInTimeline(i)) continue;
+        const c = computeCost(i.usage, i.pricing);
+        if (c != null) { visibleCost += c; hasVisibleCost = true; }
+        if (i.timing?.duration) { visibleTime += i.timing.duration; hasVisibleTime = true; }
+      }
     }
     if (tlTimeEl) {
-      tlTimeEl.textContent = hasVisibleTime ? `\u03A3 ${formatDuration(visibleTime)}` : '';
+      tlTimeEl.textContent = hasVisibleTime ? `${approx}\u03A3 ${sess ? _formatLongDuration(visibleTime) : formatDuration(visibleTime)}` : '';
+      tlTimeEl.title = sess
+        ? `${scanNote}. API and hook time added up; parallel subagents overlap.`
+          + (sess.firstAt ? ` First turn ${new Date(sess.firstAt).toLocaleString()}, last ${new Date(sess.lastAt).toLocaleString()}.` : '')
+        : '';
     }
     if (tlCostEl) {
-      tlCostEl.textContent = hasVisibleCost ? `\u03A3 ${formatCost(visibleCost)}` : '';
+      tlCostEl.textContent = hasVisibleCost ? `${approx}\u03A3 ${formatCost(visibleCost)}` : '';
+      tlCostEl.title = scanNote;
     }
   }
 
@@ -4588,6 +4787,9 @@
         extTabCounter = 0;
         activeExtTab = null;
         knownInstances.clear();
+        // A new connection may be a restarted server; ask again.
+        _sessionTotals.clear();
+        _sessionTotalsAsked.clear();
         state.interactions = msg.interactions || [];
         // Stamp null-instanceId interactions as ext tabs, rebuild instance map
         for (const i of state.interactions) {
@@ -4631,6 +4833,7 @@
           else _hi = mid;
         }
         state.interactions.splice(_lo, 0, msg.interaction);
+        _touchFull(msg.interaction.id);
         // Auto-discover instance from interaction
         if (msg.interaction.instanceId && !knownInstances.has(msg.interaction.instanceId)) {
           knownInstances.set(msg.interaction.instanceId, {
@@ -4684,6 +4887,7 @@
       case 'interaction:complete':
         updateInteraction(msg.interaction);
         updateInspectorBusy();
+        _scheduleCompaction();
         break;
 
       case 'interaction:error':
@@ -4697,11 +4901,16 @@
         if (dIdx >= 0 && msg.interaction) {
           const localEvents = state.interactions[dIdx].response?.sseEvents;
           const localSubagent = state.interactions[dIdx].subagent;
+          const localInferred = state.interactions[dIdx]._subagentInferred;
           const localRespChars = state.interactions[dIdx]._respChars;
           state.interactions[dIdx] = { ...msg.interaction };
           if (localEvents?.length) state.interactions[dIdx].response.sseEvents = localEvents;
           if (localRespChars) state.interactions[dIdx]._respChars = localRespChars;
-          if (localSubagent && !state.interactions[dIdx].subagent) state.interactions[dIdx].subagent = localSubagent;
+          if (localSubagent && !state.interactions[dIdx].subagent) {
+            state.interactions[dIdx].subagent = localSubagent;
+            if (localInferred) state.interactions[dIdx]._subagentInferred = true;
+          }
+          _touchFull(msg.id);
           if (state.selection?.id === msg.id || state.selection?.interactionId === msg.id) {
             select(state.selection);
           }
@@ -4811,6 +5020,14 @@
         break;
       }
 
+      case 'inspector:sessionTotals': {
+        if (!msg.instanceId) break;
+        if (msg.totals) _sessionTotals.set(msg.instanceId, msg.totals);
+        else _sessionTotals.delete(msg.instanceId);
+        if (activeInstanceTab === msg.instanceId) updateStats();
+        break;
+      }
+
       case 'inspector:allLoaded': {
         const allInteractions = msg.interactions || [];
         const existingIds = new Set(state.interactions.map(i => i.id));
@@ -4854,6 +5071,7 @@
         const interaction = state.interactions.find(i => i.id === msg.interactionId);
         if (interaction) {
           interaction.subagent = msg.subagent;
+          delete interaction._subagentInferred;
           if (_timelineMode === 'parallel') {
             queueTimelineParallelRebuild();
           } else {

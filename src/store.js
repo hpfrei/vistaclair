@@ -3,6 +3,7 @@ const path = require('path');
 const { DATA_HOME } = require('./utils');
 const { getModelPricing } = require('./capabilities');
 const { TraceIndex } = require('./trace-index');
+const { SessionTotals } = require('./session-totals');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
 
@@ -30,6 +31,15 @@ class InteractionStore {
     this.traceIndexes = new Map();   // sessId → TraceIndex
     this.pendingRequestEnrich = new Map(); // request-id → true (awaiting trace resolution)
     this._broadcaster = null;
+
+    // Whole-session figures for the inspector footer; memory holds only the
+    // newest maxSize turns.
+    this.totals = new SessionTotals(INTERACTIONS_DIR, {
+      getPricing: (model) => getModelPricing(DATA_HOME, model),
+      onChange: (sessId, totals) => this._broadcaster?.broadcast({
+        type: 'inspector:sessionTotals', instanceId: `cli-${sessId}`, totals,
+      }),
+    });
 
     fs.mkdirSync(INTERACTIONS_DIR, { recursive: true });
     this._loadFromDisk();
@@ -309,6 +319,7 @@ class InteractionStore {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {}
     this.sessionSeqs.delete(sessId);
+    this.totals.forget(sessId);
   }
 
   // Drop headless (`claude -p` / ai.prompt) session dirs that have been idle
@@ -361,6 +372,7 @@ class InteractionStore {
       swept.push(sessId);
       bytes += size;
       this.sessionSeqs.delete(sessId);
+      this.totals.forget(sessId);
     }
 
     if (swept.length) this._evictSweptFromMemory(swept);
@@ -535,6 +547,7 @@ class InteractionStore {
     const reqId = interaction.response?.headers?.['request-id'];
     if (reqId) this.requestIdIndex.set(reqId, filePath);
     this._writeInteractionFile(filePath, fileContent, label);
+    this.totals.record(sessId, parseInt(path.basename(filePath), 10), interaction);
 
     // Resolve LLM turns to their owning thread the moment they complete. If the
     // transcript line isn't written yet, this queues the request-id for the
@@ -666,6 +679,7 @@ class InteractionStore {
       subagent: subagent || undefined,
       pricing: data.pricing || (req.model ? getModelPricing(DATA_HOME, req.model) : undefined),
       deleted: data.deleted || undefined,
+      rules: Array.isArray(data.rules) ? data.rules : undefined,
     };
     if (data.isHook) {
       interaction.isHook = true;
@@ -807,6 +821,7 @@ class InteractionStore {
       subagent: interaction.subagent || undefined,
       pricing: interaction.pricing || undefined,
       deleted: interaction.deleted || undefined,
+      rules: interaction.rules?.length ? interaction.rules : undefined,
     };
     if (interaction.isHook) {
       out.isHook = true;

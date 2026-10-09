@@ -411,7 +411,18 @@ function createProxyRouter(store, broadcaster, targetUrl) {
     };
 
     // --- Run proxy rules (may return response hooks) ---
+    // Each rule's effect on the request is measured: `interaction.rules` is one
+    // { id, delta } per enabled rule (chars of the JSON body it removed, negative,
+    // or added). The captured request is the post-rule body, so this is the only
+    // record of what a rule did — a rule that never moves the number is dead.
     const responseHooks = [];
+    interaction.rules = [];
+    let ruleBefore = JSON.stringify(body).length;
+    const accountRule = (rule) => {
+      const after = JSON.stringify(body).length;
+      interaction.rules.push({ id: rule.id, delta: after - ruleBefore });
+      ruleBefore = after;
+    };
     for (const rule of getEnabledRules()) {
       try {
         const ctx = {
@@ -427,6 +438,7 @@ function createProxyRouter(store, broadcaster, targetUrl) {
           helpers: { generateId, sendDummyResponse, parseSSEString, trackSSEEvent, enhancedAskTool },
         };
         const result = await rule.fn(ctx);
+        accountRule(rule);
         if (result === true) {
           interaction.request = { ...body };
           interaction.requestHeaders = filterRequestHeaders(req.headers);
@@ -444,6 +456,7 @@ function createProxyRouter(store, broadcaster, targetUrl) {
           responseHooks.push(result);
         }
       } catch (err) {
+        accountRule(rule);
         console.error(`[proxy] Rule "${rule.name}" (${rule.id}) threw:`, err.message);
       }
     }
