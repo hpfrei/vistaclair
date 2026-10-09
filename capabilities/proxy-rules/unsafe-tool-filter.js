@@ -13,7 +13,9 @@ module.exports = function(ctx) {
     'Artifact',
     'SendFeedback',
     'DesignSync',
-    'EndConversation'
+    'EndConversation',
+    'ArtifactComments',
+    'ArtifactData'
   ]);
   const REMOVED_PREFIXES = ['mcp__claude_ai_'];
 

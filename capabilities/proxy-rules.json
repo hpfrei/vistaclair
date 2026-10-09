@@ -42,13 +42,6 @@
     "builtin": true
   },
   {
-    "id": "strip-git-status",
-    "name": "Strip Git Status",
-    "slug": "Removes the gitStatus block (and everything after it) from system prompt messages — strips branch, status, and recent commits info injected by Claude Code",
-    "enabled": true,
-    "builtin": true
-  },
-  {
     "id": "title-schema-shortcut",
     "name": "Title Schema Shortcut",
     "slug": "Short-circuits requests where output_config.format is a json_schema with type 'object', a single required property 'title', and additionalProperties: false. Instead of calling the LLM, returns a dummy response with text '{\"title\":\"Dummy (by vistaclair)\"}' and zero token usage. This avoids spending tokens on Claude Code's automatic title-generation requests while keeping claude -p compatibility intact.",
