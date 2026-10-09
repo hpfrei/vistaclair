@@ -1,9 +1,10 @@
 // ============================================================
 // OpenAI Responses API provider adapter
 // Targets POST /v1/responses (NOT /chat/completions).
-// Used by OpenAI-native models; supports the built-in web_search
-// tool and richer reasoning-model tool calling. DeepSeek/Kimi/Ollama
-// stay on the Chat Completions adapter (openai.js).
+// Used by OpenAI-native models and xAI (Grok, which deprecated Chat
+// Completions); supports the built-in web_search tool and richer
+// reasoning-model tool calling. DeepSeek/Kimi/Ollama stay on the
+// Chat Completions adapter (openai.js).
 // ============================================================
 
 const BaseProvider = require('./base');
@@ -67,7 +68,11 @@ class OpenAIResponsesProvider extends BaseProvider {
       reqBody.max_output_tokens = body.max_tokens;
     }
 
-    if (body.thinking && body.thinking.type === 'enabled' && body.thinking.budget_tokens > 0) {
+    // xAI: only some Grok models accept reasoning.effort (others reject it, and
+    // on multi-agent it sets the agent count); Grok reasoning models always
+    // think at their own default, so the effort is never sent.
+    if (modelDef.providerKey !== 'xai' &&
+        body.thinking && body.thinking.type === 'enabled' && body.thinking.budget_tokens > 0) {
       reqBody.reasoning = { effort: this._budgetToEffort(body.thinking.budget_tokens) };
     }
 

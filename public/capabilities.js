@@ -326,6 +326,78 @@ Available templates in this skill directory:
     </div>`;
   }
 
+  function isActiveModel(m) {
+    return !m.disabled && m.lifecycle !== 'retired';
+  }
+
+  // Sections the user folded, kept across re-renders (every model:list re-renders).
+  const collapsedModelSections = new Set();
+
+  function renderModelSection(title, count, hint, cardsHtml) {
+    return `<details class="model-section" data-section="${escHtml(title)}"${collapsedModelSections.has(title) ? '' : ' open'}>
+      <summary class="model-section-head">
+        <span class="model-section-title">${escHtml(title)}</span>
+        <span class="view-tab-count">${count}</span>
+        <span class="model-section-hint">${hint}</span>
+      </summary>
+      <div class="model-card-grid">${cardsHtml}</div>
+    </details>`;
+  }
+
+  function renderModelCard(model) {
+    const ctx = model.contextWindow ? Math.round(model.contextWindow / 1000) + 'K' : '';
+    const out = model.maxOutputTokens ? Math.round(model.maxOutputTokens / 1000) + 'K' : '';
+    const specs = [ctx ? ctx + ' ctx' : '', out ? out + ' out' : ''].filter(Boolean).join(', ');
+    const pricing = model.inputCostPerMTok != null
+      ? `$${model.inputCostPerMTok} / $${model.outputCostPerMTok} per MTok`
+      : '';
+    const isRetired = model.lifecycle === 'retired';
+    const isDeprecated = model.lifecycle === 'deprecated';
+    const lifecycleClass = isRetired ? ' model-card-retired' : '';
+    const disabledClass = model.disabled ? ' model-card-disabled' : '';
+    const retiresLabel = isDeprecated
+      ? 'retiring' + (model.retiresAt ? ' ' + escHtml(model.retiresAt) : '')
+      : '';
+    return `<div class="model-card${disabledClass}${lifecycleClass}" data-name="${escHtml(model.name)}" data-kind="model">
+      <div class="model-card-top-row">
+        <div class="model-card-name">${escHtml(model.label || model.name)}</div>
+        <button class="model-toggle-btn" data-model="${escHtml(model.name)}" data-disabled="${model.disabled ? '1' : '0'}" title="${model.disabled ? 'Enable model' : 'Disable model'}">${model.disabled ? 'Enable' : 'Disable'}</button>
+      </div>
+      <div class="model-card-id"><code>${escHtml(model.modelId || '')}</code></div>
+      ${model.description ? '<div class="model-card-desc">' + escHtml(model.description) + '</div>' : ''}
+      <div class="model-card-meta">
+        ${model.isNew ? '<span class="cap-model-new-badge">new</span>' : ''}
+        ${isDeprecated ? '<span class="cap-model-deprecated-badge">' + retiresLabel + '</span>' : ''}
+        ${isRetired ? '<span class="cap-model-retired-badge">retired</span>' : ''}
+        ${model.disabled && !isRetired ? '<span class="cap-model-disabled-badge">disabled</span>' : ''}
+        ${model.reasoning ? '<span class="cap-model-reasoning">reasoning</span>' : ''}
+        ${specs ? '<span class="cap-model-specs">' + escHtml(specs) + '</span>' : ''}
+        ${pricing ? '<span class="cap-model-pricing">' + escHtml(pricing) + '</span>' : ''}
+      </div>
+    </div>`;
+  }
+
+  // Native models are display-only: no toggle, no edit modal (they are not
+  // registry entries — see src/native-models.js).
+  function renderNativeModelCard(model) {
+    const used = model.usedBy
+      ? `<span class="cap-model-usedby" title="Called by the platform's ${escHtml(model.usedBy)}">${escHtml(model.usedBy)}</span>`
+      : '<span class="cap-model-disabled-badge" title="Offered by the provider; no platform call uses it yet">not wired</span>';
+    return `<div class="model-card model-card-native" data-kind="native">
+      <div class="model-card-top-row">
+        <div class="model-card-name">${escHtml(model.label || model.modelId)}</div>
+        <span class="cap-model-native-badge" title="Called directly on the provider&rsquo;s API &mdash; not through Claude Code">native</span>
+      </div>
+      <div class="model-card-id"><code>${escHtml(model.modelId || '')}</code></div>
+      ${model.description ? '<div class="model-card-desc">' + escHtml(model.description) + '</div>' : ''}
+      <div class="model-card-meta">
+        <span class="cap-model-kind">${escHtml(model.kind || '')}</span>
+        ${used}
+        ${model.price ? '<span class="cap-model-pricing">' + escHtml(model.price) + '</span>' : ''}
+      </div>
+    </div>`;
+  }
+
   function renderModelsPanel() {
     const nav = document.getElementById('modelsNav');
     const list = document.getElementById('capModelList');
@@ -340,6 +412,13 @@ Available templates in this skill directory:
         btn.className = 'view-tab' + (activeProviderTab === prov.key || (!activeProviderTab && prov === state.providers[0]) ? ' active' : '');
         btn.dataset.provider = prov.key;
         btn.textContent = prov.label;
+        const activeCount = state.models.filter(m => m.providerKey === prov.key && isActiveModel(m)).length;
+        if (activeCount) {
+          const count = document.createElement('span');
+          count.className = 'view-tab-count';
+          count.textContent = activeCount;
+          btn.append(' ', count);
+        }
         nav.insertBefore(btn, actionBtn);
       }
       if ((!activeProviderTab || !state.providers.some(p => p.key === activeProviderTab)) && state.providers.length) activeProviderTab = state.providers[0].key;
@@ -367,46 +446,39 @@ Available templates in this skill directory:
       html += renderClaudeAuthSection();
     }
 
-    // Model cards
+    // Model cards: active first, then inactive (disabled, retired last), then
+    // the provider's native non-text models.
     const provModels = state.models.filter(m => m.providerKey === prov.key);
-    html += '<div class="model-card-grid">';
-    for (const model of provModels) {
-      const ctx = model.contextWindow ? Math.round(model.contextWindow / 1000) + 'K' : '';
-      const out = model.maxOutputTokens ? Math.round(model.maxOutputTokens / 1000) + 'K' : '';
-      const specs = [ctx ? ctx + ' ctx' : '', out ? out + ' out' : ''].filter(Boolean).join(', ');
-      const pricing = model.inputCostPerMTok != null
-        ? `$${model.inputCostPerMTok} / $${model.outputCostPerMTok} per MTok`
-        : '';
-      const isRetired = model.lifecycle === 'retired';
-      const isDeprecated = model.lifecycle === 'deprecated';
-      const lifecycleClass = isRetired ? ' model-card-retired' : '';
-      const disabledClass = model.disabled ? ' model-card-disabled' : '';
-      const retiresLabel = isDeprecated
-        ? 'retiring' + (model.retiresAt ? ' ' + escHtml(model.retiresAt) : '')
-        : '';
-      html += `<div class="model-card${disabledClass}${lifecycleClass}" data-name="${escHtml(model.name)}" data-kind="model">
-        <div class="model-card-top-row">
-          <div class="model-card-name">${escHtml(model.label || model.name)}</div>
-          <button class="model-toggle-btn" data-model="${escHtml(model.name)}" data-disabled="${model.disabled ? '1' : '0'}" title="${model.disabled ? 'Enable model' : 'Disable model'}">${model.disabled ? 'Enable' : 'Disable'}</button>
-        </div>
-        <div class="model-card-id"><code>${escHtml(model.modelId || '')}</code></div>
-        ${model.description ? '<div class="model-card-desc">' + escHtml(model.description) + '</div>' : ''}
-        <div class="model-card-meta">
-          ${model.isNew ? '<span class="cap-model-new-badge">new</span>' : ''}
-          ${isDeprecated ? '<span class="cap-model-deprecated-badge">' + retiresLabel + '</span>' : ''}
-          ${isRetired ? '<span class="cap-model-retired-badge">retired</span>' : ''}
-          ${model.disabled && !isRetired ? '<span class="cap-model-disabled-badge">disabled</span>' : ''}
-          ${model.reasoning ? '<span class="cap-model-reasoning">reasoning</span>' : ''}
-          ${specs ? '<span class="cap-model-specs">' + escHtml(specs) + '</span>' : ''}
-          ${pricing ? '<span class="cap-model-pricing">' + escHtml(pricing) + '</span>' : ''}
-        </div>
-      </div>`;
-    }
-    if (provModels.length === 0) {
+    const active = provModels.filter(isActiveModel);
+    const inactive = provModels.filter(m => !isActiveModel(m))
+      .sort((a, b) => (a.lifecycle === 'retired') - (b.lifecycle === 'retired'));
+    const native = prov.native || [];
+
+    if (provModels.length === 0 && native.length === 0) {
       html += '<div class="models-empty">No models for this provider.</div>';
     }
-    html += '</div>';
+    if (provModels.length) {
+      html += renderModelSection('Active', active.length,
+        'Text models &mdash; selectable in Claude Code and for app calls.',
+        active.length ? active.map(renderModelCard).join('') : '<div class="models-empty">No active models &mdash; enable one below.</div>');
+    }
+    if (inactive.length) {
+      html += renderModelSection('Inactive', inactive.length, 'Disabled or retired &mdash; never routed to.',
+        inactive.map(renderModelCard).join(''));
+    }
+    if (native.length) {
+      html += renderModelSection('Native', native.length,
+        'Speech, transcription, image and video models called directly on the provider&rsquo;s API &mdash; not through Claude Code.',
+        native.map(renderNativeModelCard).join(''));
+    }
     list.innerHTML = html;
+
+    list.querySelectorAll('details.model-section').forEach(d => {
+      d.addEventListener('toggle', () => {
+        if (d.open) collapsedModelSections.delete(d.dataset.section);
+        else collapsedModelSections.add(d.dataset.section);
+      });
+    });
 
     // Toggle button click (stop propagation to avoid opening edit modal)
     list.querySelectorAll('.model-toggle-btn').forEach(btn => {
@@ -419,7 +491,7 @@ Available templates in this skill directory:
     });
 
     // Card click → open edit modal
-    list.querySelectorAll('.model-card').forEach(card => {
+    list.querySelectorAll('.model-card[data-kind="model"]').forEach(card => {
       card.addEventListener('click', () => {
         const model = state.models.find(m => m.name === card.dataset.name);
         if (model) openModelModal(model);

@@ -172,14 +172,14 @@ function claudeAuthState() {
 
 // --- Model refresh ---------------------------------------------------------
 //
-// Phase 1 scans every provider's /models API (no model in the loop). Phase 2
-// fans out one short-lived headless Claude per provider whose only job is to
-// look current pricing up on the web and return JSON — the server does every
-// write. The tasks are independent, so a provider that fails or times out costs
-// only its own result, and the whole phase takes as long as its slowest lookup
-// rather than the sum of all of them.
+// Phase 1 scans every provider's /models API. Phase 2 reads the models.dev
+// catalog (one JSON, every provider's prices and limits) and merges it. Neither
+// has a model in the loop. Phase 3 looks at what is still unpriced among the
+// enabled models: nothing, in the normal case, and the refresh ends without a
+// spawn; otherwise ONE short-lived headless Claude looks those few up on the
+// web and returns JSON — the server does every write.
 
-// These tasks are fetch-a-page-and-emit-JSON work, so pin a fast model and low
+// The task is fetch-a-page-and-emit-JSON work, so pin a fast model and low
 // effort instead of inheriting whatever the account default is.
 const REFRESH_TASK_MODEL = 'sonnet';
 const REFRESH_TASK_EFFORT = 'low';
@@ -268,46 +268,36 @@ function runRefreshTask({ prompt, instanceId, proxyPort, timeoutMs = REFRESH_TAS
   });
 }
 
-function providerPricingPrompt(label, models) {
-  const list = models.map(m => `- ${m.modelId}${m.label && m.label !== m.modelId ? ` (${m.label})` : ''}`).join('\n');
-  return `Look up the current public API pricing for the ${label} models below and return it as JSON.
+// One prompt for every model still unpriced after the catalog merge, whatever
+// the provider. The reply is keyed providerKey → modelId so the server can
+// route each price to the right row.
+function gapPricingPrompt(gaps, labelOf) {
+  const byProvider = new Map();
+  for (const g of gaps) {
+    if (!byProvider.has(g.providerKey)) byProvider.set(g.providerKey, []);
+    byProvider.get(g.providerKey).push(g);
+  }
+  const sections = [...byProvider].map(([key, list]) => {
+    const rows = list.map(m => `  - ${m.modelId}${m.label && m.label !== m.modelId ? ` (${m.label})` : ''}`).join('\n');
+    return `${labelOf(key)} (providerKey "${key}"):\n${rows}`;
+  }).join('\n\n');
 
-Use WebSearch and WebFetch to find ${label}'s own official pricing page or API docs (the vendor's site, not a third-party aggregator or blog), then read the per-model rates.
+  return `Look up the current public API pricing for the models below and return it as JSON.
 
-Models (exact API model ids):
-${list}
+Use WebSearch and WebFetch to find each vendor's own official pricing page or API docs (the vendor's site, not a third-party aggregator or blog), then read the per-model rates.
+
+Models (exact API model ids, grouped by provider):
+${sections}
 
 Return ONE JSON object and nothing else — no prose, no markdown fence:
-{"models":{"<model id exactly as listed above>":{"inputCostPerMTok":<number>,"outputCostPerMTok":<number>,"cacheReadCostPerMTok":<number|null>,"cacheCreateCostPerMTok":<number|null>}}}
+{"models":{"<providerKey>":{"<model id exactly as listed>":{"inputCostPerMTok":<number>,"outputCostPerMTok":<number>,"cacheReadCostPerMTok":<number|null>,"cacheCreateCostPerMTok":<number|null>}}}}
 
 Rules:
 - Every figure is USD per MILLION tokens on the standard tier: not batch, not priority, not a discounted off-peak or promotional rate. Convert if the page quotes per 1K tokens.
 - A pricing table often labels a model with a marketing or version name rather than its API id. Match on the API model name the docs give for each row.
 - If the table separates cache-hit and cache-miss input prices, inputCostPerMTok is the cache-MISS price and cacheReadCostPerMTok is the cache-HIT price.
 - Use null for a rate the provider does not publish — most providers publish no cache-write price.
-- Price every model you can find. Omit one only if the provider genuinely does not list it, and never invent or extrapolate a number.`;
-}
-
-function anthropicCatalogPrompt(knownIds) {
-  return `Build the current Anthropic model catalog and return it as JSON.
-
-Read these pages with WebFetch before answering. Do not answer from memory: models released after your training cutoff are real, and their ids and prices are only on these pages.
-- https://platform.claude.com/docs/en/about-claude/models/overview.md (model ids, context windows, max output, current and legacy models)
-- https://platform.claude.com/docs/en/about-claude/pricing.md (full price table including cache read and cache write rates)
-- https://platform.claude.com/docs/en/about-claude/model-deprecations.md (deprecated and retired ids with retirement dates)
-- https://code.claude.com/docs/en/model-config (which model names the Claude Code CLI accepts with a [1m] suffix)
-
-Cover every Anthropic model id the CLI can still be pointed at — current models and legacy-but-still-served ones. The catalog currently knows about: ${knownIds.join(', ')}. Refresh those and add any others you find.
-
-Return ONE JSON object and nothing else — no prose, no markdown fence:
-{"models":{"<model id>":{"label":"<display name>","lifecycle":"current"|"deprecated"|"retired","retiresAt":"<ISO date, deprecated only>","context1m":true|false,"contextWindow":<number>,"maxOutputTokens":<number>,"inputCostPerMTok":<number>,"outputCostPerMTok":<number>,"cacheReadCostPerMTok":<number>,"cacheCreateCostPerMTok":<number>}}}
-
-Rules:
-- Keys are plain API model ids such as claude-opus-4-6. Never put a [1m] suffix or a date suffix in a key; 1M support is carried by the context1m flag.
-- context1m is true when the CLI accepts <id>[1m], i.e. the model can run with a 1M token context window.
-- lifecycle: "current" for supported models, "deprecated" for models announced for retirement but still served (include retiresAt), "retired" for models no longer served. Report retired ids too — they are kept and disabled, never deleted.
-- Prices are USD per MILLION tokens, standard tier, base (non-batch) rate. cacheCreateCostPerMTok is the 5-minute cache write rate.
-- Omit any field you cannot confirm from those pages rather than guessing.`;
+- Price every model you can find. Omit one only if the vendor genuinely does not list it, and never invent or extrapolate a number.`;
 }
 
 function handleModelRefresh(ws, bc) {
@@ -318,67 +308,75 @@ function handleModelRefresh(ws, bc) {
     lines.push(line);
     send({ type: 'model:refresh:status', text: line, lines: [...lines] });
   };
+  const broadcastModels = () => bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
   send({ type: 'model:refresh:status', text: 'Scanning providers for new models...' });
   caps.scanProviderModels(PROJECT_ROOT).then(async (scanResults) => {
     send({ type: 'model:refresh:scanned', results: scanResults });
-    bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
+    broadcastModels();
 
-    const allModels = caps.listModels(PROJECT_ROOT);
     const providers = caps.listProviders(PROJECT_ROOT);
     const labelOf = (key) => providers.find(p => p.key === key)?.label || key;
 
-    // One task per third-party provider, each seeing only its own models.
-    const byProvider = new Map();
-    for (const m of allModels) {
-      if (m.providerKey === 'anthropic' || m.lifecycle === 'retired' || !m.modelId) continue;
-      if (!byProvider.has(m.providerKey)) byProvider.set(m.providerKey, []);
-      byProvider.get(m.providerKey).push(m);
+    // Phase 2: the models.dev catalog, one HTTP read and no model in the loop.
+    let catalog = null;
+    try {
+      catalog = await caps.fetchModelsDevCatalog();
+    } catch (err) {
+      pushStatus(`models.dev: catalog lookup failed — ${err.message || err}`);
+    }
+    if (catalog) {
+      const applied = caps.applyModelsDevCatalog(PROJECT_ROOT, catalog);
+      const parts = [];
+      for (const [key, r] of Object.entries(applied)) {
+        const bits = [];
+        if (r.added.length) bits.push(`+${r.added.length} new`);
+        if (r.repriced.length) bits.push(`${r.repriced.length} repriced`);
+        if (r.deprecated.length) bits.push(`${r.deprecated.length} deprecated`);
+        const otherOnly = r.updated.length - new Set([...r.repriced, ...r.deprecated]).size;
+        if (otherOnly > 0) bits.push(`${otherOnly} detail${otherOnly === 1 ? '' : 's'}`);
+        parts.push(`${labelOf(key)} ${bits.length ? bits.join(', ') : 'current'}`);
+      }
+      pushStatus(`models.dev: ${parts.join('; ') || 'no supported provider configured'}`);
+      broadcastModels();
     }
 
-    const anthropicIds = allModels.filter(m => m.providerKey === 'anthropic').map(m => m.name);
-    const tasks = [
-      { key: 'anthropic', label: 'Anthropic', prompt: anthropicCatalogPrompt(anthropicIds) },
-      ...[...byProvider].map(([key, list]) => ({
-        key, label: labelOf(key), prompt: providerPricingPrompt(labelOf(key), list),
-      })),
-    ];
-
-    pushStatus(`Looking up pricing for ${tasks.length} provider${tasks.length === 1 ? '' : 's'} in parallel...`);
-
-    const stamp = Date.now();
-    let recon = null;
-    await Promise.all(tasks.map(async (task) => {
+    // Phase 3: decide whether a lookup is needed at all. Only an enabled model
+    // the catalog could not price justifies spawning anything, and then it is
+    // one process for all of them.
+    const gaps = caps.listUnpricedModels(PROJECT_ROOT);
+    if (!gaps.length) {
+      pushStatus('Every enabled model is priced — no lookup needed.');
+    } else {
+      pushStatus(`Looking up pricing for ${plural(gaps.length, 'model')} the catalog does not list...`);
       const res = await runRefreshTask({
-        prompt: task.prompt,
-        instanceId: `pricing-${task.key}-${stamp}`,
+        prompt: gapPricingPrompt(gaps, labelOf),
+        instanceId: `pricing-gaps-${Date.now()}`,
         proxyPort: bc._proxyPort,
       });
       if (!res.ok) {
-        pushStatus(`${task.label}: lookup failed — ${res.error}`);
-        return;
-      }
-      try {
-        if (task.key === 'anthropic') {
-          recon = caps.applyAnthropicCatalog(PROJECT_ROOT, res.data.models);
-          pushStatus(`Anthropic: ${recon.touched.length} catalog entries refreshed`);
-        } else {
-          const applied = caps.applyProviderPricing(PROJECT_ROOT, task.key, res.data.models);
-          pushStatus(applied.updated.length
-            ? `${task.label}: repriced ${applied.updated.length} model${applied.updated.length === 1 ? '' : 's'}`
-            : `${task.label}: pricing already current`);
+        pushStatus(`Pricing lookup failed — ${res.error}`);
+      } else {
+        for (const [key, models] of Object.entries(res.data.models)) {
+          if (!models || typeof models !== 'object') continue;
+          try {
+            const applied = caps.applyProviderPricing(PROJECT_ROOT, key, models);
+            if (key === 'anthropic') caps.applyAnthropicCatalog(PROJECT_ROOT, models);
+            pushStatus(applied.updated.length
+              ? `${labelOf(key)}: repriced ${plural(applied.updated.length, 'model')}`
+              : `${labelOf(key)}: nothing usable came back`);
+          } catch (err) {
+            pushStatus(`${labelOf(key)}: could not apply pricing — ${err.message || err}`);
+          }
         }
-      } catch (err) {
-        pushStatus(`${task.label}: could not apply pricing — ${err.message || err}`);
+        const still = caps.listUnpricedModels(PROJECT_ROOT);
+        if (still.length) pushStatus(`Still unpriced: ${still.map(m => m.modelId).join(', ')}`);
       }
-      bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
-    }));
+    }
 
-    const lifecycleNote = recon
-      ? ` Anthropic catalog: +${recon.added.length} new, ${recon.deprecated.length} deprecated, ${recon.retired.length} retired.`
-      : '';
-    send({ type: 'model:refresh:done', text: `Refresh complete.${lifecycleNote}`, lines: [...lines] });
-    bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
+    send({ type: 'model:refresh:done', text: 'Refresh complete.', lines: [...lines] });
+    broadcastModels();
   }).catch(err => {
     send({ type: 'model:refresh:error', error: err.message });
   });

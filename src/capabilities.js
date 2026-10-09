@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const { ensureDir, safeJoin, readJSON, writeJSON, tryRm, PACKAGE_ROOT, DATA_HOME } = require('./utils');
 const secretStore = require('./secret-store');
+const { nativeModelsFor } = require('./native-models');
 
 const KNOWN_TOOLS = [
   'Read', 'Write', 'Edit', 'NotebookEdit',
@@ -64,6 +65,7 @@ const PROVIDER_ADAPTER_MAP = {
   google: 'gemini',
   deepseek: 'openai',
   moonshot: 'openai',
+  xai: 'openai-responses',
   ollama: 'openai',
 };
 
@@ -457,6 +459,7 @@ function detectProviderKey(apiBaseUrl) {
   if (domain.includes('googleapis.com')) return 'google';
   if (domain.includes('deepseek.com')) return 'deepseek';
   if (domain.includes('moonshot.cn')) return 'moonshot';
+  if (domain.includes('x.ai')) return 'xai';
   if (domain.includes('localhost')) return 'ollama';
   return 'custom';
 }
@@ -945,6 +948,8 @@ function listProviders(baseDir) {
     label: p.label || key,
     apiBaseUrl: p.apiBaseUrl || '',
     apiKey: secrets.providerKeys?.[key] || p.apiKey || '',
+    // Non-text models called directly against this provider (display only)
+    native: nativeModelsFor(key),
   }));
 }
 
@@ -1221,6 +1226,202 @@ function applyAnthropicCatalog(baseDir, models) {
   return { ...recon, touched };
 }
 
+// --- models.dev catalog ---
+//
+// https://models.dev publishes one JSON with every provider's models, prices and
+// limits, so a refresh reads it once instead of asking a model to browse
+// pricing pages. Only the providers this registry knows are extracted; the
+// model `id` there is our `modelId`. The file is external input, so every field
+// is copied by name and type, exactly like the subprocess merges above.
+
+const MODELS_DEV_URL = 'https://models.dev/api.json';
+
+// models.dev provider id → our providerKey.
+const MODELS_DEV_PROVIDERS = {
+  anthropic: 'anthropic',
+  openai: 'openai',
+  google: 'google',
+  deepseek: 'deepseek',
+  moonshotai: 'moonshot',
+  xai: 'xai',
+};
+
+function _posInt(v) {
+  return (typeof v === 'number' && Number.isFinite(v) && v > 0) ? Math.round(v) : null;
+}
+
+// Reduce the raw models.dev document to { providerKey: { modelId: meta } } for
+// the supported providers. Non-text models (image, video, embeddings) carry no
+// chat price and are dropped. Anthropic's dated snapshot ids collapse onto the
+// undated family id, which is the only one the API routes.
+function normalizeModelsDevCatalog(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [devId, providerKey] of Object.entries(MODELS_DEV_PROVIDERS)) {
+    const models = raw[devId]?.models;
+    if (!models || typeof models !== 'object') continue;
+    const byId = {};
+    const entries = Object.values(models).filter(m => m && typeof m === 'object' && typeof m.id === 'string');
+    const ids = new Set(entries.map(m => m.id));
+    for (const m of entries) {
+      let id = m.id;
+      if (UNSAFE_KEY_RE.test(id)) continue;
+      if (providerKey === 'anthropic' && ANTHROPIC_DATED_RE.test(id)) {
+        const base = id.replace(ANTHROPIC_DATED_RE, '');
+        if (ids.has(base) || byId[base]) continue;
+        id = base;
+      }
+      const outputs = Array.isArray(m.modalities?.output) ? m.modalities.output : ['text'];
+      if (!outputs.includes('text')) continue;
+      const cost = (m.cost && typeof m.cost === 'object') ? m.cost : null;
+      if (!cost) continue;
+      const limit = (m.limit && typeof m.limit === 'object') ? m.limit : {};
+      byId[id] = {
+        modelId: id,
+        label: typeof m.name === 'string' ? m.name.replace(/\s*\(latest\)\s*$/i, '').trim().slice(0, 80) : '',
+        description: typeof m.description === 'string' ? m.description.trim().slice(0, 300) : '',
+        reasoning: !!m.reasoning,
+        deprecated: m.status === 'deprecated',
+        contextWindow: _posInt(limit.context),
+        maxOutputTokens: _posInt(limit.output),
+        inputCostPerMTok: _price(cost.input),
+        outputCostPerMTok: _price(cost.output),
+        cacheReadCostPerMTok: _price(cost.cache_read ?? null),
+        cacheCreateCostPerMTok: _price(cost.cache_write ?? null),
+      };
+    }
+    out[providerKey] = byId;
+  }
+  return out;
+}
+
+async function fetchModelsDevCatalog({ url = MODELS_DEV_URL, timeoutMs = 20000 } = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    return normalizeModelsDevCatalog(await res.json());
+  } catch (err) {
+    if (err?.name === 'AbortError') throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// A label the scan generated from the id, not one somebody chose.
+function _placeholderLabel(m) {
+  return !m.label || m.label === m.name || m.label === m.modelId;
+}
+
+// Copy catalog facts onto one registry entry: prices, limits, a real label for
+// a placeholder, a description where there is none, and current → deprecated.
+// Never touches `disabled`, never retires (absence from the catalog is not a
+// signal), never downgrades retired, and a rate the catalog lacks (null) never
+// erases one we already have. Returns what changed.
+function _applyCatalogMeta(entry, meta) {
+  const changes = { priced: false, deprecated: false, other: false };
+  for (const f of PRICING_FIELDS) {
+    const v = meta[f];
+    if (v === undefined || entry[f] === v) continue;
+    if (v === null && typeof entry[f] === 'number') continue;
+    entry[f] = v;
+    changes.priced = true;
+  }
+  for (const f of ['contextWindow', 'maxOutputTokens']) {
+    if (meta[f] != null && entry[f] !== meta[f]) { entry[f] = meta[f]; changes.other = true; }
+  }
+  if (meta.label && _placeholderLabel(entry) && entry.label !== meta.label) {
+    entry.label = meta.label;
+    changes.other = true;
+  }
+  if (meta.description && !entry.description) {
+    entry.description = meta.description;
+    changes.other = true;
+  }
+  if (meta.deprecated && (entry.lifecycle || 'current') === 'current') {
+    entry.lifecycle = 'deprecated';
+    changes.deprecated = true;
+  }
+  return changes;
+}
+
+// Apply a normalized models.dev catalog to models.json, keyed by providerKey +
+// modelId. Third-party providers are update-only: what exists is decided by the
+// provider's own /models scan, and a phantom row would be retired by the next
+// one. Anthropic has no scan, so its entries also land in anthropic-pricing.json
+// and reconcileAnthropicCatalog adds the missing ones.
+// Returns { [providerKey]: { updated, repriced, added, deprecated } } (names).
+function applyModelsDevCatalog(baseDir, catalog) {
+  const result = {};
+  if (!catalog || typeof catalog !== 'object') return result;
+  const data = readModelsFile(baseDir);
+  const known = new Set(Object.keys(data.providers));
+  let dirty = false;
+
+  for (const [providerKey, models] of Object.entries(catalog)) {
+    if (!known.has(providerKey) || !models || typeof models !== 'object') continue;
+    const r = { updated: [], repriced: [], added: [], deprecated: [] };
+    for (const entry of data.models) {
+      if (entry.providerKey !== providerKey) continue;
+      const meta = models[entry.modelId] || models[(entry.modelId || '').replace(ANTHROPIC_DATED_RE, '')];
+      if (!meta) continue;
+      const ch = _applyCatalogMeta(entry, meta);
+      const name = entry.label || entry.name;
+      if (ch.priced) r.repriced.push(name);
+      if (ch.deprecated) r.deprecated.push(name);
+      if (ch.priced || ch.deprecated || ch.other) { r.updated.push(name); dirty = true; }
+    }
+    result[providerKey] = r;
+  }
+  if (dirty) writeModelsFile(baseDir, data);
+
+  if (catalog.anthropic && known.has('anthropic')) {
+    const pricingPath = path.join(baseDir, 'capabilities', 'anthropic-pricing.json');
+    let file = {};
+    try { file = JSON.parse(fs.readFileSync(pricingPath, 'utf-8')) || {}; } catch {}
+    const out = {};
+    for (const [k, v] of Object.entries(file)) if (!UNSAFE_KEY_RE.test(k)) out[k] = v;
+    for (const [id, meta] of Object.entries(catalog.anthropic)) {
+      if (!/^claude-[a-z0-9.-]+$/i.test(id)) continue;
+      const entry = { ...(out[id] || {}) };
+      if (!entry.label && meta.label) entry.label = meta.label;
+      if (!entry.description && meta.description) entry.description = meta.description;
+      if (typeof entry.reasoning !== 'boolean') entry.reasoning = meta.reasoning;
+      if (meta.deprecated && (entry.lifecycle || 'current') === 'current') entry.lifecycle = 'deprecated';
+      if (!entry.lifecycle) entry.lifecycle = 'current';
+      if (meta.contextWindow != null) {
+        entry.contextWindow = meta.contextWindow;
+        entry.context1m = meta.contextWindow >= 1000000;
+      }
+      if (meta.maxOutputTokens != null) entry.maxOutputTokens = meta.maxOutputTokens;
+      for (const f of PRICING_FIELDS) {
+        if (meta[f] === undefined) continue;
+        if (meta[f] === null && typeof entry[f] === 'number') continue;
+        entry[f] = meta[f];
+      }
+      out[id] = entry;
+    }
+    ensureDir(path.join(baseDir, 'capabilities'));
+    fs.writeFileSync(pricingPath, JSON.stringify(out, null, 2) + '\n');
+    const recon = reconcileAnthropicCatalog(baseDir, { clearNew: false });
+    result.anthropic = result.anthropic || { updated: [], repriced: [], added: [], deprecated: [] };
+    result.anthropic.added = recon.added;
+  }
+  return result;
+}
+
+// The models a pricing lookup would still be for: enabled, not retired, and
+// missing an input or output price. Disabled rows are never routed, so their
+// price is nobody's concern.
+function listUnpricedModels(baseDir) {
+  return readModelsFile(baseDir).models
+    .filter(m => m.modelId && !m.disabled && (m.lifecycle || 'current') !== 'retired')
+    .filter(m => typeof m.inputCostPerMTok !== 'number' || typeof m.outputCostPerMTok !== 'number')
+    .map(m => ({ name: m.name, label: m.label, providerKey: m.providerKey, modelId: m.modelId }));
+}
+
 // --- Provider model scanning ---
 
 // Non-chat OpenAI models
@@ -1229,6 +1430,15 @@ const OPENAI_MODEL_EXCLUDE = /^(ft:|babbage|davinci|whisper|dall-e|text-embeddin
 const OPENAI_DATED_RE = /-(20\d{2}-\d{2}-\d{2})$|-chat-latest$/;
 // Non-text Gemini models, aliases, and pinned versions
 const GEMINI_MODEL_EXCLUDE = /tts|image|nano-banana|robotics|computer-use|deep-research|lyria|^gemma|-latest$|-customtools|-\d{3}$/i;
+// Non-text xAI models (Imagine image/video, voice), and multi-agent, which
+// takes no client function tools
+const XAI_MODEL_EXCLUDE = /imagine|image|video|voice|tts|stt|transcri|embed|multi-agent/i;
+
+function _scanExclude(providerKey, adapter) {
+  if (adapter === 'gemini') return GEMINI_MODEL_EXCLUDE;
+  if (providerKey === 'xai') return XAI_MODEL_EXCLUDE;
+  return OPENAI_MODEL_EXCLUDE;
+}
 // Dated Anthropic variants (claude-opus-4-7-20250715)
 const ANTHROPIC_DATED_RE = /-(\d{8})$/;
 
@@ -1356,7 +1566,7 @@ function _sanitizeModelName(modelId, existingNames) {
   return candidate;
 }
 
-async function _fetchOpenAICompatModels(apiBaseUrl, apiKey) {
+async function _fetchOpenAICompatModels(apiBaseUrl, apiKey, exclude = OPENAI_MODEL_EXCLUDE) {
   const url = apiBaseUrl.replace(/\/+$/, '') + '/models';
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15000);
@@ -1373,7 +1583,7 @@ async function _fetchOpenAICompatModels(apiBaseUrl, apiKey) {
     }
     const data = await res.json();
     const items = Array.isArray(data.data) ? data.data : [];
-    const filtered = items.filter(m => m.id && !OPENAI_MODEL_EXCLUDE.test(m.id));
+    const filtered = items.filter(m => m.id && !exclude.test(m.id));
     // Dedup dated variants: keep base name, drop dated suffixes
     const baseIds = new Set(filtered.map(m => m.id.replace(OPENAI_DATED_RE, '')));
     return filtered
@@ -1452,7 +1662,7 @@ async function scanProviderModels(baseDir) {
         try {
           const raw = adapter === 'gemini'
             ? await _fetchGeminiModels(prov.apiBaseUrl || '', apiKey)
-            : await _fetchOpenAICompatModels(prov.apiBaseUrl || '', apiKey);
+            : await _fetchOpenAICompatModels(prov.apiBaseUrl || '', apiKey, _scanExclude(key, adapter));
           return { key, adapter, raw };
         } catch (err) {
           return { key, error: err.message || String(err) };
@@ -1472,7 +1682,7 @@ async function scanProviderModels(baseDir) {
       results[key] = { status: 'error', error: res.error, added: [] };
       continue;
     }
-    const exclude = adapter === 'gemini' ? GEMINI_MODEL_EXCLUDE : OPENAI_MODEL_EXCLUDE;
+    const exclude = _scanExclude(key, adapter);
     const liveIds = new Set(raw.map(m => m.modelId));
     const added = [];
     const retired = [];
@@ -1551,6 +1761,10 @@ module.exports = {
   reconcileAnthropicCatalog,
   applyProviderPricing,
   applyAnthropicCatalog,
+  fetchModelsDevCatalog,
+  normalizeModelsDevCatalog,
+  applyModelsDevCatalog,
+  listUnpricedModels,
   listProxyRules,
   addProxyRule,
   toggleProxyRule,

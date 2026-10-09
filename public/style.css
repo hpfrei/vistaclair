@@ -4397,6 +4397,91 @@ footer {
   color: var(--text-dim);
 }
 
+/* --- Model sections: active, inactive, native --- */
+/* Plain headed groups, not the boxed disclosure the global details rule draws */
+details.model-section {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  box-shadow: none;
+}
+details.model-section > summary.model-section-head {
+  padding: 0 0 6px;
+  background: none;
+  font-size: inherit;
+}
+details.model-section[open] > summary.model-section-head { border-bottom: 1px solid var(--border); }
+.model-section + .model-section { margin-top: 22px; }
+.model-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.model-section-head::-webkit-details-marker { display: none; }
+.model-section-head::before {
+  content: '\25B8';
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform .15s;
+}
+.model-section[open] > .model-section-head::before { transform: rotate(90deg); }
+.model-section:not([open]) > .model-section-head { margin-bottom: 0; }
+.model-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-bright);
+}
+.model-section-head .view-tab-count { font-size: 10px; }
+.model-section-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: 4px;
+}
+.model-card-grid > .models-empty { grid-column: 1 / -1; padding: 12px; }
+
+/* Native (non-text, direct provider API) models: display only */
+.model-card.model-card-native { cursor: default; border-style: dashed; }
+.model-card.model-card-native:hover { transform: none; }
+.cap-model-native-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent, #2563eb) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #2563eb) 45%, transparent);
+  color: var(--accent, #2563eb);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.cap-model-kind {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--purple);
+  color: #fff;
+  opacity: .8;
+}
+.cap-model-usedby {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--font-mono, monospace);
+  background: color-mix(in srgb, var(--accent, #2563eb) 12%, transparent);
+  color: var(--text-bright);
+}
+
 /* --- Scan results --- */
 #capRefreshStatus small { color: var(--text-dim); line-height: 1.6; }
 

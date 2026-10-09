@@ -78,7 +78,7 @@ Open **http://localhost:3457** and log in with the auth token printed to the con
 
 **CLI** — Multi-tab Claude Code terminal in the browser. Per-session model routing, directory spawning, session save/resume. **Paste screenshots from clipboard or drag-drop files directly into a session** — works over a tunnel from any device. AskUserQuestion appears inline — answer from any browser and Claude continues.
 
-**Provider routing** — Route through Anthropic, OpenAI, Gemini, DeepSeek, Kimi, or Ollama. 40+ models pre-configured. The proxy translates Anthropic Messages API to the target format transparently.
+**Provider routing** — Route through Anthropic, OpenAI, Gemini, xAI (Grok), DeepSeek, Kimi, or Ollama. 40+ models pre-configured. The proxy translates Anthropic Messages API to the target format transparently.
 
 **Proxy rules** — JavaScript middleware that intercepts every request. Swap models, strip tools, inject prompts, short-circuit responses. Describe in English, vistaclair generates the JS. Hot-reloaded, toggleable.
 
