@@ -1,0 +1,74 @@
+{
+  "v": 1,
+  "updatedAt": 1790610309785,
+  "local": {
+    "preset": "unlimited",
+    "caps": {
+      "app": {
+        "day": "unlimited",
+        "month": "unlimited",
+        "subscribers": "count"
+      },
+      "principal": {
+        "day": "unlimited",
+        "month": "unlimited",
+        "subscribers": "count",
+        "source": "fixed"
+      },
+      "unattributed": {
+        "day": "unlimited",
+        "month": "unlimited"
+      }
+    },
+    "overrides": {},
+    "rate": {
+      "principalPerMinute": "unlimited",
+      "appPerMinute": "unlimited"
+    },
+    "alerts": {
+      "appDayPct": 80,
+      "anomalyFactor": 3
+    },
+    "storage": {
+      "dailyMB": "unlimited",
+      "subscribers": "count"
+    },
+    "paused": false
+  },
+  "deployed": {
+    "preset": "unlimited",
+    "caps": {
+      "app": {
+        "day": "unlimited",
+        "month": "unlimited",
+        "subscribers": "count"
+      },
+      "principal": {
+        "day": "unlimited",
+        "month": "unlimited",
+        "subscribers": "count",
+        "source": "fixed"
+      },
+      "unattributed": {
+        "day": "unlimited",
+        "month": "unlimited"
+      }
+    },
+    "overrides": {},
+    "rate": {
+      "principalPerMinute": "unlimited",
+      "appPerMinute": "unlimited"
+    },
+    "alerts": {
+      "appDayPct": 80,
+      "anomalyFactor": 3
+    },
+    "storage": {
+      "dailyMB": "unlimited",
+      "subscribers": "count"
+    },
+    "paused": false
+  },
+  "note": "Migrated on upgrade: kept unlimited (previous behaviour). Review before deploying.",
+  "migrated": 1790610309785
+}

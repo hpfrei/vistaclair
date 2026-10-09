@@ -36,3 +36,6 @@ mcp-broker/
 
 # Spend — track policy definitions, ignore accumulating ledgers
 spend-ledger/*.json
+
+# Change requests between apps and the platform — runtime state
+change-requests.json
