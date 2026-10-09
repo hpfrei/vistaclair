@@ -216,7 +216,6 @@ function openFilePreview(filePath) {
   if (!filePath) return;
   closeFilePreview();
 
-  const token = ++_previewToken;
   const name = _fileName(filePath);
   const ext = _fileExt(filePath);
   const rawUrl = '/api/raw-file?path=' + encodeURIComponent(filePath);
@@ -230,6 +229,7 @@ function openFilePreview(filePath) {
         <span class="dir-filename">${escHtml(name)}</span>
         <span class="dir-viewer-size file-preview-size"></span>
         <span class="file-preview-path" title="${escHtml(filePath)}">${escHtml(filePath)}</span>
+        <button class="dir-download-btn file-preview-reload" title="Reload from disk">⟳</button>
         <a class="dir-download-btn" href="${rawUrl}" target="_blank" rel="noopener" title="Open in new tab">↗</a>
         <a class="dir-download-btn" href="${rawUrl}" download="${escHtml(name)}" title="Download">⬇</a>
         <button class="dir-overlay-close" title="Close (Esc)">✕</button>
@@ -245,38 +245,57 @@ function openFilePreview(filePath) {
   const keyHandler = e => { if (e.key === 'Escape') { e.preventDefault(); closeFilePreview(); } };
   document.addEventListener('keydown', keyHandler);
 
-  _activePreview = { el: overlay, editor: null, keyHandler, filePath, token };
+  const preview = { el: overlay, editor: null, keyHandler, filePath, token: 0, asText: false, scrollTop: null };
+  _activePreview = preview;
 
   const content = overlay.querySelector('.dir-overlay-content');
   const sizeEl = overlay.querySelector('.file-preview-size');
 
-  // /api/file-info is only used to show the size and to report a missing file
-  // up front. If it is unavailable (older server), preview optimistically.
-  fetch('/api/file-info?path=' + encodeURIComponent(filePath))
-    .then(r => r.ok ? r.json() : null)
-    .then(info => {
-      if (_previewToken !== token) return;
-      if (info && !info.exists) {
-        content.innerHTML = `<div class="file-preview-empty">File not found on disk</div>`;
-        return;
-      }
-      if (info && info.isDirectory) {
-        content.innerHTML = `<div class="file-preview-empty">That path is a directory</div>`;
-        return;
-      }
-      if (info && sizeEl) sizeEl.textContent = formatBytes(info.size);
-      _renderFilePreview(filePath, ext, content, token, info ? info.size : null);
-    })
-    .catch(() => {
-      if (_previewToken === token) _renderFilePreview(filePath, ext, content, token, null);
-    });
+  // Each load takes a fresh token so a slow earlier load can't land on top.
+  // `bust` is appended to media URLs on reload so the browser refetches.
+  const load = bust => {
+    const token = ++_previewToken;
+    preview.token = token;
+    // /api/file-info is only used to show the size and to report a missing file
+    // up front. If it is unavailable (older server), preview optimistically.
+    fetch('/api/file-info?path=' + encodeURIComponent(filePath), { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null)
+      .then(info => {
+        if (_previewToken !== token) return;
+        if (info && !info.exists) {
+          content.innerHTML = `<div class="file-preview-empty">File not found on disk</div>`;
+          return;
+        }
+        if (info && info.isDirectory) {
+          content.innerHTML = `<div class="file-preview-empty">That path is a directory</div>`;
+          return;
+        }
+        if (info && sizeEl) sizeEl.textContent = formatBytes(info.size);
+        _renderFilePreview(filePath, ext, content, token, info ? info.size : null, bust);
+      })
+      .catch(() => {
+        if (_previewToken === token) _renderFilePreview(filePath, ext, content, token, null, bust);
+      });
+  };
 
+  // Reload re-reads the file in place, keeping the text scroll position.
+  overlay.querySelector('.file-preview-reload').addEventListener('click', () => {
+    if (_activePreview !== preview) return;
+    preview.scrollTop = preview.editor ? preview.editor.getScrollTop() : content.querySelector('.file-preview-plain') ? content.scrollTop : null;
+    try { preview.editor?.dispose(); } catch {}
+    preview.editor = null;
+    content.innerHTML = '';
+    if (sizeEl) sizeEl.textContent = '';
+    load(Date.now());
+  });
+
+  load(0);
   return overlay;
 }
 
-function _renderFilePreview(filePath, ext, content, token, size) {
-  const category = fileCategory(ext);
-  const rawUrl = '/api/raw-file?path=' + encodeURIComponent(filePath);
+function _renderFilePreview(filePath, ext, content, token, size, bust) {
+  const category = _activePreview?.asText ? 'text' : fileCategory(ext);
+  const rawUrl = '/api/raw-file?path=' + encodeURIComponent(filePath) + (bust ? '&v=' + bust : '');
 
   switch (category) {
     case 'image': {
@@ -300,7 +319,7 @@ function _renderFilePreview(filePath, ext, content, token, size) {
       const video = document.createElement('video');
       video.controls = true;
       video.preload = 'metadata';
-      video.src = '/api/video-stream?path=' + encodeURIComponent(filePath);
+      video.src = '/api/video-stream?path=' + encodeURIComponent(filePath) + (bust ? '&v=' + bust : '');
       content.appendChild(video);
       break;
     }
@@ -325,6 +344,7 @@ function _renderUnknownPreview(filePath, ext, content, token, size) {
   </div>`;
   content.querySelector('.file-preview-astext').addEventListener('click', () => {
     if (_previewToken !== token) return;
+    if (_activePreview) _activePreview.asText = true;
     content.innerHTML = '';
     _renderTextPreview(filePath, ext, content, token, size);
   });
@@ -338,7 +358,7 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
   content.innerHTML = '<div class="file-preview-empty">Loading…</div>';
   let text;
   try {
-    const resp = await fetch('/api/raw-file?path=' + encodeURIComponent(filePath));
+    const resp = await fetch('/api/raw-file?path=' + encodeURIComponent(filePath), { cache: 'no-store' });
     if (!resp.ok) throw new Error('load failed');
     // fetch resolves on headers — bail out before pulling a huge body down.
     const len = parseInt(resp.headers.get('content-length') || '', 10);
@@ -371,6 +391,7 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
     pre.className = 'file-preview-plain';
     pre.textContent = text;
     content.appendChild(pre);
+    if (_activePreview?.scrollTop != null) content.scrollTop = _activePreview.scrollTop;
     return;
   }
 
@@ -391,8 +412,10 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
     overviewRulerLanes: 0,
     scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
   });
-  if (_activePreview && _activePreview.token === token) _activePreview.editor = editor;
-  else editor.dispose();
+  if (_activePreview && _activePreview.token === token) {
+    _activePreview.editor = editor;
+    if (_activePreview.scrollTop != null) editor.setScrollTop(_activePreview.scrollTop);
+  } else editor.dispose();
 }
 
 // --- Markdown rendering (with HTML/SVG pass-through and MathJax) ---
