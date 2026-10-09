@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { pipeline } = require('stream');
 const { spawn } = require('child_process');
 const express = require('express');
 const { MIME_TYPES, DATA_HOME, ensureDir } = require('./utils');
@@ -131,14 +132,15 @@ function streamFile(req, res, file, mime) {
         'Accept-Ranges': 'bytes',
         'Content-Length': end - start + 1,
       });
-      fs.createReadStream(file, { start, end }).pipe(res);
+      // pipeline, not .pipe: an aborted range request must close the fd.
+      pipeline(fs.createReadStream(file, { start, end }), res, () => {});
       return;
     }
   }
   res.setHeader('Content-Type', mime);
   res.setHeader('Content-Length', size);
   res.setHeader('Accept-Ranges', 'bytes');
-  fs.createReadStream(file).pipe(res);
+  pipeline(fs.createReadStream(file), res, () => {});
 }
 
 function createApiRouter({ broadcaster, store, proxyPort, dashboardPort, authToken, cliSessionManager }) {
