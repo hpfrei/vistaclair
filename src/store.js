@@ -771,9 +771,17 @@ class InteractionStore {
     let files;
     try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch { return []; }
 
+    // Memory holds maxSize turns, so only the newest maxSize files can stay
+    // loaded anyway. Parsing the rest just to evict them — and returning them
+    // all — exhausts the heap on a long-running tab (30k turns, 6 GB), the
+    // same way an uncapped boot load did (see _loadFromDisk).
+    const newest = files
+      .map(file => ({ file, seqNum: parseInt(file) }))
+      .sort((a, b) => a.seqNum - b.seqNum)
+      .slice(-this.maxSize);
+
     const loaded = [];
-    for (const file of files) {
-      const seqNum = parseInt(file);
+    for (const { file, seqNum } of newest) {
       const filePath = path.join(dir, file);
       const interaction = this._parseInteractionFile(sessId, seqNum, filePath);
       if (!interaction) continue;

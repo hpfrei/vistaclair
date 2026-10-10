@@ -101,6 +101,34 @@ test('a resumed session appends turns instead of overwriting its history', async
   });
 });
 
+test('resuming an oversized session boot skipped loads only its newest turns', async () => {
+  const home = tmpHome();
+  const big = '99999999-8888-7777-6666-555555555555';
+  const recent = '12121212-3434-5656-7878-909090909090';
+  const maxSize = 4;
+  const write = (sessId, seq, mtime) => {
+    const dir = path.join(home, 'interactions', sessId);
+    fs.mkdirSync(dir, { recursive: true });
+    const fp = path.join(dir, `${seq}.json`);
+    fs.writeFileSync(fp, JSON.stringify({ id: `${sessId}-turn${seq}`, request: { timestamp: seq } }));
+    fs.utimesSync(fp, new Date(mtime), new Date(mtime));
+  };
+  // Another session wrote last, so boot fills memory from it and never reaches
+  // the big one — the resume then has to load the big session itself.
+  for (let seq = 1; seq <= 12; seq++) write(big, seq, 1_000_000 + seq * 1000);
+  for (let seq = 1; seq <= 5; seq++) write(recent, seq, 2_000_000 + seq * 1000);
+
+  const store = freshStore(home, maxSize);
+  assert.ok(store.getAll().every(i => i.instanceId === `cli-${recent}`), 'boot loads the newest session only');
+
+  store.registerSession(`cli-${big}`, big);
+  const historical = store.loadSessionIntoMemory(big);
+
+  assert.deepStrictEqual(historical.map(i => i.id), [9, 10, 11, 12].map(n => `${big}-turn${n}`));
+  assert.strictEqual(store.getAll().length, maxSize, 'memory stays at maxSize');
+  assert.strictEqual(store.sessionSeqs.get(big), 12, 'numbering still comes from every file');
+});
+
 test('a headless spawn sharing a tab session keeps appending', async () => {
   const home = tmpHome();
   const sessId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
