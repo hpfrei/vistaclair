@@ -384,11 +384,12 @@
       const close = document.createElement('span');
       close.className = 'tab-close';
       close.textContent = '×';
-      close.title = 'Close';
+      // Hover opens the close menu; click opens it too, for touch screens.
+      close.addEventListener('mouseenter', () => showCloseMenu(tabId, close));
+      close.addEventListener('mouseleave', scheduleCloseMenuClose);
       close.addEventListener('click', (e) => {
         e.stopPropagation();
-        sendWs({ type: 'cli:closeTab', tabId });
-        removeTab(tabId);
+        showCloseMenu(tabId, close);
       });
       btn.appendChild(close);
 
@@ -421,6 +422,67 @@
         renderTabStrip();
       }
     }
+  }
+
+  // --- Tab × menu: close, or close and drop the session from the resume list ---
+  let _closeMenuTimer = null;
+
+  function showCloseMenu(tabId, anchor) {
+    clearTimeout(_closeMenuTimer);
+    const existing = document.getElementById('cliCloseMenu');
+    if (existing?.dataset.tabId === tabId) return;
+    closeCloseMenu();
+    const menu = document.createElement('div');
+    menu.className = 'cli-new-menu cli-close-menu';
+    menu.id = 'cliCloseMenu';
+    menu.dataset.tabId = tabId;
+
+    const addItem = (text, forget) => {
+      const item = document.createElement('div');
+      item.className = 'cli-new-menu-item' + (forget ? ' cli-close-menu-forget' : '');
+      item.textContent = text;
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeCloseMenu();
+        sendWs({ type: 'cli:closeTab', tabId, forget });
+        removeTab(tabId);
+      });
+      menu.appendChild(item);
+    };
+    addItem('Close', false);
+    addItem('Close and remove interaction', true);
+
+    menu.addEventListener('mouseenter', () => clearTimeout(_closeMenuTimer));
+    menu.addEventListener('mouseleave', scheduleCloseMenuClose);
+    document.body.appendChild(menu);
+
+    const rect = anchor.getBoundingClientRect();
+    menu.style.position = 'fixed';
+    menu.style.top = rect.bottom + 4 + 'px';
+    const menuWidth = menu.offsetWidth;
+    let left = rect.left + rect.width / 2 - menuWidth / 2;
+    if (left + menuWidth > window.innerWidth - 8) left = window.innerWidth - menuWidth - 8;
+    if (left < 8) left = 8;
+    menu.style.left = left + 'px';
+
+    const onClickOutside = (e) => {
+      if (!menu.contains(e.target) && e.target !== anchor) closeCloseMenu();
+    };
+    menu._onClickOutside = onClickOutside;
+    setTimeout(() => document.addEventListener('click', onClickOutside, true), 0);
+  }
+
+  function scheduleCloseMenuClose() {
+    clearTimeout(_closeMenuTimer);
+    _closeMenuTimer = setTimeout(closeCloseMenu, 250);
+  }
+
+  function closeCloseMenu() {
+    clearTimeout(_closeMenuTimer);
+    const menu = document.getElementById('cliCloseMenu');
+    if (!menu) return;
+    document.removeEventListener('click', menu._onClickOutside, true);
+    menu.remove();
   }
 
   // --- "+" button: menu with New + saved sessions ---

@@ -1731,6 +1731,22 @@ async function scanProviderModels(baseDir) {
   return results;
 }
 
+// The registry refresh without a UI: the provider scan, then the models.dev
+// catalog. The Models page (ws/capabilities-handler.js) and Pro's daily model
+// review both run this; the page adds its pricing-gap lookup after it.
+// A catalog failure is reported, never thrown — the scan already landed.
+async function refreshModelRegistry(baseDir) {
+  const scan = await scanProviderModels(baseDir);
+  let catalog = null;
+  let catalogError = null;
+  try {
+    catalog = applyModelsDevCatalog(baseDir, await fetchModelsDevCatalog());
+  } catch (err) {
+    catalogError = err.message || String(err);
+  }
+  return { scan, catalog, catalogError };
+}
+
 module.exports = {
   KNOWN_TOOLS,
   PROVIDER_ADAPTER_MAP,
@@ -1758,6 +1774,7 @@ module.exports = {
   deleteProvider,
   getModelPricing,
   scanProviderModels,
+  refreshModelRegistry,
   reconcileAnthropicCatalog,
   applyProviderPricing,
   applyAnthropicCatalog,

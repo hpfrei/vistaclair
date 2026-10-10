@@ -118,6 +118,7 @@
   const inspectorTabStrip = document.getElementById('inspectorTabStrip');
   const _sessionTotals = new Map();     // CLI instanceId → whole-session totals from the server
   const _sessionTotalsAsked = new Set();
+  let _statsTab = null;                 // the tab the footer was last drawn for
 
   // --- External session tabs ---
   let extTabCounter = 0;
@@ -216,6 +217,10 @@
       inspectorTabStrip.appendChild(allBtn);
     } else if (activeInstanceTab === 'all' && knownInstances.size > 0) {
       activeInstanceTab = knownInstances.keys().next().value;
+      // After a reload the CLI tabs arrive (claude:instances, a resumed
+      // session) after init drew an empty footer; show the new tab properly
+      // unless the caller is about to.
+      queueMicrotask(() => { if (_statsTab !== activeInstanceTab) switchInstanceTab(activeInstanceTab); });
     }
     // Per-instance tabs
     for (const [id, info] of knownInstances) {
@@ -4628,6 +4633,7 @@
     const source = state.interactions;
     let inputTokens = 0, outputTokens = 0, cacheRead = 0, cacheCreate = 0, toolCallCount = 0, totalCost = 0;
     let hasCost = false;
+    _statsTab = activeInstanceTab;
     const sess = _activeSessionTotals();
     const counts = sess || _countTurns(source);
     if (sess) {
@@ -4987,8 +4993,13 @@
       case 'inspector:instancesCleared': {
         const cleared = new Set(msg.instanceIds || []);
         state.interactions = state.interactions.filter(i => !cleared.has(i.instanceId));
-        for (const id of cleared) knownInstances.delete(id);
-        if (cleared.has(activeInstanceTab)) activeInstanceTab = 'all';
+        // A running tab keeps its place, as on the server (removeInstances):
+        // Clear empties its timeline, but its footer still shows the whole
+        // session's totals.
+        for (const id of cleared) {
+          if (knownInstances.get(id)?.status !== 'running') knownInstances.delete(id);
+        }
+        if (!knownInstances.has(activeInstanceTab)) activeInstanceTab = 'all';
         renderInspectorTabStrip();
         renderTimelineActive();
         updateStats();

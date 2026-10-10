@@ -1352,6 +1352,7 @@ function handleMessage(msg) {
     case 'inspector:sessionLoaded':
     case 'inspector:allLoaded':
     case 'inspector:turnsDeleted':
+    case 'inspector:sessionTotals':
       window.inspectorModule?.handleMessage(msg);
       break;
 

@@ -48,8 +48,13 @@ function handleMessage(ws, msg, bc) {
     }
     case 'cli:closeTab':
       if (msg.tabId) {
+        // `forget` also drops the session from the resume list, the same as
+        // the × on a saved session in the "+" menu. Read the sessId first:
+        // remove() discards the session object.
+        const forgetId = msg.forget ? mgr.get(msg.tabId)?.sessId : null;
         clearPendingQuestionsForTab(msg.tabId);
         mgr.remove(msg.tabId);
+        if (forgetId) mgr.deleteSavedSession(forgetId);
         mgr.broadcastTabs();
       }
       break;

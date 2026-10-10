@@ -2000,6 +2000,11 @@ footer {
 .cli-new-menu-item:hover .cli-new-menu-del { opacity: 0.5; }
 .cli-new-menu-del:hover { opacity: 1 !important; color: var(--red, #f44); }
 
+/* CLI tab × menu */
+.cli-close-menu { min-width: 0; padding: 4px 0; }
+.cli-close-menu .cli-new-menu-item { padding: 7px 14px; white-space: nowrap; }
+.cli-close-menu-forget:hover { color: var(--red, #f44); }
+
 /* Settings modal */
 .modal-overlay {
   position: fixed;

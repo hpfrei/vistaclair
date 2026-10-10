@@ -121,8 +121,8 @@
     "outputCostPerMTok": 15,
     "cacheReadCostPerMTok": 0.3,
     "cacheCreateCostPerMTok": 3.75,
-    "context1m": true,
-    "contextWindow": 1000000,
+    "context1m": false,
+    "contextWindow": 200000,
     "maxOutputTokens": 64000,
     "description": "Balanced Claude model for coding, analysis, agent workflows, and cost control",
     "reasoning": true
@@ -292,7 +292,20 @@
     "maxOutputTokens": 128000,
     "inputCostPerMTok": 2,
     "outputCostPerMTok": 10,
-    "cacheReadCostPerMTok": 0.2,
+    "cacheReadCostPerMTok": 0.1,
     "cacheCreateCostPerMTok": 2.5
+  },
+  "claude-haiku-5-5": {
+    "label": "Claude Haiku 5.5",
+    "description": "Fast Claude model for responsive assistance, classification, and lightweight agents",
+    "reasoning": true,
+    "lifecycle": "current",
+    "contextWindow": 1000000,
+    "context1m": true,
+    "maxOutputTokens": 128000,
+    "inputCostPerMTok": 0.1,
+    "outputCostPerMTok": 0.5,
+    "cacheReadCostPerMTok": 0.01,
+    "cacheCreateCostPerMTok": 0.125
   }
 }

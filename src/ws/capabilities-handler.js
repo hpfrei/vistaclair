@@ -312,22 +312,17 @@ function handleModelRefresh(ws, bc) {
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
   send({ type: 'model:refresh:status', text: 'Scanning providers for new models...' });
-  caps.scanProviderModels(PROJECT_ROOT).then(async (scanResults) => {
+  // Phases 1+2 (provider scan, models.dev catalog) are the shared registry
+  // refresh — Pro's daily model review runs the same function.
+  caps.refreshModelRegistry(PROJECT_ROOT).then(async ({ scan: scanResults, catalog: applied, catalogError }) => {
     send({ type: 'model:refresh:scanned', results: scanResults });
     broadcastModels();
 
     const providers = caps.listProviders(PROJECT_ROOT);
     const labelOf = (key) => providers.find(p => p.key === key)?.label || key;
 
-    // Phase 2: the models.dev catalog, one HTTP read and no model in the loop.
-    let catalog = null;
-    try {
-      catalog = await caps.fetchModelsDevCatalog();
-    } catch (err) {
-      pushStatus(`models.dev: catalog lookup failed — ${err.message || err}`);
-    }
-    if (catalog) {
-      const applied = caps.applyModelsDevCatalog(PROJECT_ROOT, catalog);
+    if (catalogError) pushStatus(`models.dev: catalog lookup failed — ${catalogError}`);
+    if (applied) {
       const parts = [];
       for (const [key, r] of Object.entries(applied)) {
         const bits = [];

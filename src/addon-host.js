@@ -58,6 +58,12 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     // carries { usable, unusableReason, credential }. Pro projects these through
     // publicModelShape rather than re-deriving availability from key presence.
     listModelsWithAvailability: () => caps.listModelsWithAvailability(home),
+    // The non-text (speech / transcription / image / …) model catalog — what
+    // Pro's media calls resolve a `model` against. No secrets.
+    listNativeModels: () => require('./native-models').listNativeModels(),
+    // The registry refresh the Models page runs (provider scan + models.dev
+    // catalog), for Pro's daily model review. Resolves { scan, catalog, catalogError }.
+    refreshModels: () => caps.refreshModelRegistry(home),
     resolveAuth: (authMode) => caps.resolveAuth(home, { authMode }),
     claudeAuthInfo: () => ({
       hasSubscription: caps.hasClaudeSubscription(),
