@@ -2022,7 +2022,7 @@
       "cacheCreateCostPerMTok": 0.125,
       "lifecycle": "current",
       "retiresAt": null,
-      "isNew": true
+      "isNew": false
     }
   ]
 }
