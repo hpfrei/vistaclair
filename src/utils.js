@@ -156,6 +156,12 @@ function buildClaudeArgs(opts, { skipTools, outputFormat = 'stream-json' } = {})
 function buildCliArgs(settings) {
   const args = [];
   if (!settings) return args;
+  // The session's display name is also its cross-session messaging address
+  // (orchestration runs address sessions by it).
+  if (settings.name) args.push('--name', String(settings.name));
+  // Session-scoped subagent definitions, e.g. an orchestration worker's
+  // coder/explorer pair with their models fixed.
+  if (settings.agents && typeof settings.agents === 'object') args.push('--agents', JSON.stringify(settings.agents));
   return _appendCommonFlags(args, settings);
 }
 

@@ -160,6 +160,13 @@ class DashboardBroadcaster {
         }));
       }
 
+      // Questions still waiting for an answer (a new-CLI mode choice, an MCP
+      // AskUserQuestion): a reloaded or newly opened dashboard shows them again
+      // instead of leaving the asker waiting on a form nobody can see.
+      for (const pending of pendingQuestions.values()) {
+        if (pending.message) ws.send(JSON.stringify(pending.message));
+      }
+
       ws.on('message', (data) => {
         try {
           const msg = JSON.parse(data);

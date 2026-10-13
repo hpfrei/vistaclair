@@ -18,6 +18,8 @@ const mcp = require('./src/mcp');
 const { createLicensing } = require('./src/licensing');
 const addons = require('./src/addons');
 const { createAddonCtx } = require('./src/addon-host');
+const { createOrchestration } = require('./src/orchestration');
+const { createSessionControl } = require('./src/session-control');
 const { createAuth } = require('./src/auth');
 let proModule = null;   // the loaded ./vistaclair-pro module (for licensing/update)
 let proAddon = null;    // its registered descriptor (null until init succeeds)
@@ -265,6 +267,15 @@ dashboardApp.post('/api/hook-report', (req, res) => {
     if ((hookEvent === 'SubagentStop' || hookEvent === 'Stop') && sessId) {
       store.rescanTrace(sessId);
     }
+
+    // The reporter reproduces this answer (stdout, exit code): the pause channel
+    // into a plain session and its subagents. A run member gets its answer from
+    // its orchestration hook instead, so it is decided once per event.
+    const instanceId = interaction.instanceId;
+    const session = instanceId ? cliSessionManager.getByInstanceId(instanceId) : null;
+    if (session && !session.getSettings().orchestration) {
+      return res.json(sessionControl.reply(instanceId, hookData));
+    }
   } catch {}
   res.status(200).end();
 });
@@ -272,19 +283,19 @@ dashboardApp.post('/api/hook-report', (req, res) => {
 // AskUserQuestion endpoint — called by vista-AskUserQuestion MCP tool handler.
 // Broadcasts the question to the dashboard and waits for the user's answer.
 const { getInstanceContext } = require('./src/utils');
-let askSeq = 0;
 dashboardApp.post('/api/ask', async (req, res) => {
   if (!safeEqual(req.body?.token, AUTH_TOKEN)) return res.status(401).end();
   const { instanceId, formData, questions } = req.body;
-  const askId = `ask-${Date.now()}-${++askSeq}`;
   const ctx = instanceId ? getInstanceContext(instanceId) : null;
   const tabId = ctx?.tabId || null;
   const session = instanceId ? cliSessionManager.getByInstanceId(instanceId) : null;
   const title = session?.title || null;
   const cwd = session?.cwd || null;
 
-  const promise = new Promise((resolve, reject) => {
-    pendingQuestions.set(askId, { formData: formData || {}, questions: questions || [], resolve, reject, ctx });
+  let askId = null;
+  const promise = orchestration.askUser({
+    formData: formData || {}, questions: questions || [], ctx, title, cwd, tabId,
+    onPending: (id) => { askId = id; },
   });
 
   // If the MCP tool gives up (4h timeout) it destroys the socket; reject the
@@ -299,16 +310,6 @@ dashboardApp.post('/api/ask', async (req, res) => {
       broadcaster.broadcast({ type: 'ask:timeout', askId });
     }
   });
-
-  broadcaster.broadcast({
-    type: 'ask:question',
-    askId,
-    toolUseIds: [askId],
-    forms: [{ toolUseId: askId, formData: formData || {}, questions: questions || [] }],
-    title,
-    cwd,
-    ...(tabId ? { tabId } : {}),
-  });
   console.log(`[api/ask] Broadcasting ask:question askId=${askId} tabId=${tabId || '(none)'}`);
 
   try {
@@ -316,8 +317,6 @@ dashboardApp.post('/api/ask', async (req, res) => {
     res.json({ ok: true, answer });
   } catch (err) {
     res.json({ ok: false, error: err.message });
-  } finally {
-    pendingQuestions.delete(askId);
   }
 });
 
@@ -376,9 +375,29 @@ const dashboardServer = http.createServer(dashboardApp);
 
 const cliSessionManager = new CliSessionManager(PROXY_PORT, { broadcast: (...args) => broadcaster.broadcast(...args) }, store, { authToken: AUTH_TOKEN, dashboardPort: DASHBOARD_PORT });
 
+// Orchestrator CLI sessions and the one "new CLI" entry, openCli (asks Simple /
+// Orchestrator when the caller does not say). Owns the dashboard ask form too.
+// Live state of every CLI session (busy, subagents, TODO progress) from its hook
+// events, and pause / resume (src/session-control.js).
+const sessionControl = createSessionControl({
+  mgr: cliSessionManager,
+  broadcaster: { broadcast: (...args) => broadcaster.broadcast(...args) },
+});
+const orchestration = createOrchestration({
+  mgr: cliSessionManager,
+  broadcaster: { broadcast: (...args) => broadcaster.broadcast(...args) },
+  pendingQuestions,
+  coreRoot: PACKAGE_ROOT,
+  dataHome: DATA_HOME,
+  control: sessionControl,
+});
+cliSessionManager.addExitListener(orchestration.onSessionExit);
+
 // WebSocket server on dashboard (with auth)
 const wss = new WebSocketServer({ noServer: true });
 broadcaster = new DashboardBroadcaster(wss, store, { authToken: AUTH_TOKEN, proxyPort: PROXY_PORT, cliSessionManager });
+broadcaster.orchestration = orchestration;   // cli:open (src/ws/cli-handler.js)
+broadcaster.sessionControl = sessionControl; // cli:pause / cli:resumeSaved
 setProcessBroadcaster(broadcaster);
 store.setBroadcaster(broadcaster);
 
@@ -418,6 +437,7 @@ const addonCtx = createAddonCtx({
   dashboard: {
     authToken: AUTH_TOKEN, dashboardPort: DASHBOARD_PORT, proxyPort: PROXY_PORT,
     broadcaster, store, cliSessionManager,
+    openCli: orchestration.openCli,
     scheduleRestart: () => scheduleRestart(),
     pendingQuestions,
     clearPendingQuestionsForTab: createProxyRouter.clearPendingQuestionsForTab,
@@ -440,6 +460,9 @@ if (proModule) {
 addons.mountRouters(dashboardApp);
 
 ruleHandler.init({ broadcaster, store, proxyPort: PROXY_PORT, dashboardPort: DASHBOARD_PORT, authToken: AUTH_TOKEN });
+
+// Orchestration runs: hook decisions, worker launch/report tools, the run board.
+dashboardApp.use('/api/orchestration', orchestration.router());
 
 // Mount REST API
 dashboardApp.use('/api', createApiRouter({ broadcaster, store, proxyPort: PROXY_PORT, dashboardPort: DASHBOARD_PORT, authToken: AUTH_TOKEN, cliSessionManager }));
@@ -609,11 +632,12 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
       console.log(`  Hooks: removed project-scope reporter copies from ${swept.removed} dir(s) (reporters now live in ~/.claude/settings.json)`);
     }
 
-    // Bring back the CLI tabs that were open when the previous process stopped.
-    // Server-owned, so it happens whether or not a dashboard is connected.
-    const restore = cliSessionManager.restoreOpenTabs();
-    if (restore.restored || restore.dropped) {
-      console.log(`  CLI tabs: restoring ${restore.restored}${restore.dropped ? `, dropped ${restore.dropped}` : ''}`);
+    // The CLI tabs the previous process left open go to the saved sessions (the
+    // "+" menu), marked interrupted when they were mid-turn. Nothing reopens by
+    // itself unless the owner opted into reopening plain tabs.
+    const boot = cliSessionManager.bootOpenTabs();
+    if (boot.restored || boot.dropped || boot.archived) {
+      console.log(`  CLI tabs: ${boot.archived || 0} saved for resume${boot.restored ? `, restoring ${boot.restored}` : ''}${boot.dropped ? `, dropped ${boot.dropped}` : ''}`);
     }
 
     // Reclaim idle headless (`claude -p`) interaction dirs. Runs after the tab

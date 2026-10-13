@@ -72,7 +72,7 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
   };
 
   if (dashboard) {
-    const { broadcaster, store, cliSessionManager, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab, isOwnerRequest } = dashboard;
+    const { broadcaster, store, cliSessionManager, openCli, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab, isOwnerRequest } = dashboard;
     // server.js resolves these itself (AUTH_TOKEN may be generated at boot
     // rather than read from env) — its values win over the raw environment.
     if (dashboard.authToken) shared.authToken = dashboard.authToken;
@@ -82,6 +82,10 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       ...shared,
       broadcaster, store, cliSessionManager, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab,
       isOwnerRequest,
+      // The user-facing "new CLI" entry (src/orchestration.js): `mode` 'simple' |
+      // 'orchestrator', or unset to ask the user. Resolves { tabId, mode } or
+      // { cancelled: true }. launchSession stays the never-asking primitive.
+      openCli,
       // Whether external (Telegram) login is configured — one of the signals
       // Pro's deployment-mode detection reads (spend policies differ by mode).
       tgLoginConfigured: typeof dashboard.tgLoginConfigured === 'function' ? dashboard.tgLoginConfigured : () => false,

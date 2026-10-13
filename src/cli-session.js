@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const caps = require('./capabilities');
+const { conventionNote } = require('./session-folders');
 const { buildCliArgs, spawnClaudePty, sanitizeForDashboard, killGracefully, PACKAGE_ROOT, DATA_HOME } = require('./utils');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
@@ -89,10 +90,13 @@ class CliSession {
     }
 
     const safetyNote = `IMPORTANT: A Vistaclair control-room server is running from ${PROJECT_ROOT}. Never restart, stop, kill, or interfere with this server process or its ports. Do not run commands like "npm restart", "kill", "pkill", or "lsof ... | kill" targeting it.`;
+    // The session folder convention (TODO.md / NOTES.md) and the trusted
+    // pause/resume channel ride along with the safety note (session-folders.js).
+    const notes = this.settings.sessionDir ? `${safetyNote}\n\n${conventionNote(this.settings.sessionDir)}` : safetyNote;
     const mergedSettings = { ...this.settings };
     mergedSettings.appendSystemPrompt = mergedSettings.appendSystemPrompt
-      ? mergedSettings.appendSystemPrompt + '\n\n' + safetyNote
-      : safetyNote;
+      ? mergedSettings.appendSystemPrompt + '\n\n' + notes
+      : notes;
     const args = ['--dangerously-skip-permissions', ...buildCliArgs(mergedSettings)];
     if (resumeSessionId) {
       args.push('--resume', resumeSessionId);
@@ -313,16 +317,48 @@ class CliSession {
   }
 
   _buildMcpConfig() {
+    const servers = { ...this._integratedMcpServer(), ...this._orchestratorMcpServer() };
+    if (Object.keys(servers).length === 0) return null;
+    const config = { mcpServers: servers };
+
+    // Random part: two tabs spawned in the same millisecond must not share (and
+    // then delete) one config file.
+    const tmpFile = path.join(os.tmpdir(), `vistaclair-cli-mcp-${Date.now()}-${process.pid}-${crypto.randomBytes(3).toString('hex')}.json`);
+    fs.writeFileSync(tmpFile, JSON.stringify(config, null, 2));
+    this._mcpConfigFile = tmpFile;
+    return tmpFile;
+  }
+
+  // The tools of an orchestration run (src/orchestration.js), only for a
+  // session stamped with a role. The role picks the tool set.
+  _orchestratorMcpServer() {
+    const role = this.settings.orchestration?.role;
+    if (role !== 'orchestrator' && role !== 'worker') return {};
+    return {
+      orchestrator: {
+        command: 'node',
+        args: [path.join(PACKAGE_ROOT, 'lib', 'orchestrator-mcp.js')],
+        env: {
+          VISTACLAIR_DASHBOARD_PORT: String(this._dashboardPort || process.env.DASHBOARD_PORT || '3457'),
+          VISTACLAIR_AUTH_TOKEN: String(this._authToken || process.env.AUTH_TOKEN || ''),
+          VISTACLAIR_INSTANCE_ID: this.instanceId,
+          VISTACLAIR_ORCH_ROLE: role,
+        },
+      },
+    };
+  }
+
+  _integratedMcpServer() {
     let mcpServers;
     try {
       mcpServers = require('./mcp/servers');
-    } catch { return null; }
+    } catch { return {}; }
 
     const meta = mcpServers.readMeta();
-    if (!meta) return null;
+    if (!meta) return {};
 
     const enabledTools = (meta.tools || []).filter(t => t.enabled);
-    if (enabledTools.length === 0) return null;
+    if (enabledTools.length === 0) return {};
 
     const bridgePath = path.join(PACKAGE_ROOT, 'lib', 'mcp-bridge.js');
 
@@ -341,20 +377,13 @@ class CliSession {
     env.VISTACLAIR_SERVER_SLUG = mcpServers.INTEGRATED_SLUG;
     env.VISTACLAIR_INSTANCE_ID = this.instanceId;
 
-    const config = {
-      mcpServers: {
-        [mcpServers.INTEGRATED_SLUG]: {
-          command: 'node',
-          args: [bridgePath, mcpServers.INTEGRATED_SLUG],
-          env,
-        },
+    return {
+      [mcpServers.INTEGRATED_SLUG]: {
+        command: 'node',
+        args: [bridgePath, mcpServers.INTEGRATED_SLUG],
+        env,
       },
     };
-
-    const tmpFile = path.join(os.tmpdir(), `vistaclair-cli-mcp-${Date.now()}-${process.pid}.json`);
-    fs.writeFileSync(tmpFile, JSON.stringify(config, null, 2));
-    this._mcpConfigFile = tmpFile;
-    return tmpFile;
   }
 }
 

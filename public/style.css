@@ -1912,6 +1912,55 @@ footer {
   flex-shrink: 0;
 }
 .cli-new-menu-session-running { opacity: 0.85; }
+/* Pause / resume: run members grouped under their orchestrator */
+.cli-new-menu-session-worker {
+  margin-left: 18px;
+  border-left: 2px solid var(--border, rgba(255,255,255,0.12));
+}
+.cli-new-menu-state {
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+  background: var(--bg-hover, rgba(255,255,255,0.08));
+  color: var(--text-dim, #888);
+}
+.cli-new-menu-paused { color: var(--accent, #6688cc); background: color-mix(in srgb, var(--accent, #6688cc) 18%, transparent); }
+.cli-new-menu-interrupted { color: var(--orange, #e0a040); background: color-mix(in srgb, var(--orange, #e0a040) 18%, transparent); }
+.cli-new-menu-progress {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cli-new-menu-actions { display: flex; gap: 6px; margin-top: 5px; }
+.cli-new-menu-action {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border, rgba(255,255,255,0.18));
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.cli-new-menu-action:hover { background: var(--bg-hover, rgba(255,255,255,0.08)); }
+.cli-pause-btn.pausing { color: var(--orange, #e0a040); }
+.view-tab.cli-tab-pausing .cli-tab-label { font-style: italic; opacity: 0.75; }
+.cli-run-board-controls { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.cli-run-board-action {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border, rgba(255,255,255,0.18));
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.cli-run-board-action:disabled { opacity: 0.45; cursor: default; }
+.cli-run-board-hint { font-size: 12px; color: var(--orange, #e0a040); }
 .cli-new-menu-time-row {
   display: flex;
   align-items: center;

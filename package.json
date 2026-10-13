@@ -57,7 +57,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js dev",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "test:e2e:pause": "node test/e2e/pause-resume.e2e.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

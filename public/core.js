@@ -1536,6 +1536,12 @@ function handleMessage(msg) {
     case 'cli:newTab':
     case 'cli:settingsData':
     case 'cli:savedSessions':
+    case 'cli:opened':
+    case 'cli:lastTurnRemoved':
+    case 'cli:actionResult':
+    case 'cli:closeRefused':
+    case 'cli:deleteRefused':
+    case 'cli:paused':
       if (window.directoriesModule?.handleShellMessage?.(msg)) break;
       window.cliModule?.handleMessage(msg);
       break;

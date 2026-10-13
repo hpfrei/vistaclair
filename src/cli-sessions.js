@@ -4,10 +4,14 @@ const path = require('path');
 const crypto = require('crypto');
 const CliSession = require('./cli-session');
 const caps = require('./capabilities');
+const folders = require('./session-folders');
 const { readJSON, writeJSON, tryRm, DATA_HOME, PACKAGE_ROOT } = require('./utils');
 
 const HISTORY_FILE = path.join(DATA_HOME, 'data', 'cli-history.json');
 const OPEN_TABS_FILE = path.join(DATA_HOME, 'data', 'cli-open-tabs.json');
+// Default root of the per-session folders (TODO.md, NOTES.md); a launch may
+// name its own (settings.sessionsRoot — Pro puts an app's inside the app).
+const SESSIONS_ROOT = path.join(DATA_HOME, 'data', 'sessions');
 // Gap between staggered restore spawns, so a large manifest does not fork every
 // `claude` process at the same instant.
 const RESTORE_STAGGER_MS = 500;
@@ -21,6 +25,13 @@ const CLAUDE_CONFIG_DIR = path.join(os.homedir(), '.claude');
 // The native transcript `--resume` reads for a session started in `cwd`.
 function _jsonlPath(cwd, sessId) {
   return path.join(CLAUDE_CONFIG_DIR, 'projects', cwd.replace(/\//g, '-'), `${sessId}.jsonl`);
+}
+
+// A session folder is only ever removed where session-folders put it: a
+// `<root>/sessions/<key>` directory. Anything else in settings is left alone.
+function removeSessionFolder(dir) {
+  if (!dir || path.basename(path.dirname(dir)) !== 'sessions') return;
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 }
 
 function deleteFullSessionData(store, sessId, cwd) {
@@ -91,6 +102,9 @@ class CliSessionManager {
     this.opts = opts;
     this.sessions = new Map();
     this._exitCallbacks = new Map();
+    // Listeners for every tab's exit (addExitListener), unlike the one-shot
+    // per-tab onExit callback. Called with the session before it is dropped.
+    this._exitListeners = [];
     // Per-process identity. Tab IDs embed this so they can never collide with
     // tab IDs minted by a previous server process, and clients use it to detect
     // a restart on any reconnect (even a seamless one without a page reload).
@@ -139,6 +153,7 @@ class CliSessionManager {
       this._exitCallbacks.delete(tabId);
       try { cb(tabId); } catch (e) { console.error('Session exit callback error:', e); }
     }
+    this._notifyExit(tabId, session);
     this.sessions.delete(tabId);
     this._persistOpenTabs();
     this.broadcastTabs();
@@ -158,12 +173,15 @@ class CliSessionManager {
     return readJSON(HISTORY_FILE, []);
   }
 
+  // `flags` ({ paused, interrupted, pausedAt }) mark how a session left; any
+  // later save without them (a resume's spawn) clears them.
   saveToHistory(entry) {
     const history = this._loadHistory();
     const sessId = entry.sessId || `sess-${Date.now()}`;
     const existing = history.find(h => h.id === sessId);
     const deduped = history.filter(h => h.id !== sessId);
     const now = Date.now();
+    const flags = entry.flags || {};
     deduped.unshift({
       id: sessId,
       cwd: entry.cwd,
@@ -172,16 +190,33 @@ class CliSessionManager {
       autoMemory: entry.autoMemory === true,
       startedAt: existing?.startedAt || now,
       savedAt: now,
+      ...(flags.paused ? { paused: true } : {}),
+      ...(flags.interrupted ? { interrupted: true } : {}),
+      ...(flags.pausedAt ? { pausedAt: flags.pausedAt } : {}),
     });
     writeJSON(HISTORY_FILE, deduped);
     this.recordRecentDir(entry.cwd);
   }
 
+  findSaved(id) {
+    return this._loadHistory().find(h => h.id === id) || null;
+  }
+
+  // The raw history, newest first (orchestration finds a paused run's members).
+  listSaved() {
+    return this._loadHistory();
+  }
+
+  // Drop a history entry without touching its transcript (a superseded run
+  // member: the fresh session replacing it carries the state forward).
+  forgetSaved(id) {
+    writeJSON(HISTORY_FILE, this._loadHistory().filter(h => h.id !== id));
+  }
+
   // --- Open-tab manifest ---
-  // The set of tabs to bring back after a restart, owned by the server. The
-  // client no longer replays a sessionStorage record, so recovery cannot race
-  // between browser windows and no longer depends on a dashboard being open when
-  // the server restarts. Entries store session *identity*, never tabIds:
+  // The tabs open right now, owned by the server and rewritten on every change,
+  // so it is current even after a crash. At boot its entries go to the saved
+  // sessions (bootOpenTabs). Entries store session *identity*, never tabIds:
   // nextTabId deliberately embeds the per-process bootId so a tabId must not
   // outlive its process.
   _persistOpenTabs() {
@@ -194,29 +229,74 @@ class CliSessionManager {
     if (this._restoring || this._shuttingDown) return;
     const entries = [];
     for (const [tabId, session] of this.sessions) {
-      if (session.hidden) continue;          // app-driven, hidden from the strip
-      if (tabId.startsWith('app-')) continue; // app action tabs, not user tabs
       if (!session.cwd) continue;             // created but never spawned
+      const settings = session.getSettings();
       entries.push({
         sessId: session.sessId || null,
         kind: session.kind === 'shell' ? 'shell' : 'cli',
         cwd: session.cwd,
         title: session.title || null,
-        settings: session.getSettings(),
+        settings,
         autoMemory: session.autoMemory === true,
+        // Mid-turn when the process died: the boot archive marks it interrupted.
+        busy: session.busy === true,
+        // Only a plain user tab may reopen by itself (cli.reopenTabsAtBoot):
+        // app action tabs, hidden tabs and orchestration run members come back
+        // only from the "+" menu, where a run is resumed as a whole.
+        reopenable: !session.hidden && !tabId.startsWith('app-') && !settings.orchestration,
       });
     }
     writeJSON(OPEN_TABS_FILE, entries);
   }
 
-  // Bring back the tabs that were open when the previous process stopped. Called
-  // once at startup. Tabs that cannot be restored are reported on
-  // `this.droppedTabs` so the UI can say what went missing instead of letting
-  // them vanish silently.
+  // A session's busy flag changed (session-control): the manifest must know, so
+  // a crash right now still leaves an "interrupted" marker.
+  noteSessionState() {
+    this._persistOpenTabs();
+  }
+
+  // Boot: what to do with the tabs the previous process left open. By default
+  // nothing reopens — every one of them goes to the "+" menu (archiveOpenTabs).
+  // The owner can opt back into reopening plain tabs (app-prefs
+  // `cliReopenTabsAtBoot`); run members and app tabs are archived either way.
+  bootOpenTabs() {
+    const reopen = caps.readAppPrefs(DATA_HOME).cliReopenTabsAtBoot === true;
+    if (!reopen) return { restored: 0, ...this.archiveOpenTabs() };
+    return this.restoreOpenTabs();
+  }
+
+  // Move every manifest entry into the saved sessions (history) without
+  // spawning anything. An entry that was mid-turn is marked interrupted. This is
+  // what covers a crash or power loss, where saveAllToHistory never ran.
+  archiveOpenTabs(pred = () => true) {
+    const entries = readJSON(OPEN_TABS_FILE, []);
+    let archived = 0;
+    const rest = [];
+    for (const e of Array.isArray(entries) ? entries : []) {
+      if (!e || !e.cwd || e.kind === 'shell' || !e.sessId) continue;
+      if (!pred(e)) { rest.push(e); continue; }
+      if (!this._transcriptExists(e.cwd, e.sessId)) continue;
+      const saved = this.findSaved(e.sessId);
+      this.saveToHistory({
+        sessId: e.sessId, cwd: e.cwd, title: e.title, settings: e.settings, autoMemory: e.autoMemory,
+        // A pause that completed already wrote its flags; keep them.
+        flags: saved?.paused ? { paused: true, pausedAt: saved.pausedAt } : e.busy ? { interrupted: true, pausedAt: Date.now() } : {},
+      });
+      archived++;
+    }
+    writeJSON(OPEN_TABS_FILE, rest);
+    return { archived };
+  }
+
+  // Bring back the plain tabs that were open when the previous process stopped
+  // (only with cliReopenTabsAtBoot). Everything else is archived first. Tabs
+  // that cannot be restored are reported on `this.droppedTabs` so the UI can
+  // say what went missing instead of letting them vanish silently.
   restoreOpenTabs() {
+    const { archived } = this.archiveOpenTabs(e => e.reopenable === false || this.findSaved(e.sessId)?.paused === true);
     const entries = readJSON(OPEN_TABS_FILE, []);
     this.droppedTabs = [];
-    if (!Array.isArray(entries) || entries.length === 0) return { restored: 0, dropped: 0 };
+    if (!Array.isArray(entries) || entries.length === 0) return { restored: 0, dropped: 0, archived };
 
     const toRestore = [];
     for (const e of entries) {
@@ -240,7 +320,7 @@ class CliSessionManager {
 
     if (toRestore.length === 0) {
       this._persistOpenTabs();
-      return { restored: 0, dropped: this.droppedTabs.length };
+      return { restored: 0, dropped: this.droppedTabs.length, archived };
     }
 
     this._restoring = true;
@@ -258,7 +338,7 @@ class CliSessionManager {
         }
       }, i * RESTORE_STAGGER_MS);
     });
-    return { restored: toRestore.length, dropped: this.droppedTabs.length };
+    return { restored: toRestore.length, dropped: this.droppedTabs.length, archived };
   }
 
   _restoreOne(entry) {
@@ -299,6 +379,7 @@ class CliSessionManager {
     for (const session of this.sessions.values()) {
       if (session.sessId && session.running) runningIds.add(session.sessId);
     }
+    const runs = new Map();   // runDir -> run.json, read once per call
     for (const entry of history) {
       const stat = this._getJsonlStat(entry);
       entry.jsonlSize = stat.size;
@@ -306,8 +387,30 @@ class CliSessionManager {
       entry.lastEntrySize = stat.lastEntrySize;
       if (!entry.startedAt) entry.startedAt = entry.savedAt;
       entry.isRunning = runningIds.has(entry.id);
+      const dir = entry.settings?.sessionDir;
+      const folder = dir ? folders.readFolder(dir) : null;
+      if (folder) entry.progress = { ...folder.progress, updatedAt: folder.todoUpdatedAt, hasResume: !!folder.resume };
+      // Orchestration run members are grouped under their orchestrator in the
+      // "+" menu; a worker's own close/delete rules need its last report.
+      const st = entry.settings?.orchestration;
+      if (st?.runId) {
+        if (!runs.has(st.runDir)) runs.set(st.runDir, readJSON(path.join(st.runDir || '', 'run.json'), null));
+        const run = runs.get(st.runDir);
+        const w = st.role === 'worker' ? run?.workers?.find(x => x.id === st.workerId) : null;
+        entry.group = {
+          runId: st.runId, role: st.role, workerId: st.workerId || null,
+          orchestrator: run?.orchestrator || st.orchestrator || null,
+          lastReport: w?.lastReport ? { status: w.lastReport.status, summary: String(w.lastReport.summary || '').slice(0, 200) } : null,
+          completed: !!w && (w.abandoned || ['done', 'failed'].includes(w.lastReport?.status)),
+          runMissing: !run,
+        };
+      }
     }
     return history;
+  }
+
+  transcriptExists(cwd, sessId) {
+    return this._transcriptExists(cwd, sessId);
   }
 
   _transcriptExists(cwd, sessId) {
@@ -379,6 +482,7 @@ class CliSessionManager {
     writeJSON(HISTORY_FILE, filtered);
     if (entry) {
       deleteFullSessionData(this.store, id, entry.cwd);
+      removeSessionFolder(entry.settings?.sessionDir);
     } else {
       this.store.deleteSessionData(id);
     }
@@ -412,6 +516,16 @@ class CliSessionManager {
     if (!session.getSettings().model) {
       session.updateSettings({ model: caps.getCliModelPref(DATA_HOME) });
     }
+    // The session folder (TODO.md, NOTES.md): minted once, then kept in the
+    // settings so a resume or a fresh restart lands in the same folder. A run
+    // member is keyed by its --name, everything else by title + random.
+    let sessionDir = session.getSettings().sessionDir;
+    if (!sessionDir) {
+      const s = session.getSettings();
+      sessionDir = path.join(s.sessionsRoot || SESSIONS_ROOT, s.name ? folders.slugify(s.name, 64) : folders.mintKey(session.title));
+      session.updateSettings({ sessionDir });
+    }
+    try { folders.ensureFolder(sessionDir, session.title); } catch (e) { console.error(`  session folder ${sessionDir}: ${e.message}`); }
     session.spawn(cwd, cols, rows, { resumeSessionId, autoMemory });
     // Persist immediately so session survives ungraceful server death
     this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
@@ -460,9 +574,26 @@ class CliSessionManager {
         tryRm(path.join(PACKAGE_ROOT, 'uploads', session.sessId));
       }
       session.kill();
+      // The pty's own exit arrives after the session is gone from the map, so a
+      // closed tab is reported here.
+      this._notifyExit(tabId, session);
       this.sessions.delete(tabId);
       this._persistOpenTabs();
     }
+  }
+
+  // Close a tab that is being paused: it is already saved (with its flags), so
+  // no history write, no inspector-data delete and no exit callbacks or
+  // listeners — to its owner (an app's exit check, an orchestrator) a paused
+  // session has not ended.
+  closeQuiet(tabId) {
+    const session = this.sessions.get(tabId);
+    if (!session) return;
+    this._exitCallbacks.delete(tabId);
+    this.sessions.delete(tabId);
+    session.kill();
+    this._persistOpenTabs();
+    this.broadcastTabs();
   }
 
   // Shutdown path. Freezes the open-tab manifest first: these sessions are being
@@ -488,6 +619,8 @@ class CliSessionManager {
         cwd: session.cwd,
         title: session.title,
         settings: session.getSettings(),
+        busy: session.busy === true,
+        pausing: session.pausing === true,
       });
     }
     return tabs;
@@ -596,7 +729,7 @@ class CliSessionManager {
       }
     }
 
-    this.spawn(tabId, opts.cwd, opts.cols, opts.rows, { resumeSessionId });
+    this.spawn(tabId, opts.cwd, opts.cols, opts.rows, { resumeSessionId, autoMemory: opts.autoMemory === true });
 
     if (opts.prompt && opts.autoSubmit) {
       // Write the prompt and the submitting CR as separate PTY chunks: the CLI
@@ -628,6 +761,19 @@ class CliSessionManager {
 
   onExit(tabId, callback) {
     this._exitCallbacks.set(tabId, callback);
+  }
+
+  // Called as fn(tabId, session) when any tab's process exits (not on server
+  // shutdown). Covers tabs restored under a new id without per-tab arming.
+  addExitListener(fn) {
+    this._exitListeners.push(fn);
+  }
+
+  _notifyExit(tabId, session) {
+    if (!session || this._shuttingDown) return;
+    for (const fn of this._exitListeners) {
+      try { fn(tabId, session); } catch (e) { console.error('Session exit listener error:', e); }
+    }
   }
 
   broadcastTabs() {

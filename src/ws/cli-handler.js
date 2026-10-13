@@ -46,8 +46,32 @@ function handleMessage(ws, msg, bc) {
       send({ type: 'cli:newTab', tabId: newTabId, reqId: msg.reqId || null });
       break;
     }
+    case 'cli:open': {
+      // "New CLI in directory…": openCli asks Simple / Orchestrator (the same
+      // ask an app's Change gets), then mints the tab and launches it. The tab
+      // reaches every client through cli:tabs; the reply lets the requester
+      // switch to it.
+      if (!msg.cwd || !bc.orchestration) break;
+      const cols = msg.cols || 80;
+      const rows = msg.rows || 24;
+      const reply = (data) => { if (ws.readyState === WebSocket.OPEN) send({ type: 'cli:opened', reqId: msg.reqId || null, ...data }); };
+      bc.orchestration.openCli({
+        cwd: msg.cwd, cols, rows, autoMemory: msg.autoMemory === true,
+        // The requesting viewer sized the PTY, so it starts as the owner.
+        beforeLaunch: (tabId) => mgr.getOrCreate(tabId).resizeFrom(ws, cols, rows),
+      }).then(reply, (err) => reply({ error: err.message }));
+      break;
+    }
     case 'cli:closeTab':
       if (msg.tabId) {
+        // A run member closes only when orchestration allows it: a worker once
+        // its work is complete (or force-closed: abandoned), an orchestrator
+        // while none of its workers runs.
+        const check = bc.orchestration?.closeCheck(msg.tabId, { force: msg.force === true }) || { ok: true };
+        if (!check.ok) {
+          send({ type: 'cli:closeRefused', tabId: msg.tabId, reason: check.reason, canForce: !!check.canForce, forget: !!msg.forget });
+          break;
+        }
         // `forget` also drops the session from the resume list, the same as
         // the × on a saved session in the "+" menu. Read the sessId first:
         // remove() discards the session object.
@@ -177,11 +201,72 @@ function handleMessage(ws, msg, bc) {
       break;
     case 'cli:deleteSavedSession':
       if (msg.sessionId) {
+        const entry = mgr.findSaved(msg.sessionId);
+        const st = entry?.settings?.orchestration;
+        if (st?.role === 'orchestrator') {
+          send({ type: 'cli:actionResult', action: 'delete', error: 'An orchestrator is deleted with its whole run (Delete run).' });
+          break;
+        }
+        if (st?.role === 'worker' && !msg.force) {
+          const group = mgr.getSavedSessions().find(s => s.id === msg.sessionId)?.group;
+          if (group && !group.completed && !group.runMissing) {
+            send({ type: 'cli:deleteRefused', sessionId: msg.sessionId, canForce: true, reason: 'This worker has not finished its work. Deleting it abandons it: its orchestrator will not resume it.' });
+            break;
+          }
+        }
         mgr.deleteSavedSession(msg.sessionId);
+        if (st?.role === 'worker') bc.orchestration?.noteMemberDeleted(entry);
         send({ type: 'cli:savedSessions', sessions: mgr.getSavedSessions() });
       }
       break;
+    // --- Pause / resume (src/session-control.js, src/orchestration.js) ---
+    case 'cli:pause': {
+      // A run's orchestrator pauses the whole run; a worker only through it.
+      const session = msg.tabId ? mgr.get(msg.tabId) : null;
+      const st = session?.getSettings().orchestration;
+      actionResult(send, 'pause', msg, () => {
+        if (st?.role === 'worker') throw new Error('A worker is paused through its orchestrator: pause the run.');
+        if (st?.role === 'orchestrator') return bc.orchestration.pauseRun(st.runId);
+        return bc.sessionControl.pause(msg.tabId);
+      });
+      break;
+    }
+    case 'cli:pauseRun':
+      actionResult(send, 'pause', msg, () => bc.orchestration.pauseRun(String(msg.runId || '')));
+      break;
+    case 'cli:interrupt':
+      actionResult(send, 'interrupt', msg, () => bc.sessionControl.interrupt(msg.tabId));
+      break;
+    case 'cli:refreshOrchestrator':
+      actionResult(send, 'refresh', msg, () => bc.orchestration.refreshOrchestrator(String(msg.runId || '')));
+      break;
+    case 'cli:resumeSaved':
+      // A saved session (paused, interrupted or plain) with its own transcript;
+      // a paused one is told to pick up from its folder.
+      // A run worker goes through orchestration (its brief seeds a fresh start).
+      // A conversation that can no longer be restored is started fresh from
+      // the session's folder (result `fresh: true`).
+      actionResult(send, 'resume', msg, () => {
+        const id = String(msg.sessionId || '');
+        if (mgr.findSaved(id)?.settings?.orchestration?.role === 'worker') return bc.orchestration.resumeSavedWorker(id);
+        return bc.sessionControl.resumeSaved(id, { cols: msg.cols || 120, rows: msg.rows || 32 });
+      });
+      break;
+    case 'cli:resumeRun':
+      actionResult(send, 'resumeRun', msg, () => bc.orchestration.resumeRun(String(msg.runId || ''), { fresh: msg.fresh === true }));
+      break;
+    case 'cli:deleteRun':
+      actionResult(send, 'deleteRun', msg, () => bc.orchestration.deleteRun(String(msg.runId || ''), { force: msg.force === true }));
+      send({ type: 'cli:savedSessions', sessions: mgr.getSavedSessions() });
+      break;
   }
+}
+
+// Run one pause/resume action and answer the requester with its result or error.
+function actionResult(send, action, msg, fn) {
+  let out;
+  try { out = { ...(fn() || {}) }; } catch (e) { out = { error: e.message }; }
+  send({ type: 'cli:actionResult', action, reqId: msg.reqId || null, tabId: msg.tabId || null, runId: msg.runId || null, sessionId: msg.sessionId || null, ...out });
 }
 
 module.exports = { PREFIXES, handleMessage };

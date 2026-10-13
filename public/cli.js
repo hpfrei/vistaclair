@@ -348,7 +348,11 @@
       const label = document.createElement('span');
       label.className = 'cli-tab-label';
       const isAppCli = tabId.startsWith('app-');
-      label.textContent = (isAppCli ? '\u{1F528} ' : '') + computeTabLabel(tabId);
+      // Orchestration role from the tab's stamp: compass for the orchestrator,
+      // gear for its workers.
+      const orchRole = tab.settings?.orchestration?.role;
+      const roleBadge = orchRole === 'orchestrator' ? '\u{1F9ED} ' : orchRole === 'worker' ? '⚙️ ' : '';
+      label.textContent = roleBadge + (isAppCli ? '\u{1F528} ' : '') + computeTabLabel(tabId);
       let clickTimer = null;
       label.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -380,6 +384,45 @@
         openSettings(tabId);
       });
       btn.appendChild(settingsBtn);
+
+      const runId = tab.settings?.orchestration?.runId;
+      if (runId) {
+        const boardBtn = document.createElement('span');
+        boardBtn.className = 'cli-model-override-btn cli-run-board-btn';
+        boardBtn.textContent = '☰';
+        boardBtn.title = `Orchestration run ${runId} — workers and TODO`;
+        boardBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openRunBoard(runId);
+        });
+        btn.appendChild(boardBtn);
+      }
+
+      // Pause: a plain tab pauses itself, an orchestrator its whole run; a
+      // worker only through its orchestrator. While pausing, it offers
+      // "Interrupt now" — a pause has no timeout.
+      if (tab.status === 'running' && orchRole !== 'worker') {
+        const pauseBtn = document.createElement('span');
+        pauseBtn.className = 'cli-model-override-btn cli-pause-btn' + (tab.pausing ? ' pausing' : '');
+        pauseBtn.textContent = tab.pausing ? '⏹' : '⏸';
+        pauseBtn.title = tab.pausing
+          ? 'Pausing… (the session is writing its resume note). Click to interrupt now.'
+          : orchRole === 'orchestrator'
+            ? 'Pause the run: workers write their notes and close, then the orchestrator. Resume from the "+" menu.'
+            : 'Pause: the session finishes its step, writes its resume note and closes. Resume from the "+" menu.';
+        pauseBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (tab.pausing) {
+            if (confirm('Interrupt now? The session stops mid-step and is saved as interrupted; its resume note may be missing.')) {
+              sendWs({ type: 'cli:interrupt', tabId });
+            }
+            return;
+          }
+          sendWs({ type: 'cli:pause', tabId });
+        });
+        btn.appendChild(pauseBtn);
+      }
+      if (tab.pausing) btn.classList.add('cli-tab-pausing');
 
       const close = document.createElement('span');
       close.className = 'tab-close';
@@ -445,7 +488,9 @@
         e.stopPropagation();
         closeCloseMenu();
         sendWs({ type: 'cli:closeTab', tabId, forget });
-        removeTab(tabId);
+        // A run member may be refused (cli:closeRefused); the server's tab
+        // list removes it once it is really closed.
+        if (!tabs.get(tabId)?.settings?.orchestration) removeTab(tabId);
       });
       menu.appendChild(item);
     };
@@ -491,6 +536,33 @@
     state._showNewMenu = true;
   });
 
+  // The saved sessions in menu order: a run's orchestrator where the run's
+  // newest member would be, its workers indented right below it.
+  function groupSavedSessions(savedSessions) {
+    const runs = new Map();
+    for (const s of savedSessions) {
+      const g = s.group;
+      if (!g?.runId) continue;
+      if (!runs.has(g.runId)) runs.set(g.runId, { orchestrator: null, workers: [] });
+      const r = runs.get(g.runId);
+      if (g.role === 'orchestrator') r.orchestrator = r.orchestrator || s;
+      else r.workers.push(s);
+    }
+    const out = [];
+    const placed = new Set();
+    for (const s of savedSessions) {
+      const runId = s.group?.runId;
+      if (!runId) { out.push({ sess: s, indent: false }); continue; }
+      if (placed.has(runId)) continue;
+      placed.add(runId);
+      const r = runs.get(runId);
+      if (r.orchestrator) out.push({ sess: r.orchestrator, indent: false });
+      r.workers.sort((a, b) => String(a.group.workerId).localeCompare(String(b.group.workerId), undefined, { numeric: true }));
+      for (const w of r.workers) out.push({ sess: w, indent: !!r.orchestrator });
+    }
+    return out;
+  }
+
   function showNewMenu(savedSessions) {
     closeNewMenu();
     const menu = document.createElement('div');
@@ -504,9 +576,16 @@
       closeNewMenu();
       const picked = await openFsDirPicker();
       if (!picked) return;
-      _requestNewTab({
+      // The server asks Simple / Orchestrator (openCli), mints the tab and
+      // launches it; cli:opened switches to it. Size the PTY like the active tab.
+      const active = activeTabId ? tabs.get(activeTabId) : null;
+      sendWs({
+        type: 'cli:open',
+        reqId: `open-${++_reqSeq}`,
         cwd: picked.dir,
-        autoMemory: picked.autoMemory,
+        autoMemory: picked.autoMemory === true,
+        cols: active?.terminal?.cols || 80,
+        rows: active?.terminal?.rows || 24,
       });
     });
     menu.appendChild(newItem);
@@ -521,7 +600,7 @@
       header.textContent = 'Resume session';
       menu.appendChild(header);
 
-      for (const sess of savedSessions) {
+      for (const { sess, indent } of groupSavedSessions(savedSessions)) {
         const parts = sess.cwd.replace(/\/+$/, '').split('/');
         const dirName = parts[parts.length - 1] || sess.cwd;
         const mappings = formatModelMap(sess.settings?.modelMap);
@@ -529,16 +608,36 @@
         const age = formatAge(lastAt);
         const displayTitle = sess.title || dirName;
 
+        const role = sess.group?.role || null;
         const item = document.createElement('div');
-        item.className = 'cli-new-menu-item cli-new-menu-session';
+        item.className = 'cli-new-menu-item cli-new-menu-session' + (indent ? ' cli-new-menu-session-worker' : '');
         if (sess.isRunning) item.classList.add('cli-new-menu-session-running');
         item.title = sess.cwd;
 
         const info = document.createElement('div');
         info.className = 'cli-new-menu-session-info';
-        const runningTag = sess.isRunning ? '<span class="cli-new-menu-running">running</span>' : '';
-        info.innerHTML = `<span class="cli-new-menu-dir">${escHtml(displayTitle)}</span>${runningTag}<span class="cli-new-menu-age">${escHtml(age)}</span>`;
+        const tags = [];
+        if (sess.isRunning) tags.push('<span class="cli-new-menu-running">running</span>');
+        if (role) tags.push(`<span class="cli-new-menu-state">${role === 'orchestrator' ? '\u{1F9ED} orchestrator' : '⚙️ worker'}</span>`);
+        if (sess.paused) tags.push('<span class="cli-new-menu-state cli-new-menu-paused">paused</span>');
+        else if (sess.interrupted) tags.push('<span class="cli-new-menu-state cli-new-menu-interrupted" title="It was mid-turn when the server stopped">interrupted</span>');
+        if (role === 'worker' && sess.group.lastReport) tags.push(`<span class="cli-new-menu-state" title="${escHtml(sess.group.lastReport.summary || '')}">${escHtml(sess.group.lastReport.status)}</span>`);
+        info.innerHTML = `<span class="cli-new-menu-dir">${escHtml(displayTitle)}</span>${tags.join('')}<span class="cli-new-menu-age">${escHtml(age)}</span>`;
         item.appendChild(info);
+
+        // TODO.md progress from the session folder: 3/5 · doing: <item> · 12m ago.
+        const p = sess.progress;
+        if (p && (p.total || p.hasResume)) {
+          const prog = document.createElement('div');
+          prog.className = 'cli-new-menu-progress';
+          const bits = [];
+          if (p.total) bits.push(`${p.done}/${p.total}`);
+          if (p.doing) bits.push(`doing ${p.doing.id}: ${p.doing.description || ''}`);
+          if (p.updatedAt) bits.push(`TODO ${formatAge(p.updatedAt)}`);
+          if (p.hasResume) bits.push('resume note');
+          prog.textContent = bits.join(' · ');
+          item.appendChild(prog);
+        }
 
         const timeRow = document.createElement('div');
         timeRow.className = 'cli-new-menu-time-row';
@@ -580,13 +679,42 @@
           item.appendChild(gaugeLine);
         }
 
+        // An orchestrator resumes its whole run: its own transcript (it warms
+        // its workers up), or a fresh orchestrator from the notes.
+        if (role === 'orchestrator' && !sess.isRunning && !sess.group.runMissing) {
+          const actions = document.createElement('div');
+          actions.className = 'cli-new-menu-actions';
+          const action = (label, title, fresh) => {
+            const b = document.createElement('button');
+            b.className = 'cli-new-menu-action';
+            b.textContent = label;
+            b.title = title;
+            b.addEventListener('click', (e) => {
+              e.stopPropagation();
+              closeNewMenu();
+              sendWs({ type: 'cli:resumeRun', runId: sess.group.runId, fresh });
+            });
+            actions.appendChild(b);
+          };
+          action('Resume run', 'The orchestrator continues its own session and resumes its paused workers', false);
+          action('Fresh from notes', 'A new orchestrator with a clean context, seeded from the notes, TODOs and reports of the run', true);
+          item.appendChild(actions);
+        }
+
         if (!sess.isRunning) {
           const del = document.createElement('span');
           del.className = 'cli-new-menu-del';
           del.textContent = '×';
-          del.title = 'Remove';
+          del.title = role === 'orchestrator' ? 'Delete the whole run' : 'Delete';
           del.addEventListener('click', (e) => {
             e.stopPropagation();
+            if (role === 'orchestrator') {
+              if (!confirm(`Delete run ${sess.group.runId} completely? Its orchestrator and every worker session, their TODO/NOTES folders, the run directory and its worktrees are removed. Unmerged branches are kept.`)) return;
+              sendWs({ type: 'cli:deleteRun', runId: sess.group.runId });
+              closeNewMenu();
+              return;
+            }
+            if (!confirm(`Delete "${displayTitle}" completely? Its transcript, its interaction data and its TODO/NOTES folder are removed. This cannot be undone.`)) return;
             sendWs({ type: 'cli:deleteSavedSession', sessionId: sess.id });
             item.remove();
           });
@@ -595,12 +723,15 @@
 
         item.addEventListener('click', () => {
           closeNewMenu();
-          _requestNewTab({
-            cwd: sess.cwd,
-            resumeSessionId: sess.id,
-            settings: sess.settings,
-            autoMemory: sess.autoMemory === true,
-          });
+          if (role === 'orchestrator') {
+            if (!sess.isRunning && !sess.group.runMissing) sendWs({ type: 'cli:resumeRun', runId: sess.group.runId, fresh: false });
+            return;
+          }
+          // The server resumes it: a paused or interrupted one is told to pick
+          // up from its folder, and one whose conversation is gone starts
+          // fresh from that folder instead of dying on open.
+          const active = activeTabId ? tabs.get(activeTabId) : null;
+          sendWs({ type: 'cli:resumeSaved', sessionId: sess.id, cols: active?.terminal?.cols || 120, rows: active?.terminal?.rows || 32 });
         });
         menu.appendChild(item);
       }
@@ -1239,6 +1370,14 @@
         maybeNotifyNoSubscription();
         break;
       }
+      case 'cli:opened': {
+        if (msg.error) { window.dashboard.showAlert?.(`Could not open the CLI: ${msg.error}`); break; }
+        if (msg.cancelled || !msg.tabId) break;
+        if (!tabs.has(msg.tabId)) createTab(msg.tabId);
+        switchTab(msg.tabId);
+        maybeNotifyNoSubscription();
+        break;
+      }
       case 'cli:settingsData': {
         populateSettings(msg.tabId, msg.settings || {}, msg.models || [], msg.hasSubscription, msg.interactionsDir);
         break;
@@ -1276,6 +1415,49 @@
         break;
       }
       case 'cli:fileUploaded': {
+        break;
+      }
+      // --- Pause / resume ---
+      case 'cli:actionResult': {
+        if (msg.action === 'deleteRun' && msg.refused) {
+          const dirty = (msg.dirty || []).map(d => `- ${d.worker}: ${d.path}`).join('\n');
+          if (confirm(`These worktrees have uncommitted changes:\n${dirty}\n\nDelete the run anyway? The changes are lost.`)) {
+            sendWs({ type: 'cli:deleteRun', runId: msg.runId, force: true });
+          }
+          break;
+        }
+        if (msg.error) { window.dashboard.showAlert?.(msg.error); break; }
+        if (msg.action === 'deleteRun' && msg.keptBranches?.length) {
+          window.dashboard.showToast?.({ sender: 'CLI', title: 'Run deleted', message: `Unmerged branches kept: ${msg.keptBranches.join(', ')}`, level: 'info' });
+        }
+        if (msg.tabId && (msg.action === 'resume' || msg.action === 'resumeRun')) {
+          if (!tabs.has(msg.tabId)) createTab(msg.tabId);
+          switchTab(msg.tabId);
+          if (msg.fellBack || (msg.action === 'resume' && msg.fresh)) {
+            window.dashboard.showToast?.({ sender: 'CLI', title: 'Started fresh', message: 'Its earlier conversation could not be restored, so a fresh session continues from its TODO.md and NOTES.md.', level: 'info' });
+          }
+        }
+        break;
+      }
+      case 'cli:closeRefused': {
+        if (msg.canForce) {
+          if (confirm(`${msg.reason}\n\nForce-close it anyway?`)) sendWs({ type: 'cli:closeTab', tabId: msg.tabId, forget: msg.forget, force: true });
+        } else {
+          window.dashboard.showAlert?.(msg.reason);
+        }
+        break;
+      }
+      case 'cli:deleteRefused': {
+        if (confirm(`${msg.reason}\n\nDelete it anyway?`)) sendWs({ type: 'cli:deleteSavedSession', sessionId: msg.sessionId, force: true });
+        break;
+      }
+      case 'cli:paused': {
+        window.dashboard.showToast?.({
+          sender: 'CLI',
+          title: msg.interrupted ? 'Session interrupted' : 'Session paused',
+          message: `${msg.title || 'A session'} is saved${msg.interrupted ? ' as interrupted' : ' with its resume note'}. Resume it from the "+" menu.`,
+          level: msg.interrupted ? 'warning' : 'success',
+        });
         break;
       }
     }
@@ -1344,6 +1526,7 @@
       tab.cwd = st.cwd;
       tab.title = st.title || null;
       tab.settings = st.settings || {};
+      tab.pausing = st.pausing === true;
       if (st.instanceId) tab.instanceId = st.instanceId;
       if (st.sessId) tab.sessId = st.sessId;
       if (st.autoMemory != null) tab.autoMemory = st.autoMemory;
@@ -1583,6 +1766,109 @@
     }
   }
 
+
+  // --- Orchestration run board ---
+  // Workers, their last reports, recent events and the TODO of one run. All of
+  // it is server state (run.json, TODO.md), so the board is the same after a
+  // reload; it refreshes on the server's orchestration:run broadcasts.
+  let _runBoard = null; // { runId, backdrop, body }
+
+  async function renderRunBoard() {
+    if (!_runBoard) return;
+    const { runId, body } = _runBoard;
+    let run;
+    try {
+      const res = await fetch(`/api/orchestration/run?runId=${encodeURIComponent(runId)}`, { credentials: 'same-origin' });
+      run = await res.json();
+      if (!res.ok) throw new Error(run.error || res.statusText);
+    } catch (err) {
+      body.innerHTML = `<div class="alert-modal-message">Run ${escHtml(runId)}: ${escHtml(err.message)}</div>`;
+      return;
+    }
+    if (!_runBoard || _runBoard.runId !== runId) return;
+    const rows = run.workers.map(w => {
+      const r = w.lastReport;
+      const state = w.running ? (w.live?.pausing ? 'pausing…' : w.live?.busy ? 'working' : 'idle')
+        : w.paused ? 'paused' : w.abandoned ? 'abandoned' : (w.exitedAt ? 'exited' : 'stopped');
+      const p = w.progress;
+      const progress = p ? [
+        p.total ? `${p.done}/${p.total}` : '',
+        p.doing ? `doing ${p.doing.id}: ${p.doing.description || ''}` : '',
+        p.todoUpdatedAt ? `TODO ${formatAge(Date.parse(p.todoUpdatedAt))}` : '',
+        p.hasResumeNote ? 'resume note' : '',
+      ].filter(Boolean).join(' · ') : '';
+      const recent = w.live?.recent?.length ? `<br><small title="${escHtml(w.live.recent.join('\n'))}">${escHtml(w.live.recent.at(-1))}${w.live.subagents ? ` · ${w.live.subagents} subagent(s)` : ''}</small>` : '';
+      return `<tr>
+        <td title="${escHtml(w.cwd || '')}">${escHtml(w.worker)}<br><small>${escHtml(w.title || '')}</small></td>
+        <td>${escHtml(state)}${recent}</td>
+        <td title="${escHtml(w.todo || '')}">${escHtml(progress) || '—'}</td>
+        <td>${r ? `<b>${escHtml(r.status)}</b> ${escHtml(r.summary || '')}` : '<i>no report yet</i>'}</td>
+        <td>${escHtml(w.branch || '—')}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="5"><i>No workers launched yet</i></td></tr>';
+    const runState = run.pausing ? 'pausing…' : run.paused ? 'paused' : run.closed ? 'closed' : 'open';
+    const canPause = run.orchestratorRunning && !run.pausing;
+    const controls = `
+      <div class="cli-run-board-controls">
+        <button class="cli-run-board-action" data-run-action="pause" ${canPause ? '' : 'disabled'} title="Workers stop non-critical work, write their resume notes and close; then the orchestrator. Resume from the &quot;+&quot; menu.">Pause run</button>
+        <button class="cli-run-board-action" data-run-action="refresh" ${canPause ? '' : 'disabled'} title="The orchestrator writes its notes and is replaced by a fresh session with a clean context, seeded from the run. Workers keep running.">Refresh orchestrator</button>
+        ${run.refreshSuggested ? `<span class="cli-run-board-hint">Refresh suggested: the orchestrator has compacted ${run.compactions} times.</span>` : ''}
+      </div>`;
+    const events = (run.events || []).slice(-10).reverse()
+      .map(e => `<li><small>${escHtml(new Date(e.at).toLocaleTimeString())}</small> [${escHtml(e.kind)}] ${escHtml(e.text)}</li>`).join('');
+    body.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">
+        <b>Run ${escHtml(run.runId)} · ${escHtml(run.orchestrator)}</b>
+        <small>${escHtml(run.isolation)} · ${escHtml(runState)} · ${run.pendingEvents} undelivered event(s)</small>
+      </div>
+      ${controls}
+      <table style="width:100%;margin:10px 0;border-collapse:collapse;font-size:12px;text-align:left">
+        <thead><tr><th>Worker</th><th>State</th><th>TODO</th><th>Last report</th><th>Branch</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${events ? `<div style="font-size:12px"><b>Recent events</b><ul style="margin:4px 0 10px 16px;padding:0">${events}</ul></div>` : ''}
+      <div style="font-size:12px"><b>TODO</b> <small>${escHtml(run.todo)}</small></div>
+      <pre style="max-height:40vh;overflow:auto;white-space:pre-wrap;font-size:12px;margin:4px 0 0">${escHtml(run.todoText || '')}</pre>`;
+    body.querySelectorAll('[data-run-action]').forEach(b => b.addEventListener('click', () => {
+      const action = b.dataset.runAction;
+      if (action === 'pause' && !confirm('Pause this run? Each worker finishes its step, writes its resume note and closes; the orchestrator closes last. It may take a while.')) return;
+      if (action === 'refresh' && !confirm('Refresh the orchestrator? It writes its notes, then a fresh orchestrator continues the run from them. Workers keep running.')) return;
+      b.disabled = true;
+      sendWs({ type: action === 'pause' ? 'cli:pauseRun' : 'cli:refreshOrchestrator', runId });
+    }));
+  }
+
+  function openRunBoard(runId) {
+    closeRunBoard();
+    const backdrop = document.createElement('div');
+    backdrop.className = 'alert-modal-backdrop';
+    const modal = document.createElement('div');
+    modal.className = 'alert-modal';
+    modal.style.cssText = 'width:min(900px,94vw);max-width:none;text-align:left';
+    const body = document.createElement('div');
+    body.textContent = 'Loading…';
+    const close = document.createElement('button');
+    close.className = 'alert-modal-ok';
+    close.textContent = 'Close';
+    close.addEventListener('click', closeRunBoard);
+    modal.append(body, close);
+    backdrop.appendChild(modal);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeRunBoard(); });
+    backdrop.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeRunBoard(); });
+    document.body.appendChild(backdrop);
+    close.focus();
+    _runBoard = { runId, backdrop, body };
+    renderRunBoard();
+  }
+
+  function closeRunBoard() {
+    _runBoard?.backdrop.remove();
+    _runBoard = null;
+  }
+
+  window.dashboard.registerModule?.('orchestration:', (msg) => {
+    if (msg.type === 'orchestration:run' && _runBoard && msg.runId === _runBoard.runId) renderRunBoard();
+  });
 
   // Expose module
   window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel };
