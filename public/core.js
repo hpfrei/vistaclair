@@ -419,9 +419,13 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
 }
 
 // --- Markdown rendering (with HTML/SVG pass-through and MathJax) ---
-function renderMarkdown(text, targetEl) {
+// opts.file: render a markdown file from disk — keep its blank lines (they
+// separate paragraphs), use GFM line breaks, and sanitize, since the file's raw
+// HTML can come from anywhere.
+function renderMarkdown(text, targetEl, opts = {}) {
   if (!text) { targetEl.innerHTML = ''; return; }
-  text = text.replace(/\n{2,}/g, '\n');
+  if (!opts.file) text = text.replace(/\n{2,}/g, '\n');
+  if (opts.file && typeof DOMPurify === 'undefined') { targetEl.textContent = text; return; }
   if (typeof marked === 'undefined') { targetEl.textContent = text; return; }
 
   // Configure marked to pass through HTML/SVG blocks and render fenced code
@@ -441,8 +445,9 @@ function renderMarkdown(text, targetEl) {
     return `<div class="code-block-wrap"><button class="code-copy-btn" title="Copy">Copy</button><pre><code class="language-${escHtml(lang)}">${escHtml(code)}</code></pre></div>`;
   };
 
-  marked.setOptions({ renderer, breaks: true, gfm: true });
-  targetEl.innerHTML = marked.parse(text);
+  marked.setOptions({ renderer, breaks: !opts.file, gfm: true });
+  const html = marked.parse(text);
+  targetEl.innerHTML = opts.file ? DOMPurify.sanitize(html) : html;
 
   // Wire up copy buttons on code blocks
   targetEl.querySelectorAll('.code-copy-btn').forEach(btn => {

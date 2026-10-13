@@ -281,6 +281,35 @@ function createApiRouter({ broadcaster, store, proxyPort, dashboardPort, authTok
     }
   });
 
+  // ── PUT /api/write-file — save edited text over an existing file ───
+  // Only overwrites a regular file that already exists; it never creates one.
+  // `expectedMtime` is the mtime the editor loaded: if the file changed on disk
+  // since, answer 409 so the client can ask before clobbering it (`force`).
+  router.put('/write-file', (req, res) => {
+    const { path: filePath, content, expectedMtime, force } = req.body || {};
+    if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
+      return res.status(400).json({ error: 'path must be an absolute path' });
+    }
+    if (typeof content !== 'string') return res.status(400).json({ error: 'content must be a string' });
+    const resolved = path.resolve(filePath);
+    let stat;
+    try { stat = fs.statSync(resolved); }
+    catch { return res.status(404).json({ error: 'File not found', path: resolved }); }
+    if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
+    if (!force && typeof expectedMtime === 'number' && Math.abs(stat.mtimeMs - expectedMtime) > 1) {
+      return res.status(409).json({ error: 'File changed on disk', mtime: stat.mtimeMs, size: stat.size });
+    }
+    try {
+      // Write in place (not temp + rename) so permissions, ownership and
+      // symlinks pointing at the file are left as they were.
+      fs.writeFileSync(resolved, content, 'utf-8');
+      const after = fs.statSync(resolved);
+      res.json({ ok: true, path: resolved, size: after.size, mtime: after.mtimeMs });
+    } catch (err) {
+      res.status(500).json({ error: 'Write failed: ' + err.message });
+    }
+  });
+
   // ── GET /api/video-thumb — one cached ffmpeg frame from a video ────
   router.get('/video-thumb', async (req, res) => {
     const filePath = req.query.path;

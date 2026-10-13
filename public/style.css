@@ -5440,6 +5440,24 @@ details.model-section[open] > summary.model-section-head { border-bottom: 1px so
 .dir-overlay-content audio { display: block; margin: 40px auto; min-width: 320px; }
 .dir-overlay-content video { display: block; max-width: 100%; max-height: 100%; margin: 24px auto; }
 .dir-overlay-content iframe { width: 100%; height: 100%; border: none; }
+.dir-overlay-header.dirty .dir-filename::after { content: ' ●'; color: var(--accent); }
+.dir-overlay-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.dir-overlay-actions + .dir-download-btn { margin-left: 0; }
+.dir-md-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.dir-md-toggle button { background: none; border: none; color: var(--text-dim); font-size: 11px; padding: 2px 10px; cursor: pointer; font-family: inherit; }
+.dir-md-toggle button + button { border-left: 1px solid var(--border); }
+.dir-md-toggle button:hover { background: var(--bg-hover); color: var(--text); }
+.dir-md-toggle button.active { background: var(--accent); color: var(--bg); }
+.dir-save-status { font-size: 11px; color: var(--text-dim); }
+.dir-save-status.error { color: #e55; }
+.dir-save-btn { background: none; border: 1px solid var(--accent); color: var(--accent); font-size: 11px; padding: 2px 10px; border-radius: 4px; cursor: pointer; font-family: inherit; }
+.dir-save-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.dir-save-btn:disabled { border-color: var(--border); color: var(--text-dim); opacity: 0.6; cursor: default; }
+.dir-md-rendered { padding: 16px 24px; font-size: 13px; line-height: 1.55; color: var(--text); }
+.dir-md-rendered img { max-height: none; margin: 8px 0; box-shadow: none; }
+.dir-md-rendered pre { overflow-x: auto; padding: 8px 12px; background: var(--bg-surface); border-radius: 4px; }
+.dir-md-rendered table { border-collapse: collapse; margin: 8px 0; }
+.dir-md-rendered th, .dir-md-rendered td { border: 1px solid var(--border); padding: 4px 8px; }
 
 .dir-overlay-nav { position: absolute; top: 50%; z-index: 2; transform: translateY(-50%); width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.15s, border-color 0.15s, opacity 0.15s; padding: 0; }
 .dir-overlay-nav svg { width: 22px; height: 22px; }

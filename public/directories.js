@@ -486,23 +486,36 @@
     return files.findIndex(e => joinPath(tab.cwd, e.name) === filePath);
   }
 
+  const MD_EXTS = new Set(['md', 'markdown', 'mdx']);
+  const MD_VIEW_KEY = 'dirMdView';   // 'raw' | 'rendered', remembered across files
+
   function openFile(tab, filePath, entry) {
-    tab.selectedFile = filePath;
     showOverlay(tab, filePath, entry);
   }
 
+  function isOverlayDirty(ov) {
+    return !!(ov && ov.editor && ov.editable
+      && ov.editor.getModel().getAlternativeVersionId() !== ov.savedVersion);
+  }
+
+  // Returns false when the user chose to keep unsaved edits open.
   function closeOverlay() {
-    if (!activeOverlay) return;
+    if (!activeOverlay) return true;
+    if (isOverlayDirty(activeOverlay)
+        && !confirm(`Discard unsaved changes to ${activeOverlay.entry.name}?`)) return false;
     if (activeOverlay.editor) { activeOverlay.editor.dispose(); activeOverlay.editor = null; }
     const tab = activeOverlay.tab;
     activeOverlay.el.remove();
     document.removeEventListener('keydown', activeOverlay.keyHandler);
+    window.removeEventListener('beforeunload', activeOverlay.unloadHandler);
     activeOverlay = null;
     if (tab) tab.selectedFile = null;
+    return true;
   }
 
   function showOverlay(tab, filePath, entry) {
-    closeOverlay();
+    if (!closeOverlay()) return;
+    tab.selectedFile = filePath;
 
     const files = getFileList(tab);
     const currentIdx = files.findIndex(e => joinPath(tab.cwd, e.name) === filePath);
@@ -513,6 +526,9 @@
     overlay.className = 'dir-overlay';
 
     const downloadUrl = '/api/raw-file?path=' + encodeURIComponent(filePath);
+    const ext = (filePath.match(/\.([^./]+)$/) || [])[1]?.toLowerCase() || '';
+    const isText = getFileCategory(ext) === 'text';
+    const isMd = MD_EXTS.has(ext);
 
     overlay.innerHTML = `
       <div class="dir-overlay-backdrop"></div>
@@ -522,6 +538,13 @@
         <div class="dir-overlay-header">
           <span class="dir-filename">${escHtml(entry.name)}</span>
           <span class="dir-viewer-size">${formatSize(entry.size)}</span>
+          ${isText ? `<span class="dir-overlay-actions">
+            ${isMd ? `<span class="dir-md-toggle">
+              <button data-view="raw" title="Raw markdown (editable)">Raw</button><button data-view="rendered" title="Rendered markdown">Rendered</button>
+            </span>` : ''}
+            <span class="dir-save-status"></span>
+            <button class="dir-save-btn" title="Save (Ctrl+S)" disabled>Save</button>
+          </span>` : ''}
           <a class="dir-download-btn" href="${downloadUrl}" download="${escHtml(entry.name)}" title="Download">⬇</a>
           <button class="dir-overlay-close" title="Close">✕</button>
         </div>
@@ -539,51 +562,207 @@
       const newIdx = currentIdx + dir;
       if (newIdx < 0 || newIdx >= files.length) return;
       const e = files[newIdx];
-      const p = joinPath(tab.cwd, e.name);
-      tab.selectedFile = p;
-      showOverlay(tab, p, e);
+      showOverlay(tab, joinPath(tab.cwd, e.name), e);
     }
 
     if (hasPrev) overlay.querySelector('.dir-overlay-nav.prev').addEventListener('click', () => navigate(-1));
     if (hasNext) overlay.querySelector('.dir-overlay-nav.next').addEventListener('click', () => navigate(1));
 
     function keyHandler(e) {
+      // Inside the editor every key is the editor's (it binds Ctrl+S itself).
+      if (e.target instanceof Element && e.target.closest('.monaco-editor')) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        if (ov.editable) { e.preventDefault(); saveOverlay(ov); }
+        return;
+      }
       if (e.key === 'Escape') { e.preventDefault(); closeOverlay(); }
       else if (e.key === 'ArrowLeft') { e.preventDefault(); navigate(-1); }
       else if (e.key === 'ArrowRight') { e.preventDefault(); navigate(1); }
     }
     document.addEventListener('keydown', keyHandler);
 
-    activeOverlay = { el: overlay, editor: null, keyHandler, tab };
+    function unloadHandler(e) {
+      if (isOverlayDirty(ov)) { e.preventDefault(); e.returnValue = ''; }
+    }
+    window.addEventListener('beforeunload', unloadHandler);
+
+    const ov = {
+      el: overlay, editor: null, keyHandler, unloadHandler, tab, entry, filePath,
+      editable: false, savedVersion: null, mtime: null, saving: false, isMd,
+      mdView: isMd && localStorage.getItem(MD_VIEW_KEY) === 'rendered' ? 'rendered' : 'raw',
+    };
+    activeOverlay = ov;
+
+    if (isText) {
+      overlay.querySelector('.dir-save-btn').addEventListener('click', () => saveOverlay(ov));
+      overlay.querySelectorAll('.dir-md-toggle button').forEach(btn => {
+        btn.addEventListener('click', () => {
+          localStorage.setItem(MD_VIEW_KEY, btn.dataset.view);
+          setMdView(ov, btn.dataset.view, true);
+        });
+      });
+    }
 
     renderOverlayContent(tab, filePath, entry, content);
+  }
+
+  function setSaveStatus(ov, text, isError) {
+    const el = ov.el.querySelector('.dir-save-status');
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle('error', !!isError);
+  }
+
+  function updateDirtyState(ov) {
+    const dirty = isOverlayDirty(ov);
+    ov.el.querySelector('.dir-overlay-header').classList.toggle('dirty', dirty);
+    const btn = ov.el.querySelector('.dir-save-btn');
+    if (btn) btn.disabled = !dirty || ov.saving;
+  }
+
+  // Raw shows the (editable) Monaco editor; Rendered renders its current text,
+  // unsaved edits included. The editor stays alive underneath, so switching
+  // back keeps the cursor, scroll and undo history.
+  function setMdView(ov, view, focus) {
+    if (!ov.isMd) return;
+    ov.mdView = view;
+    ov.el.querySelectorAll('.dir-md-toggle button').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+    const editorDiv = ov.el.querySelector('.dir-editor-host');
+    const renderedDiv = ov.el.querySelector('.dir-md-rendered');
+    if (!editorDiv || !renderedDiv || !ov.editor) return;
+    const rendered = view === 'rendered';
+    editorDiv.style.display = rendered ? 'none' : '';
+    renderedDiv.style.display = rendered ? '' : 'none';
+    if (rendered) {
+      window.dashboard.renderMarkdown(ov.editor.getValue(), renderedDiv, { file: true });
+      fixRelativeUrls(renderedDiv, ov.filePath);
+    } else if (focus) {
+      ov.editor.focus();
+    }
+  }
+
+  // Resolve a link written relative to a markdown file against its directory.
+  function resolveRelPath(dir, rel) {
+    rel = rel.split(/[?#]/)[0];
+    try { rel = decodeURIComponent(rel); } catch {}
+    const parts = dir.split('/').filter(Boolean);
+    for (const seg of rel.split('/')) {
+      if (seg === '..') parts.pop();
+      else if (seg && seg !== '.') parts.push(seg);
+    }
+    return '/' + parts.join('/');
+  }
+
+  // Relative images and links in a rendered file point next to the file on
+  // disk, not at the dashboard URL. Links open in a new tab so following one
+  // never navigates the control room away.
+  function fixRelativeUrls(el, filePath) {
+    const dir = filePath.slice(0, filePath.lastIndexOf('/')) || '/';
+    const isRelative = u => u && !/^([a-z][a-z0-9+.-]*:|\/|#)/i.test(u);
+    const rawUrl = rel => '/api/raw-file?path=' + encodeURIComponent(resolveRelPath(dir, rel));
+    el.querySelectorAll('img[src]').forEach(img => {
+      const src = img.getAttribute('src');
+      if (isRelative(src)) img.src = rawUrl(src);
+    });
+    el.querySelectorAll('a[href]').forEach(a => {
+      const href = a.getAttribute('href');
+      if (href.startsWith('#')) return;
+      if (isRelative(href)) a.href = rawUrl(href);
+      a.target = '_blank';
+      a.rel = 'noopener';
+    });
+  }
+
+  async function saveOverlay(ov) {
+    if (!ov.editable || !ov.editor || ov.saving || !isOverlayDirty(ov)) return;
+    ov.saving = true;
+    updateDirtyState(ov);
+    const version = ov.editor.getModel().getAlternativeVersionId();
+    const content = ov.editor.getValue();
+    let force = false;
+    try {
+      for (;;) {
+        setSaveStatus(ov, 'Saving…');
+        const resp = await fetch('/api/write-file', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: ov.filePath, content, expectedMtime: ov.mtime, force }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.status === 409 && !force) {
+          if (!confirm(`${ov.entry.name} changed on disk since it was opened. Overwrite it?`)) {
+            setSaveStatus(ov, 'Not saved — changed on disk', true);
+            return;
+          }
+          force = true;
+          continue;
+        }
+        if (!resp.ok) {
+          // A server started before /api/write-file existed answers a bare 404.
+          throw new Error(data.error || (resp.status === 404 ? 'restart the server to enable saving' : 'HTTP ' + resp.status));
+        }
+        ov.mtime = data.mtime;
+        ov.savedVersion = version;
+        ov.entry.size = data.size;
+        ov.entry.mtime = data.mtime;
+        const sizeEl = ov.el.querySelector('.dir-viewer-size');
+        if (sizeEl) sizeEl.textContent = formatSize(data.size);
+        setSaveStatus(ov, 'Saved');
+        setTimeout(() => {
+          const el = ov.el.querySelector('.dir-save-status');
+          if (el && el.textContent === 'Saved') setSaveStatus(ov, '');
+        }, 1500);
+        return;
+      }
+    } catch (err) {
+      setSaveStatus(ov, 'Save failed: ' + err.message, true);
+    } finally {
+      ov.saving = false;
+      updateDirtyState(ov);
+    }
   }
 
   async function renderOverlayContent(tab, filePath, entry, content) {
     const ext = (filePath.match(/\.([^./]+)$/) || [])[1]?.toLowerCase() || '';
     const category = getFileCategory(ext);
     const url = '/api/raw-file?path=' + encodeURIComponent(filePath);
+    const ov = activeOverlay;
 
     switch (category) {
       case 'text': {
         content.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:12px">Loading…</div>';
         try {
-          const resp = await fetch(url);
+          // Stat before reading, so the baseline mtime is never newer than the
+          // text: a change in between shows up as a conflict, not a lost write.
+          const info = await fetch('/api/file-info?path=' + encodeURIComponent(filePath), { cache: 'no-store' })
+            .then(r => r.ok ? r.json() : null).catch(() => null);
+          const resp = await fetch(url, { cache: 'no-store' });
           if (!resp.ok) throw new Error();
           const text = await resp.text();
-          if (!activeOverlay || tab.selectedFile !== filePath) return;
+          if (activeOverlay !== ov) return;
+          ov.mtime = info && info.exists ? info.mtime : entry.mtime;
+          // Bytes that aren't UTF-8 decode to U+FFFD; saving would write those
+          // replacement characters back, so such files stay read-only.
+          ov.editable = !text.includes('�');
           content.innerHTML = '';
           const editorDiv = document.createElement('div');
+          editorDiv.className = 'dir-editor-host';
           editorDiv.style.cssText = 'width:100%;height:100%;position:absolute;top:0;left:0;right:0;bottom:0;';
           content.appendChild(editorDiv);
+          if (ov.isMd) {
+            const renderedDiv = document.createElement('div');
+            renderedDiv.className = 'dir-md-rendered markdown-body';
+            renderedDiv.style.display = 'none';
+            content.appendChild(renderedDiv);
+          }
 
           await ensureMonaco();
-          if (!activeOverlay || tab.selectedFile !== filePath) return;
-          activeOverlay.editor = monaco.editor.create(editorDiv, {
+          if (activeOverlay !== ov) return;
+          ov.editor = monaco.editor.create(editorDiv, {
             value: text,
             language: getMonacoLanguage(ext),
             theme: getMonacoTheme(),
-            readOnly: true,
+            readOnly: !ov.editable,
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
             automaticLayout: true,
@@ -594,8 +773,17 @@
             overviewRulerLanes: 0,
             scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
           });
+          ov.savedVersion = ov.editor.getModel().getAlternativeVersionId();
+          if (ov.editable) {
+            ov.editor.onDidChangeModelContent(() => updateDirtyState(ov));
+            ov.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveOverlay(ov));
+          } else {
+            setSaveStatus(ov, 'Read-only: not UTF-8');
+            ov.el.querySelector('.dir-save-btn')?.remove();
+          }
+          setMdView(ov, ov.mdView);
         } catch {
-          if (!activeOverlay || tab.selectedFile !== filePath) return;
+          if (activeOverlay !== ov) return;
           content.innerHTML = '<div style="padding:12px;color:#e55;font-size:12px">Failed to load file</div>';
         }
         break;
@@ -1505,7 +1693,7 @@
   // ── Utilities ──────────────────────────────────────────────────────
 
   const TEXT_EXTS = new Set([
-    'txt','md','mdx','json','js','mjs','cjs','jsx','ts','tsx','css','scss','less',
+    'txt','md','markdown','mdx','json','js','mjs','cjs','jsx','ts','tsx','css','scss','less',
     'html','htm','xml','csv','yaml','yml','toml','ini','sh','bash','zsh',
     'py','rb','go','rs','java','c','cpp','h','hpp','cs','php','swift','kt','scala',
     'sql','r','lua','pl','pm','ex','exs','erl','hs','ml','clj','dart','v','zig',
@@ -1531,7 +1719,7 @@
       js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
       ts: 'typescript', tsx: 'typescript',
       json: 'json', html: 'html', htm: 'html', css: 'css', scss: 'scss', less: 'less',
-      xml: 'xml', md: 'markdown', mdx: 'markdown',
+      xml: 'xml', md: 'markdown', markdown: 'markdown', mdx: 'markdown',
       py: 'python', rb: 'ruby', go: 'go', rs: 'rust',
       java: 'java', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp',
       php: 'php', swift: 'swift', kt: 'kotlin', scala: 'scala',
