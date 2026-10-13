@@ -76,7 +76,7 @@ Open **http://localhost:3457** and log in with the auth token printed to the con
 
 **Inspector** — Full request/response capture across all sessions. System prompts, message history, tool definitions, tool call inputs/outputs (JSON tree), thinking blocks, SSE event stream, cURL export. Token breakdown (input, output, cache read/create, reasoning) and cost tracking per turn, per group, per session. Subagent tracking with color-coded parallel swimlane view. Hook events nested under the turns that triggered them. All interactions saved to disk as JSON.
 
-**CLI** — Multi-tab Claude Code terminal in the browser. Per-session model routing, directory spawning, session save/resume. **Paste screenshots from clipboard or drag-drop files directly into a session** — works over a tunnel from any device. AskUserQuestion appears inline — answer from any browser and Claude continues.
+**CLI** — Multi-tab Claude Code terminal in the browser. Per-session model routing, directory spawning, session save/resume. **Paste screenshots from clipboard or drag-drop files directly into a session** — works over a tunnel from any device. AskUserQuestion appears inline — answer from any browser and Claude continues. Forms can show pictures: options with an `image` become a thumbnail grid to pick from, and a question's `images` are shown for the user to comment on (local paths, paths relative to the session's directory, URLs or data URIs; a zoom button opens each one large).
 
 **Provider routing** — Route through Anthropic, OpenAI, Gemini, xAI (Grok), DeepSeek, Kimi, or Ollama. 40+ models pre-configured. The proxy translates Anthropic Messages API to the target format transparently.
 

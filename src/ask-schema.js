@@ -24,6 +24,12 @@ Guidelines:
 - Use showIf to hide follow-up questions until relevant (only reference earlier questions by id).
 - Users can always type a custom answer for select/multiselect/dropdown types.
 
+Images (the form can show pictures):
+- To let the user CHOOSE among pictures, give each option an "image". select/multiselect then render as a grid of thumbnail cards (label and description under each); dropdown shows the selected option's image in its preview area. The answer is still the option label.
+- To show pictures the user should COMMENT on or rate, put them in the question's "images" ([{ src, caption? }]); they appear under the question text. Pair with textarea/text for comments or select for a rating.
+- An image src is an absolute file path, a path relative to your working directory, an http(s) URL, or a data:image/... URI. Local files are served by the dashboard; you do not need to upload or encode them. The user can click a zoom button to view any image full size.
+- Markdown images (![alt](path)) in description, question and preview text accept the same src forms.
+
 The answer for each question is returned as: { id, question, answer } where answer is a string, number, boolean, or string array depending on type. If the user cancels, the answer is { cancelled: true }.`,
   input_schema: {
     $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -70,6 +76,26 @@ The answer for each question is returned as: { id, question, answer } where answ
             question: {
               type: 'string',
               description: 'The question text. Supports inline markdown.',
+            },
+            images: {
+              type: 'array',
+              description: 'Pictures shown under the question text, e.g. for the user to comment on or rate (pair with textarea, text or select). Up to 12.',
+              maxItems: 12,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  src: {
+                    type: 'string',
+                    description: 'Absolute file path, path relative to your working directory, http(s) URL, or data:image/... URI.',
+                  },
+                  caption: {
+                    type: 'string',
+                    description: 'Short caption shown under the picture. Defaults to its number (#1, #2, ...).',
+                  },
+                },
+                required: ['src'],
+              },
             },
             header: {
               type: 'string',
@@ -129,6 +155,10 @@ The answer for each question is returned as: { id, question, answer } where answ
                   preview: {
                     type: 'string',
                     description: 'Preview content shown when this option is selected. Supports markdown/code blocks.',
+                  },
+                  image: {
+                    type: 'string',
+                    description: 'Picture for this option (select/multiselect: thumbnail card; dropdown: shown when selected). Absolute file path, path relative to your working directory, http(s) URL, or data:image/... URI. The answer is still the label.',
                   },
                 },
                 required: ['label'],

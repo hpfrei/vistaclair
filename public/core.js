@@ -761,8 +761,95 @@ document.querySelectorAll('#empty-state .empty-state-link').forEach(el => {
 // --- Expose API for modules ---
 // --- AskUserQuestion: shared form rendering ---
 
-function askFormBuildHTML(formData) {
+// Image src from a form → { url, path } or null when it can't be shown.
+// Accepts http(s) URLs, data:image/ URIs, absolute paths and paths relative to
+// the asking session's cwd; local files load through /api/raw-file. Any other
+// scheme (javascript:, file: aside) is refused.
+function askImageSrc(src, cwd) {
+  src = typeof src === 'string' ? src.trim() : '';
+  if (!src) return null;
+  if (/^https?:\/\//i.test(src)) return { url: src, path: null };
+  if (/^data:image\//i.test(src)) return { url: src, path: null };
+  let p = src;
+  if (/^file:\/\//i.test(p)) { try { p = decodeURIComponent(p.slice(7)); } catch { return null; } }
+  else if (!/^[a-zA-Z]:[\\/]/.test(p) && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(p)) return null;
+  if (!p.startsWith('/') && !/^[a-zA-Z]:[\\/]/.test(p)) {
+    if (!cwd) return null;
+    p = cwd.replace(/[\\/]+$/, '') + '/' + p.replace(/^\.\//, '');
+  }
+  return { url: '/api/raw-file?path=' + encodeURIComponent(p), path: p };
+}
+
+function askImgBrokenHTML(src) {
+  return `<span class="ask-img-broken" title="${escHtml(src || '')}"><span class="ask-img-broken-icon">&#128444;</span><span class="ask-img-broken-src">${escHtml(src || '(no image)')}</span></span>`;
+}
+
+// <img> for a form image, or the broken placeholder when the src is refused.
+// data-ask-src keeps the original src for the placeholder (askFormBind).
+function askImgHTML(src, cwd, alt) {
+  const r = askImageSrc(src, cwd);
+  if (!r) return askImgBrokenHTML(src);
+  return `<img class="ask-img" src="${escHtml(r.url)}" alt="${escHtml(alt || '')}" data-ask-src="${escHtml(src)}">`;
+}
+
+// Zoom button for a form image; the click opens it large (askFormBind).
+function askZoomHTML(src, caption) {
+  return `<button type="button" class="ask-img-zoom" data-zoom-src="${escHtml(src || '')}" data-zoom-caption="${escHtml(caption || '')}" title="View larger">&#10530;</button>`;
+}
+
+// Markdown images: resolve their src the same way (relative to cwd) without
+// letting the browser fetch the raw src first — a <template> is inert.
+function askResolveMdImages(html, cwd) {
+  if (!html || !/<img\b/i.test(html)) return html;
+  const t = document.createElement('template');
+  t.innerHTML = html;
+  t.content.querySelectorAll('img').forEach(img => {
+    const src = img.getAttribute('src') || '';
+    const r = askImageSrc(src, cwd);
+    img.classList.add('ask-img', 'ask-md-img');
+    img.setAttribute('data-ask-src', src);
+    if (r) img.setAttribute('src', r.url);
+    else img.removeAttribute('src');
+  });
+  return t.innerHTML;
+}
+
+function askInlineMd(text, cwd) {
+  return askResolveMdImages(inlineMd(text), cwd);
+}
+
+// Large view of a form image: local files open in the file preview modal,
+// URLs in a minimal overlay built on the same chrome.
+function askOpenImage(src, caption, cwd) {
+  const r = askImageSrc(src, cwd);
+  if (!r) return;
+  if (r.path) { openFilePreview(r.path); return; }
+  closeFilePreview();
+  const overlay = document.createElement('div');
+  overlay.className = 'dir-overlay file-preview-overlay';
+  overlay.innerHTML = `
+    <div class="dir-overlay-backdrop"></div>
+    <div class="dir-overlay-panel">
+      <div class="dir-overlay-header">
+        <span class="dir-filename">${escHtml(caption || 'Image')}</span>
+        <span class="file-preview-path" title="${escHtml(src)}">${escHtml(src.startsWith('data:') ? src.slice(0, 40) + '…' : src)}</span>
+        <button class="dir-overlay-close" title="Close (Esc)">✕</button>
+      </div>
+      <div class="dir-overlay-content"><img alt="${escHtml(caption || '')}"></div>
+    </div>`;
+  overlay.querySelector('img').src = r.url;
+  document.body.appendChild(overlay);
+  const keyHandler = e => { if (e.key === 'Escape') { e.preventDefault(); closeFilePreview(); } };
+  document.addEventListener('keydown', keyHandler);
+  _activePreview = { el: overlay, editor: null, keyHandler };
+  overlay.querySelector('.dir-overlay-backdrop').addEventListener('click', closeFilePreview);
+  overlay.querySelector('.dir-overlay-close').addEventListener('click', closeFilePreview);
+}
+
+// opts.cwd: the asking session's working directory (relative image paths).
+function askFormBuildHTML(formData, opts = {}) {
   const questions = formData.questions || [];
+  const cwd = opts.cwd || null;
   let html = '';
 
   // Form chrome
@@ -770,7 +857,7 @@ function askFormBuildHTML(formData) {
     html += `<div class="ask-form-title">${escHtml(formData.title)}</div>`;
   }
   if (formData.description) {
-    html += `<div class="ask-form-desc markdown-body">${inlineMd(formData.description)}</div>`;
+    html += `<div class="ask-form-desc markdown-body">${askInlineMd(formData.description, cwd)}</div>`;
   }
 
   for (let qi = 0; qi < questions.length; qi++) {
@@ -794,10 +881,24 @@ function askFormBuildHTML(formData) {
     }
 
     // Question text
-    html += `<div class="ask-text markdown-body">${inlineMd(q.question)}</div>`;
+    html += `<div class="ask-text markdown-body">${askInlineMd(q.question, cwd)}</div>`;
+
+    // Pictures to look at / comment on
+    if (Array.isArray(q.images) && q.images.length) {
+      html += '<div class="ask-images">';
+      q.images.forEach((im, ii) => {
+        const src = typeof im === 'string' ? im : im?.src;
+        const caption = (im && typeof im === 'object' && im.caption) || `#${ii + 1}`;
+        html += '<figure class="ask-image">';
+        html += `<div class="ask-image-frame">${askImgHTML(src, cwd, caption)}${askZoomHTML(src, caption)}</div>`;
+        html += `<figcaption class="ask-image-caption">${escHtml(caption)}</figcaption>`;
+        html += '</figure>';
+      });
+      html += '</div>';
+    }
 
     // Render by type
-    html += askFieldHTML(q, qi, qType, qId);
+    html += askFieldHTML(q, qi, qType, qId, cwd);
 
     html += '</div>'; // .ask-question
   }
@@ -813,18 +914,33 @@ function askFormBuildHTML(formData) {
   return html;
 }
 
-function askFieldHTML(q, qi, qType, qId) {
+// One select/multiselect option. With images the options become cards: the
+// button (thumbnail + label) selects, the zoom button beside it only views.
+function askOptionHTML(opt, qId, isSel, multi, grid, cwd) {
   let html = '';
+  if (grid) html += '<div class="ask-option-card">';
+  html += `<button class="ask-option-btn${grid ? ' ask-option-btn-img' : ''}${isSel ? ' selected' : ''}" data-qid="${escHtml(qId)}" data-label="${escHtml(opt.label)}">`;
+  if (grid) html += `<span class="ask-option-thumb">${opt.image ? askImgHTML(opt.image, cwd, opt.label) : ''}</span>`;
+  if (grid) html += '<span class="ask-option-text">';
+  if (multi) html += '<span class="ask-option-check"></span>';
+  html += `<span class="ask-option-label">${escHtml(opt.label)}</span>`;
+  if (grid) html += '</span>';
+  if (opt.description) html += `<span class="ask-option-desc">${askInlineMd(opt.description, cwd)}</span>`;
+  html += '</button>';
+  if (grid && opt.image) html += askZoomHTML(opt.image, opt.label);
+  if (grid) html += '</div>';
+  return html;
+}
+
+function askFieldHTML(q, qi, qType, qId, cwd) {
+  let html = '';
+  const grid = (q.options || []).some(o => o && o.image);
 
   switch (qType) {
     case 'select': {
-      html += `<div class="ask-options" data-qid="${escHtml(qId)}" data-multi="false">`;
+      html += `<div class="ask-options${grid ? ' ask-options-grid' : ''}" data-qid="${escHtml(qId)}" data-multi="false">`;
       for (const opt of (q.options || [])) {
-        const isDef = q.defaultValue === opt.label;
-        html += `<button class="ask-option-btn${isDef ? ' selected' : ''}" data-qid="${escHtml(qId)}" data-label="${escHtml(opt.label)}">`;
-        html += `<span class="ask-option-label">${escHtml(opt.label)}</span>`;
-        if (opt.description) html += `<span class="ask-option-desc">${inlineMd(opt.description)}</span>`;
-        html += '</button>';
+        html += askOptionHTML(opt, qId, q.defaultValue === opt.label, false, grid, cwd);
       }
       html += '</div>';
       // Preview panel
@@ -836,15 +952,10 @@ function askFieldHTML(q, qi, qType, qId) {
 
     case 'multiselect': {
       html += '<div class="ask-hint">Select one or more</div>';
-      html += `<div class="ask-options" data-qid="${escHtml(qId)}" data-multi="true">`;
+      html += `<div class="ask-options${grid ? ' ask-options-grid' : ''}" data-qid="${escHtml(qId)}" data-multi="true">`;
       const defaults = Array.isArray(q.defaultValue) ? q.defaultValue : [];
       for (const opt of (q.options || [])) {
-        const isDef = defaults.includes(opt.label);
-        html += `<button class="ask-option-btn${isDef ? ' selected' : ''}" data-qid="${escHtml(qId)}" data-label="${escHtml(opt.label)}">`;
-        html += '<span class="ask-option-check"></span>';
-        html += `<span class="ask-option-label">${escHtml(opt.label)}</span>`;
-        if (opt.description) html += `<span class="ask-option-desc">${inlineMd(opt.description)}</span>`;
-        html += '</button>';
+        html += askOptionHTML(opt, qId, defaults.includes(opt.label), true, grid, cwd);
       }
       html += '</div>';
       html += `<div class="ask-preview" data-qid="${escHtml(qId)}"></div>`;
@@ -924,8 +1035,10 @@ function askFieldHTML(q, qi, qType, qId) {
   return html;
 }
 
-function askFormBind(container, formData, callbacks) {
+// opts.cwd: as for askFormBuildHTML.
+function askFormBind(container, formData, callbacks, opts = {}) {
   const questions = formData.questions || [];
+  const cwd = opts.cwd || null;
   const submitBtn = container.querySelector('.ask-submit-btn');
   const cancelBtn = container.querySelector('.ask-cancel-btn');
 
@@ -968,6 +1081,28 @@ function askFormBind(container, formData, callbacks) {
       onChange();
     });
   });
+
+  // --- Images: zoom buttons only view, never select; a broken image becomes a placeholder ---
+  container.addEventListener('click', e => {
+    const zoom = e.target.closest?.('.ask-img-zoom');
+    if (!zoom || !container.contains(zoom)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    askOpenImage(zoom.dataset.zoomSrc, zoom.dataset.zoomCaption, cwd);
+  });
+  bindImages(container);
+
+  function bindImages(root) {
+    root.querySelectorAll('img.ask-img').forEach(img => {
+      const broken = () => {
+        const ph = document.createElement('span');
+        ph.innerHTML = askImgBrokenHTML(img.dataset.askSrc);
+        img.replaceWith(ph.firstChild);
+      };
+      if (!img.getAttribute('src')) broken();
+      else img.addEventListener('error', broken, { once: true });
+    });
+  }
 
   // --- Dropdowns ---
   container.querySelectorAll('.ask-dropdown').forEach(sel => {
@@ -1112,11 +1247,18 @@ function askFormBind(container, formData, callbacks) {
     const previewEl = container.querySelector(`.ask-preview[data-qid="${qId}"]`);
     if (!previewEl) return;
     const opt = (q?.options || []).find(o => o.label === selectedLabel);
-    if (opt?.preview) {
-      const rendered = typeof marked !== 'undefined' ? marked.parse(opt.preview) : escHtml(opt.preview);
-      const safe = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(rendered) : rendered;
-      previewEl.innerHTML = `<div class="ask-preview-content markdown-body">${safe}</div>`;
+    // Dropdown options have no thumbnail, so the chosen one's image shows here.
+    const image = opt?.image && q?.type === 'dropdown' ? opt.image : null;
+    if (opt?.preview || image) {
+      let safe = '';
+      if (opt.preview) {
+        const rendered = typeof marked !== 'undefined' ? marked.parse(opt.preview) : escHtml(opt.preview);
+        safe = askResolveMdImages(typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(rendered) : rendered, cwd);
+      }
+      const imgHtml = image ? `<div class="ask-preview-image">${askImgHTML(image, cwd, opt.label)}${askZoomHTML(image, opt.label)}</div>` : '';
+      previewEl.innerHTML = `${imgHtml}${safe ? `<div class="ask-preview-content markdown-body">${safe}</div>` : ''}`;
       previewEl.classList.add('visible');
+      bindImages(previewEl);
     } else {
       previewEl.innerHTML = '';
       previewEl.classList.remove('visible');
@@ -1241,6 +1383,12 @@ function askFormBind(container, formData, callbacks) {
     container.querySelectorAll('.ask-file-zone').forEach(z => z.classList.add('disabled'));
     if (submitBtn) submitBtn.textContent = 'Submitted';
     container.classList.add('answered');
+  }
+
+  // A default choice shows its preview (and, for a dropdown, its image) up front
+  for (const q of questions) {
+    const qId = q.id || `q${questions.indexOf(q)}`;
+    if (typeof q.defaultValue === 'string' && (q.type === 'select' || q.type === 'dropdown')) showPreview(qId, q, q.defaultValue);
   }
 
   // Initial readiness check

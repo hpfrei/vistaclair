@@ -1478,7 +1478,7 @@
         panel.classList.add('ask-external-submit');
       }
       if (isSingle && !f.formData.cancelLabel) f.formData.cancelLabel = 'Cancel';
-      panel.innerHTML = askFormBuildHTML(f.formData);
+      panel.innerHTML = askFormBuildHTML(f.formData, { cwd: meta.cwd });
 
       const binder = askFormBind(panel, f.formData, isSingle ? {
         onSubmit: (answer, files) => {
@@ -1492,7 +1492,7 @@
       } : {
         onSubmit: () => {},
         onCancel: () => {},
-      });
+      }, { cwd: meta.cwd });
       binders.push({ binder, form: f });
       body.appendChild(panel);
     });
