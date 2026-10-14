@@ -372,6 +372,9 @@ dashboardApp.use('/api', licensing.createLicenseRouter({
 }));
 
 const dashboardServer = http.createServer(dashboardApp);
+// Node cuts any request whose body is not fully received in 5 minutes; a
+// slave receiving a publish upload (code/data bundle) over a slow link needs longer.
+dashboardServer.requestTimeout = 10 * 60 * 1000;
 
 const cliSessionManager = new CliSessionManager(PROXY_PORT, { broadcast: (...args) => broadcaster.broadcast(...args) }, store, { authToken: AUTH_TOKEN, dashboardPort: DASHBOARD_PORT });
 
