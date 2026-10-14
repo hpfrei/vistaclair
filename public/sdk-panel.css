@@ -1,0 +1,407 @@
+/* ============================================================
+   AGENT SDK PANEL (sdk-panel.js) and <vc-composer> (vc-composer.js)
+   An SDK tab's wrap holds one panel: toolbar, the orchestrator's area on
+   top, worker areas below (1 or 2 columns), the composer docked at the
+   bottom. Each area scrolls its own feed.
+   ============================================================ */
+
+/* Tab strip: the "SDK" badge after the label. */
+.cli-sdk-badge {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  line-height: 15px;
+  background: var(--purple);
+  color: #fff;
+  opacity: .85;
+  vertical-align: 1px;
+}
+.cli-new-menu-sdk::before { content: 'SDK'; font-size: 9px; font-weight: 700; padding: 0 4px; margin-right: 6px; border-radius: 3px; background: var(--purple); color: #fff; }
+
+.cli-sdk-wrap { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.sdk-wrap .sdk-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg);
+  color: var(--text);
+  position: relative;
+}
+.sdk-panel.vc-dropping::after {
+  content: 'Drop images to attach';
+  position: absolute;
+  inset: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+  pointer-events: none;
+  z-index: 5;
+}
+.sdk-spacer { flex: 1; }
+.sdk-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 16px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* --- toolbar --- */
+.sdk-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  font-size: 12px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.sdk-toolbar-badge { font-size: 9px; font-weight: 700; padding: 0 5px; border-radius: 3px; background: var(--purple); color: #fff; line-height: 15px; }
+.sdk-toolbar-title { font-weight: 600; }
+.sdk-toolbar-meta { color: var(--text-dim); }
+.sdk-toolbar-cost { font-family: var(--vc-mono, ui-monospace, monospace); color: var(--green); }
+.sdk-tb-btn, .sdk-area-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.sdk-tb-btn:hover:not(:disabled), .sdk-area-btn:hover { background: var(--bg-hover); }
+.sdk-tb-btn:disabled { opacity: .45; cursor: default; }
+.sdk-tb-btn[data-act="interrupt"] { color: var(--red); }
+.sdk-area-btn { font-size: 10px; padding: 1px 7px; }
+.sdk-area-btn.active { border-color: var(--accent); color: var(--accent); }
+
+/* --- areas --- */
+.sdk-areas {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+.sdk-main-slot { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.sdk-panel.has-workers .sdk-main-slot { flex: 0 0 auto; height: 58%; min-height: 300px; }
+.sdk-workers { display: grid; grid-template-columns: 1fr; gap: 8px; align-items: start; }
+.sdk-panel:not(.has-workers) .sdk-workers { display: none; }
+@media (min-width: 1200px) {
+  .sdk-workers { grid-template-columns: 1fr 1fr; }
+}
+.sdk-area {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--paper-bg, var(--bg-surface));
+  overflow: hidden;
+}
+.sdk-main-slot > .sdk-area { flex: 1; }
+.sdk-area-worker { height: 380px; }
+.sdk-area.collapsed { height: auto; flex: 0 0 auto; }
+.sdk-panel.has-workers .sdk-main-slot:has(> .sdk-area.collapsed) { height: auto; min-height: 0; }
+.sdk-area.collapsed .sdk-area-body,
+.sdk-area.collapsed .sdk-area-todo,
+.sdk-area.collapsed .sdk-area-notes { display: none; }
+.sdk-area-is-busy { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.sdk-area-is-awaiting { border-color: var(--orange); box-shadow: 0 0 0 1px var(--orange); }
+
+.sdk-area-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  font-size: 12px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.sdk-area-fold { border: none; background: none; color: var(--text-dim); cursor: pointer; padding: 0 2px; font-size: 11px; width: 14px; }
+.sdk-area-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch; cursor: default; }
+.sdk-area-orchestrator .sdk-area-name::before { content: '\1F9ED  '; }
+.sdk-area-cost { font-family: var(--vc-mono, ui-monospace, monospace); font-size: 11px; color: var(--green); }
+.sdk-state-busy { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.sdk-state-busy::before { content: '● '; animation: sdk-pulse 1.2s ease-in-out infinite; }
+.sdk-state-awaiting { background: color-mix(in srgb, var(--orange) 25%, transparent); color: var(--orange); font-weight: 600; }
+.sdk-state-paused, .sdk-state-pausing { background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow); }
+.sdk-state-exited { background: var(--bg-hover); color: var(--text-dim); }
+.sdk-area-report { background: color-mix(in srgb, var(--cyan) 18%, transparent); color: var(--cyan); }
+.sdk-report-done, .sdk-report-complete { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
+.sdk-report-blocked, .sdk-report-failed { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+@keyframes sdk-pulse { 50% { opacity: .35; } }
+
+.sdk-area-awaiting {
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--orange);
+  background: color-mix(in srgb, var(--orange) 12%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+.sdk-area-awaiting::before { content: '? '; font-weight: 700; }
+.sdk-area-final { padding: 6px 10px; font-size: 12px; color: var(--text-dim); white-space: pre-wrap; }
+
+/* --- TODO strip / NOTES --- */
+.sdk-area-todo { max-height: 132px; overflow-y: auto; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.sdk-todo { width: 100%; border-collapse: collapse; font-size: 11px; }
+.sdk-todo td { padding: 2px 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); vertical-align: top; }
+.sdk-todo-id { width: 1%; white-space: nowrap; font-family: var(--vc-mono, ui-monospace, monospace); color: var(--text-dim); }
+.sdk-todo td:last-child { width: 1%; white-space: nowrap; text-align: right; }
+.sdk-todo-doing td { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600; }
+.sdk-todo-done .sdk-todo-desc { color: var(--text-dim); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--text-dim) 50%, transparent); }
+.sdk-todo-chip-doing { background: var(--accent); color: #fff; }
+.sdk-todo-chip-done { background: color-mix(in srgb, var(--green) 22%, transparent); color: var(--green); }
+.sdk-todo-chip-blocked { background: color-mix(in srgb, var(--red) 20%, transparent); color: var(--red); }
+.sdk-area-notes { max-height: 220px; overflow-y: auto; padding: 6px 12px; font-size: 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+
+/* --- feed --- */
+.sdk-area-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sdk-feed {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* Feed rows keep their height: a column flex scroller would otherwise
+   squash every overflow:hidden child (the tool cards) to fit. */
+.sdk-feed > *, .sdk-tool-nest > * { flex-shrink: 0; }
+.sdk-live-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  padding: 4px 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+  cursor: pointer;
+  z-index: 2;
+}
+.sdk-text { overflow-wrap: anywhere; }
+.sdk-text > :first-child { margin-top: 0; }
+.sdk-text > :last-child { margin-bottom: 0; }
+
+.sdk-thinking { color: var(--text-dim); font-size: 12px; border-left: 2px solid var(--border); padding-left: 8px; }
+.sdk-thinking-head { cursor: pointer; font-style: italic; user-select: none; opacity: .8; }
+.sdk-thinking-head::before { content: '▸ '; font-style: normal; }
+.sdk-thinking.open .sdk-thinking-head::before { content: '▾ '; }
+.sdk-thinking-body { display: none; white-space: pre-wrap; font-style: italic; max-height: 260px; overflow-y: auto; margin-top: 2px; }
+.sdk-thinking.open .sdk-thinking-body { display: block; }
+.sdk-thinking-empty .sdk-thinking-body { display: none !important; }
+
+.sdk-tool {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 12px;
+  overflow: hidden;
+}
+.sdk-tool-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  user-select: none;
+  min-width: 0;
+}
+.sdk-tool-head:hover { background: var(--bg-hover); }
+.sdk-tool-caret { color: var(--text-dim); width: 10px; flex-shrink: 0; font-size: 10px; }
+.sdk-tool-name { font-weight: 600; color: var(--purple); white-space: nowrap; flex-shrink: 0; }
+.sdk-tool-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-family: var(--vc-mono, ui-monospace, monospace); font-size: 11px; }
+.sdk-tool-st { flex-shrink: 0; color: var(--text-dim); font-size: 11px; }
+.sdk-tool.running .sdk-tool-st { color: var(--accent); animation: sdk-pulse 1.2s ease-in-out infinite; }
+.sdk-tool:not(.running):not(.error) .sdk-tool-st { color: var(--green); }
+.sdk-tool.error { border-color: color-mix(in srgb, var(--red) 55%, var(--border)); }
+.sdk-tool.error .sdk-tool-st { color: var(--red); }
+.sdk-tool-body { display: none; border-top: 1px solid var(--border); }
+.sdk-tool.open .sdk-tool-body { display: block; }
+.sdk-tool-input, .sdk-tool-result {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--vc-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+.sdk-tool-result { border-top: 1px dashed var(--border); background: var(--bg-surface); }
+.sdk-tool.error .sdk-tool-result { color: var(--red); }
+.sdk-tool-input:empty { display: none; }
+.sdk-tool-agent { border-color: color-mix(in srgb, var(--cyan) 50%, var(--border)); }
+.sdk-tool-agent > .sdk-tool-head .sdk-tool-name { color: var(--cyan); }
+.sdk-tool-send > .sdk-tool-head .sdk-tool-name { color: var(--magenta); }
+.sdk-tool-nest {
+  display: none;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 8px 8px 12px;
+  border-top: 1px solid var(--border);
+  border-left: 3px solid color-mix(in srgb, var(--cyan) 45%, transparent);
+  max-height: 340px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.sdk-tool.open > .sdk-tool-nest:not(.hidden) { display: flex; }
+.sdk-sub-prompt { color: var(--text-dim); font-size: 11px; white-space: pre-wrap; border-left: 2px solid var(--border); padding-left: 6px; max-height: 80px; overflow: hidden; }
+
+.sdk-user {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 6px 10px;
+  border-radius: 10px 10px 2px 10px;
+  background: var(--chat-user-bg, var(--bg-selected));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sdk-user-who { font-size: 10px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
+.sdk-user-peer { align-self: flex-start; border-radius: 10px 10px 10px 2px; }
+.sdk-user-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.sdk-user-imgs img { height: 72px; max-width: 160px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); display: block; }
+
+.sdk-peer {
+  border: 1px solid color-mix(in srgb, var(--magenta) 45%, var(--border));
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, var(--magenta) 7%, var(--bg));
+  font-size: 12px;
+  max-width: 92%;
+}
+.sdk-peer.out { align-self: flex-end; }
+.sdk-peer.in { align-self: flex-start; }
+.sdk-peer-head { font-weight: 600; color: var(--magenta); font-size: 11px; }
+.sdk-peer-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow-y: auto; }
+
+.sdk-notice { align-self: center; font-size: 11px; color: var(--text-dim); text-align: center; white-space: pre-wrap; max-width: 90%; }
+.sdk-notice-warn { color: var(--orange); }
+.sdk-notice-error { color: var(--red); }
+.sdk-notice-injected { align-self: stretch; text-align: left; max-width: none; font-family: var(--vc-mono, ui-monospace, monospace); border-left: 2px solid var(--border); padding-left: 8px; max-height: 4.5em; overflow: hidden; }
+.sdk-result { align-self: stretch; font-size: 11px; color: var(--text-dim); border-top: 1px dashed var(--border); padding-top: 3px; text-align: right; }
+.sdk-result.error { color: var(--red); }
+
+/* --- <vc-composer> --- */
+.vc-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.vc-composer.vc-dropping { outline: 2px dashed var(--accent); outline-offset: -3px; }
+.vc-composer-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.vc-composer-chips:not(:has(> :not(.hidden))) { display: none; }
+.vc-composer-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px 1px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+.vc-composer-target-x, .vc-composer-att-x {
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 3px;
+}
+.vc-composer-att { position: relative; display: inline-block; }
+.vc-composer-att img { height: 48px; width: 48px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); display: block; }
+.vc-composer-att-x {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+}
+.vc-composer-row { display: flex; align-items: flex-end; gap: 6px; }
+.vc-composer textarea {
+  flex: 1;
+  min-height: 34px;
+  max-height: 200px;
+  resize: none;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.vc-composer textarea:focus { outline: none; border-color: var(--accent); }
+.vc-composer-attach, .vc-composer-send {
+  flex-shrink: 0;
+  height: 34px;
+  min-width: 34px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
+  cursor: pointer;
+}
+.vc-composer-send { background: var(--accent); border-color: var(--accent); color: #fff; font-size: 14px; }
+.vc-composer button:disabled { opacity: .45; cursor: default; }
+.vc-composer-note { font-size: 11px; color: var(--text-dim); }
+.vc-composer-note.bad { color: var(--red); }
+
+/* --- phone: areas stack, the composer stays docked --- */
+/* An SDK tab types through its own composer, never the terminal key row. */
+#view-claude.sdk-tab-active .mobile-cli-bar { display: none !important; }
+@media (max-width: 640px) {
+  .sdk-areas { padding: 4px; gap: 6px; }
+  .sdk-panel.has-workers .sdk-main-slot { height: 62vh; min-height: 240px; }
+  .sdk-workers { grid-template-columns: 1fr; }
+  .sdk-area-worker { height: 55vh; }
+  .sdk-area-name { max-width: 22ch; }
+  .sdk-toolbar { padding: 4px 8px; gap: 6px; }
+  .sdk-toolbar-meta { display: none; }
+  .vc-composer { padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
+  .vc-composer textarea { font-size: 16px; } /* no iOS zoom on focus */
+}

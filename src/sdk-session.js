@@ -1,0 +1,604 @@
+// Agent SDK sessions: the third session kind (`kind: 'sdk'`, settings.engine
+// 'sdk'). The same Claude Code binary as a CLI tab, driven through
+// @anthropic-ai/claude-agent-sdk's query() instead of a PTY, billed to the API
+// key, shown in the dashboard's SDK panel instead of a terminal.
+//
+//   surface        what CliSessionManager, orchestration.js and
+//                  session-control.js use on a CliSession (sessId, instanceId,
+//                  settings, busy, running, spawn, kill, submit, interrupt, …).
+//                  write / writeWhenReady keep the PTY contract for old
+//                  callers: typed text is buffered, '\r' submits it, Esc
+//                  interrupts.
+//   options        one mapping from the tab's settings, built by the same
+//                  helpers as the CLI flags (cli-session.js): the appended
+//                  system prompt, --settings, the MCP servers, the env
+//                  (buildClaudeEnv, auth forced to the API key).
+//   input          an async queue of SDKUserMessages: submit() pushes one
+//                  (text + base64 images, optional priority now|next|later).
+//   events         every SDK message is broadcast as
+//                  `sdk:event { sessId, runId?, ev: { sdk } }`; the platform adds
+//                  `{ user }` (a submitted turn) and `{ platform }` (status,
+//                  notice, inter-agent message). Everything but stream_event
+//                  deltas is appended to <sessionDir>/transcript.jsonl, which
+//                  sdk:history replays after a reload or restart.
+//   exit           the query ending (or kill) broadcasts the same `cli:exit`
+//                  a PTY exit does, so the manager's exit callbacks and
+//                  listeners (Pro's addExitHook, orchestration) fire alike.
+//
+// The SDK is a hard requirement of core: loaded once with import() when this
+// module is required; server.js awaits `ready` before any session can spawn.
+
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const caps = require('./capabilities');
+const { buildClaudeEnv, sanitizeForDashboard, trackInstance, DATA_HOME } = require('./utils');
+const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
+
+const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
+
+let sdk = null;
+const ready = import(SDK_PACKAGE).then(
+  (m) => { sdk = m; return m; },
+  (e) => { throw new Error(`${SDK_PACKAGE} failed to load (${e.message}). It is a required dependency of core: run npm install.`); },
+);
+ready.catch(() => {});   // reported by whoever awaits it (server boot)
+
+// Claude Code's own cross-session messaging is replaced by the orchestrator
+// MCP server's tools of the same names (lib/orchestrator-mcp.js).
+const DISALLOWED_TOOLS = ['SendMessage', 'ListAgents'];
+const SETTING_SOURCES = ['user', 'project', 'local'];
+
+const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGES_BYTES = 18 * 1024 * 1024;
+const PRIORITIES = new Set(['now', 'next', 'later']);
+const HISTORY_LIMIT = 5000;            // envelopes replayed by sdk:history
+const STDERR_TAIL = 4096;
+
+function uploadUrl(sessId, name) {
+  return `/api/sdk/upload?sessId=${encodeURIComponent(sessId)}&name=${encodeURIComponent(name)}`;
+}
+
+function safeName(name) {
+  const s = path.basename(String(name || 'image').replace(/\\/g, '/')).replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^[._]+/, '');
+  return s.slice(0, 80) || 'image';
+}
+
+// The `claude` a CLI tab runs is whatever PATH resolves; the SDK gets the same
+// file, so both engines run the same Claude Code version.
+function resolveClaudeBinary(envPath) {
+  for (const dir of String(envPath || '').split(path.delimiter)) {
+    if (!dir) continue;
+    const p = path.join(dir, 'claude');
+    try { fs.accessSync(p, fs.constants.X_OK); if (fs.statSync(p).isFile()) return p; } catch {}
+  }
+  throw new Error('the `claude` CLI is not on PATH');
+}
+
+// The session's transcript file (envelopes, one per line).
+function transcriptFile(dir) {
+  return path.join(dir, 'transcript.jsonl');
+}
+
+// Read a transcript for replay: the last `limit` envelopes. A folder outlives a
+// session id (a fresh restart keeps the folder), so image URLs are re-keyed to
+// the session asking.
+function readTranscript(dir, { sessId, limit = HISTORY_LIMIT } = {}) {
+  let raw;
+  try { raw = fs.readFileSync(transcriptFile(dir), 'utf8'); } catch { return []; }
+  const lines = raw.split('\n').filter(Boolean);
+  const out = [];
+  for (const line of lines.slice(-limit)) {
+    let env;
+    try { env = JSON.parse(line); } catch { continue; }
+    if (sessId && env.ev?.user?.images?.length) {
+      env.ev.user.images = env.ev.user.images.map(i => ({ ...i, url: uploadUrl(sessId, i.name) }));
+    }
+    out.push(env);
+  }
+  return out;
+}
+
+// A user turn's text, when the message is a prompt rather than tool results.
+function promptText(message) {
+  const c = message?.content;
+  if (typeof c === 'string') return c;
+  if (!Array.isArray(c) || c.some(b => b?.type === 'tool_result')) return null;
+  return c.filter(b => b?.type === 'text').map(b => b.text).join('\n');
+}
+
+// An async iterable the query reads its input from: push() hands a message to
+// a waiting reader or queues it; close() ends the iteration.
+class InputQueue {
+  constructor() {
+    this._items = [];
+    this._waiters = [];
+    this.closed = false;
+  }
+
+  push(item) {
+    if (this.closed) return false;
+    const w = this._waiters.shift();
+    if (w) w({ value: item, done: false });
+    else this._items.push(item);
+    return true;
+  }
+
+  close() {
+    this.closed = true;
+    for (const w of this._waiters.splice(0)) w({ value: undefined, done: true });
+  }
+
+  [Symbol.asyncIterator]() {
+    return {
+      next: () => {
+        if (this._items.length) return Promise.resolve({ value: this._items.shift(), done: false });
+        if (this.closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise(r => this._waiters.push(r));
+      },
+      return: () => { this.close(); return Promise.resolve({ value: undefined, done: true }); },
+    };
+  }
+}
+
+class SdkSession {
+  // opts: authToken, dashboardPort (as CliSession); sdk ({ query,
+  // getSessionMessages }) and claudeBin replace the real SDK and binary in tests.
+  constructor(proxyPort, broadcaster, store, opts = {}) {
+    this.proxyPort = proxyPort;
+    this.broadcaster = broadcaster;
+    this.store = store;
+    this.cwd = null;
+    this.tabId = null;
+    this.kind = 'sdk';
+    this.sessId = null;
+    this._instanceId = null;
+    this.title = null;
+    this.settings = { ...DEFAULT_SETTINGS };
+    this.status = 'idle';
+    this.hidden = false;
+    this.owner = null;
+    this.busy = false;
+    // busy | idle | awaiting (an AskUserQuestion is open) | paused | exited
+    this.state = 'idle';
+    this.costUsd = 0;
+    this.autoMemory = false;
+    this._authToken = opts.authToken || '';
+    this._dashboardPort = opts.dashboardPort || 3457;
+    this._sdk = opts.sdk || null;
+    this._claudeBin = opts.claudeBin || null;
+    this._spawnGen = 0;
+    this._query = null;
+    this._input = null;
+    this._abort = null;
+    this._typed = '';
+    this._seeding = null;     // envelopes held back while a resume seeds the transcript
+    this._exitState = null;
+    this._awaiting = false;
+    this._stderr = '';
+    // Set by the manager: persists the busy flag in the open-tab manifest.
+    this.onStateChange = null;
+  }
+
+  get instanceId() {
+    return this._instanceId;
+  }
+
+  get running() {
+    return this.status === 'running' && this._query !== null;
+  }
+
+  get runId() {
+    return this.settings.orchestration?.runId || null;
+  }
+
+  sessionDir() {
+    return this.settings.sessionDir || (this.sessId ? path.join(DATA_HOME, 'interactions', this.sessId) : null);
+  }
+
+  uploadsDir() {
+    const dir = this.sessionDir();
+    return dir ? path.join(dir, 'uploads') : null;
+  }
+
+  spawn(cwd, cols, rows, { resumeSessionId, autoMemory } = {}) {
+    const mod = this._sdk || sdk;
+    if (!mod || typeof mod.query !== 'function') throw new Error(`${SDK_PACKAGE} is not loaded`);
+    this._spawnGen++;
+    if (this.running) this.kill();
+
+    this.cwd = cwd;
+    this.autoMemory = autoMemory === true;
+    this.sessId = resumeSessionId || crypto.randomUUID();
+    this._instanceId = `cli-${this.sessId}`;
+    // Built before anything is registered: a missing API key or binary fails
+    // the launch instead of leaving a dead session behind.
+    const options = this._buildOptions({ resumeSessionId });
+
+    this.status = 'running';
+    this._exitState = null;
+    this._awaiting = false;
+    this._stderr = '';
+    this.store.registerSession(this.instanceId, this.sessId);
+    // A live instance like a CLI tab's pty: the proxy applies its
+    // instance-scoped rules (the AskUserQuestion rewrite, the tab's modelMap)
+    // only to requests from a registered instance.
+    this._instanceExit = trackInstance(this.instanceId, { kill: () => this.kill() }, { tabId: this.tabId }, cwd, this.autoMemory);
+
+    if (resumeSessionId) {
+      const { store, sessId, instanceId, broadcaster } = this;
+      setImmediate(() => {
+        const historical = store.loadSessionIntoMemory(sessId);
+        if (historical.length > 0) {
+          broadcaster.broadcast({
+            type: 'inspector:sessionLoaded',
+            sessId,
+            instanceId,
+            interactions: historical.map(sanitizeForDashboard).filter(Boolean),
+          });
+        }
+      });
+      this._seedTranscript(mod, resumeSessionId);
+    }
+
+    this._input = new InputQueue();
+    this._query = mod.query({ prompt: this._input, options });
+    this._setState('idle', { force: true });
+    this._consume(this._spawnGen, this._query);
+
+    this.broadcaster.broadcast({
+      type: 'cli:spawned',
+      tabId: this.tabId,
+      instanceId: this.instanceId,
+      cwd: this.cwd,
+      title: this.title,
+      settings: this.settings,
+      autoMemory: this.autoMemory,
+      hidden: this.hidden,
+      kind: 'sdk',
+    });
+
+    writeInternalJson(this, {
+      mode: 'sdk',
+      resumed: !!resumeSessionId,
+      resumedFrom: resumeSessionId || null,
+      autoMemory: this.autoMemory,
+    });
+  }
+
+  spawnShell() {
+    throw new Error('an Agent SDK session has no shell');
+  }
+
+  // The query() options for this session's settings: the CLI flags of a tab
+  // with the same settings, in the SDK's terms.
+  _buildOptions({ resumeSessionId } = {}) {
+    const s = this.settings;
+    const apiKey = caps.getAnthropicApiKey(DATA_HOME);
+    if (!apiKey) throw new Error('An Agent SDK session is billed to the Anthropic API: add an Anthropic API key on the Models page.');
+    const env = buildClaudeEnv({
+      proxyPort: this.proxyPort,
+      dashboardPort: this._dashboardPort,
+      authToken: this._authToken,
+      instanceId: this.instanceId,
+      extraEnv: { GIT_CEILING_DIRECTORIES: this.cwd, CLAUDE_AGENT_SDK_CLIENT_APP: 'vistaclair' },
+      autoMemory: this.autoMemory,
+      anthropicApiKey: apiKey,
+    });
+    // API billing only: no OAuth credential may win over the key.
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete env.ANTHROPIC_AUTH_TOKEN;
+
+    const append = buildAppendSystemPrompt(s);
+    const options = {
+      cwd: this.cwd,
+      systemPrompt: s.systemPrompt
+        ? { type: 'custom', prompt: `${s.systemPrompt}\n\n${append}` }
+        : { type: 'preset', preset: 'claude_code', append },
+      settingSources: [...SETTING_SOURCES],
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      disallowedTools: [...DISALLOWED_TOOLS],
+      includePartialMessages: true,
+      // Claude Code offers AskUserQuestion only to a host with a permission
+      // prompt surface. The proxy rewrites the model's call to the integrated
+      // vista-AskUserQuestion (the dashboard modal), so this callback is only
+      // reached by a call the proxy did not rewrite: refuse it.
+      canUseTool: async (toolName) => ({ behavior: 'deny', message: `${toolName} is not available in this session.` }),
+      env,
+      pathToClaudeCodeExecutable: this._claudeBin || resolveClaudeBinary(env.PATH),
+      abortController: (this._abort = new AbortController()),
+      stderr: (d) => { this._stderr = (this._stderr + d).slice(-STDERR_TAIL); },
+    };
+    if (s.settingsFile) options.settings = s.settingsFile;
+    const mcpServers = buildMcpServers({ settings: s, instanceId: this.instanceId, dashboardPort: this._dashboardPort, authToken: this._authToken });
+    if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
+    if (s.agents && typeof s.agents === 'object') options.agents = s.agents;
+    if (s.model) options.model = s.model;
+    if (s.effort) options.effort = s.effort;
+    if (s.maxBudgetUsd) options.maxBudgetUsd = Number(s.maxBudgetUsd);
+    if (s.maxTurns) options.maxTurns = Number(s.maxTurns);
+    if (resumeSessionId) {
+      options.resume = resumeSessionId;
+    } else {
+      options.sessionId = this.sessId;
+      // The SDK's display title; --name's messaging address has no equivalent
+      // (run members are addressed through orchestration's own registry).
+      if (s.name) options.title = String(s.name);
+    }
+    return options;
+  }
+
+  // Read the query to its end. Only the current spawn reports its exit: a
+  // respawn has already replaced it.
+  async _consume(gen, q) {
+    let exitCode = 0;
+    try {
+      for await (const msg of q) {
+        if (gen !== this._spawnGen) break;
+        this._onMessage(msg);
+      }
+    } catch (e) {
+      if (gen === this._spawnGen && !this._abort?.signal.aborted) {
+        exitCode = 1;
+        const tail = this._stderr.trim().split('\n').slice(-5).join('\n');
+        this.emitEvent({ platform: { kind: 'notice', level: 'error', text: `The Agent SDK session stopped: ${e.message}${tail ? `\n${tail}` : ''}` } });
+      }
+    }
+    if (gen !== this._spawnGen) return;
+    this._input?.close();
+    this._query = null;
+    this.store.unregisterSession(this.instanceId);
+    this._instanceExit?.();
+    this.status = 'exited';
+    this._setState(this._exitState || 'exited', { force: true });
+    this.broadcaster.broadcast({ type: 'cli:exit', tabId: this.tabId, exitCode });
+  }
+
+  _onMessage(msg) {
+    this.emitEvent({ sdk: msg });
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'system' && msg.subtype === 'init') {
+      if (msg.apiKeySource && msg.apiKeySource !== 'ANTHROPIC_API_KEY') {
+        this.emitEvent({ platform: { kind: 'notice', level: 'warning', text: `Claude Code reports its credential as "${msg.apiKeySource}", not the API key.` } });
+      }
+    } else if (msg.type === 'system' && msg.subtype === 'session_state_changed') {
+      if (msg.state === 'idle') this._setState('idle');
+      else if (msg.state === 'running') this._setState(this._awaiting ? 'awaiting' : 'busy');
+      else if (msg.state === 'requires_action') this._setState('awaiting');
+    } else if (msg.type === 'result') {
+      const cost = typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd
+        : Object.values(msg.modelUsage || {}).reduce((n, u) => n + (u?.costUSD || 0), 0);
+      // Cumulative for the query (and carried over a resume): the latest wins.
+      if (Number.isFinite(cost)) this.costUsd = cost;
+      this._setState(msg.queued_turn_count > 0 ? 'busy' : 'idle', { force: true });
+    } else if (msg.type === 'assistant' && this.state === 'idle') {
+      this._setState('busy');
+    }
+  }
+
+  // Broadcast one envelope and keep it in the transcript (deltas excepted).
+  emitEvent(ev) {
+    if (!this.sessId) return;
+    const env = { sessId: this.sessId, ...(this.runId ? { runId: this.runId } : {}), ts: Date.now(), ev };
+    this.broadcaster.broadcast({ type: 'sdk:event', ...env });
+    if (ev.sdk?.type === 'stream_event') return;
+    if (this._seeding) { this._seeding.push(env); return; }
+    this._append([env]);
+  }
+
+  _append(envs) {
+    const dir = this.sessionDir();
+    if (!dir || !envs.length) return;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(transcriptFile(dir), envs.map(e => JSON.stringify(e)).join('\n') + '\n');
+    } catch (e) {
+      console.error(`[sdk-session] transcript ${dir}: ${e.message}`);
+    }
+  }
+
+  // A resume of a conversation the panel has never seen (it was a CLI tab):
+  // seed the transcript from Claude Code's own, so the panel shows it.
+  _seedTranscript(mod, resumeSessionId) {
+    const dir = this.sessionDir();
+    if (!dir || fs.existsSync(transcriptFile(dir)) || typeof mod.getSessionMessages !== 'function') return;
+    const held = (this._seeding = []);
+    const sessId = this.sessId;
+    const done = (seed) => {
+      if (this._seeding === held) this._seeding = null;
+      this._append([...seed, ...held]);
+    };
+    Promise.resolve()
+      .then(() => mod.getSessionMessages(resumeSessionId, { dir: this.cwd }))
+      .then((msgs) => {
+        const seed = [{ sessId, ts: Date.now(), ev: { platform: { kind: 'notice', text: 'Continued from an earlier session.' } } }];
+        for (const m of Array.isArray(msgs) ? msgs : []) {
+          const text = m.type === 'user' && !m.parent_tool_use_id ? promptText(m.message) : null;
+          const ev = text != null
+            ? { user: { text, images: [] } }
+            : { sdk: { type: m.type, message: m.message, parent_tool_use_id: m.parent_tool_use_id ?? null, uuid: m.uuid, session_id: m.session_id } };
+          seed.push({ sessId, ts: null, seeded: true, ev });
+        }
+        done(seed);
+      }, (e) => {
+        console.error(`[sdk-session] seeding ${resumeSessionId}: ${e.message}`);
+        done([]);
+      });
+  }
+
+  // State for the panel (and `busy` for the manifest and the pause flow).
+  _setState(state, { force = false } = {}) {
+    if (this.state === state && !force) return;
+    const changed = this.state !== state;
+    this.state = state;
+    const busy = state === 'busy' || state === 'awaiting';
+    const busyChanged = this.busy !== busy;
+    this.busy = busy;
+    if (changed || force) this.emitEvent({ platform: { kind: 'status', state, costUsd: this.costUsd } });
+    if (busyChanged) this.onStateChange?.(this);
+  }
+
+  // An AskUserQuestion is waiting for the owner (/api/ask).
+  setAwaiting(on) {
+    this._awaiting = !!on;
+    if (!this.running) return;
+    if (on) this._setState('awaiting');
+    else if (this.state === 'awaiting') this._setState('busy');
+  }
+
+  // Closed by a completed pause (session-control finalize): its exit reads
+  // "paused", not "exited".
+  notePaused() {
+    this._exitState = 'paused';
+  }
+
+  // One user turn. opts: priority 'now' | 'next' | 'later' (unset: the SDK's
+  // default), images [{ mediaType, base64, name? }] (saved under the session
+  // folder's uploads/ and sent as image blocks), from (the sender, for a
+  // platform or peer message). Throws when the session is not running or an
+  // image is refused.
+  submit(text, { priority, images, from } = {}) {
+    if (!this.running || !this._input || this._input.closed) throw new Error('this session is not running');
+    const body = String(text ?? '');
+    const list = Array.isArray(images) ? images : [];
+    if (!body.trim() && !list.length) throw new Error('nothing to send');
+    if (priority != null && !PRIORITIES.has(priority)) throw new Error(`unknown priority ${priority}`);
+
+    const decoded = list.map((img, i) => {
+      const ext = IMAGE_TYPES[img?.mediaType];
+      if (!ext) throw new Error(`image ${i + 1}: unsupported type ${img?.mediaType || '(none)'}`);
+      const buf = Buffer.from(String(img.base64 || ''), 'base64');
+      if (!buf.length) throw new Error(`image ${i + 1} is empty`);
+      if (buf.length > MAX_IMAGE_BYTES) throw new Error(`image ${i + 1} is over 8 MB`);
+      return { img, ext, buf };
+    });
+    if (decoded.reduce((n, d) => n + d.buf.length, 0) > MAX_IMAGES_BYTES) throw new Error('the images are over 18 MB together');
+
+    const saved = [];
+    if (decoded.length) {
+      const dir = this.uploadsDir();
+      fs.mkdirSync(dir, { recursive: true });
+      const stamp = Date.now();
+      decoded.forEach((d, i) => {
+        const base = safeName(d.img.name).replace(/\.[a-zA-Z0-9]+$/, '');
+        const name = `${stamp}-${i + 1}-${base}.${d.ext}`;
+        fs.writeFileSync(path.join(dir, name), d.buf);
+        saved.push({ name, url: uploadUrl(this.sessId, name) });
+      });
+    }
+
+    const content = [
+      ...decoded.map(d => ({ type: 'image', source: { type: 'base64', media_type: d.img.mediaType, data: d.buf.toString('base64') } })),
+      ...(body ? [{ type: 'text', text: body }] : []),
+    ];
+    const message = {
+      type: 'user',
+      message: { role: 'user', content },
+      parent_tool_use_id: null,
+      ...(priority ? { priority } : {}),
+    };
+    this.emitEvent({ user: { text: body, images: saved, ...(from ? { from } : {}) } });
+    this._input.push(message);
+    if (this.state === 'idle') this._setState('busy');
+    return { ok: true, images: saved };
+  }
+
+  async interrupt() {
+    if (!this._query) return;
+    try { await this._query.interrupt(); } catch (e) {
+      this.emitEvent({ platform: { kind: 'notice', level: 'error', text: `Interrupt failed: ${e.message}` } });
+    }
+  }
+
+  // The PTY contract, for callers that type: text is buffered until '\r'
+  // submits it; Esc interrupts.
+  write(data) {
+    const s = String(data ?? '');
+    if (s === '\x1b') { this.interrupt(); return; }
+    for (const ch of s.split(/(\r)/)) {
+      if (ch === '\r') {
+        const text = this._typed;
+        this._typed = '';
+        if (text.trim()) { try { this.submit(text); } catch (e) { console.error(`[sdk-session] ${e.message}`); } }
+      } else if (ch) {
+        this._typed += ch;
+      }
+    }
+  }
+
+  writeWhenReady(data, timeoutMs, delayMs = 0) {
+    if (delayMs > 0) setTimeout(() => this.write(data), delayMs);
+    else this.write(data);
+  }
+
+  // No terminal: nothing to size.
+  resize() {}
+  resizeFrom() {}
+  claim(ws) { this.owner = ws; }
+
+  getScrollback() {
+    return '';
+  }
+
+  kill() {
+    const q = this._query;
+    this._query = null;
+    if (q || this._input) {
+      this._input?.close();
+      try { this._abort?.abort(); } catch {}
+      try { q?.close?.(); } catch {}
+    }
+    this.status = 'idle';
+  }
+
+  // Replay for the panel (sdk:history).
+  history({ limit } = {}) {
+    const dir = this.sessionDir();
+    return dir ? readTranscript(dir, { sessId: this.sessId, limit }) : [];
+  }
+
+  updateSettings(newSettings) {
+    this.settings = { ...this.settings, ...newSettings };
+  }
+
+  getSettings() {
+    return { ...this.settings };
+  }
+}
+
+// GET /api/sdk/upload?sessId=&name= — an image pasted into an SDK session,
+// from its folder's uploads/. Mounted behind the dashboard's auth. Only names
+// submit() could have written are served: no path parts, image types only.
+function uploadRoute(mgr) {
+  const types = Object.fromEntries(Object.entries(IMAGE_TYPES).map(([mime, ext]) => [ext, mime]));
+  return (req, res) => {
+    const sessId = String(req.query.sessId || '');
+    const name = String(req.query.name || '');
+    const ext = (name.match(/\.([a-z]+)$/) || [])[1];
+    if (!/^[0-9a-f-]{36}$/i.test(sessId) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$/.test(name) || !types[ext]) {
+      return res.status(400).json({ error: 'bad request' });
+    }
+    const dir = mgr.sessionDirOf(sessId);
+    if (!dir) return res.status(404).json({ error: 'not found' });
+    const base = path.resolve(dir, 'uploads');
+    const file = path.resolve(base, name);
+    if (path.dirname(file) !== base) return res.status(400).json({ error: 'bad request' });
+    fs.readFile(file, (err, buf) => {
+      if (err) return res.status(404).json({ error: 'not found' });
+      res.set({ 'Content-Type': types[ext], 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, max-age=86400' });
+      res.send(buf);
+    });
+  };
+}
+
+module.exports = SdkSession;
+module.exports.uploadRoute = uploadRoute;
+module.exports.ready = ready;
+module.exports.readTranscript = readTranscript;
+module.exports.transcriptFile = transcriptFile;
+module.exports.resolveClaudeBinary = resolveClaudeBinary;
+module.exports.DISALLOWED_TOOLS = DISALLOWED_TOOLS;
+module.exports.SETTING_SOURCES = SETTING_SOURCES;
+module.exports.IMAGE_TYPES = IMAGE_TYPES;

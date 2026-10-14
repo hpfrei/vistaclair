@@ -32,6 +32,7 @@ function setup() {
     updateSettings(s) { Object.assign(this.settings, s); },
     writeWhenReady(d) { writes.push({ tabId, d }); },
     write(d) { writes.push({ tabId, d }); },
+    submit(d) { writes.push({ tabId, d }); writes.push({ tabId, d: '\r' }); },
   });
   let seq = 0;
   const mgr = {

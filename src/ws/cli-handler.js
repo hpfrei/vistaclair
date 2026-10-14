@@ -1,6 +1,7 @@
 // WebSocket handler for the in-browser CLI terminal: tab lifecycle, input,
 // file upload, resize, settings, scrollback, and saved-session management.
-// Registered on the dashboard broadcaster under the 'cli:' prefix.
+// Registered on the dashboard broadcaster under the 'cli:' prefix, and 'sdk:'
+// for the Agent SDK panel (src/sdk-session.js): send, interrupt, history, todo.
 
 const fs = require('fs');
 const path = require('path');
@@ -9,9 +10,12 @@ const caps = require('../capabilities');
 const { DATA_HOME, ensureDir } = require('../utils');
 const createProxyRouter = require('../proxy');
 const { clearPendingQuestionsForTab } = createProxyRouter;
+const folders = require('../session-folders');
+const { readTranscript } = require('../sdk-session');
 
 const PROJECT_ROOT = DATA_HOME;
-const PREFIXES = ['cli:'];
+const PREFIXES = ['cli:', 'sdk:'];
+const UUID_RE = /^[0-9a-f-]{36}$/i;
 const SCROLLBACK_CHUNK_SIZE = 16 * 1024;
 
 function sendScrollbackChunked(ws, tabId, data) {
@@ -47,16 +51,18 @@ function handleMessage(ws, msg, bc) {
       break;
     }
     case 'cli:open': {
-      // "New CLI in directory…": openCli asks Simple / Orchestrator (the same
-      // ask an app's Change gets), then mints the tab and launches it. The tab
-      // reaches every client through cli:tabs; the reply lets the requester
-      // switch to it.
+      // "New CLI in directory…": openCli asks Simple / Orchestrator and the
+      // engine (the same ask an app's Change gets) — only what the message
+      // leaves open — then mints the tab and launches it. The tab reaches every
+      // client through cli:tabs; the reply lets the requester switch to it.
       if (!msg.cwd || !bc.orchestration) break;
       const cols = msg.cols || 80;
       const rows = msg.rows || 24;
       const reply = (data) => { if (ws.readyState === WebSocket.OPEN) send({ type: 'cli:opened', reqId: msg.reqId || null, ...data }); };
       bc.orchestration.openCli({
         cwd: msg.cwd, cols, rows, autoMemory: msg.autoMemory === true,
+        ...(msg.engine === 'cli' || msg.engine === 'sdk' ? { engine: msg.engine } : {}),
+        ...(msg.mode === 'simple' || msg.mode === 'orchestrator' ? { mode: msg.mode } : {}),
         // The requesting viewer sized the PTY, so it starts as the owner.
         beforeLaunch: (tabId) => mgr.getOrCreate(tabId).resizeFrom(ws, cols, rows),
       }).then(reply, (err) => reply({ error: err.message }));
@@ -259,7 +265,68 @@ function handleMessage(ws, msg, bc) {
       actionResult(send, 'deleteRun', msg, () => bc.orchestration.deleteRun(String(msg.runId || ''), { force: msg.force === true }));
       send({ type: 'cli:savedSessions', sessions: mgr.getSavedSessions() });
       break;
+    // --- Agent SDK panel ---
+    case 'sdk:send': {
+      // A refusal (not running, an image too large) comes back as an error
+      // notice in the session's own event stream.
+      const session = sdkSession(mgr, msg.sessId);
+      try {
+        if (!session) throw new Error('that Agent SDK session is not running');
+        session.submit(String(msg.text || ''), { images: Array.isArray(msg.images) ? msg.images : [] });
+      } catch (e) {
+        sendNotice(send, msg.sessId, `Not sent: ${e.message}`);
+      }
+      break;
+    }
+    case 'sdk:interrupt': {
+      const session = sdkSession(mgr, msg.sessId);
+      if (session) session.interrupt();
+      break;
+    }
+    case 'sdk:history': {
+      // One session ({ sessId }), or every member of a run ({ runId }).
+      if (msg.runId) {
+        const run = bc.orchestration?.getRun(String(msg.runId));
+        const d = run ? bc.orchestration.describeRun(run) : null;
+        const ids = d ? [d.orchestratorSessId, ...d.workers.map(w => w.sessId)].filter(Boolean) : [];
+        send({ type: 'sdk:history', runId: msg.runId, sessions: ids.map(id => ({ sessId: id, events: historyOf(mgr, id) })) });
+        break;
+      }
+      if (!UUID_RE.test(String(msg.sessId || ''))) break;
+      send({ type: 'sdk:history', sessId: msg.sessId, events: historyOf(mgr, msg.sessId) });
+      break;
+    }
+    case 'sdk:todo': {
+      if (!UUID_RE.test(String(msg.sessId || ''))) break;
+      const dir = mgr.sessionDirOf(msg.sessId);
+      const folder = dir ? folders.readFolder(dir) : null;
+      let notes = '';
+      if (dir) { try { notes = fs.readFileSync(path.join(dir, 'NOTES.md'), 'utf8'); } catch {} }
+      send({
+        type: 'sdk:todo', sessId: msg.sessId,
+        rows: (folder?.items || []).map(i => ({ id: i.id, description: i.description, dependsOn: i.dependsOn, status: i.status })),
+        notes,
+      });
+      break;
+    }
   }
+}
+
+function sdkSession(mgr, sessId) {
+  const s = sessId ? mgr.getBySessId(String(sessId)) : null;
+  return s && s.kind === 'sdk' ? s : null;
+}
+
+// A session's transcript envelopes, live or saved (its folder outlives it).
+function historyOf(mgr, sessId) {
+  const live = sdkSession(mgr, sessId);
+  if (live) return live.history();
+  const dir = mgr.sessionDirOf(sessId);
+  return dir ? readTranscript(dir, { sessId }) : [];
+}
+
+function sendNotice(send, sessId, text) {
+  send({ type: 'sdk:event', sessId: sessId || null, ts: Date.now(), ev: { platform: { kind: 'notice', level: 'error', text } } });
 }
 
 // Run one pause/resume action and answer the requester with its result or error.

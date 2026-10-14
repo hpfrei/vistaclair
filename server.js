@@ -13,6 +13,7 @@ const DashboardBroadcaster = require('./src/dashboard-ws');
 const createProxyRouter = require('./src/proxy');
 const { pendingQuestions } = createProxyRouter;
 const CliSessionManager = require('./src/cli-sessions');
+const SdkSession = require('./src/sdk-session');
 const caps = require('./src/capabilities');
 const mcp = require('./src/mcp');
 const { createLicensing } = require('./src/licensing');
@@ -34,15 +35,18 @@ const { proDir, validateLicense, fetchProductInfo, checkProUpdates, npmInstall }
 const ruleHandler = require('./src/proxy-rule-handler');
 const createApiRouter = require('./src/api');
 
-// Check and auto-install native dependencies, then restart so they load
+// Check and auto-install missing dependencies (node-pty for CLI terminals, the
+// Agent SDK for SDK sessions; an install updated without `npm install` lacks
+// it), then restart so they load
 (function checkDependencies() {
   const { execFileSync } = require('child_process');
   const missing = [];
   try { require.resolve('node-pty'); } catch { missing.push('node-pty'); }
+  try { require.resolve('@anthropic-ai/claude-agent-sdk'); } catch { missing.push('@anthropic-ai/claude-agent-sdk'); }
   if (missing.length === 0) return;
   if (process.env.VISTACLAIR_SERVER === '1') {
     // Server mode: never mutate the install at boot — install at deploy time.
-    console.warn(`Warning: missing dependencies: ${missing.join(', ')}. CLI terminal feature will be unavailable. Run: npm install ${missing.join(' ')}`);
+    console.warn(`Warning: missing dependencies: ${missing.join(', ')}. CLI terminal / Agent SDK features will be unavailable. Run: npm install ${missing.join(' ')}`);
     return;
   }
   console.log(`Installing missing dependencies: ${missing.join(', ')}...`);
@@ -50,7 +54,7 @@ const createApiRouter = require('./src/api');
     execFileSync('npm', ['install', '--no-save', ...missing], { cwd: __dirname, stdio: 'inherit' });
   } catch (err) {
     console.error(`Failed to install dependencies: ${err.message}`);
-    console.error('CLI terminal feature will be unavailable. Run manually: npm install ' + missing.join(' '));
+    console.error('CLI terminal / Agent SDK features will be unavailable. Run manually: npm install ' + missing.join(' '));
     return;
   }
   console.log('Dependencies installed. Restarting...\n');
@@ -61,6 +65,15 @@ const createApiRouter = require('./src/api');
 (async () => {
 
 const fs = require('fs');
+
+// The Agent SDK (Agent SDK sessions) is a hard requirement: loaded before any
+// session can spawn, and a boot error when it is missing.
+try {
+  await SdkSession.ready;
+} catch (e) {
+  console.error(`Error: ${e.message}`);
+  process.exit(1);
+}
 fetchProductInfo();
 setInterval(fetchProductInfo, 60 * 60 * 1000);
 
@@ -287,8 +300,9 @@ dashboardApp.post('/api/ask', async (req, res) => {
   if (!safeEqual(req.body?.token, AUTH_TOKEN)) return res.status(401).end();
   const { instanceId, formData, questions } = req.body;
   const ctx = instanceId ? getInstanceContext(instanceId) : null;
-  const tabId = ctx?.tabId || null;
   const session = instanceId ? cliSessionManager.getByInstanceId(instanceId) : null;
+  // An SDK session has no tracked process: its tab comes from the session.
+  const tabId = ctx?.tabId || session?.tabId || null;
   const title = session?.title || null;
   const cwd = session?.cwd || null;
 
@@ -312,11 +326,15 @@ dashboardApp.post('/api/ask', async (req, res) => {
   });
   console.log(`[api/ask] Broadcasting ask:question askId=${askId} tabId=${tabId || '(none)'}`);
 
+  // An SDK panel shows "awaiting your answer" on the asking area.
+  session?.setAwaiting?.(true);
   try {
     const answer = await promise;
     res.json({ ok: true, answer });
   } catch (err) {
     res.json({ ok: false, error: err.message });
+  } finally {
+    session?.setAwaiting?.(false);
   }
 });
 
@@ -466,6 +484,9 @@ ruleHandler.init({ broadcaster, store, proxyPort: PROXY_PORT, dashboardPort: DAS
 
 // Orchestration runs: hook decisions, worker launch/report tools, the run board.
 dashboardApp.use('/api/orchestration', orchestration.router());
+
+// Images pasted into Agent SDK sessions (the panel's replay).
+dashboardApp.get('/api/sdk/upload', SdkSession.uploadRoute(cliSessionManager));
 
 // Mount REST API
 dashboardApp.use('/api', createApiRouter({ broadcaster, store, proxyPort: PROXY_PORT, dashboardPort: DASHBOARD_PORT, authToken: AUTH_TOKEN, cliSessionManager }));

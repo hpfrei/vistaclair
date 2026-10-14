@@ -132,9 +132,10 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
     try { return !!folders.resumeSection(fs.readFileSync(notes, 'utf8')); } catch { return false; }
   }
 
+  // One user turn from the dashboard: typed into a CLI tab, a user message for
+  // an SDK session.
   function typeInto(session, text) {
-    session.writeWhenReady(text);
-    session.writeWhenReady('\r', undefined, 400);
+    session.submit(text, { from: 'vistaclair' });
   }
 
   // --- Hook replies ---
@@ -197,6 +198,7 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
           if (!st.delivered.has(key)) {
             st.delivered.add(key);
             out.push(sub ? SUBAGENT_PAUSE : (p.hookText || p.text));
+            if (!sub) session.emitEvent?.({ platform: { kind: 'notice', text: p.hookText || p.text } });
             if (!sub && !p.hookText) p.seen = true;
           }
         }
@@ -303,7 +305,8 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
   function interrupt(tabId) {
     const session = mgr.get(tabId);
     if (!session || !isPausing(session)) throw new Error('that tab is not pausing');
-    session.write('\x1b');
+    if (typeof session.interrupt === 'function') session.interrupt();
+    else session.write('\x1b');
     setTimeout(() => finalize(session, { interrupted: true }), interruptSettleMs);
     return { ok: true };
   }
@@ -320,6 +323,7 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
       autoMemory: session.autoMemory, flags: { paused: !interrupted, interrupted: !!interrupted, pausedAt: Date.now() },
     });
     live.delete(session.instanceId);
+    if (!interrupted) session.notePaused?.();
     if (tabId) mgr.closeQuiet(tabId);
     broadcaster?.broadcast({ type: 'cli:paused', sessId: session.sessId, title: session.title, interrupted: !!interrupted });
     for (const fn of finalizedListeners) {
@@ -365,7 +369,8 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
     mgr.spawn(tabId, entry.cwd, cols, rows, { resumeSessionId: sessId, autoMemory: entry.autoMemory === true });
     const text = message !== undefined ? message
       : (entry.paused || entry.interrupted) ? resumeText(entry.settings?.sessionDir || '(your session folder)', { interrupted: !!entry.interrupted }) : null;
-    if (text) typeInto(session, text);
+    // spawn may have replaced the session object (an SDK session's engine).
+    if (text) typeInto(mgr.get(tabId) || session, text);
     return { tabId, fresh: false };
   }
 

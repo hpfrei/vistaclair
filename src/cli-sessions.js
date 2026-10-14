@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const CliSession = require('./cli-session');
+const SdkSession = require('./sdk-session');
 const caps = require('./capabilities');
 const folders = require('./session-folders');
 const { readJSON, writeJSON, tryRm, DATA_HOME, PACKAGE_ROOT } = require('./utils');
@@ -116,16 +117,38 @@ class CliSessionManager {
     this._shuttingDown = false;
   }
 
-  _createSession(tabId) {
-    const session = new CliSession(
+  // engine 'sdk' (settings.engine) makes an Agent SDK session, anything else a
+  // PTY CliSession. Both have the surface everything here uses.
+  _createSession(tabId, engine = 'cli') {
+    const Kind = engine === 'sdk' ? SdkSession : CliSession;
+    const session = new Kind(
       this.proxyPort,
       this._wrapBroadcaster(tabId),
       this.store,
       this.opts
     );
     session.tabId = tabId;
+    if (engine === 'sdk') session.onStateChange = () => this.noteSessionState(session);
     this.sessions.set(tabId, session);
     return session;
+  }
+
+  // The session for a spawn, of the class its settings' engine asks for. A tab
+  // created as one kind and launched as the other (cli:open sizes the tab
+  // before the launch decides) is replaced; the old object is retired first so
+  // its exit can never report on the new one.
+  _sessionForSpawn(tabId) {
+    const session = this.getOrCreate(tabId);
+    const engine = session.getSettings().engine === 'sdk' ? 'sdk' : 'cli';
+    if ((session instanceof SdkSession) === (engine === 'sdk')) return session;
+    session._spawnGen++;
+    if (session.running) session.kill();
+    const next = this._createSession(tabId, engine);
+    next.title = session.title;
+    next.hidden = session.hidden;
+    next.owner = session.owner;
+    next.updateSettings(session.getSettings());
+    return next;
   }
 
   _wrapBroadcaster(tabId) {
@@ -146,15 +169,17 @@ class CliSessionManager {
   _onSessionExit(tabId) {
     const session = this.sessions.get(tabId);
     if (session?.sessId && session.cwd) {
-      this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
+      this.saveToHistory(this._historyEntry(session));
     }
+    // Drop the ended session before the callbacks run: a callback may relaunch
+    // into the same tabId, and that new session must stay listed.
+    if (this.sessions.get(tabId) === session) this.sessions.delete(tabId);
     const cb = this._exitCallbacks.get(tabId);
     if (cb) {
       this._exitCallbacks.delete(tabId);
       try { cb(tabId); } catch (e) { console.error('Session exit callback error:', e); }
     }
     this._notifyExit(tabId, session);
-    this.sessions.delete(tabId);
     this._persistOpenTabs();
     this.broadcastTabs();
   }
@@ -162,9 +187,13 @@ class CliSessionManager {
   saveAllToHistory() {
     for (const [, session] of this.sessions) {
       if (session?.sessId && session.cwd) {
-        this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
+        this.saveToHistory(this._historyEntry(session));
       }
     }
+  }
+
+  _historyEntry(session) {
+    return { sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory };
   }
 
   // --- History persistence ---
@@ -184,6 +213,8 @@ class CliSessionManager {
     const flags = entry.flags || {};
     deduped.unshift({
       id: sessId,
+      // An SDK session resumes as one (its settings carry the engine too).
+      kind: entry.settings?.engine === 'sdk' ? 'sdk' : 'cli',
       cwd: entry.cwd,
       title: entry.title || null,
       settings: entry.settings || {},
@@ -233,7 +264,7 @@ class CliSessionManager {
       const settings = session.getSettings();
       entries.push({
         sessId: session.sessId || null,
-        kind: session.kind === 'shell' ? 'shell' : 'cli',
+        kind: session.kind === 'shell' ? 'shell' : session.kind === 'sdk' ? 'sdk' : 'cli',
         cwd: session.cwd,
         title: session.title || null,
         settings,
@@ -504,10 +535,13 @@ class CliSessionManager {
   }
 
   spawn(tabId, cwd, cols, rows, { resumeSessionId, autoMemory } = {}) {
-    const session = this.getOrCreate(tabId);
+    const session = this._sessionForSpawn(tabId);
     if (session.sessId && session.cwd) {
-      this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
+      this.saveToHistory(this._historyEntry(session));
     }
+    // An SDK run's workers are areas of its panel, never tabs of their own.
+    const st = session.getSettings();
+    if (st.engine === 'sdk' && st.orchestration?.role === 'worker') session.hidden = true;
     this._assignTitle(session, cwd, resumeSessionId);
     // Pin the model into the tab's own settings so the spawn always carries an
     // explicit --model, and so a resume re-uses the model the session ran with
@@ -526,9 +560,19 @@ class CliSessionManager {
       session.updateSettings({ sessionDir });
     }
     try { folders.ensureFolder(sessionDir, session.title); } catch (e) { console.error(`  session folder ${sessionDir}: ${e.message}`); }
-    session.spawn(cwd, cols, rows, { resumeSessionId, autoMemory });
+    try {
+      session.spawn(cwd, cols, rows, { resumeSessionId, autoMemory });
+    } catch (e) {
+      // Refused before anything ran (an SDK session without an API key): no
+      // half-made tab is left behind.
+      if (!session.running) {
+        this.sessions.delete(tabId);
+        this.broadcastTabs();
+      }
+      throw e;
+    }
     // Persist immediately so session survives ungraceful server death
-    this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
+    this.saveToHistory(this._historyEntry(session));
     this._persistOpenTabs();
     this.broadcastTabs();
   }
@@ -567,7 +611,7 @@ class CliSessionManager {
     const session = this.sessions.get(tabId);
     if (session) {
       if (session.sessId && session.cwd) {
-        this.saveToHistory({ sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(), autoMemory: session.autoMemory });
+        this.saveToHistory(this._historyEntry(session));
       }
       if (session.sessId) {
         this.store.deleteSessionData(session.sessId);
@@ -610,8 +654,10 @@ class CliSessionManager {
     const tabs = [];
     for (const [tabId, session] of this.sessions) {
       if (session.hidden) continue;
+      const sdk = session instanceof SdkSession;
       tabs.push({
         tabId,
+        kind: sdk ? 'sdk' : session.kind === 'shell' ? 'shell' : 'cli',
         instanceId: session.instanceId,
         sessId: session.sessId,
         autoMemory: session.autoMemory,
@@ -621,6 +667,7 @@ class CliSessionManager {
         settings: session.getSettings(),
         busy: session.busy === true,
         pausing: session.pausing === true,
+        ...(sdk ? { state: session.state, costUsd: session.costUsd } : {}),
       });
     }
     return tabs;
@@ -693,6 +740,23 @@ class CliSessionManager {
     return null;
   }
 
+  // The live session with this id (hidden ones included), or null.
+  getBySessId(sessId) {
+    if (!sessId) return null;
+    for (const session of this.sessions.values()) {
+      if (session.sessId === sessId) return session;
+    }
+    return null;
+  }
+
+  // A session's folder, live or saved: where an SDK session keeps its
+  // transcript.jsonl and uploads/.
+  sessionDirOf(sessId) {
+    const live = this.getBySessId(sessId);
+    if (live) return live.getSettings().sessionDir || null;
+    return this.findSaved(sessId)?.settings?.sessionDir || null;
+  }
+
   launchSession(tabId, opts = {}) {
     const session = this.getOrCreate(tabId);
     if (opts.title !== undefined) session.title = opts.title;
@@ -731,13 +795,8 @@ class CliSessionManager {
 
     this.spawn(tabId, opts.cwd, opts.cols, opts.rows, { resumeSessionId, autoMemory: opts.autoMemory === true });
 
-    if (opts.prompt && opts.autoSubmit) {
-      // Write the prompt and the submitting CR as separate PTY chunks: the CLI
-      // treats a chunk with an embedded newline as a paste (newline inserted,
-      // not submitted), so a trailing '\n' never fires Enter.
-      session.writeWhenReady(opts.prompt);
-      session.writeWhenReady('\r', undefined, 400);
-    }
+    // spawn may have replaced the session object (engine change).
+    if (opts.prompt && opts.autoSubmit) this.sessions.get(tabId).submit(opts.prompt, { from: opts.promptFrom });
   }
 
   // Roll a CLI session back one user/assistant turn: truncate the native
@@ -777,7 +836,8 @@ class CliSessionManager {
   }
 
   broadcastTabs() {
-    this.broadcaster.broadcast({ type: 'cli:tabs', bootId: this.bootId, tabs: this.list() });
+    // sdkEngine: this server runs Agent SDK sessions (the GUI shows their items).
+    this.broadcaster.broadcast({ type: 'cli:tabs', bootId: this.bootId, sdkEngine: true, tabs: this.list() });
   }
 }
 

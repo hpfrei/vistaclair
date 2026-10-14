@@ -2,7 +2,12 @@
 // that do the work, Claude Code's own cross-session messaging between them.
 //
 //   openCli(opts)        the one user-facing "new CLI" entry. `mode` unset asks
-//                        Simple / Orchestrator through the dashboard ask form.
+//                        Simple / Orchestrator, `engine` unset asks CLI terminal
+//                        / Agent SDK panel, in one dashboard ask form.
+//   engine               settings.engine 'cli' (a PTY tab) | 'sdk' (an Agent SDK
+//                        session, src/sdk-session.js). A run has one engine
+//                        (run.engine); its workers inherit it. SDK workers are
+//                        hidden: they are areas of the run's panel.
 //   run directory        <runsDir>/<runId>/ — run.json (server-owned: workers,
 //                        events, delivery cursor), TODO.md (the orchestrator's),
 //                        sessions/<name>.json (each session's --settings file).
@@ -22,7 +27,12 @@
 //                        is busy, or by typing a one-line notice into its tab when
 //                        it is idle (which starts a turn).
 //   tools                lib/orchestrator-mcp.js: launch_cli, resume_worker,
-//                        list_workers, end_run (orchestrator); report (workers).
+//                        list_workers, end_run (orchestrator); report (workers);
+//                        SendMessage, ListAgents (both, SDK runs: Claude Code's
+//                        own cross-session messaging is a CLI feature). A message
+//                        is submitted into its target with priority 'next' (an
+//                        SDK target reads it within its running turn); a busy
+//                        CLI target gets it through its next hook instead.
 //   session folders      every member keeps TODO.md / NOTES.md in
 //                        <sessionsRoot>/<name>/ (session-folders.js); the
 //                        orchestrator reads its workers' folders (list_workers
@@ -44,6 +54,9 @@ const folders = require('./session-folders');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
 
 const MAX_WORKERS = 3;
+// The model a worker may be launched on (launch_cli `model`), as Claude Code's
+// Agent tool takes it. Unset: the dashboard's default model for new tabs.
+const WORKER_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
 const MAX_SUBAGENTS = 3;
 const PUSH_DEBOUNCE_MS = 2000;
 const RELAY_FALLBACK_MS = 120000;    // a worker the orchestrator has not told to pause by then hears it from the server
@@ -168,6 +181,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   const pushTimers = new Map();    // runId -> timeout
   const pendingAsks = new Map();   // dedupe key -> Promise
   const relayTimers = new Map();   // worker name -> pause fallback timeout
+  const inbox = new Map();         // session name -> messages for a busy CLI member
   let askSeq = 0;
 
   // --- Ask (the dashboard form, shared with /api/ask) ---
@@ -196,29 +210,57 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return promise;
   }
 
-  async function askMode({ cwd, title }) {
+  const ENGINE_LABELS = { cli: 'CLI terminal', sdk: 'Agent SDK panel (API billing)' };
+
+  // Ask what is still open — the session type, the engine, or both — in one
+  // form. Resolves { mode, engine } (the asked ones filled in), or null when
+  // cancelled.
+  async function askMode({ cwd, title, mode = null, engine = null }) {
+    const questions = [];
+    if (!mode) {
+      questions.push({
+        id: 'mode', type: 'select', header: 'Session type',
+        question: 'Open a simple CLI, or an orchestrator that delegates the work to worker CLIs?',
+        defaultValue: 'Simple CLI',
+        options: [
+          { label: 'Simple CLI', description: 'One Claude Code session, as usual.' },
+          { label: 'Orchestrator CLI', description: `Plans and delegates to up to ${MAX_WORKERS} worker CLIs, tracks them in a TODO, never codes itself.` },
+        ],
+      });
+    }
+    if (!engine) {
+      questions.push({
+        id: 'engine', type: 'select', header: 'Engine',
+        question: 'Run it in a terminal, or in the Agent SDK panel?',
+        defaultValue: ENGINE_LABELS.cli,
+        options: [
+          { label: ENGINE_LABELS.cli, description: 'Claude Code in a terminal tab, on your usual Claude credential.' },
+          { label: ENGINE_LABELS.sdk, description: 'The same Claude Code in an HTML panel (live thinking, tool calls, images), billed to the Anthropic API key.' },
+        ],
+      });
+    }
     let answer;
     try {
       answer = await askUser({
         formData: { title: 'New CLI', submitLabel: 'Open', cancelLabel: 'Cancel' },
-        questions: [{
-          id: 'mode', type: 'select', header: 'Session type',
-          question: 'Open a simple CLI, or an orchestrator that delegates the work to worker CLIs?',
-          defaultValue: 'Simple CLI',
-          options: [
-            { label: 'Simple CLI', description: 'One Claude Code session, as usual.' },
-            { label: 'Orchestrator CLI', description: `Plans and delegates to up to ${MAX_WORKERS} worker CLIs, tracks them in a TODO, never codes itself.` },
-          ],
-        }],
+        questions,
         title: title || 'New CLI',
         cwd,
       });
     } catch { return null; }
     if (!Array.isArray(answer) || answer.some(a => a?.id === '_cancelled')) return null;
-    const value = String(answer.find(a => a?.id === 'mode')?.answer || '');
-    if (/orchestrat/i.test(value)) return 'orchestrator';
-    if (/simple/i.test(value)) return 'simple';
-    return null;
+    if (!mode) {
+      const value = String(answer.find(a => a?.id === 'mode')?.answer || '');
+      if (/orchestrat/i.test(value)) mode = 'orchestrator';
+      else if (/simple/i.test(value)) mode = 'simple';
+      else return null;
+    }
+    if (!engine) {
+      // Unanswered falls back to the form's default.
+      const value = String(answer.find(a => a?.id === 'engine')?.answer || '');
+      engine = /sdk/i.test(value) ? 'sdk' : 'cli';
+    }
+    return { mode, engine };
   }
 
   // --- Runs ---
@@ -333,7 +375,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // Create a run and return the settings that make a launch its orchestrator.
   // `settings` is the caller's own launch settings: its system prompt, settings
   // file and stamps become the base every worker inherits.
-  function prepareRun({ cwd, runsDir, isolation, maxBudgetUsd, settings = {} }) {
+  function prepareRun({ cwd, runsDir, isolation, maxBudgetUsd, engine, settings = {} }) {
     const root = realpathOr(cwd);
     const runId = crypto.randomBytes(3).toString('hex');
     const dir = realpathOr(runsDir || path.join(root, '.orchestrator'));
@@ -343,7 +385,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
     // sessionDir is per session, never inherited; sessionsRoot (the caller's
     // choice of where folders live) is, through the stamps.
-    const { appendSystemPrompt, settingsFile, name: _n, orchestration: _o, model: _m, sessionDir: _d, ...stamps } = settings;
+    const { appendSystemPrompt, settingsFile, name: _n, orchestration: _o, model: _m, sessionDir: _d, engine: _e, ...stamps } = settings;
     const sessionsRoot = settings.sessionsRoot || path.join(dataHome, 'data', 'sessions');
     const orchestrator = `orch-${runId}`;
     const run = {
@@ -354,6 +396,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       orchestratorDir: path.join(sessionsRoot, orchestrator),
       sessionsRoot,
       isolation: isolation || (gitToplevel(root) ? 'worktree' : 'none'),
+      engine: (engine || settings.engine) === 'sdk' ? 'sdk' : 'cli',
       maxBudgetUsd: maxBudgetUsd || null,
       base: { appendSystemPrompt: appendSystemPrompt || '', settingsFile: settingsFile || null, stamps },
       createdAt: new Date().toISOString(),
@@ -375,6 +418,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const card = orchestratorCard(run);
     return {
       ...settings,
+      engine: run.engine,
       name: run.orchestrator,
       sessionDir: run.orchestratorDir,
       orchestration: { runId, role: 'orchestrator', runDir },
@@ -386,35 +430,38 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // --- openCli: the one user-facing "new CLI" entry ---
 
   async function openCli(opts = {}) {
-    let mode = opts.mode;
-    if (mode !== 'simple' && mode !== 'orchestrator') {
+    let mode = opts.mode === 'simple' || opts.mode === 'orchestrator' ? opts.mode : null;
+    const given = opts.engine || opts.settings?.engine;
+    let engine = given === 'cli' || given === 'sdk' ? given : null;
+    if (!mode || !engine) {
       // One pending question per target: a double click joins the open ask.
       const key = opts.tabId || `cwd:${opts.cwd}`;
       if (!pendingAsks.has(key)) {
-        pendingAsks.set(key, askMode({ cwd: opts.cwd, title: opts.title }).finally(() => pendingAsks.delete(key)));
+        pendingAsks.set(key, askMode({ cwd: opts.cwd, title: opts.title, mode, engine }).finally(() => pendingAsks.delete(key)));
       } else {
         return { cancelled: true, duplicate: true };
       }
-      mode = await pendingAsks.get(key);
-      if (!mode) return { cancelled: true };
+      const picked = await pendingAsks.get(key);
+      if (!picked) return { cancelled: true };
+      ({ mode, engine } = picked);
     }
     const tabId = opts.tabId || mgr.nextTabId();
     const launch = {
       cwd: opts.cwd, cols: opts.cols, rows: opts.rows, title: opts.title,
-      settings: opts.settings, hidden: opts.hidden, autoMemory: opts.autoMemory,
+      settings: { ...(opts.settings || {}), engine }, hidden: opts.hidden, autoMemory: opts.autoMemory,
       prompt: opts.prompt, autoSubmit: opts.autoSubmit, spawnOpts: opts.spawnOpts,
     };
     if (mode === 'orchestrator') {
       launch.settings = prepareRun({
         cwd: opts.cwd, runsDir: opts.runsDir, isolation: opts.isolation,
-        maxBudgetUsd: opts.maxBudgetUsd, settings: opts.settings || {},
+        maxBudgetUsd: opts.maxBudgetUsd, engine, settings: opts.settings || {},
       });
       launch.spawnOpts = {};   // a fresh transcript: never resume a plain session into the role
       launch.hidden = false;
     }
     if (opts.beforeLaunch) opts.beforeLaunch(tabId);
     mgr.launchSession(tabId, launch);
-    return { tabId, mode };
+    return { tabId, mode, engine };
   }
 
   // --- Workers ---
@@ -441,11 +488,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
   }
 
-  function launchWorker(instanceId, { title, task, cwd, isolation } = {}) {
+  function launchWorker(instanceId, { title, task, cwd, isolation, model } = {}) {
     const { run } = callerRun(instanceId, 'orchestrator');
     if (run.closed) throw new Error('this run has been ended');
     if (run.pausing) throw new Error('this run is being paused: launch nothing new');
     if (!task || !String(task).trim()) throw new Error('task is required');
+    if (model && !WORKER_MODELS.includes(model)) throw new Error(`model must be one of ${WORKER_MODELS.join(', ')}`);
     const paused = run.workers.filter(w => w.paused);
     if (paused.length) {
       throw new Error(`paused workers must be resumed (resume_worker) before new ones are launched: ${paused.map(w => w.name).join(', ')}`);
@@ -460,6 +508,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       id, name, title: title || id, task: String(task), cwd: target, branch: null, worktree: null,
       sessionDir: path.join(run.sessionsRoot || path.join(dataHome, 'data', 'sessions'), name),
       launchedAt: new Date().toISOString(), exitedAt: null, lastReport: null,
+      ...(model ? { model } : {}),
     };
 
     const mode = isolation || run.isolation;
@@ -478,7 +527,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     run.workers.push(worker);
     saveRun(run);
     const tabId = spawnWorker(run, worker, worker.task);
-    return { worker: name, tabId, cwd: worker.cwd, branch: worker.branch, folder: worker.sessionDir };
+    return { worker: name, tabId, cwd: worker.cwd, branch: worker.branch, folder: worker.sessionDir, model: mgr.sessions.get(tabId)?.getSettings().model || null };
   }
 
   // A worker's launch settings — the same for its first launch and a fresh
@@ -487,12 +536,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const card = workerCard(run, worker);
     return {
       ...run.base.stamps,
+      engine: run.engine || 'cli',
       name: worker.name,
       ...(worker.sessionDir ? { sessionDir: worker.sessionDir } : {}),
       orchestration: { runId: run.runId, role: 'worker', workerId: worker.id, orchestrator: run.orchestrator, runDir: run.runDir },
       appendSystemPrompt: run.base.appendSystemPrompt ? `${run.base.appendSystemPrompt}\n\n${card}` : card,
       settingsFile: writeSessionSettings(run, worker.name, run.base.settingsFile),
       agents: WORKER_AGENTS,
+      ...(worker.model ? { model: worker.model } : {}),
       ...(run.maxBudgetUsd ? { maxBudgetUsd: run.maxBudgetUsd } : {}),
     };
   }
@@ -503,7 +554,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (worker.sessionDir) folders.ensureFolder(worker.sessionDir, `${worker.title} (${worker.id})`);
     mgr.launchSession(tabId, {
       cwd: worker.cwd, cols: 120, rows: 32, title: `${worker.title} (${worker.id})`,
-      settings: workerSettings(run, worker), prompt, autoSubmit: true,
+      settings: workerSettings(run, worker), prompt, promptFrom: run.orchestrator, autoSubmit: true,
+      ...(run.engine === 'sdk' ? { hidden: true } : {}),
     });
     return tabId;
   }
@@ -525,11 +577,31 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
   }
 
+  // The panel's state word for a member: busy / idle / awaiting (SDK) while it
+  // runs, else why it is not running.
+  function memberState(session, w) {
+    if (session?.running) return session.state && session.state !== 'exited' ? session.state : session.busy ? 'busy' : 'idle';
+    if (!w) return 'exited';
+    return w.paused ? 'paused' : w.abandoned ? 'abandoned' : w.exitedAt ? 'exited' : 'stopped';
+  }
+
+  function costOf(session, stored) {
+    return typeof session?.costUsd === 'number' ? session.costUsd : (typeof stored === 'number' ? stored : null);
+  }
+
   function describeRun(run) {
     const orch = orchestratorSession(run);
+    const saved = savedEntries();
+    // A member that is not running is known by its newest saved session (its
+    // sessId keys the SDK panel's history).
+    const savedId = (pred) => saved.find(e => {
+      const st = e.settings?.orchestration;
+      return st?.runId === run.runId && pred(st);
+    })?.id || null;
     return {
       runId: run.runId,
       orchestrator: run.orchestrator,
+      engine: run.engine || 'cli',
       root: run.root,
       isolation: run.isolation,
       closed: run.closed,
@@ -538,13 +610,22 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       pausing: !!run.pausing,
       paused: run.paused || null,
       orchestratorRunning: !!orch?.session.running,
+      orchestratorSessId: orch?.session.sessId || savedId(st => st.role === 'orchestrator'),
+      orchestratorTabId: orch?.tabId || null,
+      orchestratorState: memberState(orch?.session, null),
+      orchestratorCost: costOf(orch?.session, run.orchestratorCost),
       compactions: run.compactions || 0,
       refreshSuggested: (run.compactions || 0) >= REFRESH_SUGGESTED_AFTER,
       pendingEvents: run.events.filter(e => e.seq > run.delivered).length,
       workers: run.workers.map(w => {
         const live = workerSession(run, w.id);
         return {
-          worker: w.name, id: w.id, title: w.title, running: !!live?.session.running, tabId: live?.tabId || null,
+          worker: w.name, name: w.name, id: w.id, title: w.title, running: !!live?.session.running, tabId: live?.tabId || null,
+          sessId: live?.session.sessId || savedId(st => st.role === 'worker' && st.workerId === w.id),
+          engine: run.engine || 'cli',
+          model: w.model || live?.session.getSettings().model || null,
+          state: memberState(live?.session, w),
+          cost: costOf(live?.session, w.costUsd),
           cwd: w.cwd, branch: w.branch, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: w.lastReport,
           paused: !!w.paused, abandoned: !!w.abandoned,
           todo: w.sessionDir ? path.join(w.sessionDir, 'TODO.md') : null,
@@ -686,6 +767,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       if (!w) return;
       w.paused = true;
       w.pausedAt = new Date().toISOString();
+      if (typeof session.costUsd === 'number') w.costUsd = session.costUsd;
       clearTimeout(relayTimers.get(w.name));
       relayTimers.delete(w.name);
       saveRun(run);
@@ -732,6 +814,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const card = orchestratorCard(run);
     return {
       ...run.base.stamps,
+      engine: run.engine || 'cli',
       name: run.orchestrator,
       sessionDir: orchestratorDir(run),
       orchestration: { runId: run.runId, role: 'orchestrator', runDir: run.runDir },
@@ -975,6 +1058,93 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return { ok: true };
   }
 
+  // --- Messages between run members (SendMessage / ListAgents) ---
+
+  // The run's members, by address: the orchestrator, then every worker.
+  function members(run) {
+    const out = [{ name: run.orchestrator, role: 'orchestrator', id: null, title: 'orchestrator', worker: null, live: orchestratorSession(run) }];
+    for (const w of run.workers) out.push({ name: w.name, role: 'worker', id: w.id, title: w.title, worker: w, live: workerSession(run, w.id) });
+    return out;
+  }
+
+  // `to` is an address (optionally with Claude Code's ` [ref]` suffix), a
+  // worker id (w2) or "orchestrator".
+  function resolveMember(run, to) {
+    const want = String(to || '').trim().replace(/\s+\[[^\]]*\]$/, '');
+    if (!want) throw new Error('`to` is required');
+    const list = members(run);
+    const m = list.find(x => x.name === want) || list.find(x => x.id && x.id === want) || (want === 'orchestrator' ? list[0] : null);
+    if (!m) throw new Error(`no member ${want} in run ${run.runId}. Members: ${list.map(x => x.name).join(', ')}`);
+    return m;
+  }
+
+  // An SDK panel event for one member (kept in its transcript); a CLI member
+  // has no panel, so it is only broadcast.
+  function emitTo(session, run, ev) {
+    if (typeof session?.emitEvent === 'function') session.emitEvent(ev);
+    else if (session?.sessId) broadcaster.broadcast({ type: 'sdk:event', sessId: session.sessId, runId: run.runId, ts: Date.now(), ev });
+  }
+
+  // Messages waiting for a busy CLI member's next hook, or null.
+  function takeInbox(name) {
+    const q = inbox.get(name);
+    if (!q?.length) return null;
+    inbox.delete(name);
+    return clip(q.join('\n\n'), CONTEXT_LIMIT);
+  }
+
+  const joinContext = (...parts) => parts.filter(Boolean).join('\n\n') || null;
+
+  // SendMessage: deliver `message` to a member of the caller's run as a user
+  // turn "[message from <name>] …". An SDK target takes it with priority 'next'
+  // (busy: read after its running tool calls, in the same turn; idle: starts a
+  // turn); an idle CLI target has it typed; a busy CLI target gets it through
+  // its next hook (tool result, prompt, or a Stop block).
+  function sendMessage(instanceId, { to, message } = {}) {
+    const { session, stamp, run } = callerRun(instanceId);
+    const from = session.getSettings().name || stamp.role;
+    const text = String(message ?? '').trim();
+    if (!text) throw new Error('message is required');
+    const target = resolveMember(run, to);
+    if (target.name === from) throw new Error('that is your own address');
+    const ts = target.live?.session;
+    if (!ts?.running) {
+      throw new Error(target.role === 'worker'
+        ? `${target.name} is not running${target.worker.paused ? ' (paused)' : ''}${stamp.role === 'orchestrator' ? ': bring it back with resume_worker, passing this as its message' : ''}`
+        : `the orchestrator ${target.name} is not running`);
+    }
+    const body = `[message from ${from}] ${text}`;
+    let delivery = 'submitted';
+    if (ts.kind === 'sdk') {
+      ts.submit(body, { priority: 'next', from });
+    } else if (!ts.busy) {
+      ts.submit(body, { from });
+    } else {
+      const q = inbox.get(target.name) || [];
+      q.push(body);
+      inbox.set(target.name, q);
+      delivery = 'queued';
+    }
+    const ev = { platform: { kind: 'message', from, to: target.name, text } };
+    emitTo(session, run, ev);
+    emitTo(ts, run, ev);
+    return { ok: true, to: target.name, delivery };
+  }
+
+  // ListAgents: the caller's run, every member with its state.
+  function listAgents(instanceId) {
+    const { session, run } = callerRun(instanceId);
+    return {
+      you: session.getSettings().name || null,
+      runId: run.runId,
+      agents: members(run).map(m => ({
+        name: m.name, role: m.role, title: m.title,
+        state: memberState(m.live?.session, m.worker),
+        ...(m.worker?.lastReport ? { lastReport: `${m.worker.lastReport.status}: ${clip(m.worker.lastReport.summary, 200)}` } : {}),
+      })),
+    };
+  }
+
   // --- Events and delivery ---
 
   function addEvent(run, { worker, kind, text }) {
@@ -991,7 +1161,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     run.delivered = fresh[fresh.length - 1].seq;
     saveRun(run);
     const lines = fresh.map(e => `- [${e.kind}] ${e.text}`);
-    return clip(`[orchestration] ${fresh.length} worker event(s) — act on them and update TODO.md:\n${lines.join('\n')}`, CONTEXT_LIMIT);
+    const text = clip(`[orchestration] ${fresh.length} worker event(s) — act on them and update TODO.md:\n${lines.join('\n')}`, CONTEXT_LIMIT);
+    // Hook context never shows in the SDK stream: the panel gets it as a notice.
+    orchestratorSession(run)?.session.emitEvent?.({ platform: { kind: 'notice', text } });
+    return text;
   }
 
   function schedulePush(runId) {
@@ -1009,8 +1182,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       // hook then attaches the events themselves.
       run.busy = true;
       saveRun(run);
-      orch.session.writeWhenReady(`[orchestration] ${pending} worker event(s) pending`);
-      orch.session.writeWhenReady('\r', undefined, 400);
+      orch.session.submit(`[orchestration] ${pending} worker event(s) pending`, { from: 'orchestration' });
     }, pushDebounceMs));
   }
 
@@ -1023,12 +1195,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!run) return;
     if (stamp.role === 'orchestrator') {
       run.busy = false;
+      if (typeof session.costUsd === 'number') run.orchestratorCost = session.costUsd;
       saveRun(run);
       return;
     }
     const w = run.workers.find(x => x.id === stamp.workerId);
     if (!w) return;
     w.exitedAt = new Date().toISOString();
+    if (typeof session.costUsd === 'number') w.costUsd = session.costUsd;
     addEvent(run, { worker: w.name, kind: 'exited', text: `${w.name} exited${w.lastReport ? ` (last report: ${w.lastReport.status})` : ' without reporting'}` });
   }
 
@@ -1122,14 +1296,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         return ctxOut('SessionStart', clip(text, CONTEXT_LIMIT));
       }
       case 'UserPromptSubmit': {
-        if (!isOrch) { v.reported = false; v.nudged = false; return {}; }
+        if (!isOrch) { v.reported = false; v.nudged = false; return ctxOut('UserPromptSubmit', takeInbox(name)); }
         run.busy = true;
         // The run's original request, for a fresh orchestrator's seed: the first
         // prompt that is not one of the dashboard's own notices.
         const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
         if (!run.request && prompt && !prompt.startsWith('[')) run.request = clip(prompt, 8000);
         saveRun(run);
-        return ctxOut('UserPromptSubmit', events());
+        return ctxOut('UserPromptSubmit', joinContext(takeInbox(name), events()));
       }
       case 'PreToolUse': {
         if (tool === 'Workflow') return deny('Workflows are disabled in orchestration sessions (they would bypass the subagent cap). Use the Agent tool, at most 3 at once.');
@@ -1150,17 +1324,19 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       case 'PostToolUse': {
         // Exact address, optionally with a ` [ref]` suffix — a sibling worker's
-        // name also starts with the orchestrator's.
-        const to = tool === 'SendMessage' && typeof input.tool_input?.to === 'string' ? input.tool_input.to : null;
+        // name also starts with the orchestrator's. Claude Code's own
+        // SendMessage and the orchestrator server's (mcp__orchestrator__SendMessage,
+        // SDK runs) alike.
+        const to = /(^|__)SendMessage$/.test(tool) && typeof input.tool_input?.to === 'string' ? input.tool_input.to : null;
         const addressed = (n) => to === n || (to || '').startsWith(`${n} [`);
         if (!isOrch) {
-          if (to && addressed(run.orchestrator)) v.reported = true;
+          if (to && (addressed(run.orchestrator) || to === 'orchestrator')) v.reported = true;
           if (/(^|__)report$/.test(tool)) v.reported = true;
-          return {};
+          return ctxOut('PostToolUse', takeInbox(name));
         }
         if (to && run.pausing) {
           // The orchestrator relayed the pause to a worker: no server fallback.
-          const w = run.workers.find(x => addressed(x.name));
+          const w = run.workers.find(x => addressed(x.name) || to === x.id);
           if (w && !run.pausing.relayed.includes(w.name)) {
             run.pausing.relayed.push(w.name);
             clearTimeout(relayTimers.get(w.name));
@@ -1168,7 +1344,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
             saveRun(run);
           }
         }
-        return ctxOut('PostToolUse', events());
+        return ctxOut('PostToolUse', joinContext(takeInbox(name), events()));
       }
       case 'PostToolUseFailure': {
         if (AGENT_TOOLS.has(tool)) v.agents = Math.max(0, v.agents - 1);
@@ -1184,12 +1360,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       case 'Stop': {
         if (isOrch) {
-          const pending = events();
+          const pending = joinContext(takeInbox(name), events());
           if (pending) return { stdout: JSON.stringify({ decision: 'block', reason: pending }) };
           run.busy = false;
           saveRun(run);
           return {};
         }
+        // A message arrived during the turn: it continues with it.
+        const msgs = takeInbox(name);
+        if (msgs) return { stdout: JSON.stringify({ decision: 'block', reason: msgs }) };
         // Still working in the background (subagents, background shells): not idle.
         if (Array.isArray(input.background_tasks) && input.background_tasks.length) return {};
         if (v.reported) return {};
@@ -1225,6 +1404,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     r.post('/end', call(b => endRun(b.instanceId)));
     r.post('/report', call(b => report(b.instanceId, b)));
     r.post('/resume-worker', call(b => resumeWorker(b.instanceId, b)));
+    r.post('/send-message', call(b => sendMessage(b.instanceId, b)));
+    r.post('/list-agents', call(b => listAgents(b.instanceId)));
     // The run board (GUI).
     r.post('/pause', call(b => pauseRun(String(b.runId || ''))));
     r.post('/refresh', call(b => refreshOrchestrator(String(b.runId || ''))));
@@ -1239,7 +1420,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   return {
-    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report,
+    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report, sendMessage, listAgents,
     handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,

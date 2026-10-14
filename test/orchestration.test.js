@@ -28,6 +28,8 @@ function fakeMgr() {
   const sessions = new Map();
   const launches = [];
   const writes = [];
+  const submits = [];        // { tabId, data, opts }
+  const emitted = [];        // SDK panel events: { tabId, ev }
   let history = [];          // newest first, like cli-sessions
   const closed = [];
   let seq = 0;
@@ -37,9 +39,11 @@ function fakeMgr() {
     updateSettings(s) { Object.assign(this.settings, s); },
     writeWhenReady(data) { writes.push({ tabId, data }); },
     write(data) { writes.push({ tabId, data }); },
+    // CliSession.submit: the text, then the CR.
+    submit(data, opts) { submits.push({ tabId, data, opts }); writes.push({ tabId, data }); writes.push({ tabId, data: '\r' }); },
   });
   const mgr = {
-    sessions, launches, writes, closed,
+    sessions, launches, writes, closed, submits, emitted,
     get history() { return history; },
     nextTabId: () => `tab-t-${++seq}`,
     get: (tabId) => sessions.get(tabId) || null,
@@ -62,6 +66,12 @@ function fakeMgr() {
       const s = mgr.getOrCreate(tabId);
       if (opts.title !== undefined) s.title = opts.title;
       s.updateSettings(opts.settings || {});
+      if (opts.hidden != null) s.hidden = opts.hidden;
+      // An SDK session (src/sdk-session.js) has a panel: events land there.
+      if (s.settings.engine === 'sdk') {
+        s.kind = 'sdk';
+        s.emitEvent = (ev) => emitted.push({ tabId, ev });
+      }
       mgr.spawn(tabId, opts.cwd, opts.cols, opts.rows);
       launches.push({ tabId, opts });
       if (opts.prompt && opts.autoSubmit) writes.push({ tabId, data: opts.prompt });
@@ -115,7 +125,7 @@ function answer(pendingQuestions, value) {
 async function openOrchestrator(t, opts = {}) {
   const ctx = setup();
   const cwd = opts.cwd || tmpDir();
-  const r = await ctx.orch.openCli({ cwd, mode: 'orchestrator', ...opts });
+  const r = await ctx.orch.openCli({ cwd, mode: 'orchestrator', engine: 'cli', ...opts });
   const orchSession = ctx.mgr.sessions.get(r.tabId);
   const stamp = orchSession.settings.orchestration;
   return { ...ctx, cwd, r, orchSession, stamp, run: () => ctx.orch.getRun(stamp.runId) };
@@ -132,7 +142,7 @@ test('openCli without a mode asks, and the answer decides the launch', async () 
   const ask = broadcasts.find(m => m.type === 'ask:question');
   assert.ok(ask, 'the ask is broadcast');
   // The dashboard builds the form from formData.questions (askFormBuildHTML).
-  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.options.map(o => o.label)), [['Simple CLI', 'Orchestrator CLI']]);
+  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.options.map(o => o.label)), [['Simple CLI', 'Orchestrator CLI'], ['CLI terminal', 'Agent SDK panel (API billing)']]);
   assert.deepStrictEqual([...pendingQuestions.values()][0].message, ask, 'the entry keeps its broadcast for replay on reconnect');
   answer(pendingQuestions, 'Simple CLI');
   const s = await simple;
@@ -163,12 +173,43 @@ test('openCli without a mode asks, and the answer decides the launch', async () 
   assert.ok(!/have a worker \(or a separate reviewer worker\) run the tests/.test(st.appendSystemPrompt));
 });
 
-test('openCli with a mode never asks', async () => {
+test('openCli with a mode and an engine never asks', async () => {
   const { orch, pendingQuestions, broadcasts } = setup();
-  const r = await orch.openCli({ cwd: tmpDir(), mode: 'simple' });
+  const r = await orch.openCli({ cwd: tmpDir(), mode: 'simple', engine: 'cli' });
   assert.strictEqual(r.mode, 'simple');
+  assert.strictEqual(r.engine, 'cli');
   assert.strictEqual(pendingQuestions.size, 0);
   assert.ok(!broadcasts.some(m => m.type === 'ask:question'));
+});
+
+test('openCli asks only what is open: the engine when the mode is given, the mode when the engine is', async () => {
+  const { mgr, orch, pendingQuestions, broadcasts } = setup();
+  const cwd = tmpDir();
+  const reply = (answers) => [...pendingQuestions.values()][0].resolve(Object.entries(answers).map(([id, answer]) => ({ id, question: 'x', answer })));
+  const lastAsk = () => broadcasts.filter(m => m.type === 'ask:question').at(-1);
+
+  const a = orch.openCli({ cwd, mode: 'simple' });
+  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['engine']);
+  reply({ engine: 'Agent SDK panel (API billing)' });
+  const ra = await a;
+  assert.deepStrictEqual({ mode: ra.mode, engine: ra.engine }, { mode: 'simple', engine: 'sdk' });
+  assert.strictEqual(mgr.sessions.get(ra.tabId).settings.engine, 'sdk');
+
+  const b = orch.openCli({ cwd, engine: 'sdk' });
+  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['mode']);
+  reply({ mode: 'Orchestrator CLI' });
+  const rb = await b;
+  assert.deepStrictEqual({ mode: rb.mode, engine: rb.engine }, { mode: 'orchestrator', engine: 'sdk' });
+  assert.strictEqual(orch.getRun(mgr.sessions.get(rb.tabId).settings.orchestration.runId).engine, 'sdk');
+
+  // Both open: one form, both answers.
+  const c = orch.openCli({ cwd });
+  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['mode', 'engine']);
+  reply({ mode: 'Simple CLI', engine: 'CLI terminal' });
+  assert.strictEqual((await c).engine, 'cli');
+  // The engine can also come in the caller's settings (Pro passes settings).
+  const d = await orch.openCli({ cwd, mode: 'simple', settings: { engine: 'sdk' } });
+  assert.strictEqual(d.engine, 'sdk');
 });
 
 test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds its own', async (t) => {
@@ -210,6 +251,12 @@ test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds it
   assert.strictEqual(ws.agents.explorer.model, 'sonnet');
   assert.strictEqual(mgr.launches.at(-1).opts.autoSubmit, true);
   assert.strictEqual(mgr.launches.at(-1).opts.prompt, 'do it');
+
+  // launch_cli `model`: the worker runs on it (kept for a fresh relaunch); anything else is refused.
+  const h = orch.launchWorker(orchSession.instanceId, { title: 'Docs', task: 'x', model: 'haiku' });
+  assert.strictEqual(mgr.sessions.get(h.tabId).settings.model, 'haiku');
+  assert.strictEqual(orch.listWorkers(orchSession.instanceId).workers.find(x => x.name === h.worker).model, 'haiku');
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'bad', task: 'x', model: 'gpt' }), /model must be one of fable, opus, sonnet, haiku/);
 });
 
 test('launch_cli guards: orchestrator only, at most 3 running, cwd inside the root', async (t) => {
@@ -602,4 +649,130 @@ test('the hook script fails open when the dashboard is unreachable', () => {
   });
   assert.strictEqual(r.status, 0);
   assert.strictEqual(r.stdout.toString(), '');
+});
+
+// --- Agent SDK runs: engine, messaging ---
+
+const msgEvents = (mgr, tabId) => mgr.emitted.filter(e => e.tabId === tabId && e.ev.platform?.kind === 'message').map(e => e.ev.platform);
+
+test('an SDK run: workers inherit the engine and are hidden; describeRun names sessId, engine, state and cost', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  assert.strictEqual(run().engine, 'sdk');
+  assert.strictEqual(orchSession.settings.engine, 'sdk');
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const wSession = mgr.sessions.get(w.tabId);
+  assert.strictEqual(wSession.settings.engine, 'sdk');
+  assert.strictEqual(mgr.launches.at(-1).opts.hidden, true, 'an SDK worker is an area of the panel, not a tab');
+  wSession.costUsd = 0.12;
+  wSession.state = 'busy';
+  orchSession.costUsd = 0.5;
+
+  let d = orch.describeRun(run());
+  assert.strictEqual(d.engine, 'sdk');
+  assert.strictEqual(d.orchestratorSessId, orchSession.sessId);
+  assert.strictEqual(d.orchestratorCost, 0.5);
+  const dw = d.workers[0];
+  assert.deepStrictEqual({ name: dw.name, sessId: dw.sessId, engine: dw.engine, state: dw.state, cost: dw.cost },
+    { name: w.worker, sessId: wSession.sessId, engine: 'sdk', state: 'busy', cost: 0.12 });
+
+  // Exited: the cost is kept in run.json, the sessId comes from history.
+  wSession.running = false;
+  orch.onSessionExit(w.tabId, wSession);
+  mgr.sessions.delete(w.tabId);
+  d = orch.describeRun(run());
+  assert.deepStrictEqual({ sessId: d.workers[0].sessId, state: d.workers[0].state, cost: d.workers[0].cost },
+    { sessId: wSession.sessId, state: 'exited', cost: 0.12 });
+
+  // A CLI run stays CLI.
+  const cli = await openOrchestrator(t, { isolation: 'none' });
+  const cw = cli.orch.launchWorker(cli.orchSession.instanceId, { title: 'b', task: 'y' });
+  assert.strictEqual(cli.mgr.sessions.get(cw.tabId).settings.engine, 'cli');
+  assert.strictEqual(cli.mgr.launches.at(-1).opts.hidden, undefined);
+});
+
+test('SendMessage to an SDK member: a next-priority turn, idle or busy, and a message card in both areas', async (t) => {
+  const { orch, orchSession, mgr } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  const orchName = orchSession.settings.name;
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const wSession = mgr.sessions.get(w.tabId);
+
+  // Worker -> idle orchestrator.
+  const r1 = orch.sendMessage(wSession.instanceId, { to: orchName, message: 'need a decision' });
+  assert.deepStrictEqual(r1, { ok: true, to: orchName, delivery: 'submitted' });
+  const sub = mgr.submits.filter(x => x.tabId === orchSession.tabId).at(-1);
+  assert.strictEqual(sub.data, `[message from ${w.worker}] need a decision`);
+  assert.deepStrictEqual(sub.opts, { priority: 'next', from: w.worker });
+  const card = { kind: 'message', from: w.worker, to: orchName, text: 'need a decision' };
+  assert.deepStrictEqual(msgEvents(mgr, orchSession.tabId), [card]);
+  assert.deepStrictEqual(msgEvents(mgr, w.tabId), [card]);
+
+  // Orchestrator -> busy worker, by its id: still submitted, with priority next.
+  wSession.busy = true;
+  const r2 = orch.sendMessage(orchSession.instanceId, { to: 'w1', message: 'also fix b' });
+  assert.strictEqual(r2.delivery, 'submitted');
+  assert.strictEqual(r2.to, w.worker);
+  assert.deepStrictEqual(mgr.submits.filter(x => x.tabId === w.tabId).at(-1).opts, { priority: 'next', from: orchName });
+  // The PostToolUse watcher sees the MCP tool by its suffix: a worker that
+  // messaged its orchestrator has reported.
+  hook(orch, wSession, { hook_event_name: 'UserPromptSubmit' });
+  hook(orch, wSession, { hook_event_name: 'PostToolUse', tool_name: 'mcp__orchestrator__SendMessage', tool_input: { to: orchName } });
+  assert.deepStrictEqual(hook(orch, wSession, { hook_event_name: 'Stop' }), {});
+
+  // Refusals.
+  assert.throws(() => orch.sendMessage(wSession.instanceId, { to: 'nobody', message: 'x' }), /no member nobody[\s\S]*Members: orch-/);
+  assert.throws(() => orch.sendMessage(wSession.instanceId, { to: w.worker, message: 'x' }), /your own address/);
+  assert.throws(() => orch.sendMessage(wSession.instanceId, { to: orchName, message: ' ' }), /message is required/);
+  wSession.running = false;
+  assert.throws(() => orch.sendMessage(orchSession.instanceId, { to: w.worker, message: 'x' }), /not running.*resume_worker/);
+
+  // ListAgents: both members, with state.
+  const list = orch.listAgents(orchSession.instanceId);
+  assert.strictEqual(list.you, orchName);
+  assert.deepStrictEqual(list.agents.map(a => [a.name, a.role]), [[orchName, 'orchestrator'], [w.worker, 'worker']]);
+  assert.strictEqual(list.agents[1].state, 'stopped');
+});
+
+test('SendMessage to a CLI member: typed when idle, through its next hook when busy', async (t) => {
+  const { orch, orchSession, mgr, broadcasts } = await openOrchestrator(t, { isolation: 'none' });
+  const orchName = orchSession.settings.name;
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const wSession = mgr.sessions.get(w.tabId);
+
+  assert.strictEqual(orch.sendMessage(orchSession.instanceId, { to: w.worker, message: 'one' }).delivery, 'submitted');
+  assert.deepStrictEqual(mgr.submits.filter(x => x.tabId === w.tabId).at(-1).opts, { from: orchName });
+  // No panel: the message is still broadcast for both session ids.
+  const sent = broadcasts.filter(b => b.type === 'sdk:event' && b.ev.platform?.kind === 'message');
+  assert.deepStrictEqual(sent.map(b => b.sessId).sort(), [orchSession.sessId, wSession.sessId].sort());
+
+  wSession.busy = true;
+  const before = mgr.submits.length;
+  assert.strictEqual(orch.sendMessage(orchSession.instanceId, { to: w.worker, message: 'two' }).delivery, 'queued');
+  assert.strictEqual(mgr.submits.length, before, 'nothing typed into a busy terminal');
+  const post = JSON.parse(hook(orch, wSession, { hook_event_name: 'PostToolUse', tool_name: 'Read' }).stdout);
+  assert.strictEqual(post.hookSpecificOutput.additionalContext, `[message from ${orchName}] two`);
+  assert.deepStrictEqual(hook(orch, wSession, { hook_event_name: 'PostToolUse', tool_name: 'Read' }), {}, 'delivered once');
+
+  // Still queued when the turn ends: the Stop continues it with the message.
+  orch.sendMessage(orchSession.instanceId, { to: w.worker, message: 'three' });
+  const stop = JSON.parse(hook(orch, wSession, { hook_event_name: 'Stop' }).stdout);
+  assert.strictEqual(stop.decision, 'block');
+  assert.match(stop.reason, /three/);
+
+  // To a busy CLI orchestrator: merged with its worker events.
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit' });
+  orchSession.busy = true;
+  orch.sendMessage(wSession.instanceId, { to: 'orchestrator', message: 'question' });
+  orch.report(wSession.instanceId, { status: 'blocked', summary: 'stuck' });
+  const ctx = JSON.parse(hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'Read' }).stdout).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /\[message from [^\]]+\] question[\s\S]*reported blocked: stuck/);
+});
+
+test('the orchestrator MCP server offers SendMessage / ListAgents to SDK sessions only', () => {
+  const CliSession = require('../src/cli-session');
+  const env = (engine) => CliSession.buildMcpServers({ settings: { engine, orchestration: { role: 'worker' } }, instanceId: 'cli-x' }).orchestrator.env;
+  assert.strictEqual(env('sdk').VISTACLAIR_ORCH_ENGINE, 'sdk');
+  assert.strictEqual(env(undefined).VISTACLAIR_ORCH_ENGINE, 'cli');
+  const src = fs.readFileSync(path.join(CORE, 'lib', 'orchestrator-mcp.js'), 'utf8');
+  assert.match(src, /name: "SendMessage",\s*path: "send-message"/);
+  assert.match(src, /name: "ListAgents",\s*path: "list-agents"/);
 });

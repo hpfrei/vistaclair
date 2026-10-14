@@ -89,14 +89,7 @@ class CliSession {
       });
     }
 
-    const safetyNote = `IMPORTANT: A Vistaclair control-room server is running from ${PROJECT_ROOT}. Never restart, stop, kill, or interfere with this server process or its ports. Do not run commands like "npm restart", "kill", "pkill", or "lsof ... | kill" targeting it.`;
-    // The session folder convention (TODO.md / NOTES.md) and the trusted
-    // pause/resume channel ride along with the safety note (session-folders.js).
-    const notes = this.settings.sessionDir ? `${safetyNote}\n\n${conventionNote(this.settings.sessionDir)}` : safetyNote;
-    const mergedSettings = { ...this.settings };
-    mergedSettings.appendSystemPrompt = mergedSettings.appendSystemPrompt
-      ? mergedSettings.appendSystemPrompt + '\n\n' + notes
-      : notes;
+    const mergedSettings = { ...this.settings, appendSystemPrompt: buildAppendSystemPrompt(this.settings) };
     const args = ['--dangerously-skip-permissions', ...buildCliArgs(mergedSettings)];
     if (resumeSessionId) {
       args.push('--resume', resumeSessionId);
@@ -208,29 +201,7 @@ class CliSession {
   }
 
   _writeInternalJson(extra = {}) {
-    const dir = this.sessId
-      ? path.join(INTERACTIONS_DIR, this.sessId)
-      : null;
-    if (!dir) return;
-
-    const record = {
-      sessId: this.sessId || null,
-      tabId: this.tabId || null,
-      tabName: this.title || (this.cwd ? path.basename(this.cwd) : null),
-      cwd: this.cwd || null,
-      hidden: this.hidden || false,
-      spawnedAt: new Date().toISOString(),
-      ...extra,
-    };
-
-    const filePath = path.join(dir, 'internal.json');
-    let entries = [];
-    try {
-      entries = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      if (!Array.isArray(entries)) entries = [];
-    } catch {}
-    entries.push(record);
-    fs.writeFile(filePath, JSON.stringify(entries, null, 2), () => {});
+    writeInternalJson(this, extra);
   }
 
   write(data) {
@@ -257,6 +228,20 @@ class CliSession {
         doWrite();
       }
     }, 300);
+  }
+
+  // Send one user turn: the text, then the submitting CR as a separate PTY
+  // chunk 400ms later (the CLI reads a chunk with an embedded newline as a
+  // paste, so a trailing '\n' never fires Enter). `priority` and `images` are
+  // SdkSession's; a terminal has no equivalent.
+  submit(text) {
+    this.writeWhenReady(String(text));
+    this.writeWhenReady('\r', undefined, 400);
+  }
+
+  // Esc ends the running turn.
+  interrupt() {
+    this.write('\x1b');
   }
 
   resize(cols, rows) {
@@ -317,7 +302,7 @@ class CliSession {
   }
 
   _buildMcpConfig() {
-    const servers = { ...this._integratedMcpServer(), ...this._orchestratorMcpServer() };
+    const servers = buildMcpServers(this._mcpOpts());
     if (Object.keys(servers).length === 0) return null;
     const config = { mcpServers: servers };
 
@@ -329,62 +314,132 @@ class CliSession {
     return tmpFile;
   }
 
-  // The tools of an orchestration run (src/orchestration.js), only for a
-  // session stamped with a role. The role picks the tool set.
+  _mcpOpts() {
+    return mcpOptsOf(this);
+  }
+
   _orchestratorMcpServer() {
-    const role = this.settings.orchestration?.role;
-    if (role !== 'orchestrator' && role !== 'worker') return {};
-    return {
-      orchestrator: {
-        command: 'node',
-        args: [path.join(PACKAGE_ROOT, 'lib', 'orchestrator-mcp.js')],
-        env: {
-          VISTACLAIR_DASHBOARD_PORT: String(this._dashboardPort || process.env.DASHBOARD_PORT || '3457'),
-          VISTACLAIR_AUTH_TOKEN: String(this._authToken || process.env.AUTH_TOKEN || ''),
-          VISTACLAIR_INSTANCE_ID: this.instanceId,
-          VISTACLAIR_ORCH_ROLE: role,
-        },
-      },
-    };
+    return orchestratorMcpServer(mcpOptsOf(this));
   }
 
   _integratedMcpServer() {
-    let mcpServers;
-    try {
-      mcpServers = require('./mcp/servers');
-    } catch { return {}; }
-
-    const meta = mcpServers.readMeta();
-    if (!meta) return {};
-
-    const enabledTools = (meta.tools || []).filter(t => t.enabled);
-    if (enabledTools.length === 0) return {};
-
-    const bridgePath = path.join(PACKAGE_ROOT, 'lib', 'mcp-bridge.js');
-
-    const env = {};
-    if (meta.env && typeof meta.env === 'object' && !Array.isArray(meta.env)) {
-      for (const [k, v] of Object.entries(meta.env)) {
-        if (k) env[k] = String(v);
-      }
-    }
-    // Secrets are NOT injected here — the bridge decrypts secrets.enc itself at
-    // spawn (via VISTACLAIR_DATA_HOME + slug), so plaintext never hits this tmp
-    // config file.
-    env.VISTACLAIR_DASHBOARD_PORT = String(this._dashboardPort || process.env.DASHBOARD_PORT || '3457');
-    env.VISTACLAIR_AUTH_TOKEN = String(this._authToken || process.env.AUTH_TOKEN || '');
-    env.VISTACLAIR_DATA_HOME = DATA_HOME;
-    env.VISTACLAIR_SERVER_SLUG = mcpServers.INTEGRATED_SLUG;
-    env.VISTACLAIR_INSTANCE_ID = this.instanceId;
-
-    return {
-      [mcpServers.INTEGRATED_SLUG]: {
-        command: 'node',
-        args: [bridgePath, mcpServers.INTEGRATED_SLUG],
-        env,
-      },
-    };
+    return integratedMcpServer(mcpOptsOf(this));
   }
 }
 
+// --- Shared with SdkSession (src/sdk-session.js) ---
+// One definition each of what a dashboard session gets on top of Claude Code:
+// the appended system prompt, the MCP servers and the internal.json record, so
+// a CLI tab and an Agent SDK session of the same settings are configured alike.
+
+// The caller's --append-system-prompt plus the dashboard's own notes: the
+// safety note, and (with a session folder) the TODO.md / NOTES.md convention
+// and the trusted pause/resume channel (session-folders.js).
+function buildAppendSystemPrompt(settings = {}) {
+  const safetyNote = `IMPORTANT: A Vistaclair control-room server is running from ${PROJECT_ROOT}. Never restart, stop, kill, or interfere with this server process or its ports. Do not run commands like "npm restart", "kill", "pkill", or "lsof ... | kill" targeting it.`;
+  const notes = settings.sessionDir ? `${safetyNote}\n\n${conventionNote(settings.sessionDir)}` : safetyNote;
+  return settings.appendSystemPrompt ? settings.appendSystemPrompt + '\n\n' + notes : notes;
+}
+
+function mcpOptsOf(session) {
+  return { settings: session.settings, instanceId: session.instanceId, dashboardPort: session._dashboardPort, authToken: session._authToken };
+}
+
+// Every MCP server a session gets (--mcp-config for a CLI tab, options.mcpServers
+// for an SDK session): the integrated bridge and, for a run member, the
+// orchestrator tools.
+function buildMcpServers(opts) {
+  return { ...integratedMcpServer(opts), ...orchestratorMcpServer(opts) };
+}
+
+// The tools of an orchestration run (src/orchestration.js), only for a
+// session stamped with a role. The role picks the tool set; the engine adds
+// SendMessage / ListAgents where Claude Code's own cross-session messaging is
+// not available (SDK sessions).
+function orchestratorMcpServer({ settings = {}, instanceId, dashboardPort, authToken } = {}) {
+  const role = settings.orchestration?.role;
+  if (role !== 'orchestrator' && role !== 'worker') return {};
+  return {
+    orchestrator: {
+      command: 'node',
+      args: [path.join(PACKAGE_ROOT, 'lib', 'orchestrator-mcp.js')],
+      env: {
+        VISTACLAIR_DASHBOARD_PORT: String(dashboardPort || process.env.DASHBOARD_PORT || '3457'),
+        VISTACLAIR_AUTH_TOKEN: String(authToken || process.env.AUTH_TOKEN || ''),
+        VISTACLAIR_INSTANCE_ID: instanceId,
+        VISTACLAIR_ORCH_ROLE: role,
+        VISTACLAIR_ORCH_ENGINE: settings.engine === 'sdk' ? 'sdk' : 'cli',
+      },
+    },
+  };
+}
+
+function integratedMcpServer({ instanceId, dashboardPort, authToken } = {}) {
+  let mcpServers;
+  try {
+    mcpServers = require('./mcp/servers');
+  } catch { return {}; }
+
+  const meta = mcpServers.readMeta();
+  if (!meta) return {};
+
+  const enabledTools = (meta.tools || []).filter(t => t.enabled);
+  if (enabledTools.length === 0) return {};
+
+  const bridgePath = path.join(PACKAGE_ROOT, 'lib', 'mcp-bridge.js');
+
+  const env = {};
+  if (meta.env && typeof meta.env === 'object' && !Array.isArray(meta.env)) {
+    for (const [k, v] of Object.entries(meta.env)) {
+      if (k) env[k] = String(v);
+    }
+  }
+  // Secrets are NOT injected here — the bridge decrypts secrets.enc itself at
+  // spawn (via VISTACLAIR_DATA_HOME + slug), so plaintext never hits a tmp
+  // config file.
+  env.VISTACLAIR_DASHBOARD_PORT = String(dashboardPort || process.env.DASHBOARD_PORT || '3457');
+  env.VISTACLAIR_AUTH_TOKEN = String(authToken || process.env.AUTH_TOKEN || '');
+  env.VISTACLAIR_DATA_HOME = DATA_HOME;
+  env.VISTACLAIR_SERVER_SLUG = mcpServers.INTEGRATED_SLUG;
+  env.VISTACLAIR_INSTANCE_ID = instanceId;
+
+  return {
+    [mcpServers.INTEGRATED_SLUG]: {
+      command: 'node',
+      args: [bridgePath, mcpServers.INTEGRATED_SLUG],
+      env,
+    },
+  };
+}
+
+// Append one spawn record to interactions/<sessId>/internal.json.
+function writeInternalJson(session, extra = {}) {
+  const dir = session.sessId ? path.join(INTERACTIONS_DIR, session.sessId) : null;
+  if (!dir) return;
+
+  const record = {
+    sessId: session.sessId || null,
+    tabId: session.tabId || null,
+    tabName: session.title || (session.cwd ? path.basename(session.cwd) : null),
+    cwd: session.cwd || null,
+    hidden: session.hidden || false,
+    spawnedAt: new Date().toISOString(),
+    ...extra,
+  };
+
+  const filePath = path.join(dir, 'internal.json');
+  let entries = [];
+  try {
+    entries = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!Array.isArray(entries)) entries = [];
+  } catch {}
+  entries.push(record);
+  fs.writeFile(filePath, JSON.stringify(entries, null, 2), () => {});
+}
+
 module.exports = CliSession;
+module.exports.buildAppendSystemPrompt = buildAppendSystemPrompt;
+module.exports.buildMcpServers = buildMcpServers;
+module.exports.writeInternalJson = writeInternalJson;
+module.exports.DEFAULT_SETTINGS = DEFAULT_SETTINGS;
+module.exports.SCROLLBACK_LIMIT = SCROLLBACK_LIMIT;

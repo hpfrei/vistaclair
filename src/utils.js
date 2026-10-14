@@ -269,6 +269,14 @@ function spawnClaudePty(args, { cwd, proxyPort, instanceId, sourceContext, cols,
   return ptyProc;
 }
 
+// Register a session that is not a spawnClaude/spawnClaudePty child (an Agent
+// SDK session) as a live instance, so the proxy treats its requests as the
+// dashboard's own (getInstanceContext). `proc` needs only kill(). Returns the
+// exit handler, as _trackProcess does.
+function trackInstance(instanceId, proc, sourceContext, cwd, autoMemory) {
+  return _trackProcess(instanceId, proc, sourceContext, cwd, autoMemory);
+}
+
 function killInstance(instanceId) {
   const entry = _activeProcesses.get(instanceId);
   if (!entry || entry.status !== 'running') return false;
@@ -594,10 +602,12 @@ module.exports = {
   spawnClaude,
   buildCliArgs,
   spawnClaudePty,
+  buildClaudeEnv,
   setProcessBroadcaster,
   getActiveProcessCount,
   getInstances,
   getInstanceContext,
+  trackInstance,
   killInstance,
   removeInstances,
   runClaudeArtifactTask,

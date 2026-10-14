@@ -19,6 +19,16 @@
   // cwd/settings the way a single shared slot or a positional queue could.
   const _pendingNewTabs = new Map();
   let _reqSeq = 0;
+  // cli:open reqId -> the tab kind it asked for, so cli:opened creates the
+  // right view before the server's tab list confirms it.
+  const _pendingOpenKinds = new Map();
+  // The server says it runs the Agent SDK engine (cli:tabs sdkEngine:true);
+  // until then the "+" menu offers no SDK items.
+  let _sdkEngine = false;
+
+  // A tab is an xterm terminal ('cli') or an Agent SDK panel ('sdk').
+  const kindOf = (t) => (t?.kind === 'sdk' || t?.settings?.engine === 'sdk') ? 'sdk' : 'cli';
+  const isSdk = (tab) => tab?.kind === 'sdk';
   function _requestNewTab(intent) {
     const reqId = `req-${++_reqSeq}`;
     if (intent) _pendingNewTabs.set(reqId, intent);
@@ -152,16 +162,18 @@
     const active = () => tabs.get(activeTabId);
     const atBottom = t => t.buffer.active.viewportY >= t.buffer.active.baseY;
 
+    // SDK tabs have their own composer (the bar is hidden for them); every
+    // terminal call here is for xterm tabs only.
     function sendSeq(seq) {
       const tab = active();
-      if (!tab) return;
+      if (!tab?.terminal) return;
       sendWs({ type: 'cli:claim', tabId: activeTabId, cols: tab.terminal.cols, rows: tab.terminal.rows });
       sendWs({ type: 'cli:input', tabId: activeTabId, data: seq });
       tab.terminal.scrollToBottom();
     }
     function submit() {
       const text = input.value.replace(/\r?\n$/, '');
-      if (!text.trim() || !active()) return;
+      if (!text.trim() || !active()?.terminal) return;
       // Text first, Enter a beat later — the way a paste-then-Enter lands,
       // so a multi-line message is not submitted at its first newline.
       sendSeq(text.replace(/\n/g, '\r'));
@@ -178,9 +190,9 @@
       if (b.dataset.font) {
         fontSize = Math.min(20, Math.max(9, fontSize + Number(b.dataset.font)));
         localStorage.setItem(FONT_KEY, String(fontSize));
-        for (const tab of tabs.values()) tab.terminal.options.fontSize = fontSize;
+        for (const tab of tabs.values()) if (tab.terminal) tab.terminal.options.fontSize = fontSize;
         const tab = active();
-        if (tab) try { tab.fitAddon.fit(); } catch {}
+        if (tab?.fitAddon) try { tab.fitAddon.fit(); } catch {}
       }
     });
     sendBtn.addEventListener('click', submit);
@@ -194,14 +206,14 @@
     });
     pill.addEventListener('click', () => {
       const tab = active();
-      if (tab) tab.terminal.scrollToBottom();
+      if (tab?.terminal) tab.terminal.scrollToBottom();
       pill.classList.add('hidden');
     });
 
     // The pill shows when output lands while the viewer is scrolled up
     // (reading history); scrolling back to the bottom clears it.
     function onOutput(tab) {
-      if (!window.dashboard.isPhone?.()) return;
+      if (!tab?.terminal || !window.dashboard.isPhone?.()) return;
       // write() is async; look once the buffer has the new lines.
       requestAnimationFrame(() => {
         if (tab !== active()) return;
@@ -210,7 +222,8 @@
     }
     function onTabChange(tab) {
       pill.classList.add('hidden');
-      if (tab && !tab._mobileScrollHooked) {
+      view.classList.toggle('sdk-tab-active', isSdk(tab));
+      if (tab?.terminal && !tab._mobileScrollHooked) {
         tab._mobileScrollHooked = true;
         tab.terminal.onScroll(() => { if (atBottom(tab.terminal)) pill.classList.add('hidden'); });
       }
@@ -218,7 +231,8 @@
     return { onOutput, onTabChange, fontSize: () => (window.dashboard.isPhone?.() ? fontSize : 14) };
   })();
 
-  function createTab(tabId) {
+  function createTab(tabId, kind = 'cli') {
+    if (kind === 'sdk') return createSdkTab(tabId);
     const wrap = document.createElement('div');
     wrap.className = 'cli-terminal-wrap';
     wrap.style.display = 'none';
@@ -283,7 +297,7 @@
 
     _setupDropOverlay(wrap, tabId);
 
-    const tab = { terminal, fitAddon, wrap, cwd: null, title: null, settings: {}, status: 'idle' };
+    const tab = { kind: 'cli', terminal, fitAddon, wrap, cwd: null, title: null, settings: {}, status: 'idle' };
     tabs.set(tabId, tab);
 
     container.appendChild(wrap);
@@ -299,6 +313,52 @@
     return tab;
   }
 
+  // An Agent SDK tab: no terminal, no PTY size, no scrollback. sdk-panel.js
+  // renders its areas into the wrap; the tab keeps the same registry fields so
+  // the strip, the menus and the Inspector treat it like any other tab.
+  function createSdkTab(tabId) {
+    const wrap = document.createElement('div');
+    wrap.className = 'cli-terminal-wrap cli-sdk-wrap';
+    wrap.style.display = 'none';
+    const tab = { kind: 'sdk', terminal: null, fitAddon: null, wrap, cwd: null, title: null, settings: {}, status: 'idle' };
+    tabs.set(tabId, tab);
+    container.appendChild(wrap);
+    window.sdkPanel?.mount(tabId, wrap);
+    return tab;
+  }
+
+  function sdkInfo(tab) {
+    return { sessId: tab.sessId, title: tab.title, cwd: tab.cwd, settings: tab.settings, status: tab.status, pausing: tab.pausing === true, state: tab.sdkState, costUsd: tab.costUsd };
+  }
+
+  // Drop a tab's view without telling the server or the Inspector.
+  function _disposeTabView(tabId, tab) {
+    if (isSdk(tab)) window.sdkPanel?.unmount(tabId);
+    else try { tab.terminal?.dispose(); } catch {}
+    tab._resizeObserver?.disconnect();
+    tab.wrap?.remove();
+  }
+
+  // The tab with this id, of this kind. A tab first created as a terminal
+  // (before the server said what it is) is rebuilt as the right view.
+  function ensureTab(tabId, kind) {
+    const tab = tabs.get(tabId);
+    if (tab && (!kind || tab.kind === kind)) return tab;
+    if (tab) {
+      _disposeTabView(tabId, tab);
+      tabs.delete(tabId);
+      _scrollbackLoaded.delete(tabId);
+      const fresh = createTab(tabId, kind);
+      for (const k of ['cwd', 'title', 'settings', 'status', 'pausing', 'instanceId', 'sessId', 'autoMemory']) {
+        if (tab[k] !== undefined) fresh[k] = tab[k];
+      }
+      if (isSdk(fresh)) window.sdkPanel?.update(tabId, sdkInfo(fresh));
+      if (activeTabId === tabId) switchTab(tabId);
+      return fresh;
+    }
+    return createTab(tabId, kind || 'cli');
+  }
+
   function switchTab(tabId) {
     for (const [id, tab] of tabs) {
       tab.wrap.style.display = id === tabId ? '' : 'none';
@@ -307,7 +367,10 @@
     if (placeholder) placeholder.style.display = tabs.size > 0 ? 'none' : '';
     renderTabStrip();
     const tab = tabs.get(tabId);
-    if (tab) {
+    window.sdkPanel?.setActive(isSdk(tab) ? tabId : null);
+    if (isSdk(tab)) {
+      _mobileBar?.onTabChange(tab);
+    } else if (tab) {
       if (!_scrollbackLoaded.has(tabId)) {
         _scrollbackLoaded.add(tabId);
         sendWs({ type: 'cli:requestScrollback', tabId });
@@ -353,6 +416,13 @@
       const orchRole = tab.settings?.orchestration?.role;
       const roleBadge = orchRole === 'orchestrator' ? '\u{1F9ED} ' : orchRole === 'worker' ? '⚙️ ' : '';
       label.textContent = roleBadge + (isAppCli ? '\u{1F528} ' : '') + computeTabLabel(tabId);
+      if (isSdk(tab)) {
+        const sdkBadge = document.createElement('span');
+        sdkBadge.className = 'cli-sdk-badge';
+        sdkBadge.textContent = 'SDK';
+        sdkBadge.title = 'Agent SDK session (API billing)';
+        label.appendChild(sdkBadge);
+      }
       let clickTimer = null;
       label.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -450,9 +520,7 @@
       if (tab.instanceId) {
         sendWs({ type: 'inspector:clearInstances', instanceIds: [tab.instanceId] });
       }
-      tab.terminal.dispose();
-      tab._resizeObserver?.disconnect();
-      tab.wrap.remove();
+      _disposeTabView(tabId, tab);
       tabs.delete(tabId);
     }
     if (activeTabId === tabId) {
@@ -462,6 +530,8 @@
       } else {
         activeTabId = null;
         if (placeholder) placeholder.style.display = '';
+        window.sdkPanel?.setActive(null);
+        _mobileBar?.onTabChange(null);
         renderTabStrip();
       }
     }
@@ -589,6 +659,38 @@
       });
     });
     menu.appendChild(newItem);
+
+    // Agent SDK tabs: an HTML panel instead of a terminal, API-billed. The
+    // mode is chosen here, so the server asks nothing.
+    if (_sdkEngine) {
+      const sdkItem = (text, mode, title) => {
+        const item = document.createElement('div');
+        item.className = 'cli-new-menu-item cli-new-menu-new cli-new-menu-sdk';
+        item.textContent = text;
+        item.title = title;
+        item.addEventListener('click', async () => {
+          closeNewMenu();
+          const picked = await openFsDirPicker();
+          if (!picked) return;
+          const active = activeTabId ? tabs.get(activeTabId) : null;
+          const reqId = `open-${++_reqSeq}`;
+          _pendingOpenKinds.set(reqId, 'sdk');
+          sendWs({
+            type: 'cli:open',
+            reqId,
+            cwd: picked.dir,
+            autoMemory: picked.autoMemory === true,
+            cols: active?.terminal?.cols || 80,
+            rows: active?.terminal?.rows || 24,
+            engine: 'sdk',
+            mode,
+          });
+        });
+        menu.appendChild(item);
+      };
+      sdkItem('Agent SDK orchestrator…', 'orchestrator', 'An orchestrator and its workers in one panel, on the Agent SDK (API billing)');
+      sdkItem('Agent SDK session…', 'simple', 'A single Agent SDK session in a panel (API billing)');
+    }
 
     if (savedSessions.length > 0) {
       const divider = document.createElement('div');
@@ -1289,7 +1391,7 @@
       }
       case 'cli:output': {
         const tab = tabs.get(msg.tabId);
-        if (tab) {
+        if (tab?.terminal) {
           tab.terminal.write(msg.data);
           if (tab === tabs.get(activeTabId)) _mobileBar?.onOutput(tab);
         }
@@ -1299,7 +1401,8 @@
         const tab = tabs.get(msg.tabId);
         if (tab) {
           tab.status = 'exited';
-          tab.terminal.write('\r\n\x1b[90m[Process exited' + (msg.exitCode != null ? ' with code ' + msg.exitCode : '') + ']\x1b[0m\r\n');
+          if (tab.terminal) tab.terminal.write('\r\n\x1b[90m[Process exited' + (msg.exitCode != null ? ' with code ' + msg.exitCode : '') + ']\x1b[0m\r\n');
+          else if (isSdk(tab)) window.sdkPanel?.update(msg.tabId, sdkInfo(tab));
           renderTabStrip();
           const timer = setTimeout(() => { _pendingRemoval.delete(msg.tabId); removeTab(msg.tabId); }, 1500);
           _pendingRemoval.set(msg.tabId, timer);
@@ -1310,12 +1413,16 @@
         const pendingTimer = _pendingRemoval.get(msg.tabId);
         if (pendingTimer) { clearTimeout(pendingTimer); _pendingRemoval.delete(msg.tabId); }
         let tab = tabs.get(msg.tabId);
+        // The spawn says what the tab is only when it carries kind/engine;
+        // otherwise keep what we have (cli:tabs is authoritative).
+        const spawnedKind = (msg.kind || msg.settings?.engine) ? kindOf(msg) : null;
+        if (tab && spawnedKind && tab.kind !== spawnedKind) tab = ensureTab(msg.tabId, spawnedKind);
         if (!tab && !msg.hidden) {
           // A tab we have not seen yet: either an app action tab, or one the
           // server restored at boot (its cli:spawned lands before the cli:tabs
           // that would otherwise introduce it). Adopt it either way.
           const isAppCli = msg.tabId.startsWith('app-');
-          tab = createTab(msg.tabId);
+          tab = createTab(msg.tabId, spawnedKind || 'cli');
           if (isAppCli) {
             switchTab(msg.tabId);
             if (typeof switchView === 'function') switchView('claude');
@@ -1332,11 +1439,14 @@
           if (msg.autoMemory != null) tab.autoMemory = msg.autoMemory;
           if (msg.title) tab.title = msg.title;
           tab.settings = msg.settings || {};
+          if (isSdk(tab)) window.sdkPanel?.update(msg.tabId, sdkInfo(tab));
           renderTabStrip();
         }
         break;
       }
       case 'cli:tabs': {
+        if (msg.sdkEngine != null) _sdkEngine = msg.sdkEngine === true;
+        window.sdkPanel?.onTabs();
         handleTabList(msg.tabs || [], msg.bootId || null, msg.droppedTabs || null);
         break;
       }
@@ -1360,7 +1470,7 @@
           tab.autoMemory = intent.autoMemory === true;
           if (intent.resumeSessionId) tab.sessId = intent.resumeSessionId;
         }
-        const { cols, rows } = tab ? { cols: tab.terminal.cols, rows: tab.terminal.rows } : { cols: 80, rows: 24 };
+        const { cols, rows } = tab?.terminal ? { cols: tab.terminal.cols, rows: tab.terminal.rows } : { cols: 80, rows: 24 };
         const spawnMsg = {
           type: 'cli:spawn', tabId, cwd: intent.cwd, cols, rows,
           autoMemory: intent.autoMemory === true,
@@ -1372,8 +1482,10 @@
       }
       case 'cli:opened': {
         if (msg.error) { window.dashboard.showAlert?.(`Could not open the CLI: ${msg.error}`); break; }
+        const openedKind = msg.reqId ? _pendingOpenKinds.get(msg.reqId) : null;
+        if (msg.reqId) _pendingOpenKinds.delete(msg.reqId);
         if (msg.cancelled || !msg.tabId) break;
-        if (!tabs.has(msg.tabId)) createTab(msg.tabId);
+        if (!tabs.has(msg.tabId)) createTab(msg.tabId, openedKind || 'cli');
         switchTab(msg.tabId);
         maybeNotifyNoSubscription();
         break;
@@ -1490,9 +1602,7 @@
     for (const [tabId, tab] of tabs) {
       dismissAskModalsForTab(tabId);
       _scrollbackLoaded.delete(tabId);
-      try { tab.terminal.dispose(); } catch {}
-      tab._resizeObserver?.disconnect();
-      tab.wrap?.remove();
+      _disposeTabView(tabId, tab);
     }
     tabs.clear();
     activeTabId = null;
@@ -1520,8 +1630,7 @@
       if (!serverIds.has(tabId)) removeTab(tabId);
     }
     for (const st of serverTabs) {
-      if (!tabs.has(st.tabId)) createTab(st.tabId);
-      const tab = tabs.get(st.tabId);
+      const tab = ensureTab(st.tabId, kindOf(st));
       tab.status = st.status;
       tab.cwd = st.cwd;
       tab.title = st.title || null;
@@ -1530,6 +1639,9 @@
       if (st.instanceId) tab.instanceId = st.instanceId;
       if (st.sessId) tab.sessId = st.sessId;
       if (st.autoMemory != null) tab.autoMemory = st.autoMemory;
+      if (st.state) tab.sdkState = st.state;
+      if (typeof st.costUsd === 'number') tab.costUsd = st.costUsd;
+      if (isSdk(tab)) window.sdkPanel?.update(st.tabId, sdkInfo(tab));
     }
     if (!activeTabId && tabs.size > 0) {
       const first = Array.from(tabs.keys())[0];
@@ -1868,8 +1980,9 @@
 
   window.dashboard.registerModule?.('orchestration:', (msg) => {
     if (msg.type === 'orchestration:run' && _runBoard && msg.runId === _runBoard.runId) renderRunBoard();
+    if (msg.type === 'orchestration:run') window.sdkPanel?.onRunUpdate(msg);
   });
 
   // Expose module
-  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel };
+  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, openRunBoard };
 })();
