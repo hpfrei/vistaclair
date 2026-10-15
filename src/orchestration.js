@@ -3,11 +3,16 @@
 //
 //   openCli(opts)        the one user-facing "new CLI" entry. `mode` unset asks
 //                        Simple / Orchestrator, `engine` unset asks CLI terminal
-//                        / Agent SDK panel, in one dashboard ask form.
+//                        / Agent SDK panel, `auth` unset asks an SDK session's
+//                        billing, in one dashboard ask form.
 //   engine               settings.engine 'cli' (a PTY tab) | 'sdk' (an Agent SDK
 //                        session, src/sdk-session.js). A run has one engine
 //                        (run.engine); its workers inherit it. SDK workers are
 //                        hidden: they are areas of the run's panel.
+//   auth                 settings.auth 'apikey' | 'subscription': what an SDK
+//                        session is billed to. Asked only when both credentials
+//                        exist; otherwise the form names the one in use. A run
+//                        has one (run.auth); its workers inherit it.
 //   run directory        <runsDir>/<runId>/ — run.json (server-owned: workers,
 //                        events, delivery cursor), TODO.md (the orchestrator's),
 //                        sessions/<name>.json (each session's --settings file).
@@ -174,7 +179,9 @@ function workerCard(run, worker) {
   ].join('\n');
 }
 
-function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS }) {
+function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS }) {
+  // Which Claude credentials exist: { apiKey, subscription }. Read per ask.
+  const claudeCredentials = credentials || (() => require('./capabilities').claudeCredentials(dataHome));
   const HOOK_SCRIPT = path.join(coreRoot, 'lib', 'orchestration-hook.js');
   const runDirs = new Map();       // runId -> runDir (rebuilt from stamps on miss)
   const volatile = new Map();      // session name -> { agents, reported, nudged }
@@ -210,13 +217,42 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return promise;
   }
 
-  const ENGINE_LABELS = { cli: 'CLI terminal', sdk: 'Agent SDK panel (API billing)' };
+  const ENGINE_LABELS = { cli: 'CLI terminal', sdk: 'Agent SDK panel' };
+  const AUTH_LABELS = { apikey: 'API key', subscription: 'Claude subscription' };
 
-  // Ask what is still open — the session type, the engine, or both — in one
-  // form. Resolves { mode, engine } (the asked ones filled in), or null when
-  // cancelled.
-  async function askMode({ cwd, title, mode = null, engine = null }) {
+  // Ask what is still open — the session type, the engine, an SDK session's
+  // billing — in one form. Billing is a question only when both credentials
+  // exist; with one, the form names it and the session is pinned to it.
+  // Resolves { mode, engine, auth } (the asked ones filled in; auth null for a
+  // CLI terminal), or null when cancelled.
+  async function askMode({ cwd, title, mode = null, engine = null, auth = null }) {
     const questions = [];
+    let description = null;
+    let onlyAuth = null;
+    let billing = '';
+    let authQuestion = null;
+    if (!auth && engine !== 'cli') {
+      const creds = claudeCredentials();
+      if (creds.apiKey && creds.subscription) {
+        authQuestion = {
+          id: 'auth', type: 'select', header: 'Billing',
+          question: 'Bill the Agent SDK session to the API key or to your Claude subscription?',
+          defaultValue: AUTH_LABELS.apikey,
+          options: [
+            { label: AUTH_LABELS.apikey, description: 'Per token, to the Anthropic API key on the Models page.' },
+            { label: AUTH_LABELS.subscription, description: 'Your Claude Max/Pro plan, as a CLI terminal is.' },
+          ],
+          // Only when the engine picked in this form is the SDK panel.
+          ...(engine ? {} : { showIf: { questionId: 'engine', equals: ENGINE_LABELS.sdk } }),
+        };
+      } else {
+        onlyAuth = creds.apiKey ? 'apikey' : creds.subscription ? 'subscription' : null;
+        billing = onlyAuth
+          ? `billed to the ${onlyAuth === 'apikey' ? 'Anthropic API key' : 'Claude subscription'} (the only Claude credential configured)`
+          : 'needs a Claude credential: none is configured (an API key on the Models page, or `claude /login`)';
+        if (engine) description = `Agent SDK panel, ${billing}.`;
+      }
+    }
     if (!mode) {
       questions.push({
         id: 'mode', type: 'select', header: 'Session type',
@@ -235,14 +271,17 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         defaultValue: ENGINE_LABELS.cli,
         options: [
           { label: ENGINE_LABELS.cli, description: 'Claude Code in a terminal tab, on your usual Claude credential.' },
-          { label: ENGINE_LABELS.sdk, description: 'The same Claude Code in an HTML panel (live thinking, tool calls, images), billed to the Anthropic API key.' },
+          { label: ENGINE_LABELS.sdk, description: `The same Claude Code in an HTML panel (live thinking, tool calls, images)${billing ? `, ${billing}` : ''}.` },
         ],
       });
     }
+    if (authQuestion) questions.push(authQuestion);
+    // Nothing to ask: the mode and the SDK engine were given, one credential.
+    if (!questions.length) return { mode, engine, auth: auth || onlyAuth };
     let answer;
     try {
       answer = await askUser({
-        formData: { title: 'New CLI', submitLabel: 'Open', cancelLabel: 'Cancel' },
+        formData: { title: 'New CLI', submitLabel: 'Open', cancelLabel: 'Cancel', ...(description ? { description } : {}) },
         questions,
         title: title || 'New CLI',
         cwd,
@@ -260,7 +299,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const value = String(answer.find(a => a?.id === 'engine')?.answer || '');
       engine = /sdk/i.test(value) ? 'sdk' : 'cli';
     }
-    return { mode, engine };
+    if (engine === 'sdk' && !auth) {
+      // Unanswered falls back to the form's default, the API key.
+      if (!authQuestion) auth = onlyAuth;
+      else auth = /subscription/i.test(String(answer.find(a => a?.id === 'auth')?.answer || '')) ? 'subscription' : 'apikey';
+    }
+    return { mode, engine, auth: engine === 'sdk' ? auth : null };
   }
 
   // --- Runs ---
@@ -375,7 +419,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // Create a run and return the settings that make a launch its orchestrator.
   // `settings` is the caller's own launch settings: its system prompt, settings
   // file and stamps become the base every worker inherits.
-  function prepareRun({ cwd, runsDir, isolation, maxBudgetUsd, engine, settings = {} }) {
+  function prepareRun({ cwd, runsDir, isolation, maxBudgetUsd, engine, auth, settings = {} }) {
     const root = realpathOr(cwd);
     const runId = crypto.randomBytes(3).toString('hex');
     const dir = realpathOr(runsDir || path.join(root, '.orchestrator'));
@@ -385,7 +429,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
     // sessionDir is per session, never inherited; sessionsRoot (the caller's
     // choice of where folders live) is, through the stamps.
-    const { appendSystemPrompt, settingsFile, name: _n, orchestration: _o, model: _m, sessionDir: _d, engine: _e, ...stamps } = settings;
+    const { appendSystemPrompt, settingsFile, name: _n, orchestration: _o, model: _m, sessionDir: _d, engine: _e, auth: _a, ...stamps } = settings;
     const sessionsRoot = settings.sessionsRoot || path.join(dataHome, 'data', 'sessions');
     const orchestrator = `orch-${runId}`;
     const run = {
@@ -397,6 +441,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       sessionsRoot,
       isolation: isolation || (gitToplevel(root) ? 'worktree' : 'none'),
       engine: (engine || settings.engine) === 'sdk' ? 'sdk' : 'cli',
+      auth: null,
       maxBudgetUsd: maxBudgetUsd || null,
       base: { appendSystemPrompt: appendSystemPrompt || '', settingsFile: settingsFile || null, stamps },
       createdAt: new Date().toISOString(),
@@ -411,6 +456,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       events: [],
       delivered: 0,
     };
+    if (run.engine === 'sdk') run.auth = auth || settings.auth || null;
     folders.ensureFolder(run.orchestratorDir, `Orchestration run ${runId}`);
     saveRun(run);
     runDirs.set(runId, runDir);
@@ -419,6 +465,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return {
       ...settings,
       engine: run.engine,
+      ...authOf(run),
       name: run.orchestrator,
       sessionDir: run.orchestratorDir,
       orchestration: { runId, role: 'orchestrator', runDir },
@@ -427,41 +474,50 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
   }
 
+  // A run's billing as launch settings: an SDK run's members carry it.
+  function authOf(run) {
+    return run.engine === 'sdk' && run.auth ? { auth: run.auth } : {};
+  }
+
   // --- openCli: the one user-facing "new CLI" entry ---
 
   async function openCli(opts = {}) {
     let mode = opts.mode === 'simple' || opts.mode === 'orchestrator' ? opts.mode : null;
     const given = opts.engine || opts.settings?.engine;
     let engine = given === 'cli' || given === 'sdk' ? given : null;
-    if (!mode || !engine) {
+    const givenAuth = opts.auth || opts.settings?.auth;
+    let auth = givenAuth === 'apikey' || givenAuth === 'subscription' ? givenAuth : null;
+    if (!mode || !engine || (engine === 'sdk' && !auth)) {
       // One pending question per target: a double click joins the open ask.
       const key = opts.tabId || `cwd:${opts.cwd}`;
       if (!pendingAsks.has(key)) {
-        pendingAsks.set(key, askMode({ cwd: opts.cwd, title: opts.title, mode, engine }).finally(() => pendingAsks.delete(key)));
+        pendingAsks.set(key, askMode({ cwd: opts.cwd, title: opts.title, mode, engine, auth }).finally(() => pendingAsks.delete(key)));
       } else {
         return { cancelled: true, duplicate: true };
       }
       const picked = await pendingAsks.get(key);
       if (!picked) return { cancelled: true };
-      ({ mode, engine } = picked);
+      ({ mode, engine, auth } = picked);
     }
+    if (engine !== 'sdk') auth = null;
     const tabId = opts.tabId || mgr.nextTabId();
+    const { auth: _a, ...callerSettings } = opts.settings || {};
     const launch = {
       cwd: opts.cwd, cols: opts.cols, rows: opts.rows, title: opts.title,
-      settings: { ...(opts.settings || {}), engine }, hidden: opts.hidden, autoMemory: opts.autoMemory,
+      settings: { ...callerSettings, engine, ...(auth ? { auth } : {}) }, hidden: opts.hidden, autoMemory: opts.autoMemory,
       prompt: opts.prompt, autoSubmit: opts.autoSubmit, spawnOpts: opts.spawnOpts,
     };
     if (mode === 'orchestrator') {
       launch.settings = prepareRun({
         cwd: opts.cwd, runsDir: opts.runsDir, isolation: opts.isolation,
-        maxBudgetUsd: opts.maxBudgetUsd, engine, settings: opts.settings || {},
+        maxBudgetUsd: opts.maxBudgetUsd, engine, auth, settings: callerSettings,
       });
       launch.spawnOpts = {};   // a fresh transcript: never resume a plain session into the role
       launch.hidden = false;
     }
     if (opts.beforeLaunch) opts.beforeLaunch(tabId);
     mgr.launchSession(tabId, launch);
-    return { tabId, mode, engine };
+    return { tabId, mode, engine, auth };
   }
 
   // --- Workers ---
@@ -537,6 +593,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return {
       ...run.base.stamps,
       engine: run.engine || 'cli',
+      ...authOf(run),
       name: worker.name,
       ...(worker.sessionDir ? { sessionDir: worker.sessionDir } : {}),
       orchestration: { runId: run.runId, role: 'worker', workerId: worker.id, orchestrator: run.orchestrator, runDir: run.runDir },
@@ -819,6 +876,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return {
       ...run.base.stamps,
       engine: run.engine || 'cli',
+      ...authOf(run),
       name: run.orchestrator,
       sessionDir: orchestratorDir(run),
       orchestration: { runId: run.runId, role: 'orchestrator', runDir: run.runDir },

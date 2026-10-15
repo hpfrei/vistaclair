@@ -109,6 +109,8 @@ function setup(extra = {}) {
   const orch = createOrchestration({
     mgr, pendingQuestions, coreRoot: CORE, dataHome: tmpDir('vistaclair-orch-home-'),
     broadcaster, control,
+    // An API key and no subscription: an SDK session's billing is never asked.
+    credentials: () => ({ apiKey: true, subscription: false }),
     pushDebounceMs: 20,
     relayFallbackMs: 40,
     ...extra,
@@ -144,7 +146,9 @@ test('openCli without a mode asks, and the answer decides the launch', async () 
   const ask = broadcasts.find(m => m.type === 'ask:question');
   assert.ok(ask, 'the ask is broadcast');
   // The dashboard builds the form from formData.questions (askFormBuildHTML).
-  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.options.map(o => o.label)), [['Simple CLI', 'Orchestrator CLI'], ['CLI terminal', 'Agent SDK panel (API billing)']]);
+  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.options.map(o => o.label)), [['Simple CLI', 'Orchestrator CLI'], ['CLI terminal', 'Agent SDK panel']]);
+  // One credential: the SDK option names it instead of asking.
+  assert.match(ask.forms[0].formData.questions[1].options[1].description, /billed to the Anthropic API key \(the only Claude credential configured\)/);
   assert.deepStrictEqual([...pendingQuestions.values()][0].message, ask, 'the entry keeps its broadcast for replay on reconnect');
   answer(pendingQuestions, 'Simple CLI');
   const s = await simple;
@@ -192,7 +196,7 @@ test('openCli asks only what is open: the engine when the mode is given, the mod
 
   const a = orch.openCli({ cwd, mode: 'simple' });
   assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['engine']);
-  reply({ engine: 'Agent SDK panel (API billing)' });
+  reply({ engine: 'Agent SDK panel' });
   const ra = await a;
   assert.deepStrictEqual({ mode: ra.mode, engine: ra.engine }, { mode: 'simple', engine: 'sdk' });
   assert.strictEqual(mgr.sessions.get(ra.tabId).settings.engine, 'sdk');
@@ -212,6 +216,59 @@ test('openCli asks only what is open: the engine when the mode is given, the mod
   // The engine can also come in the caller's settings (Pro passes settings).
   const d = await orch.openCli({ cwd, mode: 'simple', settings: { engine: 'sdk' } });
   assert.strictEqual(d.engine, 'sdk');
+  assert.strictEqual(d.auth, 'apikey', 'the one credential is pinned without a form');
+});
+
+test('openCli: an SDK session\'s billing is asked only when both credentials exist; a run\'s workers inherit it', async () => {
+  let creds = { apiKey: true, subscription: true };
+  const { mgr, orch, pendingQuestions, broadcasts } = setup({ credentials: () => creds });
+  const cwd = tmpDir();
+  const reply = (answers) => [...pendingQuestions.values()][0].resolve(Object.entries(answers).map(([id, answer]) => ({ id, question: 'x', answer })));
+  const lastAsk = () => broadcasts.filter(m => m.type === 'ask:question').at(-1);
+
+  // The engine open: billing is in the same form, shown only for the SDK panel.
+  const a = orch.openCli({ cwd });
+  const qs = lastAsk().forms[0].formData.questions;
+  assert.deepStrictEqual(qs.map(q => q.id), ['mode', 'engine', 'auth']);
+  assert.deepStrictEqual(qs[2].showIf, { questionId: 'engine', equals: 'Agent SDK panel' });
+  assert.deepStrictEqual(qs[2].options.map(o => o.label), ['API key', 'Claude subscription']);
+  reply({ mode: 'Orchestrator CLI', engine: 'Agent SDK panel', auth: 'Claude subscription' });
+  const ra = await a;
+  assert.deepStrictEqual({ engine: ra.engine, auth: ra.auth }, { engine: 'sdk', auth: 'subscription' });
+  const orchSession = mgr.sessions.get(ra.tabId);
+  assert.strictEqual(orchSession.settings.auth, 'subscription');
+  assert.strictEqual(orch.getRun(orchSession.settings.orchestration.runId).auth, 'subscription');
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  assert.strictEqual(mgr.sessions.get(w.tabId).settings.auth, 'subscription', 'a worker inherits the run\'s billing');
+
+  // A CLI terminal carries no billing, whatever the form held.
+  const b = orch.openCli({ cwd });
+  reply({ mode: 'Simple CLI', engine: 'CLI terminal', auth: 'Claude subscription' });
+  const rb = await b;
+  assert.strictEqual(rb.auth, null);
+  assert.strictEqual(mgr.sessions.get(rb.tabId).settings.auth, undefined);
+
+  // Mode and SDK engine given: a form with billing alone; an unanswered one is the API key.
+  const c = orch.openCli({ cwd, mode: 'simple', engine: 'sdk' });
+  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['auth']);
+  assert.strictEqual(lastAsk().forms[0].formData.questions[0].showIf, undefined);
+  reply({});
+  assert.strictEqual((await c).auth, 'apikey');
+
+  // Billing given, or a CLI terminal: never asked.
+  const asks = broadcasts.filter(m => m.type === 'ask:question').length;
+  assert.strictEqual((await orch.openCli({ cwd, mode: 'simple', engine: 'sdk', auth: 'subscription' })).auth, 'subscription');
+  assert.strictEqual((await orch.openCli({ cwd, mode: 'simple', engine: 'cli' })).auth, null);
+  assert.strictEqual(broadcasts.filter(m => m.type === 'ask:question').length, asks);
+
+  // Only the subscription: the form names it; the session is pinned to it.
+  creds = { apiKey: false, subscription: true };
+  const d = orch.openCli({ cwd, engine: 'sdk' });
+  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['mode']);
+  assert.match(lastAsk().forms[0].formData.description, /Claude subscription \(the only Claude credential configured\)/);
+  reply({ mode: 'Simple CLI' });
+  const rd = await d;
+  assert.strictEqual(mgr.sessions.get(rd.tabId).settings.auth, 'subscription');
 });
 
 test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds its own', async (t) => {

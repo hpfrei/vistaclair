@@ -798,6 +798,11 @@ function getInteractiveAuth(baseDir) {
   return resolveAuth(baseDir).key;
 }
 
+// Which Claude credentials exist right now, for a form that offers the choice.
+function claudeCredentials(baseDir) {
+  return { apiKey: !!getAnthropicApiKey(baseDir), subscription: hasClaudeSubscription() };
+}
+
 // Whether a single registry model can actually be called right now, and why not
 // when it can't. THE definition of "usable" — every picker, payload and prompt
 // reads this rather than re-deriving it from key presence. `hasApiKey` remains a
@@ -1800,6 +1805,7 @@ module.exports = {
   resolveAvailability,
   resolveHeadlessAuth,
   getInteractiveAuth,
+  claudeCredentials,
   readAppPrefs,
   writeAppPrefs,
   getClaudeAuthPref,

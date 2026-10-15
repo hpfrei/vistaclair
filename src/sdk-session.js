@@ -1,7 +1,8 @@
 // Agent SDK sessions: the third session kind (`kind: 'sdk'`, settings.engine
 // 'sdk'). The same Claude Code binary as a CLI tab, driven through
 // @anthropic-ai/claude-agent-sdk's query() instead of a PTY, billed to the API
-// key, shown in the dashboard's SDK panel instead of a terminal.
+// key or the Claude subscription (settings.auth), shown in the dashboard's SDK
+// panel instead of a terminal.
 //
 //   surface        what CliSessionManager, orchestration.js and
 //                  session-control.js use on a CliSession (sessId, instanceId,
@@ -12,7 +13,7 @@
 //   options        one mapping from the tab's settings, built by the same
 //                  helpers as the CLI flags (cli-session.js): the appended
 //                  system prompt, --settings, the MCP servers, the env
-//                  (buildClaudeEnv, auth forced to the API key).
+//                  (buildClaudeEnv, auth forced to settings.auth's credential).
 //   input          an async queue of SDKUserMessages: submit() pushes one
 //                  (text + base64 images, optional priority now|next|later).
 //   events         every SDK message is broadcast as
@@ -340,8 +341,11 @@ class SdkSession {
   // with the same settings, in the SDK's terms.
   _buildOptions({ resumeSessionId } = {}) {
     const s = this.settings;
-    const apiKey = caps.getAnthropicApiKey(DATA_HOME);
-    if (!apiKey) throw new Error('An Agent SDK session is billed to the Anthropic API: add an Anthropic API key on the Models page.');
+    // The session's billing choice (settings.auth, from the New CLI form);
+    // unset is the API key, falling back to the subscription without one.
+    const { credential, key } = caps.resolveAuth(DATA_HOME, { authMode: s.auth || 'apikey' });
+    if (!credential) throw new Error('An Agent SDK session needs a Claude credential: add an Anthropic API key on the Models page, or log in to a Claude subscription with `claude /login`.');
+    this._credential = credential;
     const env = buildClaudeEnv({
       proxyPort: this.proxyPort,
       dashboardPort: this._dashboardPort,
@@ -349,11 +353,13 @@ class SdkSession {
       instanceId: this.instanceId,
       extraEnv: { GIT_CEILING_DIRECTORIES: this.cwd, CLAUDE_AGENT_SDK_CLIENT_APP: 'vistaclair' },
       autoMemory: this.autoMemory,
-      anthropicApiKey: apiKey,
+      anthropicApiKey: key,
+      subscriptionOnly: credential === 'subscription',
     });
-    // API billing only: no OAuth credential may win over the key.
-    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    // No other credential may win over the chosen one: the key alone, or the
+    // CLI's OAuth login alone.
     delete env.ANTHROPIC_AUTH_TOKEN;
+    if (credential === 'api-key') delete env.CLAUDE_CODE_OAUTH_TOKEN;
 
     const append = buildAppendSystemPrompt(s);
     const options = {
@@ -428,8 +434,10 @@ class SdkSession {
     if (!msg || typeof msg !== 'object') return;
     const main = !msg.parent_tool_use_id;
     if (msg.type === 'system' && msg.subtype === 'init') {
-      if (msg.apiKeySource && msg.apiKeySource !== 'ANTHROPIC_API_KEY') {
-        this.emitEvent({ platform: { kind: 'notice', level: 'warning', text: `Claude Code reports its credential as "${msg.apiKeySource}", not the API key.` } });
+      const onKey = msg.apiKeySource === 'ANTHROPIC_API_KEY';
+      if (msg.apiKeySource && onKey !== (this._credential === 'api-key')) {
+        const want = this._credential === 'api-key' ? 'the API key' : 'the Claude subscription';
+        this.emitEvent({ platform: { kind: 'notice', level: 'warning', text: `Claude Code reports its credential as "${msg.apiKeySource}", not ${want}.` } });
       }
       if (typeof msg.model === 'string' && msg.model !== this._initModel) {
         this._initModel = msg.model;

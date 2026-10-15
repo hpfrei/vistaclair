@@ -197,13 +197,15 @@ function getInstanceContext(instanceId) {
  * (instance-scoped), auto-memory toggle, and the VISTACLAIR_* handshake vars.
  * Shared by spawnClaude and spawnClaudePty.
  */
-function buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extraEnv, autoMemory, anthropicApiKey }) {
+function buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly }) {
   const env = { ...process.env, ...extraEnv };
   delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
   // Only set the API key when core's resolveAuth chose the 'api-key' credential.
   // An empty string means it chose 'subscription': leave the env untouched so the
   // spawn authenticates with the `claude` CLI's own OAuth login.
   if (anthropicApiKey) env.ANTHROPIC_API_KEY = anthropicApiKey;
+  // A session that picked the subscription: no key in the server's env may win.
+  else if (subscriptionOnly) delete env.ANTHROPIC_API_KEY;
   if (proxyPort) {
     env.ANTHROPIC_BASE_URL = `http://localhost:${proxyPort}/i/${encodeURIComponent(instanceId)}`;
   } else {
@@ -253,9 +255,9 @@ function spawnClaude(args, { cwd, proxyPort, dashboardPort, authToken, instanceI
 /**
  * Spawn `claude` in interactive PTY mode with the proxy URL injected.
  */
-function spawnClaudePty(args, { cwd, proxyPort, instanceId, sourceContext, cols, rows, dashboardPort, authToken, extraEnv, autoMemory, anthropicApiKey }) {
+function spawnClaudePty(args, { cwd, proxyPort, instanceId, sourceContext, cols, rows, dashboardPort, authToken, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly }) {
   if (!instanceId) throw new Error('spawnClaudePty requires instanceId');
-  const env = buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extraEnv, autoMemory, anthropicApiKey });
+  const env = buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly });
 
   const ptyProc = getPty().spawn('claude', args, {
     name: 'xterm-256color',

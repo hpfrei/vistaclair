@@ -19,12 +19,6 @@
   // cwd/settings the way a single shared slot or a positional queue could.
   const _pendingNewTabs = new Map();
   let _reqSeq = 0;
-  // cli:open reqId -> the tab kind it asked for, so cli:opened creates the
-  // right view before the server's tab list confirms it.
-  const _pendingOpenKinds = new Map();
-  // The server says it runs the Agent SDK engine (cli:tabs sdkEngine:true);
-  // until then the "+" menu offers no SDK items.
-  let _sdkEngine = false;
 
   // A tab is an xterm terminal ('cli') or an Agent SDK panel ('sdk').
   const kindOf = (t) => (t?.kind === 'sdk' || t?.settings?.engine === 'sdk') ? 'sdk' : 'cli';
@@ -420,7 +414,7 @@
         const sdkBadge = document.createElement('span');
         sdkBadge.className = 'cli-sdk-badge';
         sdkBadge.textContent = 'SDK';
-        sdkBadge.title = 'Agent SDK session (API billing)';
+        sdkBadge.title = `Agent SDK session (${tab.settings?.auth === 'subscription' ? 'Claude subscription' : 'API key'} billing)`;
         label.appendChild(sdkBadge);
       }
       let clickTimer = null;
@@ -646,8 +640,9 @@
       closeNewMenu();
       const picked = await openFsDirPicker();
       if (!picked) return;
-      // The server asks Simple / Orchestrator (openCli), mints the tab and
-      // launches it; cli:opened switches to it. Size the PTY like the active tab.
+      // The server asks Simple / Orchestrator, CLI terminal / Agent SDK panel
+      // and an SDK session's billing (openCli), mints the tab and launches it;
+      // cli:opened switches to it. Size the PTY like the active tab.
       const active = activeTabId ? tabs.get(activeTabId) : null;
       sendWs({
         type: 'cli:open',
@@ -659,38 +654,6 @@
       });
     });
     menu.appendChild(newItem);
-
-    // Agent SDK tabs: an HTML panel instead of a terminal, API-billed. The
-    // mode is chosen here, so the server asks nothing.
-    if (_sdkEngine) {
-      const sdkItem = (text, mode, title) => {
-        const item = document.createElement('div');
-        item.className = 'cli-new-menu-item cli-new-menu-new cli-new-menu-sdk';
-        item.textContent = text;
-        item.title = title;
-        item.addEventListener('click', async () => {
-          closeNewMenu();
-          const picked = await openFsDirPicker();
-          if (!picked) return;
-          const active = activeTabId ? tabs.get(activeTabId) : null;
-          const reqId = `open-${++_reqSeq}`;
-          _pendingOpenKinds.set(reqId, 'sdk');
-          sendWs({
-            type: 'cli:open',
-            reqId,
-            cwd: picked.dir,
-            autoMemory: picked.autoMemory === true,
-            cols: active?.terminal?.cols || 80,
-            rows: active?.terminal?.rows || 24,
-            engine: 'sdk',
-            mode,
-          });
-        });
-        menu.appendChild(item);
-      };
-      sdkItem('Agent SDK orchestrator…', 'orchestrator', 'An orchestrator and its workers in one panel, on the Agent SDK (API billing)');
-      sdkItem('Agent SDK session…', 'simple', 'A single Agent SDK session in a panel (API billing)');
-    }
 
     if (savedSessions.length > 0) {
       const divider = document.createElement('div');
@@ -1445,7 +1408,6 @@
         break;
       }
       case 'cli:tabs': {
-        if (msg.sdkEngine != null) _sdkEngine = msg.sdkEngine === true;
         window.sdkPanel?.onTabs();
         handleTabList(msg.tabs || [], msg.bootId || null, msg.droppedTabs || null);
         break;
@@ -1482,10 +1444,10 @@
       }
       case 'cli:opened': {
         if (msg.error) { window.dashboard.showAlert?.(`Could not open the CLI: ${msg.error}`); break; }
-        const openedKind = msg.reqId ? _pendingOpenKinds.get(msg.reqId) : null;
-        if (msg.reqId) _pendingOpenKinds.delete(msg.reqId);
         if (msg.cancelled || !msg.tabId) break;
-        if (!tabs.has(msg.tabId)) createTab(msg.tabId, openedKind || 'cli');
+        // The engine picked in the form decides the view before the server's
+        // tab list confirms it.
+        if (!tabs.has(msg.tabId)) createTab(msg.tabId, msg.engine === 'sdk' ? 'sdk' : 'cli');
         switchTab(msg.tabId);
         maybeNotifyNoSubscription();
         break;

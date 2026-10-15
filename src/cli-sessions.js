@@ -854,8 +854,7 @@ class CliSessionManager {
   }
 
   broadcastTabs() {
-    // sdkEngine: this server runs Agent SDK sessions (the GUI shows their items).
-    this.broadcaster.broadcast({ type: 'cli:tabs', bootId: this.bootId, sdkEngine: true, tabs: this.list() });
+    this.broadcaster.broadcast({ type: 'cli:tabs', bootId: this.bootId, tabs: this.list() });
   }
 }
 

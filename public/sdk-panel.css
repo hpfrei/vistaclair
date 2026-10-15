@@ -20,7 +20,6 @@
   opacity: .85;
   vertical-align: 1px;
 }
-.cli-new-menu-sdk::before { content: 'SDK'; font-size: 9px; font-weight: 700; padding: 0 4px; margin-right: 6px; border-radius: 3px; background: var(--purple); color: #fff; }
 
 .cli-sdk-wrap { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .sdk-wrap .sdk-panel {

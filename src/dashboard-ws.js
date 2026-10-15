@@ -152,8 +152,6 @@ class DashboardBroadcaster {
         ws.send(JSON.stringify({
           type: 'cli:tabs',
           bootId: this.cliSessionManager.bootId,
-          // This server runs Agent SDK sessions: the GUI offers their "+" items.
-          sdkEngine: true,
           tabs: this.cliSessionManager.list(),
           // Only on the initial send: tabs the startup restore could not bring
           // back, so the client can say what went missing rather than letting

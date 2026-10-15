@@ -1,6 +1,6 @@
 // Agent SDK sessions (src/sdk-session.js): the query() options a tab's settings
 // map to (the same append prompt, settings file and MCP servers as its CLI
-// twin, API-key auth), the event fan-out into broadcasts and transcript.jsonl,
+// twin, the billing it picked), the event fan-out into broadcasts and transcript.jsonl,
 // submit (priorities, images), interrupt, and the exit a PTY tab would report.
 // A fake query() stands in for the SDK — nothing here spawns `claude`.
 //
@@ -174,7 +174,37 @@ test('options: env is the whole buildClaudeEnv, with API-key auth and no OAuth',
   s.kill();
 });
 
-test('options: a resume passes resume, not sessionId; no API key refuses the spawn', () => {
+test('options: settings.auth subscription runs on the OAuth login, with no API key in the env', async () => {
+  const creds = path.join(HOME, '.claude', '.credentials.json');
+  fs.mkdirSync(path.dirname(creds), { recursive: true });
+  fs.writeFileSync(creds, JSON.stringify({ claudeAiOauth: { accessToken: 'a', refreshToken: 'r' } }));
+  try {
+    const { s, calls, events } = makeSession({ auth: 'subscription' });
+    s.spawn(tmp('proj-'), 80, 24, {});
+    const env = calls[0].options.env;
+    assert.strictEqual(env.ANTHROPIC_API_KEY, undefined, 'the server env key may not win');
+    assert.strictEqual(env.CLAUDE_CODE_OAUTH_TOKEN, 'oauth-should-not-pass', 'the OAuth credential stays');
+    assert.strictEqual(env.ANTHROPIC_AUTH_TOKEN, undefined);
+    // Claude Code confirming the subscription is quiet; the key is a warning.
+    calls[0].emit({ type: 'system', subtype: 'init', apiKeySource: 'none', session_id: s.sessId });
+    await tick();
+    assert.ok(!events().some(e => e.ev.platform?.kind === 'notice'));
+    calls[0].emit({ type: 'system', subtype: 'init', apiKeySource: 'ANTHROPIC_API_KEY', session_id: s.sessId });
+    await tick();
+    assert.match(events().find(e => e.ev.platform?.kind === 'notice').ev.platform.text, /not the Claude subscription/);
+    s.kill();
+
+    // Unset is the API key, as before.
+    const b = makeSession();
+    b.s.spawn(tmp('proj-'), 80, 24, {});
+    assert.strictEqual(b.calls[0].options.env.ANTHROPIC_API_KEY, 'sk-ant-test');
+    b.s.kill();
+  } finally {
+    fs.rmSync(creds, { force: true });
+  }
+});
+
+test('options: a resume passes resume, not sessionId; no credential refuses the spawn', () => {
   const { s, calls } = makeSession();
   const id = '11111111-2222-3333-4444-555555555555';
   s.spawn(tmp('proj-'), 80, 24, { resumeSessionId: id });
@@ -187,7 +217,7 @@ test('options: a resume passes resume, not sessionId; no API key refuses the spa
   delete process.env.ANTHROPIC_API_KEY;
   try {
     const b = makeSession();
-    assert.throws(() => b.s.spawn(tmp('proj-'), 80, 24, {}), /Anthropic API key/);
+    assert.throws(() => b.s.spawn(tmp('proj-'), 80, 24, {}), /needs a Claude credential/);
     assert.strictEqual(b.calls.length, 0);
     assert.strictEqual(b.s.running, false);
   } finally {
@@ -580,8 +610,6 @@ test('the manager: engine sdk makes an SdkSession, carried by list, manifest, hi
   assert.strictEqual(mgr.findSaved(s.sessId).kind, 'sdk');
   assert.strictEqual(mgr.getBySessId(s.sessId), s);
   assert.strictEqual(mgr.sessionDirOf(s.sessId), s.settings.sessionDir);
-  mgr.broadcastTabs();
-  assert.strictEqual(broadcasts.filter(b => b.type === 'cli:tabs').at(-1).sdkEngine, true);
 
   // The query ends: the same exit path as a PTY.
   calls[0].end();
