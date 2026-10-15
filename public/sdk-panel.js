@@ -512,12 +512,18 @@
       return rec;
     }
 
-    // Live draws the main agent's thinking and text. Tool calls and subagent
-    // messages are tracked (for the "now:" line) but not drawn: the
-    // Inspector button shows them.
+    // Live draws the main agent's thinking and text, and each of its tool
+    // calls as one line: the call's `description` (else its gist). Subagent
+    // messages are tracked for the "now:" line but not drawn: the Inspector
+    // button shows them.
     newBlock(rec, type, opts = {}) {
       if (type === 'tool_use') {
         const blk = { type, partial: '', final: false, toolId: opts.toolId || null, tool: this.toolStarted(opts.toolId, opts.toolName, rec.pk) };
+        if (!rec.pk && !blk.tool.lineEl) {
+          blk.tool.lineEl = el('div', 'sdk-toolline');
+          this.renderToolLine(blk.tool);
+          this.feed.appendChild(blk.tool.lineEl);
+        }
         rec.blocks.push(blk);
         return blk;
       }
@@ -551,7 +557,18 @@
     setToolInput(t, input) {
       if (!t) return;
       t.input = input;
+      this.renderToolLine(t);
       if (t === this.nowTool) this.renderNow();
+    }
+
+    renderToolLine(t) {
+      const line = t.lineEl;
+      if (!line) return;
+      const gist = oneLine((t.input && t.input.description) || toolSummary(t.name, t.input));
+      line.textContent = gist ? `${prettyTool(t.name)} · ${gist}` : prettyTool(t.name);
+      line.title = gist;
+      line.classList.toggle('done', !!t.done);
+      line.classList.toggle('error', !!t.error);
     }
 
     // Lifted from the Inspector's appendSSEToDetail: block start / delta /
@@ -652,7 +669,7 @@
       for (const b of c) {
         if (b?.type !== 'tool_result') continue;
         const t = this.tools.get(b.tool_use_id);
-        if (t) t.done = true;
+        if (t) { t.done = true; t.error = !!b.is_error; this.renderToolLine(t); }
         if (t && t === this.nowTool) {
           // The newest main-agent call still running, if any.
           this.nowTool = [...this.tools.values()].reverse().find(x => !x.done && !x.sub) || null;
