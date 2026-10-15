@@ -1984,5 +1984,5 @@
   });
 
   // Expose module
-  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, openRunBoard };
+  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, openRunBoard, modelPickerOptions };
 })();

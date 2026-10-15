@@ -63,7 +63,7 @@ function fakeSdk() {
     sessionMessages: [],
     query({ prompt, options }) {
       const out = channel();
-      const call = { prompt, options, inputs: [], interrupts: 0, closed: false, emit: (m) => out.push(m), end: () => out.end(), fail: (e) => out.fail(e) };
+      const call = { prompt, options, inputs: [], interrupts: 0, models: [], closed: false, emit: (m) => out.push(m), end: () => out.end(), fail: (e) => out.fail(e) };
       options.abortController?.signal.addEventListener('abort', () => out.end());
       (async () => { for await (const m of prompt) call.inputs.push(m); call.inputEnded = true; })();
       calls.push(call);
@@ -72,6 +72,7 @@ function fakeSdk() {
         next: () => out.next(),
         return: async () => { out.end(); return { value: undefined, done: true }; },
         interrupt: async () => { call.interrupts++; },
+        setModel: async (m) => { call.models.push(m); },
         close: () => { call.closed = true; out.end(); },
       };
     },
@@ -245,6 +246,131 @@ test('cost falls back to modelUsage; queued turns keep it busy; an open question
   calls[0].emit({ type: 'result', total_cost_usd: 0.5, queued_turn_count: 0 });
   await tick();
   assert.strictEqual(s.state, 'idle');
+  s.kill();
+});
+
+// --- Model, cost carry-over, folder signals ---
+
+const statuses = (events) => events().filter(e => e.ev.platform?.kind === 'status').map(e => e.ev.platform);
+
+test('setModel: live on a running query, settings only when not running; refused when exited or invalid', async () => {
+  const { s, calls, events } = makeSession({ model: 'sonnet', modelMap: { fable: null, opus: 'gpt-x', sonnet: null, haiku: null } });
+  s.spawn(tmp('proj-'), 80, 24, {});
+  assert.deepStrictEqual(statuses(events)[0], { kind: 'status', state: 'idle', costUsd: 0, model: 'sonnet', actualModel: null, mappedTo: null });
+  assert.deepStrictEqual(await s.setModel('claude-opus-4-5[1m]'), { ok: true, model: 'claude-opus-4-5[1m]' });
+  assert.deepStrictEqual(calls[0].models, ['claude-opus-4-5[1m]']);
+  assert.strictEqual(s.settings.model, 'claude-opus-4-5[1m]');
+  assert.deepStrictEqual(statuses(events).at(-1), { kind: 'status', state: 'idle', costUsd: 0, model: 'claude-opus-4-5[1m]', actualModel: null, mappedTo: 'gpt-x' });
+  await assert.rejects(s.setModel('bad model'), /invalid model/);
+  await assert.rejects(s.setModel(''), /invalid model/);
+  await assert.rejects(s.setModel(undefined), /invalid model/);
+  assert.deepStrictEqual(calls[0].models, ['claude-opus-4-5[1m]'], 'a refused model reaches nothing');
+  calls[0].end();
+  await tick();
+  await assert.rejects(s.setModel('haiku'), /exited/);
+  assert.strictEqual(s.settings.model, 'claude-opus-4-5[1m]');
+
+  // Never spawned: the settings carry it into the first spawn.
+  const b = makeSession();
+  await b.s.setModel('haiku');
+  assert.strictEqual(b.s.settings.model, 'haiku');
+  assert.strictEqual(b.calls.length, 0);
+  b.s.spawn(tmp('proj-'), 80, 24, {});
+  assert.strictEqual(b.calls[0].options.model, 'haiku');
+  b.s.kill();
+});
+
+test('status: the init model when none is chosen, and the model of the last main-agent reply', async () => {
+  const { s, calls, events } = makeSession();
+  s.spawn(tmp('proj-'), 80, 24, {});
+  const q = calls[0];
+  q.emit({ type: 'system', subtype: 'init', apiKeySource: 'ANTHROPIC_API_KEY', model: 'claude-sonnet-4-5' });
+  await tick();
+  assert.strictEqual(statuses(events).at(-1).model, 'claude-sonnet-4-5');
+  q.emit({ type: 'assistant', message: { model: 'claude-sonnet-4-5-20250929', content: [] }, parent_tool_use_id: null });
+  await tick();
+  assert.strictEqual(statuses(events).at(-1).actualModel, 'claude-sonnet-4-5-20250929');
+  assert.strictEqual(statuses(events).at(-1).state, 'busy');
+  // A subagent's or a synthetic reply leaves it; a change while busy is reported.
+  const before = statuses(events).length;
+  q.emit({ type: 'assistant', message: { model: 'claude-haiku-4-5', content: [] }, parent_tool_use_id: 'toolu_sub' });
+  q.emit({ type: 'assistant', message: { model: '<synthetic>', content: [] }, parent_tool_use_id: null });
+  await tick();
+  assert.strictEqual(statuses(events).length, before);
+  q.emit({ type: 'assistant', message: { model: 'claude-opus-4-5', content: [] }, parent_tool_use_id: null });
+  await tick();
+  assert.strictEqual(statuses(events).length, before + 1);
+  assert.strictEqual(s.actualModel, 'claude-opus-4-5');
+  // A switch clears it until the next reply.
+  await s.setModel('haiku');
+  assert.deepStrictEqual([statuses(events).at(-1).model, statuses(events).at(-1).actualModel], ['haiku', null]);
+  s.kill();
+});
+
+test('a resume carries its cost on: seeded from the transcript, never lowered, raised by seedCost', async () => {
+  const { s, calls, events } = makeSession();
+  const id = '77777777-2222-3333-4444-555555555555';
+  const env = (sessId, ev) => JSON.stringify({ sessId, ts: 1, ev });
+  fs.writeFileSync(path.join(s.settings.sessionDir, 'transcript.jsonl'), [
+    env(id, { sdk: { type: 'result', total_cost_usd: 0.9 } }),
+    env(id, { platform: { kind: 'status', state: 'exited', costUsd: 1.23 } }),
+    env(id, { platform: { kind: 'status', state: 'idle', costUsd: 0 } }),
+    // An earlier session of the same folder does not count.
+    env('88888888-2222-3333-4444-555555555555', { platform: { kind: 'status', state: 'exited', costUsd: 9.9 } }),
+  ].join('\n') + '\n');
+  assert.strictEqual(SdkSession.recordedCost(s.settings.sessionDir, id), 1.23);
+  s.spawn(tmp('proj-'), 80, 24, { resumeSessionId: id });
+  assert.strictEqual(statuses(events)[0].costUsd, 1.23, 'the first status already shows it');
+  calls[0].emit({ type: 'result', total_cost_usd: 0.5, queued_turn_count: 0 });
+  await tick();
+  assert.strictEqual(s.costUsd, 1.23);
+  calls[0].emit({ type: 'result', total_cost_usd: 2.0, queued_turn_count: 0 });
+  await tick();
+  assert.strictEqual(s.costUsd, 2.0);
+  s.seedCost(1.5);
+  assert.strictEqual(s.costUsd, 2.0);
+  s.seedCost(3);
+  assert.strictEqual(s.costUsd, 3);
+  assert.strictEqual(statuses(events).at(-1).costUsd, 3);
+  s.kill();
+
+  // A new conversation starts at zero.
+  const b = makeSession({ sessionDir: s.settings.sessionDir });
+  b.s.spawn(tmp('proj-'), 80, 24, {});
+  assert.strictEqual(b.s.costUsd, 0);
+  b.s.kill();
+});
+
+test('files: a main-agent write to TODO.md / NOTES.md is signalled when its result arrives, never kept', async () => {
+  const { s, calls, events } = makeSession();
+  const dir = s.settings.sessionDir;
+  s.spawn(dir, 80, 24, {});
+  const q = calls[0];
+  const use = (id, name, input, parent = null) => q.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] }, parent_tool_use_id: parent });
+  const result = (id, parent = null) => q.emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] }, parent_tool_use_id: parent });
+  const files = () => events().filter(e => e.ev.platform?.kind === 'files').map(e => e.ev.platform);
+
+  use('t1', 'Edit', { file_path: path.join(dir, 'TODO.md'), old_string: 'a', new_string: 'b' });
+  await tick();
+  assert.deepStrictEqual(files(), [], 'nothing before the result');
+  result('t1');
+  await tick();
+  assert.deepStrictEqual(files(), [{ kind: 'files', todo: true, notes: false }]);
+
+  use('t2', 'Edit', { file_path: path.join(dir, 'other.md') });
+  result('t2');
+  use('t3', 'Write', { file_path: path.join(dir, 'NOTES.md') }, 'toolu_sub');
+  result('t3', 'toolu_sub');
+  await tick();
+  assert.strictEqual(files().length, 1, 'another file or a subagent: nothing');
+
+  use('t4', 'Bash', { command: 'sed -i s/a/b/ NOTES.md' });   // bare: the session runs in its folder
+  result('t4');
+  use('t5', 'MultiEdit', { file_path: 'TODO.md' });
+  result('t5');
+  await tick();
+  assert.deepStrictEqual(files().slice(1), [{ kind: 'files', todo: false, notes: true }, { kind: 'files', todo: true, notes: false }]);
+  assert.ok(!lines(dir).some(e => e.ev.platform?.kind === 'files'), 'not in the transcript');
   s.kill();
 });
 
@@ -449,6 +575,20 @@ test('the manager: engine sdk makes an SdkSession, carried by list, manifest, hi
   } finally {
     process.env.ANTHROPIC_API_KEY = saved;
   }
+});
+
+test('the manager: a model switch reaches the manifest and the saved entry', async () => {
+  const { sdk, calls } = fakeSdk();
+  const mgr = new CliSessionManager(9999, { broadcast() {} }, store, { sdk, claudeBin: '/opt/claude' });
+  const tabId = mgr.nextTabId();
+  mgr.launchSession(tabId, { cwd: tmp('proj-'), settings: { engine: 'sdk', model: 'sonnet' } });
+  const s = mgr.get(tabId);
+  await s.setModel('opus');
+  assert.deepStrictEqual(calls[0].models, ['opus']);
+  const manifest = JSON.parse(fs.readFileSync(path.join(HOME, 'data', 'cli-open-tabs.json'), 'utf8'));
+  assert.strictEqual(manifest.find(e => e.sessId === s.sessId).settings.model, 'opus');
+  assert.strictEqual(mgr.findSaved(s.sessId).settings.model, 'opus');
+  mgr.remove(tabId);
 });
 
 test('an exit callback that relaunches into the same tab keeps the new session listed', async () => {

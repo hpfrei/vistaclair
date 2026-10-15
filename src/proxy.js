@@ -139,6 +139,17 @@ async function* resumeWebStream(firstChunk, reader) {
   }
 }
 
+// The modelMap family of a model id or alias (substring match), or null.
+// Also used by the SDK panel's status (src/sdk-session.js) to name a mapping.
+function modelFamily(model) {
+  const lower = String(model || '').toLowerCase();
+  return lower.includes('fable') ? 'fable'
+    : lower.includes('opus') ? 'opus'
+    : lower.includes('sonnet') ? 'sonnet'
+    : lower.includes('haiku') ? 'haiku'
+    : null;
+}
+
 // Resolve a CLI tab's per-session model override (modelMap, family-substring
 // match fable/opus/sonnet/haiku). Anthropic targets are applied in-place to
 // body.model; non-Anthropic targets are returned as tabModelDef for the
@@ -147,12 +158,7 @@ async function* resumeWebStream(firstChunk, reader) {
 // unknown model id.
 function resolveTabModel(body, cliSettings) {
   if (!cliSettings || !body.model || !cliSettings.modelMap) return { tabModelDef: null };
-  const lower = body.model.toLowerCase();
-  const family = lower.includes('fable') ? 'fable'
-    : lower.includes('opus') ? 'opus'
-    : lower.includes('sonnet') ? 'sonnet'
-    : lower.includes('haiku') ? 'haiku'
-    : null;
+  const family = modelFamily(body.model);
   if (!family || !cliSettings.modelMap[family]) return { tabModelDef: null };
   const mapped = caps.loadModel(PROJECT_ROOT, cliSettings.modelMap[family]);
   // Skip retired/disabled targets — fall through to passthrough so a
@@ -949,3 +955,4 @@ createProxyRouter._showSensitiveHeaders = false;
 module.exports = createProxyRouter;
 module.exports.pendingQuestions = pendingQuestions;
 module.exports.clearPendingQuestionsForTab = clearPendingQuestionsForTab;
+module.exports.modelFamily = modelFamily;

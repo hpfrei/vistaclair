@@ -128,7 +128,10 @@ class CliSessionManager {
       this.opts
     );
     session.tabId = tabId;
-    if (engine === 'sdk') session.onStateChange = () => this.noteSessionState(session);
+    if (engine === 'sdk') {
+      session.onStateChange = () => this.noteSessionState(session);
+      session.onSettingsChange = () => this.noteSettingsChanged(session);
+    }
     this.sessions.set(tabId, session);
     return session;
   }
@@ -284,6 +287,14 @@ class CliSessionManager {
   // a crash right now still leaves an "interrupted" marker.
   noteSessionState() {
     this._persistOpenTabs();
+  }
+
+  // A live session's settings changed in place (an SDK model switch): the
+  // manifest and its saved entry follow, so a restart or a resume keeps it.
+  noteSettingsChanged(session) {
+    if (session?.sessId && session.cwd) this.saveToHistory(this._historyEntry(session));
+    this._persistOpenTabs();
+    this.broadcastTabs();
   }
 
   // Boot: what to do with the tabs the previous process left open. By default

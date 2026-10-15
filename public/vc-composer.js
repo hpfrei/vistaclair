@@ -2,10 +2,10 @@
 // attachments from three gestures (Ctrl-V paste, drag/drop, the file picker),
 // all through one addFiles() so the size guards and the base64 conversion
 // cannot drift between them. It knows nothing about sessions: it emits
-//   send       {text, images:[{mediaType, base64, name}]}
+//   send       {text, images:[{mediaType, base64, name}]}  (Enter, Ctrl+Enter, ➤)
 //   interrupt  (Esc)
-//   target-clear (the × on the "to: <name>" chip)
-// and the panel decides where they go.
+// and the panel decides where they go. A send does not clear the draft: the
+// panel calls clear() once the message has really gone out.
 (function () {
   const FILE_MAX = 8 * 1024 * 1024;
   const TOTAL_MAX = 18 * 1024 * 1024;
@@ -35,9 +35,7 @@
       this._built = true;
       this.classList.add('vc-composer');
       this.innerHTML = `
-        <div class="vc-composer-chips">
-          <span class="vc-composer-target hidden"><span class="vc-composer-target-label"></span><button type="button" class="vc-composer-target-x" title="Back to the default target">×</button></span>
-        </div>
+        <div class="vc-composer-chips"></div>
         <div class="vc-composer-row">
           <button type="button" class="vc-composer-attach" title="Attach images (or paste / drop them)">+</button>
           <textarea rows="1" spellcheck="true"></textarea>
@@ -46,7 +44,6 @@
         <div class="vc-composer-note hidden"></div>
         <input type="file" accept="image/*" multiple hidden>`;
       this._chips = this.querySelector('.vc-composer-chips');
-      this._targetEl = this.querySelector('.vc-composer-target');
       this._input = this.querySelector('textarea');
       this._note = this.querySelector('.vc-composer-note');
       this._file = this.querySelector('input[type=file]');
@@ -61,9 +58,6 @@
         this.addFiles(files);
       });
       this.querySelector('.vc-composer-send').addEventListener('click', () => this.send());
-      this._targetEl.querySelector('.vc-composer-target-x').addEventListener('click', () => {
-        this.dispatchEvent(new CustomEvent('target-clear', { bubbles: true }));
-      });
       this._input.addEventListener('keydown', (e) => {
         if (e.isComposing) return;
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.send(); }
@@ -92,17 +86,10 @@
     set disabled(v) {
       this.toggleAttribute('disabled', !!v);
       if (this._input) this._input.disabled = !!v;
-      this.querySelectorAll('button').forEach(b => { if (!b.classList.contains('vc-composer-target-x')) b.disabled = !!v; });
+      this.querySelectorAll('button').forEach(b => { b.disabled = !!v; });
     }
 
     focus() { this._input?.focus(); }
-
-    // "to: <name>" chip; null hides it.
-    setTarget(label) {
-      if (!this._targetEl) return;
-      this._targetEl.classList.toggle('hidden', !label);
-      this._targetEl.querySelector('.vc-composer-target-label').textContent = label ? `to: ${label}` : '';
-    }
 
     // Any element can take drops for this composer (the whole panel does).
     // The counter goes up and down rather than toggling on every dragenter:
@@ -171,7 +158,6 @@
       if (!text.trim() && !this._atts.length) return;
       const images = this._atts.map(({ mediaType, base64, name }) => ({ mediaType, base64, name }));
       this.dispatchEvent(new CustomEvent('send', { bubbles: true, detail: { text, images } }));
-      this.clear();
     }
 
     clear() {

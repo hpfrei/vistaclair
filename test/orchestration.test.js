@@ -41,6 +41,8 @@ function fakeMgr() {
     write(data) { writes.push({ tabId, data }); },
     // CliSession.submit: the text, then the CR.
     submit(data, opts) { submits.push({ tabId, data, opts }); writes.push({ tabId, data }); writes.push({ tabId, data: '\r' }); },
+    // SdkSession.seedCost: a resumed member's carried-over cost.
+    seedCost(usd) { this.seeded = usd; },
   });
   const mgr = {
     sessions, launches, writes, closed, submits, emitted,
@@ -688,6 +690,50 @@ test('an SDK run: workers inherit the engine and are hidden; describeRun names s
   const cw = cli.orch.launchWorker(cli.orchSession.instanceId, { title: 'b', task: 'y' });
   assert.strictEqual(cli.mgr.sessions.get(cw.tabId).settings.engine, 'cli');
   assert.strictEqual(cli.mgr.launches.at(-1).opts.hidden, undefined);
+});
+
+test('a member model switch: run.json follows, fresh restarts use it; a resumed member keeps its cost', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A', model: 'sonnet' });
+  const wSession = mgr.sessions.get(w.tabId);
+  wSession.settings.model = 'haiku';            // what SdkSession.setModel did
+  assert.strictEqual(orch.memberModelChanged(wSession, 'haiku'), true);
+  assert.strictEqual(run().workers[0].model, 'haiku');
+  assert.strictEqual(orch.describeRun(run()).workers[0].model, 'haiku');
+  assert.match(mgr.sessions.get(w.tabId).settings.appendSystemPrompt, /rows of your TODO\.md \(short descriptions, detail in NOTES\.md\)/);
+  assert.strictEqual(orch.memberModelChanged(orchSession, 'claude-opus-4-5[1m]'), true);
+  assert.strictEqual(run().orchestratorModel, 'claude-opus-4-5[1m]');
+  assert.strictEqual(orch.memberModelChanged({ getSettings: () => ({}) }, 'opus'), false, 'not a member');
+
+  // It exits with a cost; a continue resume is raised to it, and describeRun
+  // never shows the resumed session's live 0 over the recorded cost.
+  wSession.costUsd = 0.12;
+  wSession.running = false;
+  orch.onSessionExit(w.tabId, wSession);
+  mgr.sessions.delete(w.tabId);
+  const c = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue' });
+  const c1 = mgr.sessions.get(c.tabId);
+  assert.strictEqual(c1.seeded, 0.12);
+  c1.costUsd = 0;
+  assert.strictEqual(orch.describeRun(run()).workers[0].cost, 0.12);
+  c1.costUsd = 0.3;
+  assert.strictEqual(orch.describeRun(run()).workers[0].cost, 0.3);
+
+  // A fresh restart is launched with the switched model.
+  c1.running = false;
+  mgr.sessions.delete(c.tabId);
+  const f = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'fresh' });
+  assert.strictEqual(f.mode, 'fresh');
+  assert.strictEqual(mgr.sessions.get(f.tabId).settings.model, 'haiku');
+
+  // A fresh orchestrator with no saved entry to take settings from uses it too.
+  orchSession.running = false;
+  orch.onSessionExit(orchSession.tabId, orchSession);
+  mgr.sessions.delete(orchSession.tabId);
+  mgr.forgetSaved(orchSession.sessId);
+  const r = orch.resumeRun(run().runId);
+  assert.strictEqual(r.fresh, true);
+  assert.strictEqual(mgr.sessions.get(r.tabId).settings.model, 'claude-opus-4-5[1m]');
 });
 
 test('SendMessage to an SDK member: a next-priority turn, idle or busy, and a message card in both areas', async (t) => {

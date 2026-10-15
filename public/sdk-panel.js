@@ -1,21 +1,32 @@
 // Agent SDK panel: the HTML view of an `kind:'sdk'` CLI tab. One panel per
-// tab; for an orchestrator tab the orchestrator's area sits on top and one
-// area per worker follows (workers are hidden sessions with no tab of their
-// own). A plain SDK tab has a single area.
+// tab, drawn as a diagram: the orchestrator's box spans the top, one box per
+// worker sits in a row below it (workers are hidden sessions with no tab of
+// their own), and an SVG behind the boxes joins them. A plain SDK tab has a
+// single box. Each box shows one view at a time — TODO, Notes or Live
+// (thinking and text; every tool call is in the Inspector) — under a caption
+// on its top border: name, model (click to switch), state, cost.
 //
-// Everything shown is server state: on mount and after a reconnect each area
+// Everything shown is server state: on mount and after a reconnect each box
 // asks for `sdk:history` (the session's transcript, no stream deltas),
 // replays it, then continues from the live `sdk:event` broadcasts. TODO.md
-// comes from `sdk:todo`, run membership from GET /api/orchestration/run.
+// and NOTES.md come from `sdk:todo`, re-asked on the session's own edits to
+// them (`platform.files`), run membership from GET /api/orchestration/run.
+// The composer has no remembered target: every message is sent through a
+// pick-the-session, then confirm dialog.
 // cli.js owns the tab; this file owns what is inside its wrap.
 (function () {
   const D = window.dashboard;
   const { sendWs, state, escHtml, renderMarkdown, renderMarkdownDebounced, cancelRenderDebounce } = D;
 
-  const POLL_MS = 5000;
+  const POLL_MS = 15000;           // backstop: TODO/NOTES edits normally arrive as platform.files
+  const TICK_MS = 1000;            // the "now:" line's elapsed time
   const HISTORY_WAIT_MS = 10000;
   const FOLLOW_SLACK_PX = 48;
-  const AGENT_TOOLS = new Set(['Agent', 'Task']);
+  const LINK_FLASH_MS = 1600;
+  const VIEWS = ['todo', 'notes', 'live'];
+  const VIEW_STORE = 'sdkPanelViews';
+  const VIEW_STORE_MAX = 200;
+  const FALLBACK_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
 
   const panels = new Map();   // tabId -> Panel
   const areas = new Map();    // sessId -> Area (across panels: workers have no tab)
@@ -28,6 +39,7 @@
   const fmtCost = (usd) => typeof usd === 'number' && isFinite(usd)
     ? `$${usd < 0.1 ? usd.toFixed(3) : usd.toFixed(2)}` : '';
   const fmtSecs = (ms) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : `${(ms / 1000).toFixed(1)}s`;
+  const fmtAge = (ms) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}s` : `${Math.floor(ms / 1000)}s`;
   const costOf = (c) => typeof c === 'number' ? c
     : c && typeof c === 'object' ? (c.usd ?? c.costUsd ?? c.totalUsd ?? c.total ?? null) : null;
   const isDone = (s) => /^(done|complete|completed|finished|dropped|✓|✔)/i.test(String(s || '').trim());
@@ -38,11 +50,14 @@
   // History holds the broadcast envelopes ({sessId, runId?, ts, ev}); take the ev.
   const unwrap = (rec) => (rec && typeof rec === 'object' && rec.ev && typeof rec.ev === 'object') ? rec.ev : rec;
   const ENDED = new Set(['exited', 'stopped', 'abandoned']);
+  const STATE_TEXT = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing' };
+  // `claude-sonnet-5-5` → `sonnet-5-5`; aliases and `[1m]` stay as they are.
+  const fmtModel = (m) => String(m || '').replace(/^claude-/, '');
 
   // The tool's one-line gist, as the Inspector shows it.
   function toolSummary(name, input) {
     if (!input || typeof input !== 'object') return '';
-    if (AGENT_TOOLS.has(name)) return [input.subagent_type, input.description].filter(Boolean).join(': ');
+    if (name === 'Agent' || name === 'Task') return [input.subagent_type, input.description].filter(Boolean).join(': ');
     if (/(^|__)SendMessage$/.test(name)) return `→ ${input.to || ''}: ${oneLine(input.message || '')}`;
     if (name === 'Skill') return input.args || input.skill || '';
     if (input.file_path) return input.file_path;
@@ -58,11 +73,6 @@
     const m = /^mcp__(.+?)__(.+)$/.exec(name || '');
     return m ? `${m[1]} · ${m[2]}` : (name || 'tool');
   };
-  function resultText(content) {
-    if (typeof content === 'string') return content;
-    if (!Array.isArray(content)) return content == null ? '' : JSON.stringify(content, null, 2);
-    return content.map(b => b?.type === 'text' ? b.text : b?.type === 'image' ? '[image]' : JSON.stringify(b)).join('\n');
-  }
   function selectionInside(node) {
     const sel = window.getSelection?.();
     return !!(sel && !sel.isCollapsed && sel.anchorNode && node.contains(sel.anchorNode));
@@ -75,8 +85,28 @@
     if (orch && name.startsWith(orch + '-')) return name.slice(orch.length + 1);
     return name.replace(/^orch-[^-]+-/, '').replace(/^orch-[^-]+$/, 'orch');
   }
+  // Scroll `node` (inside the scroller `box`) to a third of the box's height.
+  function scrollToNode(box, node) {
+    const top = node.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+    box.scrollTop = Math.max(0, top - box.clientHeight / 3);
+  }
 
-  // ---- Area: one agent's header, TODO, feed --------------------------------
+  // The view each box shows, per session, across reloads (most recent last).
+  function storedView(key) {
+    try { return JSON.parse(localStorage.getItem(VIEW_STORE) || '{}')?.[key] || null; } catch { return null; }
+  }
+  function storeView(key, view) {
+    try {
+      const m = JSON.parse(localStorage.getItem(VIEW_STORE) || '{}') || {};
+      delete m[key];
+      m[key] = view;
+      const keys = Object.keys(m);
+      for (const k of keys.slice(0, Math.max(0, keys.length - VIEW_STORE_MAX))) delete m[k];
+      localStorage.setItem(VIEW_STORE, JSON.stringify(m));
+    } catch {}
+  }
+
+  // ---- Area: one agent's box -----------------------------------------------
 
   class Area {
     constructor(panel, sessId, { role, name, label }) {
@@ -90,16 +120,18 @@
       this.gotStatus = false;
       this.cost = null;
       this.lastReport = null;
-      this.collapsed = false;
-      this.autoCollapsed = false;
+      this.model = null;             // chosen (settings.model)
+      this.actualModel = null;       // what the API answered with
+      this.mappedTo = null;          // the tab's modelMap target, when it rewrites
+      this.initModel = null;         // system/init, before any status names one
       this.todo = null;
-      this.todoOpen = true;
-      this.notesOpen = false;
       this.follow = true;
       this.queue = [];
       this.historyPending = false;
+      this.view = storedView(sessId) || (role === 'worker' ? 'todo' : 'live');
       this._build();
       this.reset();
+      this.setView(this.view, { store: false });
       areas.set(sessId, this);
     }
 
@@ -107,50 +139,61 @@
       const root = this.el = el('section', `sdk-area sdk-area-${this.role}`);
       root.dataset.sessId = this.sessId;
       root.innerHTML = `
-        <header class="sdk-area-head">
-          <button type="button" class="sdk-area-fold" title="Collapse / expand">▾</button>
+        <div class="sdk-cap">
           <span class="sdk-area-name"></span>
+          <button type="button" class="sdk-model" title="Change this session's model"></button>
           <span class="sdk-chip sdk-area-state"></span>
           <span class="sdk-chip sdk-area-report hidden"></span>
           <span class="sdk-area-cost"></span>
-          <span class="sdk-spacer"></span>
-          <button type="button" class="sdk-area-btn" data-a="todo" title="TODO.md">TODO</button>
-          <button type="button" class="sdk-area-btn" data-a="notes" title="NOTES.md">NOTES</button>
-          <button type="button" class="sdk-area-btn" data-a="msg" title="Send the next message to this agent">message</button>
-        </header>
+        </div>
+        <button type="button" class="sdk-insp" title="Open this session in the Inspector: every request, tool call and result">Inspector</button>
+        <div class="sdk-bar">
+          <div class="sdk-seg">
+            <button type="button" data-v="todo">TODO</button><button type="button" data-v="notes">Notes</button><button type="button" data-v="live">Live</button>
+          </div>
+          <div class="sdk-now"></div>
+        </div>
         <div class="sdk-area-awaiting hidden">Awaiting your answer: the question is open in the dialog.</div>
-        <div class="sdk-area-final hidden"></div>
-        <div class="sdk-area-todo hidden"></div>
-        <div class="sdk-area-notes markdown-body hidden"></div>
-        <div class="sdk-area-body">
-          <div class="sdk-feed"></div>
-          <button type="button" class="sdk-live-pill hidden">↓ jump to live</button>
+        <div class="sdk-main">
+          <div class="sdk-view sdk-view-todo">
+            <div class="sdk-area-final hidden"></div>
+            <div class="sdk-todo-wrap"></div>
+          </div>
+          <div class="sdk-view sdk-view-notes markdown-body"></div>
+          <div class="sdk-view sdk-view-live">
+            <div class="sdk-feed"></div>
+            <button type="button" class="sdk-live-pill hidden">↓ jump to live</button>
+          </div>
         </div>`;
       const q = (s) => root.querySelector(s);
       this.nameEl = q('.sdk-area-name');
+      this.modelBtn = q('.sdk-model');
       this.stateEl = q('.sdk-area-state');
       this.reportEl = q('.sdk-area-report');
       this.costEl = q('.sdk-area-cost');
+      this.nowEl = q('.sdk-now');
       this.awaitEl = q('.sdk-area-awaiting');
       this.finalEl = q('.sdk-area-final');
-      this.todoEl = q('.sdk-area-todo');
-      this.notesEl = q('.sdk-area-notes');
+      this.todoView = q('.sdk-view-todo');
+      this.todoEl = q('.sdk-todo-wrap');
+      this.notesEl = q('.sdk-view-notes');
+      this.liveView = q('.sdk-view-live');
       this.feed = q('.sdk-feed');
       this.pill = q('.sdk-live-pill');
-      this.todoBtn = q('[data-a="todo"]');
-      this.notesBtn = q('[data-a="notes"]');
-      this.msgBtn = q('[data-a="msg"]');
+      this.segBtns = Object.fromEntries([...root.querySelectorAll('.sdk-seg button')].map(b => [b.dataset.v, b]));
 
-      q('.sdk-area-fold').addEventListener('click', () => this.setCollapsed(!this.collapsed, true));
-      q('.sdk-area-name').addEventListener('dblclick', () => this.setCollapsed(!this.collapsed, true));
-      this.todoBtn.addEventListener('click', () => { this.todoOpen = !this.todoOpen; this.renderTodo(); });
-      this.notesBtn.addEventListener('click', () => { this.notesOpen = !this.notesOpen; this.renderTodo(); });
-      this.msgBtn.addEventListener('click', () => this.panel.setTarget(this.sessId));
+      for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
+      this.modelBtn.addEventListener('click', (e) => { e.stopPropagation(); openModelMenu(this, this.modelBtn); });
+      q('.sdk-insp').addEventListener('click', () => {
+        if (typeof switchView === 'function') switchView('dashboard');
+        window.inspectorModule?.switchInstanceTab?.(`cli-${this.sessId}`);
+      });
 
       // Follow the stream only while the reader is at the bottom; scrolling up
       // to read pauses it and offers the pill instead.
       this.feed.addEventListener('scroll', () => {
-        const atBottom = this.feed.scrollHeight - this.feed.scrollTop - this.feed.clientHeight <= FOLLOW_SLACK_PX;
+        const v = this.feed;
+        const atBottom = v.scrollHeight - v.scrollTop - v.clientHeight <= FOLLOW_SLACK_PX;
         this.follow = atBottom;
         if (atBottom) this.pill.classList.add('hidden');
       }, { passive: true });
@@ -159,10 +202,15 @@
       // render that lands later) goes through one observer, so following
       // never lags a render.
       this._mo = new MutationObserver(() => {
+        if (this.view !== 'live') return;
         if (this.follow) this._scrollSoon();
         else this.pill.classList.remove('hidden');
       });
       this._mo.observe(this.feed, { childList: true, subtree: true, characterData: true });
+      // A feed filled while hidden (a background tab, another view) cannot
+      // scroll; it catches up when it is shown or resized.
+      this._ro = new ResizeObserver(() => { if (this.view === 'live' && this.follow) this._scrollSoon(); });
+      this._ro.observe(this.feed);
       this.renderHeader();
     }
 
@@ -177,6 +225,7 @@
 
     destroy() {
       this._mo.disconnect();
+      this._ro.disconnect();
       clearTimeout(this._historyTimer);
       if (areas.get(this.sessId) === this) areas.delete(this.sessId);
       this.el.remove();
@@ -184,28 +233,43 @@
 
     addAliases(list) { for (const n of list) if (n) this.aliases.add(String(n)); }
     isMe(name) { return !!name && (this.aliases.has(name) || this.aliases.has(shortName(name, this.panel.run))); }
+    ended() { return ENDED.has(this.state); }
+    shownModel() { return this.actualModel || this.model || this.initModel || ''; }
+
+    // ---- view toggle ----
+
+    setView(v, { store = true } = {}) {
+      if (!VIEWS.includes(v)) v = 'live';
+      this.view = v;
+      if (store) storeView(this.sessId, v);
+      this.el.dataset.view = v;
+      for (const [k, b] of Object.entries(this.segBtns)) b.classList.toggle('on', k === v);
+      if (v === 'live') {
+        this.segBtns.live.classList.remove('unread');
+        this.follow = true;
+        this.pill.classList.add('hidden');
+        this._scrollSoon();
+      } else if (v === 'todo') {
+        this.renderTodo({ scroll: true });
+      } else {
+        this.renderNotes({ scroll: true });
+      }
+    }
+
+    // Something new to read in Live while another view is showing.
+    markUnread() {
+      if (this.view !== 'live' && !this._replaying) this.segBtns.live.classList.add('unread');
+    }
 
     // ---- header ----
-
-    setCollapsed(v, byUser) {
-      this.collapsed = !!v;
-      if (byUser) this.userFolded = true;
-      this.el.classList.toggle('collapsed', this.collapsed);
-      this.el.querySelector('.sdk-area-fold').textContent = this.collapsed ? '▸' : '▾';
-      this.renderHeader();
-      if (!this.collapsed && this.follow) this._scrollSoon();
-    }
 
     setState(s) {
       if (!s || s === this.state) return;
       this.state = s;
-      // Ended workers fold to their final report, once; the owner can unfold.
-      if (this.role === 'worker' && ENDED.has(s) && !this.autoCollapsed && !this.userFolded) {
-        this.autoCollapsed = true;
-        this.setCollapsed(true);
-      }
+      if (s !== 'busy' && s !== 'awaiting') this.nowTool = null;
       this.renderHeader();
       this.panel.renderToolbar();
+      this.panel.drawLinksSoon();
     }
 
     setCost(c) {
@@ -219,30 +283,62 @@
       this.nameEl.textContent = this.label;
       this.nameEl.title = this.name;
       const s = this.state || 'idle';
-      const stateText = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing' }[s] || s;
-      this.stateEl.textContent = stateText;
-      this.stateEl.className = `sdk-chip sdk-area-state sdk-state-${ENDED.has(s) ? 'exited' : s}`;
+      const ended = ENDED.has(s);
+      this.stateEl.textContent = STATE_TEXT[s] || s;
+      this.stateEl.className = `sdk-chip sdk-area-state sdk-state-${ended ? 'exited' : s}`;
       this.awaitEl.classList.toggle('hidden', s !== 'awaiting');
+      const r = this.lastReport;
+      const rs = String(r?.status || '').toLowerCase().replace(/[^a-z]/g, '');
       this.el.classList.toggle('sdk-area-is-awaiting', s === 'awaiting');
       this.el.classList.toggle('sdk-area-is-busy', s === 'busy');
-      const r = this.lastReport;
+      this.el.classList.toggle('sdk-area-ended', ended);
+      this.el.classList.toggle('sdk-area-is-blocked', !ended && (rs === 'blocked' || rs === 'failed'));
       this.reportEl.classList.toggle('hidden', !r);
       if (r) {
         this.reportEl.textContent = r.status || 'report';
         this.reportEl.title = r.summary || '';
-        this.reportEl.className = `sdk-chip sdk-area-report sdk-report-${String(r.status || '').toLowerCase().replace(/[^a-z]/g, '')}`;
+        this.reportEl.className = `sdk-chip sdk-area-report sdk-report-${rs}`;
       }
-      this.finalEl.classList.toggle('hidden', !(this.collapsed && r?.summary));
+      // The last report heads the TODO view once ended, or when there is no TODO.
+      this.finalEl.classList.toggle('hidden', !(r?.summary && (ended || !this.todo?.rows?.length)));
       if (r?.summary) this.finalEl.textContent = `${r.status || 'report'}: ${r.summary}`;
       this.costEl.textContent = fmtCost(this.cost);
+      const m = this.shownModel();
+      this.modelBtn.textContent = m ? `${fmtModel(m)}${this.mappedTo ? ` → ${fmtModel(this.mappedTo)}` : ''} ▾` : 'model ▾';
+      this.modelBtn.title = [
+        this.model ? `Chosen: ${this.model}` : null,
+        this.actualModel ? `Answering: ${this.actualModel}` : null,
+        this.mappedTo ? `Rewritten by this tab's model map to: ${this.mappedTo}` : null,
+        ended ? 'The session has ended.' : 'Click to switch the model; the context and the cost so far are kept.',
+      ].filter(Boolean).join('\n');
+      this.modelBtn.disabled = ended;
       const t = this.todo?.rows || [];
       const done = t.filter(x => isDone(x.status)).length;
-      this.todoBtn.textContent = t.length ? `TODO ${done}/${t.length}` : 'TODO';
-      this.todoBtn.classList.toggle('active', this.todoOpen && t.length > 0);
-      this.notesBtn.classList.toggle('hidden', !this.todo?.notes);
-      this.notesBtn.classList.toggle('active', this.notesOpen);
-      this.msgBtn.classList.toggle('hidden', this.panel.areaCount() < 2);
-      this.msgBtn.classList.toggle('active', this.panel.targetSess === this.sessId);
+      this.segBtns.todo.textContent = t.length ? `TODO ${done}/${t.length}` : 'TODO';
+      this.renderNow();
+    }
+
+    // One line under the caption: what the agent is doing right now.
+    renderNow() {
+      const s = this.state || 'idle';
+      let text = '';
+      let cls = 'idle';
+      if (ENDED.has(s)) text = 'ended';
+      else if (s === 'awaiting') { text = 'waiting for your answer'; cls = 'awaiting'; }
+      else if (s === 'pausing') { text = 'pausing: writing its resume note'; cls = 'busy'; }
+      else if (s === 'paused') text = 'paused';
+      else if (s === 'busy') {
+        cls = 'busy';
+        const t = this.nowTool;
+        if (t) {
+          const age = t.startedAt ? ` · ${fmtAge(Date.now() - t.startedAt)}` : '';
+          text = `now: ${prettyTool(t.name)} ${oneLine(toolSummary(t.name, t.input))}`.trim() + age;
+        } else {
+          text = 'now: thinking…';
+        }
+      } else text = 'idle';
+      if (text !== this._nowText) { this._nowText = text; this.nowEl.textContent = text; this.nowEl.title = text; }
+      this.nowEl.className = `sdk-now sdk-now-${cls}`;
     }
 
     // ---- TODO.md / NOTES.md ----
@@ -255,31 +351,50 @@
       const sig = JSON.stringify([rows, notes]);
       if (sig === this._todoSig) return;
       this._todoSig = sig;
+      const notesChanged = notes !== this.todo?.notes;
       this.todo = { rows, notes };
-      this.renderTodo();
+      this.renderTodo({ scroll: true });
+      if (notesChanged) this.renderNotes({ scroll: true });
+      this.renderHeader();
     }
 
-    renderTodo() {
+    // The table fits its box: id and status stay narrow, a description wraps
+    // to two lines (the whole text is its tooltip). It scrolls to the row in
+    // progress, or to the newest row when none is.
+    renderTodo({ scroll } = {}) {
       const rows = this.todo?.rows || [];
-      this.todoEl.classList.toggle('hidden', !(this.todoOpen && rows.length));
-      if (this.todoOpen && rows.length) {
-        const body = rows.map(r => {
-          const st = String(r.status || '');
-          const cls = isDoing(st) ? 'doing' : isDone(st) ? 'done' : isBlocked(st) ? 'blocked' : 'open';
-          return `<tr class="sdk-todo-${cls}"><td class="sdk-todo-id">${escHtml(r.id)}</td>`
-            + `<td class="sdk-todo-desc" title="${escHtml(r.dependsOn ? `depends on ${r.dependsOn}` : '')}">${escHtml(r.description || '')}</td>`
-            + `<td><span class="sdk-chip sdk-todo-chip sdk-todo-chip-${cls}">${escHtml(st || '—')}</span></td></tr>`;
-        }).join('');
-        this.todoEl.innerHTML = `<table class="sdk-todo"><tbody>${body}</tbody></table>`;
-        this.todoEl.querySelector('.sdk-todo-doing')?.scrollIntoView?.({ block: 'nearest' });
+      const sig = this._todoSig || '';
+      if (this._todoDrawn !== sig) {
+        this._todoDrawn = sig;
+        this.todoEl.innerHTML = rows.length
+          ? `<table class="sdk-todo"><colgroup><col class="sdk-todo-c-id"><col><col class="sdk-todo-c-st"></colgroup><tbody>${rows.map(r => {
+            const st = String(r.status || '');
+            const cls = isDoing(st) ? 'doing' : isDone(st) ? 'done' : isBlocked(st) ? 'blocked' : 'open';
+            const tip = [r.description || '', r.dependsOn ? `depends on ${r.dependsOn}` : '', st].filter(Boolean).join('\n');
+            return `<tr class="sdk-todo-${cls}" title="${escHtml(tip)}"><td class="sdk-todo-id">${escHtml(r.id)}</td>`
+              + `<td class="sdk-todo-desc"><div class="sdk-clamp">${escHtml(r.description || '')}</div></td>`
+              + `<td class="sdk-todo-st"><span class="sdk-chip sdk-todo-chip sdk-todo-chip-${cls}">${escHtml(clip(st || '—', 40))}</span></td></tr>`;
+          }).join('')}</tbody></table>`
+          : '<div class="sdk-empty">No TODO.md yet.</div>';
       }
+      if (scroll && this.view === 'todo') {
+        const doing = this.todoEl.querySelectorAll('.sdk-todo-doing');
+        if (doing.length) scrollToNode(this.todoView, doing[doing.length - 1]);
+        else this.todoView.scrollTop = this.todoView.scrollHeight;
+      }
+    }
+
+    // Rendered only while showing; on a change it scrolls to `## Resume`.
+    renderNotes({ scroll } = {}) {
+      if (this.view !== 'notes') return;
       const notes = this.todo?.notes || '';
-      this.notesEl.classList.toggle('hidden', !(this.notesOpen && notes));
-      if (this.notesOpen && notes && this._notesShown !== notes) {
-        this._notesShown = notes;
-        renderMarkdown(notes, this.notesEl, { file: true });
-      }
-      this.renderHeader();
+      if (this._notesShown === notes) return;
+      this._notesShown = notes;
+      if (!notes) { this.notesEl.innerHTML = '<div class="sdk-empty">No NOTES.md yet.</div>'; return; }
+      renderMarkdown(notes, this.notesEl, { file: true });
+      if (!scroll) return;
+      const resume = [...this.notesEl.querySelectorAll('h1, h2, h3')].find(h => /^\s*resume\b/i.test(h.textContent));
+      if (resume) scrollToNode(this.notesEl, resume);
     }
 
     // ---- feed: history, then live ----
@@ -288,10 +403,9 @@
       this.feed.innerHTML = '';
       this.msgs = new Map();      // message.id -> {id, pk, blocks}
       this.streams = new Map();   // parent_tool_use_id|'' -> {rec, byIndex}
-      this.tools = new Map();     // tool_use_id -> card
-      this.orphanNests = new Map();
+      this.tools = new Map();     // tool_use_id -> {id, name, input, done, startedAt}
+      this.nowTool = null;
       this.seen = new Set();
-      this.model = null;
       this.follow = true;
       this.pill.classList.add('hidden');
     }
@@ -313,11 +427,13 @@
       clearTimeout(this._historyTimer);
       this.reset();
       const keys = new Set();
+      this._replaying = true;
       for (const rec of events) {
         const ev = unwrap(rec);
         keys.add(envKey(ev));
         try { this.apply(ev, false); } catch (e) { console.warn('sdk-panel: history event', e, ev); }
       }
+      this._replaying = false;
       if (error) this.notice(`History: ${error}`, 'warn');
       const queued = this.queue;
       this.queue = [];
@@ -330,6 +446,7 @@
       }
       this.follow = true;
       this._scrollSoon();
+      this.renderNow();
     }
 
     receive(ev) {
@@ -340,15 +457,29 @@
     apply(ev, live) {
       if (!ev || typeof ev !== 'object') return;
       if (ev.sdk) return this.applySdk(ev.sdk, live);
-      if (ev.user) return this.applyUser(ev.user);
+      if (ev.user) return this.applyUser(ev.user, live);
       const p = ev.platform;
       if (!p) return;
-      if (p.kind === 'message') return this.applyPeerMessage(p);
-      if (p.kind === 'notice') return this.notice(p.text, p.level === 'warning' ? 'warn' : p.level);
+      if (p.kind === 'message') return this.applyPeerMessage(p, live);
+      if (p.kind === 'notice') {
+        // A refused switch: the label goes back to the model still in use.
+        if (/^Model not changed/.test(p.text || '') && this._modelBefore !== undefined) {
+          this.model = this._modelBefore;
+          this.actualModel = this._actualBefore || null;
+          this._modelBefore = undefined;
+          this.renderHeader();
+        }
+        return this.notice(p.text, p.level === 'warning' ? 'warn' : p.level);
+      }
+      if (p.kind === 'files') { if (live) this.requestTodo(); return; }
       if (p.kind === 'status') {
         this.gotStatus = true;
         if (typeof p.costUsd === 'number') this.setCost(p.costUsd);
+        if (p.model !== undefined) { this.model = p.model || null; this._modelBefore = undefined; }
+        if (p.actualModel !== undefined) this.actualModel = p.actualModel || null;
+        if (p.mappedTo !== undefined) this.mappedTo = p.mappedTo || null;
         this.setState(p.state);
+        this.renderHeader();
       }
     }
 
@@ -364,30 +495,14 @@
         case 'result': return this.applyResult(m);
         case 'system': return this.applySystem(m);
         case 'tool_progress': {
-          const card = this.tools.get(m.tool_use_id);
-          if (card && !card.done) card.stateEl.textContent = `⋯ ${Math.round(m.elapsed_time_seconds || 0)}s`;
+          const t = this.tools.get(m.tool_use_id);
+          if (t && !t.done && live) {
+            t.startedAt = Date.now() - (m.elapsed_time_seconds || 0) * 1000;
+            if (t === this.nowTool) this.renderNow();
+          }
           return;
         }
       }
-    }
-
-    // Where a message's blocks go: the area's feed, or nested under the
-    // Agent card that started the subagent.
-    containerFor(parentId) {
-      if (!parentId) return this.feed;
-      const card = this.tools.get(parentId);
-      if (card) { card.nest.classList.remove('hidden'); return card.nest; }
-      let nest = this.orphanNests.get(parentId);
-      if (!nest) {
-        const wrap = el('div', 'sdk-tool sdk-tool-agent open');
-        wrap.innerHTML = '<div class="sdk-tool-head"><span class="sdk-tool-caret">▾</span><span class="sdk-tool-name">subagent</span></div>';
-        nest = el('div', 'sdk-tool-nest');
-        wrap.appendChild(nest);
-        wrap.querySelector('.sdk-tool-head').addEventListener('click', () => wrap.classList.toggle('open'));
-        this.feed.appendChild(wrap);
-        this.orphanNests.set(parentId, nest);
-      }
-      return nest;
     }
 
     msgRec(id, pk) {
@@ -397,61 +512,46 @@
       return rec;
     }
 
+    // Live draws the main agent's thinking and text. Tool calls and subagent
+    // messages are tracked (for the "now:" line) but not drawn: the
+    // Inspector button shows them.
     newBlock(rec, type, opts = {}) {
-      const container = this.containerFor(rec.pk);
-      const blk = { type, raw: '', partial: '', final: false, toolId: opts.toolId || null };
+      if (type === 'tool_use') {
+        const blk = { type, partial: '', final: false, toolId: opts.toolId || null, tool: this.toolStarted(opts.toolId, opts.toolName, rec.pk) };
+        rec.blocks.push(blk);
+        return blk;
+      }
+      if (rec.pk || (type !== 'text' && type !== 'thinking')) return null;
+      const blk = { type, raw: '', final: false };
       if (type === 'text') {
         blk.el = blk.body = el('div', 'sdk-text markdown-body');
-      } else if (type === 'thinking') {
+        this.markUnread();
+      } else {
         blk.el = el('div', 'sdk-thinking open');
         const head = el('div', 'sdk-thinking-head', 'Thinking');
         blk.body = el('div', 'sdk-thinking-body');
         head.addEventListener('click', () => blk.el.classList.toggle('open'));
         blk.el.append(head, blk.body);
-      } else if (type === 'tool_use') {
-        blk.card = this.toolCard(opts.toolId, opts.toolName, container);
-        blk.card.blk = blk;
-        blk.el = blk.card.el;
-        rec.blocks.push(blk);
-        return blk;
-      } else {
-        return null;
       }
-      container.appendChild(blk.el);
+      this.feed.appendChild(blk.el);
       rec.blocks.push(blk);
       return blk;
     }
 
-    toolCard(id, name, container) {
-      const isAgent = AGENT_TOOLS.has(name);
-      const root = el('div', `sdk-tool running${isAgent ? ' sdk-tool-agent open' : ''}${/(^|__)SendMessage$/.test(name || '') ? ' sdk-tool-send' : ''}`);
-      root.innerHTML = `
-        <div class="sdk-tool-head"><span class="sdk-tool-caret"></span><span class="sdk-tool-name"></span><span class="sdk-tool-sum"></span><span class="sdk-tool-st">⋯</span></div>
-        <div class="sdk-tool-body"><pre class="sdk-tool-input"></pre><pre class="sdk-tool-result hidden"></pre></div>
-        <div class="sdk-tool-nest hidden"></div>`;
-      const card = {
-        id, name, el: root, isAgent, done: false,
-        caret: root.querySelector('.sdk-tool-caret'),
-        sumEl: root.querySelector('.sdk-tool-sum'),
-        stateEl: root.querySelector('.sdk-tool-st'),
-        inputEl: root.querySelector('.sdk-tool-input'),
-        resultEl: root.querySelector('.sdk-tool-result'),
-        nest: root.querySelector('.sdk-tool-nest'),
-      };
-      root.querySelector('.sdk-tool-name').textContent = prettyTool(name);
-      const syncCaret = () => { card.caret.textContent = root.classList.contains('open') ? '▾' : '▸'; };
-      syncCaret();
-      root.querySelector('.sdk-tool-head').addEventListener('click', () => { root.classList.toggle('open'); syncCaret(); });
-      card.syncCaret = syncCaret;
-      container.appendChild(root);
-      if (id) this.tools.set(id, card);
-      return card;
+    toolStarted(id, name, pk) {
+      let t = id ? this.tools.get(id) : null;
+      if (!t) {
+        t = { id, name, input: null, done: false, startedAt: this._replaying ? null : Date.now(), sub: !!pk };
+        if (id) this.tools.set(id, t);
+      }
+      if (!t.sub && !t.done) { this.nowTool = t; this.renderNow(); }
+      return t;
     }
 
-    setToolInput(card, input) {
-      card.input = input;
-      card.sumEl.textContent = clip(oneLine(toolSummary(card.name, input)), 140);
-      card.inputEl.textContent = clip(JSON.stringify(input, null, 2), 6000);
+    setToolInput(t, input) {
+      if (!t) return;
+      t.input = input;
+      if (t === this.nowTool) this.renderNow();
     }
 
     // Lifted from the Inspector's appendSSEToDetail: block start / delta /
@@ -472,7 +572,7 @@
           const b = ev.content_block || {};
           const type = b.type === 'redacted_thinking' ? 'thinking' : b.type === 'server_tool_use' ? 'tool_use' : b.type;
           // A block the complete message already delivered (it can overtake
-          // the deltas) is not drawn twice.
+          // the deltas) is not counted twice.
           if (type === 'tool_use' && b.id && this.tools.has(b.id)) return;
           const blk = this.newBlock(cur.rec, type, { toolId: b.id, toolName: b.name });
           if (blk) cur.byIndex.set(ev.index, blk);
@@ -491,7 +591,6 @@
             blk.body.appendChild(document.createTextNode(d.thinking || ''));
           } else if (d.type === 'input_json_delta') {
             blk.partial += d.partial_json || '';
-            blk.card.inputEl.textContent = clip(blk.partial, 6000);
           }
           return;
         }
@@ -499,7 +598,7 @@
           const blk = cur?.byIndex.get(ev.index);
           if (!blk || blk.final) return;
           if (blk.type === 'tool_use') {
-            try { this.setToolInput(blk.card, JSON.parse(blk.partial || '{}')); } catch {}
+            try { this.setToolInput(blk.tool, JSON.parse(blk.partial || '{}')); } catch {}
           } else if (blk.type === 'text') {
             cancelRenderDebounce(blk.body);
             renderMarkdown(blk.raw, blk.body);
@@ -522,14 +621,15 @@
       if (!rec) rec = this.msgRec(id, pk);
       for (const b of m.message?.content || []) {
         if (b.type === 'tool_use' || b.type === 'server_tool_use') {
-          let blk = rec.blocks.find(x => x.type === 'tool_use' && x.toolId === b.id) || this.tools.get(b.id)?.blk;
+          let blk = rec.blocks.find(x => x.type === 'tool_use' && x.toolId === b.id);
           if (!blk) blk = this.newBlock(rec, 'tool_use', { toolId: b.id, toolName: b.name });
           blk.final = true;
-          this.setToolInput(blk.card, b.input || {});
+          this.setToolInput(blk.tool, b.input || {});
         } else if (b.type === 'text' || b.type === 'thinking' || b.type === 'redacted_thinking') {
           const t = b.type === 'text' ? 'text' : 'thinking';
           let blk = rec.blocks.find(x => x.type === t && !x.final);
           if (!blk) blk = this.newBlock(rec, t);
+          if (!blk) continue;
           blk.final = true;
           if (t === 'text') {
             blk.raw = b.text || '';
@@ -548,34 +648,17 @@
 
     applySdkUser(m) {
       const c = m.message?.content;
-      if (Array.isArray(c)) {
-        for (const b of c) {
-          if (b?.type === 'tool_result') this.toolResult(b.tool_use_id, b.content, b.is_error);
+      if (!Array.isArray(c)) return;
+      for (const b of c) {
+        if (b?.type !== 'tool_result') continue;
+        const t = this.tools.get(b.tool_use_id);
+        if (t) t.done = true;
+        if (t && t === this.nowTool) {
+          // The newest main-agent call still running, if any.
+          this.nowTool = [...this.tools.values()].reverse().find(x => !x.done && !x.sub) || null;
+          this.renderNow();
         }
       }
-      // The prompt a subagent was started with, shown dimmed in its nest.
-      // Top-level user turns arrive as {user:…} envelopes instead.
-      if (m.parent_tool_use_id && !m.isSynthetic) {
-        const text = typeof c === 'string' ? c : Array.isArray(c) ? c.filter(b => b?.type === 'text').map(b => b.text).join('\n') : '';
-        if (text.trim()) this.containerFor(m.parent_tool_use_id).appendChild(el('div', 'sdk-sub-prompt', clip(text, 600)));
-      }
-    }
-
-    toolResult(id, content, isError) {
-      let card = this.tools.get(id);
-      if (!card) {
-        card = this.toolCard(id, 'tool result', this.feed);
-        card.sumEl.textContent = '(its call is not in this view)';
-      }
-      card.done = true;
-      card.el.classList.remove('running');
-      card.el.classList.toggle('error', !!isError);
-      card.stateEl.textContent = isError ? '✗' : '✓';
-      const text = resultText(content);
-      card.resultEl.textContent = clip(text, 8000);
-      card.resultEl.classList.toggle('hidden', !text);
-      // A finished subagent folds away to its card; its report is the result.
-      if (card.isAgent) { card.el.classList.remove('open'); card.syncCaret(); }
     }
 
     applyResult(m) {
@@ -589,16 +672,19 @@
       this.feed.appendChild(el('div', `sdk-result${m.is_error ? ' error' : ''}`, bits.join(' · ')));
       // total_cost_usd is the running total of this query(), so the latest wins.
       if (typeof m.total_cost_usd === 'number') this.setCost(m.total_cost_usd);
+      this.nowTool = null;
       if (!this.gotStatus) this.setState('idle');
+      this.renderNow();
     }
 
     applySystem(m) {
       switch (m.subtype) {
         case 'init':
           // Emitted at the start of every turn; only a model change is news.
-          if (m.model && m.model !== this.model) {
-            this.notice(`${this.model ? 'Model now' : 'Session started ·'} ${m.model}`);
-            this.model = m.model;
+          if (m.model && m.model !== this.initModel) {
+            this.notice(`${this.initModel ? 'Model now' : 'Session started ·'} ${m.model}`);
+            this.initModel = m.model;
+            this.renderHeader();
           }
           if (!this.gotStatus) this.setState('busy');
           return;
@@ -620,21 +706,22 @@
       }
     }
 
-    applyUser(u) {
+    applyUser(u, live) {
       const text = String(u.text || '');
       if (u.from) {
-        // A peer's message is drawn once, from its platform `message` card;
+        // A peer's message is drawn once, from its platform `message` event;
         // the user turn it became (`[message from X] …`) is skipped. Turns the
         // platform itself typed in (from 'orchestration', 'vistaclair': pause
-        // instructions, pending-event pings) have no card, so they show as a
-        // notice instead of disappearing.
+        // instructions, pending-event pings) show as a one-line notice that
+        // opens on click.
         if (/^\[message from /i.test(text)) return;
         // A worker's brief, submitted on its orchestrator's behalf.
         if (u.from !== 'orchestration' && u.from !== 'vistaclair') {
-          return this.applyPeerMessage({ from: u.from, to: [...this.aliases][0], text });
+          return this.applyPeerMessage({ from: u.from, to: [...this.aliases][0], text }, live);
         }
-        const n = this.notice(`${u.from}: ${clip(text, 400)}`, 'injected');
+        const n = this.notice(`${u.from}: ${oneLine(text)}`, 'injected');
         n.title = text;
+        n.addEventListener('click', () => n.classList.toggle('open'));
         return;
       }
       const bubble = el('div', 'sdk-user');
@@ -658,22 +745,93 @@
     }
 
     // One per SendMessage, emitted on both the sender's and the receiver's
-    // session: "orch → w2: …" in the sender's area, "from orch: …" in the other.
-    applyPeerMessage(p) {
-      const text = String(p.text || '');
-      // Sent by this agent, or (neither end recognised) shown as `a → b`.
-      const outgoing = this.isMe(p.from) || !this.isMe(p.to);
-      const card = el('div', `sdk-peer ${outgoing ? 'out' : 'in'}`);
+    // session. The receiver's Live shows the text; the sender's side only
+    // lights the line between the two boxes. A message neither end of which
+    // is recognised yet (membership not fetched) is shown as `a → b`.
+    applyPeerMessage(p, live) {
+      if (this.isMe(p.from) && !this.isMe(p.to)) {
+        if (live) this.panel.flashLink(p.from, p.to);
+        return;
+      }
       const from = shortName(p.from, this.panel.run);
-      const to = shortName(p.to, this.panel.run);
-      card.appendChild(el('div', 'sdk-peer-head', outgoing ? `${from} → ${to}` : `from ${from}`));
-      card.appendChild(el('div', 'sdk-peer-text', text));
+      const card = el('div', 'sdk-peer in');
+      card.appendChild(el('div', 'sdk-peer-head', this.isMe(p.to) ? `from ${from}` : `${from} → ${shortName(p.to, this.panel.run)}`));
+      card.appendChild(el('div', 'sdk-peer-text', String(p.text || '')));
       this.feed.appendChild(card);
+      this.markUnread();
     }
 
     notice(text, level) {
       return this.feed.appendChild(el('div', `sdk-notice${level ? ` sdk-notice-${level}` : ''}`, String(text || '')));
     }
+  }
+
+  // ---- the model menu (one open at a time) ---------------------------------
+
+  let _menu = null;
+  function closeModelMenu() {
+    if (!_menu) return;
+    _menu.el.remove();
+    document.removeEventListener('mousedown', _menu.onDown, true);
+    document.removeEventListener('keydown', _menu.onKey, true);
+    _menu = null;
+  }
+
+  // The same options as the tab settings and the tab-strip cog. A switch
+  // keeps the conversation and its cost; the next turn caches the whole
+  // context again at the new model's rate, so the menu says so.
+  function openModelMenu(area, anchor) {
+    const reopen = _menu?.area === area;
+    closeModelMenu();
+    if (reopen || area.ended()) return;
+    const listed = window.cliModule?.modelPickerOptions?.() || [];
+    const opts = listed.length ? listed : FALLBACK_MODELS.map(v => ({ value: v, label: v, group: 'Aliases', price: '' }));
+    const cur = area.model || '';
+    const box = el('div', 'sdk-model-menu');
+    box.appendChild(el('div', 'sdk-model-warn', 'The context and the cost so far are kept. The next turn re-caches the whole context at the new model\'s rate.'));
+    let group = null;
+    for (const o of opts) {
+      if (o.group !== group) { group = o.group; box.appendChild(el('div', 'sdk-model-group', group || '')); }
+      const b = el('button', `sdk-model-opt${o.value === cur ? ' on' : ''}`);
+      b.type = 'button';
+      b.appendChild(el('span', 'sdk-model-opt-label', o.label || o.value));
+      if (o.price) b.appendChild(el('span', 'sdk-model-opt-price', o.price));
+      b.addEventListener('click', () => {
+        closeModelMenu();
+        if (o.value === cur) return;
+        area._modelBefore = area.model;
+        area._actualBefore = area.actualModel;
+        area.model = o.value;
+        area.actualModel = null;
+        area.renderHeader();
+        sendWs({ type: 'sdk:setModel', sessId: area.sessId, model: o.value });
+      });
+      box.appendChild(b);
+    }
+    document.body.appendChild(box);
+    const r = anchor.getBoundingClientRect();
+    const h = Math.min(box.scrollHeight, window.innerHeight * 0.6);
+    const below = window.innerHeight - r.bottom > h + 12;
+    box.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - box.offsetWidth - 8))}px`;
+    box.style.top = `${below ? r.bottom + 4 : Math.max(8, r.top - h - 4)}px`;
+    const onDown = (e) => { if (!box.contains(e.target) && e.target !== anchor) closeModelMenu(); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); closeModelMenu(); } };
+    document.addEventListener('mousedown', onDown, true);
+    document.addEventListener('keydown', onKey, true);
+    _menu = { el: box, area, onDown, onKey };
+  }
+
+  // ---- pick a session, then confirm (one dialog at a time) -----------------
+
+  let _pick = null;
+  function closePicker() {
+    if (!_pick) return;
+    _pick.backdrop.remove();
+    document.removeEventListener('keydown', _pick.onKey, true);
+    document.removeEventListener('keyup', _pick.onKeyUp, true);
+    const p = _pick.panel;
+    _pick = null;
+    p.composer.focus();
   }
 
   // ---- Panel: one SDK tab --------------------------------------------------
@@ -687,7 +845,6 @@
       this.run = null;
       this.main = null;
       this.workers = new Map();  // sessId -> Area
-      this.targetSess = null;
       this.active = false;
       wrap.classList.add('sdk-wrap');
       wrap.innerHTML = `
@@ -702,17 +859,20 @@
             <button type="button" class="sdk-tb-btn" data-act="pause">Pause</button>
             <button type="button" class="sdk-tb-btn hidden" data-act="board" title="Workers, reports and TODO of the run">☰ Run board</button>
           </div>
-          <div class="sdk-areas">
+          <div class="sdk-stage">
+            <svg class="sdk-links" aria-hidden="true"></svg>
             <div class="sdk-main-slot"></div>
             <div class="sdk-workers"></div>
           </div>
-          <vc-composer></vc-composer>
+          <vc-composer placeholder="Message… (Enter or Ctrl+Enter, then choose the session · Shift+Enter new line · Esc interrupts)"></vc-composer>
         </div>`;
       const q = (s) => wrap.querySelector(s);
       this.panelEl = q('.sdk-panel');
       this.titleEl = q('.sdk-toolbar-title');
       this.metaEl = q('.sdk-toolbar-meta');
       this.costEl = q('.sdk-toolbar-cost');
+      this.stage = q('.sdk-stage');
+      this.linksEl = q('.sdk-links');
       this.mainSlot = q('.sdk-main-slot');
       this.workersEl = q('.sdk-workers');
       this.interruptBtn = q('[data-act="interrupt"]');
@@ -723,15 +883,21 @@
       this.interruptBtn.addEventListener('click', () => this.interrupt());
       this.pauseBtn.addEventListener('click', () => this.pause());
       this.boardBtn.addEventListener('click', () => { if (this.runId) window.cliModule?.openRunBoard?.(this.runId); });
-      this.composer.addEventListener('send', (e) => this.send(e.detail));
+      this.composer.addEventListener('send', (e) => this.openPicker('send', e.detail));
       this.composer.addEventListener('interrupt', () => this.interrupt());
-      this.composer.addEventListener('target-clear', () => this.setTarget(null));
       // Images dropped anywhere on the panel go to the composer.
       customElements.whenDefined('vc-composer').then(() => this.composer.attachDropTarget?.(this.panelEl));
+      this._ro = new ResizeObserver(() => this.drawLinksSoon());
+      this._ro.observe(this.stage);
     }
 
     areaCount() { return (this.main ? 1 : 0) + this.workers.size; }
-    allAreas() { return [this.main, ...this.workers.values()].filter(Boolean); }
+    allAreas() { return [this.main, ...this.sortedWorkers()].filter(Boolean); }
+    sortedWorkers() {
+      const n = (a) => parseInt(String(a.workerId || '').replace(/\D/g, ''), 10) || 1e9;
+      return [...this.workers.values()].sort((a, b) => n(a) - n(b));
+    }
+    areaByName(name) { return this.allAreas().find(a => a.isMe(name)) || null; }
 
     // The tab as cli.js knows it: {sessId, title, cwd, settings, status, pausing}.
     update(info) {
@@ -749,9 +915,11 @@
         this.mainSlot.appendChild(this.main.el);
         this.main.requestHistory();
         this.main.requestTodo();
+        this.drawLinksSoon();
       }
       if (this.main && info.state) this.main.setState(info.state);
       if (this.main && typeof info.costUsd === 'number') this.main.setCost(info.costUsd);
+      if (this.main && !this.main.model && this.info.settings?.model) { this.main.model = this.info.settings.model; this.main.renderHeader(); }
       if (this.main && role === 'single' && this.info.title) {
         this.main.label = this.info.title;
         this.main.renderHeader();
@@ -799,7 +967,12 @@
         a.name = w.name || w.worker || a.name;
         a.label = w.id ? `${w.id}${w.title && w.title !== w.id ? ` · ${w.title}` : ''}` : shortName(a.name, run);
         a.addAliases([w.name, w.worker, w.id, shortName(w.name || w.worker, run)]);
+        // A new report travels up the worker's line (not on the first load).
+        const rep = w.lastReport ? JSON.stringify([w.lastReport.status, w.lastReport.summary, w.lastReport.at]) : null;
+        if (rep && a._repSig !== undefined && rep !== a._repSig) this.flashLink(a.name, this.main?.name);
+        a._repSig = rep;
         a.lastReport = w.lastReport || null;
+        if (!a.model && w.model) a.model = w.model;
         const c = costOf(w.cost ?? w.costUsd);
         if (c != null) a.cost = c;
         const derived = w.state
@@ -808,7 +981,7 @@
         a.workerId = w.id;
         a.renderHeader();
       }
-      this.sortWorkers();
+      this.layoutWorkers();
       this.renderToolbar();
       for (const a of this.allAreas()) a.renderHeader();
     }
@@ -820,39 +993,235 @@
       const a = new Area(this, sessId, { role: 'worker', name, label });
       this.workers.set(sessId, a);
       this.workersEl.appendChild(a.el);
-      this.panelEl.classList.add('has-workers');
       a.requestHistory();
       a.requestTodo();
-      for (const x of this.allAreas()) x.renderHeader();
+      this.layoutWorkers();
       return a;
     }
 
-    sortWorkers() {
-      const n = (a) => parseInt(String(a.workerId || '').replace(/\D/g, ''), 10) || 1e9;
-      [...this.workers.values()].sort((a, b) => n(a) - n(b)).forEach(a => this.workersEl.appendChild(a.el));
+    // Workers in id order, one row. Past three boxes, ended ones narrow so
+    // the running ones keep their room.
+    layoutWorkers() {
+      const list = this.sortedWorkers();
+      list.forEach(a => this.workersEl.appendChild(a.el));
+      this.panelEl.classList.toggle('has-workers', list.length > 0);
+      this.workersEl.classList.toggle('crowded', list.length > 3);
+      this.drawLinksSoon();
     }
 
-    target() { return (this.targetSess && areas.get(this.targetSess)) || this.main; }
+    // ---- the lines between the boxes ----
 
-    setTarget(sessId) {
-      this.targetSess = sessId && this.main && sessId !== this.main.sessId ? sessId : null;
-      const t = this.target();
-      this.composer.setTarget?.(this.targetSess && t ? t.label : null);
-      for (const a of this.allAreas()) a.renderHeader();
-      this.renderToolbar();
-      this.composer.focus();
+    drawLinksSoon() {
+      if (this._linkRaf) return;
+      this._linkRaf = requestAnimationFrame(() => { this._linkRaf = null; this.drawLinks(); });
     }
 
-    send({ text, images }) {
-      const t = this.target();
-      if (!t) return;
-      sendWs({ type: 'sdk:send', sessId: t.sessId, text, images: images || [] });
+    // One curve per worker, from the orchestrator's bottom edge down onto the
+    // worker's name tag (the caption on its top border). Redrawn on every
+    // resize of the stage.
+    // Paths are updated in place, so a redraw never cuts a flash short.
+    drawLinks() {
+      const svg = this.linksEl;
+      const list = this.sortedWorkers();
+      const keep = new Set();
+      if (this.main && list.length && this.stage.offsetParent) {
+        const NS = 'http://www.w3.org/2000/svg';
+        const s = this.stage.getBoundingClientRect();
+        const m = this.main.el.getBoundingClientRect();
+        const n = list.length;
+        const spread = Math.min(m.width * 0.5, 140 * (n - 1));
+        const y1 = m.bottom - s.top;
+        svg.setAttribute('viewBox', `0 0 ${s.width} ${s.height}`);
+        list.forEach((a, i) => {
+          const r = a.el.querySelector('.sdk-cap').getBoundingClientRect();
+          const x1 = m.left - s.left + m.width / 2 + (n > 1 ? (i / (n - 1) - 0.5) * spread : 0);
+          const x2 = r.left - s.left + r.width / 2;
+          const y2 = r.top - s.top;
+          const my = (y1 + y2) / 2;
+          const st = a.ended() ? 'ended' : a.state === 'busy' ? 'busy' : a.state === 'awaiting' ? 'awaiting' : 'idle';
+          let g = svg.querySelector(`g[data-sess="${CSS.escape(a.sessId)}"]`);
+          if (!g) {
+            g = document.createElementNS(NS, 'g');
+            g.dataset.sess = a.sessId;
+            g.append(document.createElementNS(NS, 'path'), document.createElementNS(NS, 'circle'));
+            svg.appendChild(g);
+          }
+          g.setAttribute('class', `sdk-link sdk-link-${st}`);
+          g.firstChild.setAttribute('d', `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`);
+          const dot = g.lastChild;
+          dot.setAttribute('cx', x1); dot.setAttribute('cy', y1); dot.setAttribute('r', 3);
+          keep.add(g);
+        });
+      }
+      for (const g of [...svg.children]) if (!keep.has(g)) g.remove();
     }
 
-    interrupt() {
-      const t = this.target();
-      if (t) sendWs({ type: 'sdk:interrupt', sessId: t.sessId });
+    // A message or report travelling between two boxes: the worker's line
+    // lights up, moving down (from the orchestrator) or up (to it).
+    flashLink(from, to) {
+      const a = this.areaByName(from);
+      const b = this.areaByName(to);
+      const hit = [];
+      if (a && a.role === 'worker') hit.push([a, 'up']);
+      if (b && b.role === 'worker') hit.push([b, 'down']);
+      for (const [w, dir] of hit) {
+        const path = this.linksEl.querySelector(`g[data-sess="${CSS.escape(w.sessId)}"] path`);
+        if (!path) continue;
+        path.classList.remove('flash-up', 'flash-down');
+        void path.getBoundingClientRect();
+        path.classList.add(`flash-${dir}`);
+        clearTimeout(path._flashT);
+        path._flashT = setTimeout(() => path.classList.remove(`flash-${dir}`), LINK_FLASH_MS);
+      }
     }
+
+    // ---- sending ----
+
+    // Submit → pick the session → confirm. There is no remembered target:
+    // every message names its session, and the confirmation says which one.
+    // `mode` 'interrupt' picks a busy session and stops it, without a
+    // confirmation step.
+    openPicker(mode, payload = {}) {
+      closePicker();
+      closeModelMenu();
+      const list = this.allAreas();
+      if (!list.length) return;
+      const pickable = (a) => mode === 'send' ? !a.ended() : (a.state === 'busy' || a.state === 'awaiting' || a.state === 'pausing');
+      if (mode === 'interrupt' && list.length === 1) {
+        if (pickable(list[0])) sendWs({ type: 'sdk:interrupt', sessId: list[0].sessId });
+        return;
+      }
+      const backdrop = el('div', 'alert-modal-backdrop sdk-pick-backdrop');
+      const modal = el('div', 'alert-modal sdk-pick');
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-modal', 'true');
+      modal.tabIndex = -1;
+      backdrop.appendChild(modal);
+      document.body.appendChild(backdrop);
+      backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) closePicker(); });
+      const pick = _pick = { panel: this, backdrop, modal, mode, payload, list, pickable, step: 'pick', armed: false, target: null };
+      pick.onKeyUp = () => { pick.armed = true; };
+      pick.onKey = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePicker(); return; }
+        if (pick.step === 'pick') {
+          const i = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : -1;
+          if (i >= 0 && list[i] && pickable(list[i])) { e.preventDefault(); this._picked(list[i], { byKey: true }); }
+          return;
+        }
+        if (e.key === 'Enter') {
+          // The Enter that submitted (or one held down) never confirms: it
+          // takes a fresh key press.
+          e.preventDefault();
+          e.stopPropagation();
+          if (pick.armed && !e.repeat) this._confirmSend();
+        }
+      };
+      document.addEventListener('keydown', pick.onKey, true);
+      document.addEventListener('keyup', pick.onKeyUp, true);
+      // Only one box to choose from (a plain tab): straight to the confirmation.
+      if (mode === 'send' && list.length === 1 && pickable(list[0])) this._picked(list[0], { byKey: true });
+      else this._renderPick();
+    }
+
+    _nodeMeta(a) {
+      return [fmtModel(a.shownModel()), STATE_TEXT[a.state || 'idle'] || a.state].filter(Boolean).join(' · ');
+    }
+
+    _renderPick() {
+      const pick = _pick;
+      const { modal, list, pickable, mode } = pick;
+      pick.step = 'pick';
+      const node = (a, i) => {
+        const b = el('button', `sdk-pick-node sdk-pick-${a.role}${pickable(a) ? '' : ' off'}`);
+        b.type = 'button';
+        b.disabled = !pickable(a);
+        b.appendChild(el('span', 'sdk-pick-key', String(i + 1)));
+        b.appendChild(el('span', 'sdk-pick-name', a.label));
+        b.appendChild(el('span', 'sdk-pick-meta', this._nodeMeta(a)));
+        b.addEventListener('click', () => this._picked(a));
+        return b;
+      };
+      modal.innerHTML = '';
+      modal.appendChild(el('div', 'sdk-pick-title', mode === 'send' ? 'Send to which session?' : 'Interrupt which session?'));
+      const map = el('div', 'sdk-pick-map');
+      const [first, ...rest] = list;
+      map.appendChild(node(first, 0));
+      if (rest.length) {
+        const row = el('div', 'sdk-pick-row');
+        row.style.setProperty('--n', rest.length);
+        rest.forEach((a, i) => row.appendChild(node(a, i + 1)));
+        map.appendChild(row);
+      }
+      modal.appendChild(map);
+      modal.appendChild(el('div', 'sdk-pick-hint', mode === 'send'
+        ? 'Click a box or press its number. Ended sessions cannot take messages.'
+        : 'Click a busy box or press its number.'));
+      const actions = el('div', 'sdk-pick-actions');
+      const cancel = el('button', 'sdk-tb-btn', 'Cancel');
+      cancel.type = 'button';
+      cancel.addEventListener('click', closePicker);
+      actions.appendChild(cancel);
+      modal.appendChild(actions);
+      modal.focus();
+    }
+
+    // `byKey`: a key is still down (the submitting Enter, a number), so the
+    // confirmation waits for its release. A click leaves no key down.
+    _picked(a, { byKey = false } = {}) {
+      const pick = _pick;
+      if (!pick || !pick.pickable(a)) return;
+      if (pick.mode === 'interrupt') {
+        sendWs({ type: 'sdk:interrupt', sessId: a.sessId });
+        closePicker();
+        return;
+      }
+      pick.target = a;
+      pick.step = 'confirm';
+      pick.armed = !byKey;
+      const { modal, payload, list } = pick;
+      const text = String(payload.text || '');
+      const lines = text.split('\n');
+      const preview = lines.slice(0, 3).join('\n') + (lines.length > 3 ? '\n…' : '');
+      const nImg = (payload.images || []).length;
+      modal.innerHTML = '';
+      const title = el('div', 'sdk-pick-title');
+      title.append('Send to ', el('b', null, a.label), '?');
+      modal.appendChild(title);
+      modal.appendChild(el('div', 'sdk-pick-meta-line', this._nodeMeta(a)));
+      if (a.state === 'busy' || a.state === 'awaiting') {
+        modal.appendChild(el('div', 'sdk-pick-note', 'It is busy: it reads this after its current tool calls.'));
+      }
+      if (text) modal.appendChild(el('pre', 'sdk-pick-preview', clip(preview, 600)));
+      if (nImg) modal.appendChild(el('div', 'sdk-pick-imgs', `+ ${nImg} image${nImg === 1 ? '' : 's'}`));
+      const actions = el('div', 'sdk-pick-actions');
+      if (list.length > 1) {
+        const back = el('button', 'sdk-tb-btn', '← Back');
+        back.type = 'button';
+        back.addEventListener('click', () => this._renderPick());
+        actions.appendChild(back);
+      }
+      const cancel = el('button', 'sdk-tb-btn', 'Cancel');
+      cancel.type = 'button';
+      cancel.addEventListener('click', closePicker);
+      const send = el('button', 'alert-modal-ok sdk-pick-send', `Send to ${clip(a.label, 32)}`);
+      send.type = 'button';
+      send.addEventListener('click', () => this._confirmSend());
+      actions.append(cancel, send);
+      modal.appendChild(actions);
+      send.focus();
+    }
+
+    _confirmSend() {
+      const pick = _pick;
+      if (!pick || pick.step !== 'confirm' || !pick.target) return;
+      const { target, payload } = pick;
+      sendWs({ type: 'sdk:send', sessId: target.sessId, text: payload.text, images: payload.images || [] });
+      // The draft stays in the composer until a message is really sent.
+      this.composer.clear();
+      closePicker();
+    }
+
+    interrupt() { this.openPicker('interrupt'); }
 
     // The same pause flow as the tab strip: an orchestrator pauses its run,
     // a plain tab itself; while pausing it offers "interrupt now".
@@ -884,9 +1253,9 @@
       this.metaEl.textContent = meta.join(' · ');
       const costs = this.allAreas().map(a => a.cost).filter(c => typeof c === 'number');
       this.costEl.textContent = costs.length ? `${fmtCost(costs.reduce((s, c) => s + c, 0))}${this.workers.size ? ' total' : ''}` : '';
-      const t = this.target();
-      this.interruptBtn.title = `Interrupt ${t ? t.label : 'the session'} (Esc in the composer)`;
-      this.interruptBtn.disabled = !t || ENDED.has(t.state);
+      const busy = this.allAreas().filter(a => a.state === 'busy' || a.state === 'awaiting' || a.state === 'pausing');
+      this.interruptBtn.title = this.areaCount() > 1 ? 'Interrupt a session: you choose which (Esc in the composer)' : 'Interrupt the session (Esc in the composer)';
+      this.interruptBtn.disabled = !busy.length;
       const running = info.status === 'running';
       const isWorkerTab = info.settings?.orchestration?.role === 'worker';
       this.pauseBtn.classList.toggle('hidden', isWorkerTab);
@@ -906,23 +1275,34 @@
 
     pollTodos() {
       if (!this.active || document.visibilityState !== 'visible' || !this.wrap.offsetParent) return;
-      // An ended, folded worker's TODO no longer moves.
-      for (const a of this.allAreas()) if (!(a.collapsed && ENDED.has(a.state))) a.requestTodo();
+      // An ended worker's files no longer move.
+      for (const a of this.allAreas()) if (!a.ended()) a.requestTodo();
+    }
+
+    tick() {
+      for (const a of this.allAreas()) if (a.nowTool?.startedAt && a.state === 'busy') a.renderNow();
     }
 
     setActive(v) {
       this.active = !!v;
       clearInterval(this._poll);
-      this._poll = null;
+      clearInterval(this._tick);
+      this._poll = this._tick = null;
       if (this.active) {
         this._poll = setInterval(() => this.pollTodos(), POLL_MS);
+        this._tick = setInterval(() => this.tick(), TICK_MS);
         this.pollTodos();
+        this.drawLinksSoon();
         if (!D.isPhone?.()) setTimeout(() => this.composer.focus(), 50);
       }
     }
 
     destroy() {
       clearInterval(this._poll);
+      clearInterval(this._tick);
+      this._ro.disconnect();
+      if (_pick?.panel === this) closePicker();
+      if (_menu && this.allAreas().includes(_menu.area)) closeModelMenu();
       for (const a of this.allAreas()) a.destroy();
       this.workers.clear();
       this.main = null;
@@ -985,9 +1365,9 @@
     switch (msg.type) {
       case 'sdk:event': {
         // A refusal answered only to this window (e.g. a refused sdk:send)
-        // may come without a known session: show it where the owner typed.
+        // may come without a known session: show it in the main box.
         const a = areas.get(msg.sessId) || adopt(msg)
-          || (!areas.has(msg.sessId) && msg.ev?.platform?.kind === 'notice' ? activePanel()?.target() : null);
+          || (!areas.has(msg.sessId) && msg.ev?.platform?.kind === 'notice' ? activePanel()?.main : null);
         // A freshly adopted area has just asked for history, which queues
         // this event and drops it if history already holds it.
         a?.receive(msg.ev);

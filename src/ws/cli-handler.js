@@ -1,7 +1,8 @@
 // WebSocket handler for the in-browser CLI terminal: tab lifecycle, input,
 // file upload, resize, settings, scrollback, and saved-session management.
 // Registered on the dashboard broadcaster under the 'cli:' prefix, and 'sdk:'
-// for the Agent SDK panel (src/sdk-session.js): send, interrupt, history, todo.
+// for the Agent SDK panel (src/sdk-session.js): send, interrupt, setModel,
+// history, todo.
 
 const fs = require('fs');
 const path = require('path');
@@ -281,6 +282,26 @@ function handleMessage(ws, msg, bc) {
     case 'sdk:interrupt': {
       const session = sdkSession(mgr, msg.sessId);
       if (session) session.interrupt();
+      break;
+    }
+    case 'sdk:setModel': {
+      // The session persists its settings (manifest, saved entry) itself; a
+      // run member's run.json follows through orchestration. The new model
+      // reaches the panel as a status event; a refusal as an error notice.
+      const live = msg.sessId ? mgr.getBySessId(String(msg.sessId)) : null;
+      const session = sdkSession(mgr, msg.sessId);
+      (async () => {
+        try {
+          if (!session) throw new Error(live ? 'not an Agent SDK session' : 'that Agent SDK session is not running');
+          await session.setModel(msg.model);
+        } catch (e) {
+          try { sendNotice(send, msg.sessId, `Model not changed: ${e.message}`); } catch {}
+          return;
+        }
+        try { bc.orchestration?.memberModelChanged(session, session.getSettings().model); } catch (e) {
+          console.error(`[sdk:setModel] run record: ${e.message}`);
+        }
+      })();
       break;
     }
     case 'sdk:history': {

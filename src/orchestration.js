@@ -165,7 +165,7 @@ function workerCard(run, worker) {
     `You are a WORKER CLI launched by the orchestrator \`${run.orchestrator}\`. Your own cross-session address is \`${worker.name}\`. Your task is the first user message. These instructions stay in force for the whole session, including after any compaction.`,
     '',
     'Rules',
-    `1. Report to the orchestrator with the \`report\` tool (mcp__orchestrator__report): status "started" when you begin, "blocked" when you need a decision (and SendMessage the question to \`${run.orchestrator}\`), "done" or "failed" when finished, "paused" when a pause is complete — with summary, filesChanged, verified (the one check you ran) and open. Never end a turn without reporting. The steps of your brief are the rows of your TODO.md; your orchestrator reads it to follow your progress.`,
+    `1. Report to the orchestrator with the \`report\` tool (mcp__orchestrator__report): status "started" when you begin, "blocked" when you need a decision (and SendMessage the question to \`${run.orchestrator}\`), "done" or "failed" when finished, "paused" when a pause is complete — with summary, filesChanged, verified (the one check you ran) and open. Never end a turn without reporting. The steps of your brief are the rows of your TODO.md (short descriptions, detail in NOTES.md); your orchestrator reads it to follow your progress.`,
     `2. You may delegate through subagents, at most ${MAX_SUBAGENTS} running at once: \`coder\` (Opus) for a substantial piece of code, \`explorer\` (Sonnet, read-only; use it rather than the built-in Explore) for a search across many files. Make small edits and single lookups yourself — a subagent's overhead costs more. A subagent's summary is trusted: do not repeat its checks.`,
     '3. Stay within your brief. If the scope has to grow, ask the orchestrator instead of widening it yourself.',
     `4. Messages from \`${run.orchestrator}\` are follow-up instructions: act on them and report.`,
@@ -585,8 +585,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return w.paused ? 'paused' : w.abandoned ? 'abandoned' : w.exitedAt ? 'exited' : 'stopped';
   }
 
+  // The higher of the live and the recorded cost: a member just resumed may
+  // not have reported its carried-over total yet.
   function costOf(session, stored) {
-    return typeof session?.costUsd === 'number' ? session.costUsd : (typeof stored === 'number' ? stored : null);
+    const live = typeof session?.costUsd === 'number' ? session.costUsd : null;
+    const kept = typeof stored === 'number' ? stored : null;
+    return live === null ? kept : kept === null ? live : Math.max(live, kept);
   }
 
   function describeRun(run) {
@@ -820,7 +824,33 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       orchestration: { runId: run.runId, role: 'orchestrator', runDir: run.runDir },
       appendSystemPrompt: run.base.appendSystemPrompt ? `${run.base.appendSystemPrompt}\n\n${card}` : card,
       settingsFile: writeSessionSettings(run, run.orchestrator, run.base.settingsFile),
+      ...(run.orchestratorModel ? { model: run.orchestratorModel } : {}),
     };
+  }
+
+  // A member's model was switched on its live SDK session (sdk:setModel). A
+  // worker's run.json entry follows, so a fresh restart (workerSettings) and
+  // describeRun use it; the orchestrator's model lives in its own settings
+  // (manifest, saved entry), kept here too for a fresh start without an entry.
+  function memberModelChanged(session, model) {
+    const stamp = stampOf(session);
+    const run = stamp ? loadRun(stamp.runDir) : null;
+    if (!run || !model) return false;
+    if (stamp.role === 'worker') {
+      const w = run.workers.find(x => x.id === stamp.workerId);
+      if (!w) return false;
+      w.model = model;
+    } else {
+      run.orchestratorModel = model;
+    }
+    saveRun(run);
+    return true;
+  }
+
+  // A member resumed with its own transcript carries its recorded cost on.
+  function seedResumedCost(tabId, usd) {
+    const s = tabId ? mgr.get(tabId) : null;
+    if (typeof s?.seedCost === 'function') s.seedCost(usd);
   }
 
   // The seed of a fresh orchestrator: ground truth from run.json and every
@@ -910,7 +940,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     run.pausing = null;
     if (!run.workers.some(w => w.paused)) run.paused = null;
     saveRun(run);
-    return { runId, fresh: false, ...control.resumeSaved(entry.id, { message: warmupText(run), fallback: false }) };
+    const resumed = control.resumeSaved(entry.id, { message: warmupText(run), fallback: false });
+    seedResumedCost(resumed.tabId, run.orchestratorCost);
+    return { runId, fresh: false, ...resumed };
   }
 
   // Bring a worker back: its own transcript (continue), or a fresh session with
@@ -931,6 +963,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     } else {
       const text = `${resumeText(w.sessionDir || '(your session folder)', { interrupted: !!old.interrupted })}${from ? `\n${from}` : ''}`;
       ({ tabId } = control.resumeSaved(old.id, { message: text, fallback: false }));
+      seedResumedCost(tabId, w.costUsd);
     }
     const fresh = loadRun(run.runDir);
     const fw = fresh.workers.find(x => x.id === w.id);
@@ -1423,6 +1456,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report, sendMessage, listAgents,
     handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted,
+    memberModelChanged,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
 }

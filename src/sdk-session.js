@@ -18,9 +18,19 @@
 //   events         every SDK message is broadcast as
 //                  `sdk:event { sessId, runId?, ev: { sdk } }`; the platform adds
 //                  `{ user }` (a submitted turn) and `{ platform }` (status,
-//                  notice, inter-agent message). Everything but stream_event
-//                  deltas is appended to <sessionDir>/transcript.jsonl, which
-//                  sdk:history replays after a reload or restart.
+//                  notice, inter-agent message, files). Everything but
+//                  stream_event deltas and `files` signals is appended to
+//                  <sessionDir>/transcript.jsonl, which sdk:history replays
+//                  after a reload or restart.
+//   status         `{ platform: { kind: 'status', state, costUsd, model,
+//                  actualModel, mappedTo } }`: the chosen model (setModel
+//                  switches it live), the model the last main-agent reply came
+//                  from (cleared by a switch), and the tab's modelMap target for its family. The
+//                  cost of a resume starts from the last one its transcript
+//                  recorded and never goes below it.
+//   files          `{ platform: { kind: 'files', todo, notes } }` when a
+//                  main-agent tool call that wrote the folder's TODO.md /
+//                  NOTES.md has returned: the panel re-reads them (sdk:todo).
 //   exit           the query ending (or kill) broadcasts the same `cli:exit`
 //                  a PTY exit does, so the manager's exit callbacks and
 //                  listeners (Pro's addExitHook, orchestration) fire alike.
@@ -34,6 +44,7 @@ const path = require('path');
 const caps = require('./capabilities');
 const { buildClaudeEnv, sanitizeForDashboard, trackInstance, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
+const { modelFamily } = require('./proxy');
 
 const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
 
@@ -55,6 +66,9 @@ const MAX_IMAGES_BYTES = 18 * 1024 * 1024;
 const PRIORITIES = new Set(['now', 'next', 'later']);
 const HISTORY_LIMIT = 5000;            // envelopes replayed by sdk:history
 const STDERR_TAIL = 4096;
+const COST_TAIL_BYTES = 256 * 1024;    // transcript tail read for a resume's cost
+const MODEL_RE = /^[A-Za-z0-9._-]+(\[1m\])?$/;
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 function uploadUrl(sessId, name) {
   return `/api/sdk/upload?sessId=${encodeURIComponent(sessId)}&name=${encodeURIComponent(name)}`;
@@ -98,6 +112,35 @@ function readTranscript(dir, { sessId, limit = HISTORY_LIMIT } = {}) {
     out.push(env);
   }
   return out;
+}
+
+// The cost a transcript recorded for one session id (status envelopes and
+// results), from its tail only; 0 when there is none. Costs are cumulative, so
+// the highest wins: a resume made before the floor existed logged a 0 status.
+function recordedCost(dir, sessId) {
+  let fd;
+  let text = '';
+  try {
+    fd = fs.openSync(transcriptFile(dir), 'r');
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, COST_TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    text = buf.toString('utf8');
+    if (len < size) text = text.slice(text.indexOf('\n') + 1);   // a cut first line
+  } catch { return 0; } finally { if (fd !== undefined) fs.closeSync(fd); }
+  let best = 0;
+  for (const line of text.split('\n')) {
+    if (!line.includes(sessId)) continue;
+    let env;
+    try { env = JSON.parse(line); } catch { continue; }
+    if (env.sessId !== sessId) continue;
+    const ev = env.ev || {};
+    const cost = ev.platform?.kind === 'status' ? ev.platform.costUsd
+      : ev.sdk?.type === 'result' ? ev.sdk.total_cost_usd : undefined;
+    if (typeof cost === 'number' && Number.isFinite(cost) && cost > best) best = cost;
+  }
+  return best;
 }
 
 // A user turn's text, when the message is a prompt rather than tool results.
@@ -163,6 +206,10 @@ class SdkSession {
     // busy | idle | awaiting (an AskUserQuestion is open) | paused | exited
     this.state = 'idle';
     this.costUsd = 0;
+    this._costFloor = 0;      // a resume's carried-over cost: no result lowers it
+    this._initModel = null;   // the model system/init reported
+    this.actualModel = null;  // the model of the last main-agent reply
+    this._fileTools = new Map();   // tool_use id -> { todo, notes } it writes
     this.autoMemory = false;
     this._authToken = opts.authToken || '';
     this._dashboardPort = opts.dashboardPort || 3457;
@@ -177,8 +224,10 @@ class SdkSession {
     this._exitState = null;
     this._awaiting = false;
     this._stderr = '';
-    // Set by the manager: persists the busy flag in the open-tab manifest.
+    // Set by the manager: persists the busy flag in the open-tab manifest, and
+    // settings changed in place (setModel) in the manifest and history.
     this.onStateChange = null;
+    this.onSettingsChange = null;
   }
 
   get instanceId() {
@@ -220,6 +269,12 @@ class SdkSession {
     this._exitState = null;
     this._awaiting = false;
     this._stderr = '';
+    this._initModel = null;
+    this.actualModel = null;
+    this._fileTools.clear();
+    // A resume carries its cost on (the forced idle status below shows it).
+    this._costFloor = resumeSessionId && this.sessionDir() ? recordedCost(this.sessionDir(), this.sessId) : 0;
+    this.costUsd = this._costFloor;
     this.store.registerSession(this.instanceId, this.sessId);
     // A live instance like a CLI tab's pty: the proxy applies its
     // instance-scoped rules (the AskUserQuestion rewrite, the tab's modelMap)
@@ -359,9 +414,14 @@ class SdkSession {
   _onMessage(msg) {
     this.emitEvent({ sdk: msg });
     if (!msg || typeof msg !== 'object') return;
+    const main = !msg.parent_tool_use_id;
     if (msg.type === 'system' && msg.subtype === 'init') {
       if (msg.apiKeySource && msg.apiKeySource !== 'ANTHROPIC_API_KEY') {
         this.emitEvent({ platform: { kind: 'notice', level: 'warning', text: `Claude Code reports its credential as "${msg.apiKeySource}", not the API key.` } });
+      }
+      if (typeof msg.model === 'string' && msg.model !== this._initModel) {
+        this._initModel = msg.model;
+        if (!this.settings.model) this._emitStatus();
       }
     } else if (msg.type === 'system' && msg.subtype === 'session_state_changed') {
       if (msg.state === 'idle') this._setState('idle');
@@ -370,20 +430,70 @@ class SdkSession {
     } else if (msg.type === 'result') {
       const cost = typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd
         : Object.values(msg.modelUsage || {}).reduce((n, u) => n + (u?.costUSD || 0), 0);
-      // Cumulative for the query (and carried over a resume): the latest wins.
-      if (Number.isFinite(cost)) this.costUsd = cost;
+      // Cumulative for the query: the latest wins, but never below the cost a
+      // resume carried over.
+      if (Number.isFinite(cost)) this.costUsd = Math.max(cost, this._costFloor);
       this._setState(msg.queued_turn_count > 0 ? 'busy' : 'idle', { force: true });
-    } else if (msg.type === 'assistant' && this.state === 'idle') {
-      this._setState('busy');
+    } else if (msg.type === 'assistant') {
+      const model = main ? msg.message?.model : null;
+      const modelChanged = typeof model === 'string' && model !== '<synthetic>' && model !== this.actualModel;
+      if (modelChanged) this.actualModel = model;
+      if (main) this._noteFileTools(msg.message?.content);
+      if (this.state === 'idle') this._setState('busy');
+      else if (modelChanged) this._emitStatus();
+    } else if (msg.type === 'user' && main) {
+      this._fileToolsDone(msg.message?.content);
     }
   }
 
-  // Broadcast one envelope and keep it in the transcript (deltas excepted).
+  // Remember the main agent's tool calls that write the folder's TODO.md or
+  // NOTES.md: an edit tool on either file, or a Bash command naming it (by
+  // its absolute path, or bare when the session runs in its folder).
+  _noteFileTools(content) {
+    const dir = this.sessionDir();
+    if (!dir || !Array.isArray(content)) return;
+    const todo = path.join(path.resolve(dir), 'TODO.md');
+    const notes = path.join(path.resolve(dir), 'NOTES.md');
+    const inDir = !!this.cwd && path.resolve(this.cwd) === path.resolve(dir);
+    for (const b of content) {
+      if (b?.type !== 'tool_use' || !b.id) continue;
+      let hit = null;
+      if (EDIT_TOOLS.has(b.name)) {
+        const p = b.input?.file_path || b.input?.notebook_path;
+        const file = typeof p === 'string' ? path.resolve(this.cwd || dir, p) : null;
+        if (file === todo || file === notes) hit = { todo: file === todo, notes: file === notes };
+      } else if (b.name === 'Bash' && typeof b.input?.command === 'string') {
+        const cmd = b.input.command;
+        const t = cmd.includes(todo) || (inDir && cmd.includes('TODO.md'));
+        const n = cmd.includes(notes) || (inDir && cmd.includes('NOTES.md'));
+        if (t || n) hit = { todo: t, notes: n };
+      }
+      if (hit) this._fileTools.set(b.id, hit);
+    }
+  }
+
+  // Their results are in: tell the panel which file to re-read.
+  _fileToolsDone(content) {
+    if (!this._fileTools.size || !Array.isArray(content)) return;
+    let todo = false;
+    let notes = false;
+    for (const b of content) {
+      const hit = b?.type === 'tool_result' ? this._fileTools.get(b.tool_use_id) : null;
+      if (!hit) continue;
+      this._fileTools.delete(b.tool_use_id);
+      todo = todo || hit.todo;
+      notes = notes || hit.notes;
+    }
+    if (todo || notes) this.emitEvent({ platform: { kind: 'files', todo, notes } });
+  }
+
+  // Broadcast one envelope and keep it in the transcript (deltas and the
+  // live-only `files` signal excepted).
   emitEvent(ev) {
     if (!this.sessId) return;
     const env = { sessId: this.sessId, ...(this.runId ? { runId: this.runId } : {}), ts: Date.now(), ev };
     this.broadcaster.broadcast({ type: 'sdk:event', ...env });
-    if (ev.sdk?.type === 'stream_event') return;
+    if (ev.sdk?.type === 'stream_event' || ev.platform?.kind === 'files') return;
     if (this._seeding) { this._seeding.push(env); return; }
     this._append([env]);
   }
@@ -436,8 +546,41 @@ class SdkSession {
     const busy = state === 'busy' || state === 'awaiting';
     const busyChanged = this.busy !== busy;
     this.busy = busy;
-    if (changed || force) this.emitEvent({ platform: { kind: 'status', state, costUsd: this.costUsd } });
+    if (changed || force) this._emitStatus();
     if (busyChanged) this.onStateChange?.(this);
+  }
+
+  // The status envelope: state, cost and the model picture.
+  _emitStatus() {
+    const model = this.settings.model || this._initModel || null;
+    const family = model ? modelFamily(model) : null;
+    const mappedTo = (family && this.settings.modelMap?.[family]) || null;
+    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, model, actualModel: this.actualModel, mappedTo } });
+  }
+
+  // Switch the model: live on a running query (the next turn uses it), and in
+  // the settings in any case, so a respawn or resume keeps it. Refused once
+  // the session has exited (its saved entry is resumed instead).
+  async setModel(model) {
+    if (typeof model !== 'string' || !MODEL_RE.test(model)) throw new Error(`invalid model ${JSON.stringify(model)}`);
+    if (this.status === 'exited' || this.state === 'exited') throw new Error('this session has exited');
+    if (this._query) await this._query.setModel(model);
+    this.settings = { ...this.settings, model };
+    this.actualModel = null; // unknown until the next reply
+    this.onSettingsChange?.(this);
+    this._emitStatus();
+    return { ok: true, model };
+  }
+
+  // Raise the carried-over cost (orchestration's run.json total for a
+  // resumed member, when the transcript recorded less).
+  seedCost(usd) {
+    if (typeof usd !== 'number' || !Number.isFinite(usd) || usd <= this._costFloor) return;
+    this._costFloor = usd;
+    if (this.costUsd < usd) {
+      this.costUsd = usd;
+      this._emitStatus();
+    }
   }
 
   // An AskUserQuestion is waiting for the owner (/api/ask).
@@ -598,6 +741,7 @@ module.exports.uploadRoute = uploadRoute;
 module.exports.ready = ready;
 module.exports.readTranscript = readTranscript;
 module.exports.transcriptFile = transcriptFile;
+module.exports.recordedCost = recordedCost;
 module.exports.resolveClaudeBinary = resolveClaudeBinary;
 module.exports.DISALLOWED_TOOLS = DISALLOWED_TOOLS;
 module.exports.SETTING_SOURCES = SETTING_SOURCES;

@@ -79,5 +79,6 @@ test('the convention note names the folder and announces the trusted channel', (
   assert.ok(note.includes('/x/sessions/demo-abc123'));
   assert.ok(note.includes('| id | description | depends on | status |'));
   assert.ok(note.includes('## Resume'));
+  assert.match(note, /keep each description short \(60 characters at most\) and put the detail in NOTES\.md/);
   assert.ok(note.includes(folders.CONTROL_TRUST));
 });
