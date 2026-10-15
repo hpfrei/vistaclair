@@ -439,6 +439,11 @@ dashboardServer.on('upgrade', (req, socket, head) => {
 });
 
 cliSessionManager.broadcaster = broadcaster;
+// An SDK session's cost counts up per proxied request (subagents included)
+// until its turn's result settles it.
+broadcaster.onBroadcast((msg) => {
+  if (msg.type === 'interaction:complete') cliSessionManager.noteInteraction(msg.interaction);
+});
 
 // Wire CLI settings getter for proxy model mapping
 createProxyRouter._cliSettingsGetter = (instanceId) => cliSessionManager.getSettingsByInstanceId(instanceId);

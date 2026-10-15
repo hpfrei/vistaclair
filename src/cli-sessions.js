@@ -744,6 +744,13 @@ class CliSessionManager {
     return null;
   }
 
+  // A finished proxied request: an SDK session adds its priced usage to the
+  // running cost of the turn in progress.
+  noteInteraction(interaction) {
+    const session = interaction?.instanceId ? this.getByInstanceId(interaction.instanceId) : null;
+    if (session?.kind === 'sdk') session.addRequestCost(interaction.usage, interaction.pricing);
+  }
+
   getByInstanceId(instanceId) {
     for (const session of this.sessions.values()) {
       if (session.instanceId === instanceId) return session;

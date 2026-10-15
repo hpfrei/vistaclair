@@ -512,29 +512,36 @@
       return rec;
     }
 
-    // Live draws the main agent's thinking and text, and each of its tool
-    // calls as one line: the call's `description` (else its gist). Subagent
-    // messages are tracked for the "now:" line but not drawn: the Inspector
-    // button shows them.
+    // Live draws the thinking and text of the agent and of its subagents, and
+    // each tool call as one line: the call's `description` (else its gist).
+    // A subagent's blocks lead with a chip naming it.
     newBlock(rec, type, opts = {}) {
       if (type === 'tool_use') {
         const blk = { type, partial: '', final: false, toolId: opts.toolId || null, tool: this.toolStarted(opts.toolId, opts.toolName, rec.pk) };
-        if (!rec.pk && !blk.tool.lineEl) {
-          blk.tool.lineEl = el('div', 'sdk-toolline');
+        if (!blk.tool.lineEl) {
+          const line = blk.tool.lineEl = el('div', 'sdk-toolline');
+          if (rec.pk) line.appendChild(this.subChip(rec.pk));
+          blk.tool.lineText = line.appendChild(el('span', 'sdk-toolline-text'));
           this.renderToolLine(blk.tool);
-          this.feed.appendChild(blk.tool.lineEl);
+          this.feed.appendChild(line);
         }
         rec.blocks.push(blk);
         return blk;
       }
-      if (rec.pk || (type !== 'text' && type !== 'thinking')) return null;
+      if (type !== 'text' && type !== 'thinking') return null;
       const blk = { type, raw: '', final: false };
       if (type === 'text') {
         blk.el = blk.body = el('div', 'sdk-text markdown-body');
+        if (rec.pk) {
+          blk.el = el('div', 'sdk-sub');
+          blk.el.append(this.subChip(rec.pk), blk.body);
+        }
         this.markUnread();
       } else {
         blk.el = el('div', 'sdk-thinking open');
-        const head = el('div', 'sdk-thinking-head', 'Thinking');
+        const head = el('div', 'sdk-thinking-head');
+        if (rec.pk) head.appendChild(this.subChip(rec.pk));
+        head.appendChild(document.createTextNode('Thinking'));
         blk.body = el('div', 'sdk-thinking-body');
         head.addEventListener('click', () => blk.el.classList.toggle('open'));
         blk.el.append(head, blk.body);
@@ -542,6 +549,18 @@
       this.feed.appendChild(blk.el);
       rec.blocks.push(blk);
       return blk;
+    }
+
+    // The chip on a subagent's blocks: its type (Explore, coder, …), the
+    // Agent call's description on hover, one colour per subagent run.
+    subChip(pk) {
+      const agent = this.tools.get(pk);
+      const input = (agent && agent.input) || {};
+      if (!this.subColors) this.subColors = new Map();
+      if (!this.subColors.has(pk)) this.subColors.set(pk, this.subColors.size % 4);
+      const chip = el('span', `sdk-subchip sdk-subchip-c${this.subColors.get(pk)}`, input.subagent_type || 'subagent');
+      chip.title = input.description || '';
+      return chip;
     }
 
     toolStarted(id, name, pk) {
@@ -565,7 +584,7 @@
       const line = t.lineEl;
       if (!line) return;
       const gist = oneLine((t.input && t.input.description) || toolSummary(t.name, t.input));
-      line.textContent = gist ? `${prettyTool(t.name)} · ${gist}` : prettyTool(t.name);
+      t.lineText.textContent = gist ? `${prettyTool(t.name)} · ${gist}` : prettyTool(t.name);
       line.title = gist;
       line.classList.toggle('done', !!t.done);
       line.classList.toggle('error', !!t.error);

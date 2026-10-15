@@ -151,6 +151,7 @@ test('options: the same append prompt, settings file, MCP servers and model as t
   assert.strictEqual(o.allowDangerouslySkipPermissions, true);
   assert.deepStrictEqual(o.disallowedTools, ['SendMessage', 'ListAgents']);
   assert.strictEqual(o.includePartialMessages, true);
+  assert.strictEqual(o.forwardSubagentText, true, 'subagents stream their text and thinking too');
   assert.strictEqual(o.pathToClaudeCodeExecutable, '/opt/claude');
   assert.strictEqual(o.sessionId, s.sessId);
   assert.strictEqual(o.resume, undefined);
@@ -247,6 +248,36 @@ test('cost falls back to modelUsage; queued turns keep it busy; an open question
   await tick();
   assert.strictEqual(s.state, 'idle');
   s.kill();
+});
+
+test('a turn\'s proxied requests (subagents included) raise the cost live; the result settles it', async () => {
+  const { s, calls, events } = makeSession();
+  const pricing = { inputCostPerMTok: 1, outputCostPerMTok: 5, cacheReadCostPerMTok: 0.1, cacheCreateCostPerMTok: 1.25 };
+  s.spawn(tmp('proj-'), 80, 24, {});
+  s.addRequestCost({ input_tokens: 1e6 }, pricing);
+  assert.strictEqual(s.costUsd, 0, 'idle before the first send: nothing is in flight');
+  s.submit('go');
+  s.addRequestCost({ input_tokens: 1e6, output_tokens: 1e5 }, pricing);          // main loop: 1 + 0.5
+  s.addRequestCost({ cache_read_input_tokens: 1e6, cache_creation_input_tokens: 1e6 }, pricing); // subagent: 0.1 + 1.25
+  assert.ok(Math.abs(s.costUsd - 2.85) < 1e-9);
+  assert.ok(Math.abs(events().filter(e => e.ev.platform?.kind === 'status').at(-1).ev.platform.costUsd - 2.85) < 1e-9, 'the panel sees it');
+  calls[0].emit({ type: 'result', total_cost_usd: 2.9, queued_turn_count: 0 });
+  await tick();
+  assert.strictEqual(s.costUsd, 2.9, 'the SDK total replaces the estimate');
+  s.addRequestCost({ output_tokens: 1e6 }, pricing);
+  assert.strictEqual(s.costUsd, 2.9, 'a request reported after the result is already in it');
+  s.kill();
+});
+
+test('the manager routes a proxied interaction to its SDK session by instance id', () => {
+  const mgr = new CliSessionManager(9999, { broadcast() {} }, store, {});
+  const seen = [];
+  mgr.sessions.set('t1', { kind: 'sdk', instanceId: 'cli-a', addRequestCost: (u, p) => seen.push([u, p]) });
+  mgr.sessions.set('t2', { kind: 'cli', instanceId: 'cli-b', addRequestCost: () => seen.push('cli') });
+  mgr.noteInteraction({ instanceId: 'cli-a', usage: { input_tokens: 1 }, pricing: { inputCostPerMTok: 1 } });
+  mgr.noteInteraction({ instanceId: 'cli-b', usage: {}, pricing: {} });
+  mgr.noteInteraction({ instanceId: 'nobody' });
+  assert.deepStrictEqual(seen, [[{ input_tokens: 1 }, { inputCostPerMTok: 1 }]]);
 });
 
 // --- Model, cost carry-over, folder signals ---

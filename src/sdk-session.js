@@ -90,6 +90,16 @@ function resolveClaudeBinary(envPath) {
   throw new Error('the `claude` CLI is not on PATH');
 }
 
+// A request's cost from its usage and the proxy's pricing (the Inspector's
+// computeCost).
+function requestCost(usage, pricing) {
+  const per = (tokens, rate) => (tokens || 0) * (rate || 0) / 1e6;
+  return per(usage.input_tokens, pricing.inputCostPerMTok)
+    + per(usage.output_tokens, pricing.outputCostPerMTok)
+    + per(usage.cache_read_input_tokens, pricing.cacheReadCostPerMTok || pricing.inputCostPerMTok)
+    + per(usage.cache_creation_input_tokens, pricing.cacheCreateCostPerMTok || pricing.inputCostPerMTok);
+}
+
 // The session's transcript file (envelopes, one per line).
 function transcriptFile(dir) {
   return path.join(dir, 'transcript.jsonl');
@@ -356,6 +366,8 @@ class SdkSession {
       allowDangerouslySkipPermissions: true,
       disallowedTools: [...DISALLOWED_TOOLS],
       includePartialMessages: true,
+      // Subagents' text and thinking too, not only their tool calls.
+      forwardSubagentText: true,
       // Claude Code offers AskUserQuestion only to a host with a permission
       // prompt surface. The proxy rewrites the model's call to the integrated
       // vista-AskUserQuestion (the dashboard modal), so this callback is only
@@ -551,6 +563,18 @@ class SdkSession {
   }
 
   // The status envelope: state, cost and the model picture.
+  // One proxied request of a turn in progress (the main loop or a subagent):
+  // its priced usage raises the cost shown until the turn's result replaces
+  // it with the SDK's own total. A request landing while idle (after the
+  // result) is already in that total.
+  addRequestCost(usage, pricing) {
+    if (!usage || !pricing || !this.running || this.state === 'idle') return;
+    const usd = requestCost(usage, pricing);
+    if (!(usd > 0)) return;
+    this.costUsd += usd;
+    this._emitStatus();
+  }
+
   _emitStatus() {
     const model = this.settings.model || this._initModel || null;
     const family = model ? modelFamily(model) : null;
