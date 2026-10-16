@@ -1559,10 +1559,11 @@ function handleMessage(msg) {
       window.capabilitiesModule?.handleMessage(msg);
       break;
 
-    // Default model for new CLI tabs
+    // Settings for new CLI tabs: default model, engine
     case 'prefs:cliModel':
       state.cliModel = msg.model || null;
       if (Array.isArray(msg.aliases)) state.cliModelAliases = msg.aliases;
+      state.cliFallbackEngine = msg.fallbackEngine || 'sdk';
       window.cliModule?.handleMessage(msg);
       break;
 

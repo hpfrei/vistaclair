@@ -52,9 +52,9 @@ function handleMessage(ws, msg, bc) {
       break;
     }
     case 'cli:open': {
-      // "New CLI in directory…": openCli asks Simple / Orchestrator and the
-      // engine (the same ask an app's Change gets) — only what the message
-      // leaves open — then mints the tab and launches it. The tab reaches every
+      // "New CLI in directory…": openCli asks Simple / Orchestrator and an SDK
+      // session's billing (the same ask an app's Change gets) — only what the
+      // message leaves open — then mints the tab and launches it. The tab reaches every
       // client through cli:tabs; the reply lets the requester switch to it.
       if (!msg.cwd || !bc.orchestration) break;
       const cols = msg.cols || 80;

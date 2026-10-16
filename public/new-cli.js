@@ -2,11 +2,13 @@
  *
  * The server's New CLI ask (orchestration.askMode) carries formData.kind
  * 'new-cli' and formData.newCli; cli.js's ask overlay hands such a form here
- * instead of building the generic one. The dialog asks the session type, the
- * engine, an SDK session's billing, an orchestrator's own model, and an
- * optional routing of model families to other models (the tab's modelMap,
- * applied by the proxy to the whole session or run). It answers with the same
- * ids the generic form uses — mode, engine, auth — plus model and modelMap.
+ * instead of building the generic one. The dialog asks the session type, an
+ * SDK session's billing, an orchestrator's own model, and an optional routing
+ * of model families to other models (the tab's modelMap, applied by the proxy
+ * to the whole session or run). The engine is never asked: the server decides
+ * it (given.engine — the Agent SDK panel, or a terminal by the fallback pref).
+ * It answers with the same ids the generic form uses — mode, auth — plus
+ * model and modelMap.
  *
  *   window.newCliDialog.render(newCli, { uid, onSubmit(answer), onCancel() })
  *     -> { el, focus() }
@@ -109,14 +111,6 @@
         </div>
       </div>`}
       <div class="ncd-rows">
-        ${given.engine ? '' : `
-        <div class="ncd-row">
-          <div class="ncd-label">Engine</div>
-          ${seg('engine', [
-            { value: 'sdk', label: 'Agent SDK panel', title: 'Claude Code in an HTML panel: live thinking, tool calls, images' },
-            { value: 'cli', label: 'Terminal', title: 'Claude Code in a terminal tab, on your usual Claude credential' },
-          ], state.engine)}
-        </div>`}
         <div class="ncd-row" data-row="auth">
           <div class="ncd-label">Billing</div>
           <div class="ncd-auth-slot"></div>
@@ -236,7 +230,6 @@
     el.addEventListener('change', (e) => {
       const t = e.target;
       if (t.name === `${uid}-mode`) state.mode = t.value;
-      else if (t.name === `${uid}-engine`) state.engine = t.value;
       else if (t.name === `${uid}-auth`) state.auth = t.value;
       else if (t.name === `${uid}-model`) state.model = t.value;
       else if (t.dataset.map) state.map[t.dataset.map] = t.value;
@@ -264,7 +257,6 @@
       for (const f of FAMILIES) if (state.map[f]) modelMap[f] = state.map[f];
       const answer = [
         { id: 'mode', question: 'Session type', answer: labels.mode[state.mode] },
-        { id: 'engine', question: 'Engine', answer: labels.engine[state.engine] },
       ];
       if (state.engine === 'sdk' && state.auth) answer.push({ id: 'auth', question: 'Billing', answer: labels.auth[state.auth] });
       if (state.mode === 'orchestrator' && state.model) answer.push({ id: 'model', question: 'Orchestrator model', answer: state.model });

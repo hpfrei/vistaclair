@@ -35,13 +35,6 @@
     "builtin": true
   },
   {
-    "id": "auth-inject",
-    "name": "Auth Inject",
-    "slug": "Injects OAuth token from ~/.claude/.credentials.json into requests missing auth headers, allowing --bare with Max/Pro subscriptions",
-    "enabled": false,
-    "builtin": true
-  },
-  {
     "id": "title-schema-shortcut",
     "name": "Title Schema Shortcut",
     "slug": "Short-circuits requests where output_config.format is a json_schema with type 'object', a single required property 'title', and additionalProperties: false. Instead of calling the LLM, returns a dummy response with text '{\"title\":\"Dummy (by vistaclair)\"}' and zero token usage. This avoids spending tokens on Claude Code's automatic title-generation requests while keeping claude -p compatibility intact.",

@@ -87,6 +87,36 @@ test('resolveAuth picks the subscription by default and reports which credential
   });
 });
 
+test('an SDK session with no billing choice gets the global default: the subscription over a key', () => {
+  withHome(LIVE, (caps) => {
+    const base = emptyBase();
+    const prevEnvKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'sk-env';
+    try {
+      // sdk-session passes settings.auth || undefined: unset is no override.
+      assert.deepEqual(caps.resolveAuth(base, { authMode: undefined }), { credential: 'subscription', key: '' });
+      assert.deepEqual(caps.resolveAuth(base, { authMode: 'apikey' }), { credential: 'api-key', key: 'sk-env' });
+    } finally {
+      if (prevEnvKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevEnvKey;
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+  // No subscription: the key.
+  withHome(null, (caps) => {
+    const base = emptyBase();
+    const prevEnvKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'sk-env';
+    try {
+      assert.deepEqual(caps.resolveAuth(base, { authMode: undefined }), { credential: 'api-key', key: 'sk-env' });
+    } finally {
+      if (prevEnvKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevEnvKey;
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
 test('with no subscription and no key there is no credential at all', () => {
   withHome(null, (caps) => {
     const base = emptyBase();

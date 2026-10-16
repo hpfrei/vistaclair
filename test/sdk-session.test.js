@@ -160,7 +160,7 @@ test('options: the same append prompt, settings file, MCP servers and model as t
   s.kill();
 });
 
-test('options: env is the whole buildClaudeEnv, with API-key auth and no OAuth', () => {
+test('options: env is the whole buildClaudeEnv, with API-key auth (no subscription) and no OAuth', () => {
   const { s, calls } = makeSession();
   s.spawn(tmp('proj-'), 80, 24, { autoMemory: false });
   const env = calls[0].options.env;
@@ -195,11 +195,17 @@ test('options: settings.auth subscription runs on the OAuth login, with no API k
     assert.match(events().find(e => e.ev.platform?.kind === 'notice').ev.platform.text, /not the Claude subscription/);
     s.kill();
 
-    // Unset is the API key, as before.
+    // Unset follows the global default: the subscription when one is active,
+    // though an API key exists too (without one, the key: the test above).
     const b = makeSession();
     b.s.spawn(tmp('proj-'), 80, 24, {});
-    assert.strictEqual(b.calls[0].options.env.ANTHROPIC_API_KEY, 'sk-ant-test');
+    assert.strictEqual(b.calls[0].options.env.ANTHROPIC_API_KEY, undefined);
     b.s.kill();
+    // settings.auth apikey still picks the key.
+    const c = makeSession({ auth: 'apikey' });
+    c.s.spawn(tmp('proj-'), 80, 24, {});
+    assert.strictEqual(c.calls[0].options.env.ANTHROPIC_API_KEY, 'sk-ant-test');
+    c.s.kill();
   } finally {
     fs.rmSync(creds, { force: true });
   }
