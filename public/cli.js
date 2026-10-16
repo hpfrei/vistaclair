@@ -429,7 +429,7 @@
           clickTimer = null;
           switchView('dashboard');
           const clickedTab = tabs.get(tabId);
-          if (clickedTab?.instanceId) window.inspectorModule?.switchInstanceTab?.(clickedTab.instanceId);
+          if (clickedTab?.instanceId) window.inspectorModule?.openSession?.(clickedTab.instanceId);
         }, 250);
       });
       btn.appendChild(label);

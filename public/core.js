@@ -1500,10 +1500,9 @@ function handleMessage(msg) {
     case 'interaction:enriched':
     case 'interaction:detail':
     case 'interaction:sseEvents':
-    case 'cleared':
-    case 'inspector:instancesCleared':
-    case 'inspector:sessionLoaded':
-    case 'inspector:allLoaded':
+    case 'inspector:sessions':
+    case 'inspector:sessionsRemoved':
+    case 'inspector:snapshot':
     case 'inspector:turnsDeleted':
     case 'inspector:sessionTotals':
       window.inspectorModule?.handleMessage(msg);
@@ -1525,7 +1524,6 @@ function handleMessage(msg) {
     case 'cli:exit':
     case 'cli:spawned':
       document.querySelector('.header-tab[data-view="directories"]')?.classList.remove('tab-loading');
-      if (msg.type === 'cli:spawned') window.inspectorModule?.handleCliSpawned?.(msg);
     case 'cli:tabs':
       if (msg.type === 'cli:tabs') {
         document.querySelector('.header-tab[data-view="claude"]')?.classList.remove('tab-loading');
@@ -1579,9 +1577,9 @@ function handleMessage(msg) {
       break;
 
 
-    // Claude instance lifecycle
+    // Claude instance lifecycle: the inspector reads it from inspector:sessions.
+    case 'claude:count':
     case 'claude:instances':
-      window.inspectorModule?.handleMessage(msg);
       break;
 
     // MCP

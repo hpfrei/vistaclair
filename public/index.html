@@ -124,11 +124,12 @@
   <main id="view-dashboard" class="hidden" style="display:none">
     <div class="view-nav inspector-tab-wrapper" id="inspectorTabWrapper">
       <div class="inspector-tab-scroll" id="inspectorTabStrip">
-        <button class="view-tab active" data-instance-id="all">All</button>
+        <button class="view-tab inspector-sessions-tab active" data-instance-id="sessions">Sessions</button>
       </div>
       <div class="inspector-tab-pinned" id="inspectorTabPinned"></div>
     </div>
-    <div class="inspector-body">
+    <div class="inspector-sessions" id="inspectorSessions"></div>
+    <div class="inspector-body hidden">
       <aside id="timeline">
         <div id="timeline-header">
           <span>Timeline</span>

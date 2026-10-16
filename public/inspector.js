@@ -14,8 +14,6 @@
 
   // --- Auto-select suppression: don't jump away from user-selected turns ---
   let _liveMode = localStorage.getItem('timelineLive') !== 'false';
-  let _autoClearInactive = localStorage.getItem('inspectorAutoClear') === '1';
-  let _suppressAutoClear = false;
 
   // --- Subagent registry: track numbering and colors for parallel subagents ---
   const _subagentRegistry = new Map();    // agentId -> { agentType, number, colorIndex }
@@ -112,145 +110,99 @@
     }
   }
 
-  // --- Instance tabs ---
-  const knownInstances = new Map(); // instanceId -> { instanceId, status, spawnedAt }
-  let activeInstanceTab = 'all';
+  // --- Session tabs ---
+  /* The first tab lists every session as a card (from the server's summary
+     feed, inspector:sessions); each open session has a closable tab of its
+     own. Opening one subscribes this browser to the session: the server sends
+     its snapshot, then its live events. Closing drops the subscription and
+     everything this page held for it. Nothing here survives a reload. */
+  const SESSIONS_TAB = 'sessions';
+  const SESSION_GROUPS = [
+    { kind: 'cli', title: 'CLI sessions' },
+    { kind: 'app', title: 'App AI (ai.prompt)' },
+    { kind: 'ext', title: 'External' },
+  ];
+  const _sessions = new Map();          // instanceId → card from the summary feed
+  let _sessionsAutoClear = false;
+  const _openTabs = new Map();          // instanceId → { loading }, in opening order
+  let activeInstanceTab = SESSIONS_TAB;
   const inspectorTabStrip = document.getElementById('inspectorTabStrip');
+  const _sessionsGrid = document.getElementById('inspectorSessions');
+  const _inspectorBody = document.querySelector('#view-dashboard .inspector-body');
   const _sessionTotals = new Map();     // CLI instanceId → whole-session totals from the server
   const _sessionTotalsAsked = new Set();
   let _statsTab = null;                 // the tab the footer was last drawn for
 
-  // --- External session tabs ---
-  let extTabCounter = 0;
-  let activeExtTab = null; // e.g. 'ext-1'
-
-  function stampExtInteraction(interaction) {
-    // Assign null-instanceId interactions to the active ext tab (auto-create if needed)
-    if (interaction.instanceId) return;
-    if (!activeExtTab) {
-      extTabCounter++;
-      activeExtTab = `ext-${extTabCounter}`;
-      knownInstances.set(activeExtTab, {
-        instanceId: activeExtTab,
-        status: 'running', spawnedAt: interaction.timestamp || Date.now(), cwd: null,
-      });
-      renderInspectorTabStrip();
-    }
-    interaction.instanceId = activeExtTab;
-  }
-
-  function cliInstanceLabel(instanceId) {
-    const info = knownInstances.get(instanceId);
+  // The CLI tab that owns an instance, if it is still open.
+  function _cliTabIdOf(instanceId) {
     const cliTabs = window.cliModule?.tabs;
-    // Resolve the live CLI tab that owns this instance. Prefer a current match by
-    // instanceId (the stored info.tabId can go stale when tabs are added/removed),
-    // then fall back to the stored tabId only if it's still a real tab.
-    let tabId = null;
-    if (cliTabs) {
-      for (const [id, t] of cliTabs) {
-        if (t.instanceId === instanceId) { tabId = id; break; }
-      }
+    if (!cliTabs) return null;
+    for (const [id, t] of cliTabs) {
+      if (t.instanceId === instanceId) return id;
     }
-    if (!tabId && info?.tabId && cliTabs?.has(info.tabId)) tabId = info.tabId;
-    if (tabId && window.cliModule?.computeTabLabel) {
-      const label = window.cliModule.computeTabLabel(tabId);
-      // computeTabLabel returns the raw tabId only when it can't derive a name;
-      // treat that as "no label" and fall through to the cwd basename below.
-      if (label && label !== tabId) return label.replace(/^>/, '');
-    }
-    const cwd = info?.cwd || (tabId && cliTabs?.get(tabId)?.cwd);
-    if (cwd) {
-      const parts = cwd.replace(/\/+$/, '').split('/');
-      return parts[parts.length - 1] || cwd;
-    }
-    // Last resort: a CLI session with no resolvable tab or cwd. Show a clean
-    // generic label rather than the internal cli-<uuid> instanceId.
-    return 'CLI';
-  }
-
-  // app-<appName>-ai-<rand> → { appName } (per-call ai.prompt sessions)
-  function parseAppAiInstance(instanceId) {
-    const m = typeof instanceId === 'string' && instanceId.match(/^app-(.+)-ai-[0-9a-f]+$/);
-    return m ? { appName: m[1] } : null;
-  }
-
-  function appAiLabel(instanceId, appName) {
-    // Ordinal only when several tabs of the same app coexist, numbered by
-    // insertion order so concurrent calls read "qmd · AI 1", "qmd · AI 2".
-    const siblings = [];
-    for (const id of knownInstances.keys()) {
-      if (parseAppAiInstance(id)?.appName === appName) siblings.push(id);
-    }
-    if (siblings.length <= 1) return `${appName} · AI`;
-    return `${appName} · AI ${siblings.indexOf(instanceId) + 1}`;
+    return null;
   }
 
   function instanceDisplayLabel(instanceId) {
-    if (!instanceId || instanceId === 'all') return 'Others';
-    // ext-1 → "Ext 1"
-    const extMatch = instanceId.match(/^ext-(\d+)$/);
-    if (extMatch) return `Ext ${extMatch[1]}`;
-    // chat-tab-1 → "Chat 1"
-    const chatMatch = instanceId.match(/^chat-tab-(\d+)$/);
-    if (chatMatch) return `Chat ${chatMatch[1]}`;
-    const appAi = parseAppAiInstance(instanceId);
-    if (appAi) return appAiLabel(instanceId, appAi.appName);
-    // cli-tab-1 → cwd-based label
-    if (instanceId.startsWith('cli-')) return cliInstanceLabel(instanceId);
-    return instanceId;
+    if (instanceId === SESSIONS_TAB) return 'Sessions';
+    // A live CLI tab's own name, as the CLI strip shows it.
+    const tabId = instanceId?.startsWith('cli-') ? _cliTabIdOf(instanceId) : null;
+    if (tabId && window.cliModule?.computeTabLabel) {
+      const label = window.cliModule.computeTabLabel(tabId);
+      if (label && label !== tabId) return label.replace(/^>/, '');
+    }
+    return _sessions.get(instanceId)?.label || instanceId;
   }
 
-  function hasOrphanInteractions() {
-    return state.interactions.some(i => !i.instanceId || !knownInstances.has(i.instanceId));
+  function _relTime(ms) {
+    if (!ms) return '';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return new Date(ms).toLocaleDateString();
   }
 
   function renderInspectorTabStrip() {
     if (!inspectorTabStrip) return;
     inspectorTabStrip.innerHTML = '';
-    // "Others" tab — only when orphan interactions exist
-    const showOthers = false;
-    if (showOthers) {
-      const allBtn = document.createElement('button');
-      allBtn.className = 'view-tab' + (activeInstanceTab === 'all' ? ' active' : '');
-      allBtn.dataset.instanceId = 'all';
-      allBtn.textContent = 'Others';
-      inspectorTabStrip.appendChild(allBtn);
-    } else if (activeInstanceTab === 'all' && knownInstances.size > 0) {
-      activeInstanceTab = knownInstances.keys().next().value;
-      // After a reload the CLI tabs arrive (claude:instances, a resumed
-      // session) after init drew an empty footer; show the new tab properly
-      // unless the caller is about to.
-      queueMicrotask(() => { if (_statsTab !== activeInstanceTab) switchInstanceTab(activeInstanceTab); });
-    }
-    // Per-instance tabs
-    for (const [id, info] of knownInstances) {
+    const home = document.createElement('button');
+    home.className = 'view-tab inspector-sessions-tab' + (activeInstanceTab === SESSIONS_TAB ? ' active' : '');
+    home.dataset.instanceId = SESSIONS_TAB;
+    home.textContent = 'Sessions';
+    inspectorTabStrip.appendChild(home);
+
+    for (const [id, tab] of _openTabs) {
+      const card = _sessions.get(id);
       const btn = document.createElement('button');
       btn.className = 'view-tab' + (activeInstanceTab === id ? ' active' : '');
-      if (info.status === 'exited') btn.classList.add('instance-exited');
+      if (card?.status === 'inactive') btn.classList.add('instance-exited');
+      if (tab.loading) btn.classList.add('instance-loading');
       btn.dataset.instanceId = id;
       const label = document.createElement('span');
       label.textContent = instanceDisplayLabel(id);
       if (id.startsWith('cli-')) {
         label.className = 'cli-tab-label';
+        // A second click on the open tab goes to its CLI tab.
         label.addEventListener('click', (e) => {
           e.stopPropagation();
           if (activeInstanceTab !== id) {
             switchInstanceTab(id);
             return;
           }
-          const entry = knownInstances.get(id);
-          if (entry?.tabId) {
+          const tabId = _cliTabIdOf(id);
+          if (tabId) {
             switchView('claude');
-            window.cliModule?.switchTab?.(entry.tabId);
+            window.cliModule?.switchTab?.(tabId);
           }
         });
       }
       btn.appendChild(label);
 
       // Model override indicator (non-clickable)
-      if (id.startsWith('cli-') && info.tabId && window.cliModule?.tabs) {
-        const cliTab = window.cliModule.tabs.get(info.tabId);
-        const hasOverride = cliTab?.settings &&
+      const cliTab = id.startsWith('cli-') ? window.cliModule?.tabs?.get(_cliTabIdOf(id)) : null;
+      if (cliTab) {
+        const hasOverride = cliTab.settings &&
           cliTab.settings.modelMap && Object.values(cliTab.settings.modelMap).some(v => v);
         const overrideIcon = document.createElement('span');
         overrideIcon.className = 'cli-model-override-btn' + (hasOverride ? ' active' : '') + ' inspector-only';
@@ -263,100 +215,167 @@
 
       const close = document.createElement('span');
       close.className = 'view-tab-close';
-      close.textContent = '\u00d7';
+      close.textContent = '×';
+      close.title = 'Close this tab';
       btn.appendChild(close);
       inspectorTabStrip.appendChild(btn);
     }
-    // Combined "Clear inactive" button with autoclear toggle
-    const hasExited = [...knownInstances.values()].some(i => i.status === 'exited');
 
-    // Autoclear: if enabled, clear exited instances immediately. App-AI tabs are
-    // exempt — the headless `claude -p` exits after every ai.prompt call, and
-    // their whole value is post-hoc timeline inspection. Manual clear still works.
-    if (hasExited && _autoClearInactive && !_suppressAutoClear) {
-      const exitedIds = [];
-      for (const [id, info] of knownInstances) {
-        if (info.status === 'exited' && !parseAppAiInstance(id)) exitedIds.push(id);
-      }
-      if (exitedIds.length) {
-        for (const id of exitedIds) knownInstances.delete(id);
-        sendWs({ type: 'inspector:clearInstances', instanceIds: exitedIds });
-        if (!knownInstances.has(activeInstanceTab)) {
-          const fallback = knownInstances.size > 0 ? knownInstances.keys().next().value : 'all';
-          activeInstanceTab = fallback;
-        }
-        queueMicrotask(() => renderInspectorTabStrip());
-        return;
-      }
-    }
-
-    {
-      const clearBtn = document.createElement('button');
-      clearBtn.className = 'view-tab-action' + (_autoClearInactive ? ' autoclear-on' : '');
-      clearBtn.title = _autoClearInactive
-        ? (hasExited ? 'Clear remaining inactive tabs (autoclear skips app AI tabs)' : 'Autoclear active — inactive tabs are removed automatically')
-        : 'Clear all inactive tabs';
-
-      // Auto-toggle SVG — recycle arrows when off, check-circle when on
-      const autoToggle = document.createElement('span');
-      autoToggle.className = 'autoclear-toggle' + (_autoClearInactive ? ' active' : '');
-      autoToggle.title = _autoClearInactive ? 'Disable autoclear' : 'Enable autoclear';
-      autoToggle.innerHTML = _autoClearInactive
+    // Autoclear: one switch for the whole server — every session is removed
+    // as soon as it is inactive, here and in every other browser.
+    const pinned = document.getElementById('inspectorTabPinned');
+    if (pinned) {
+      const btn = document.createElement('button');
+      btn.className = 'view-tab-action autoclear-switch' + (_sessionsAutoClear ? ' autoclear-on' : '');
+      btn.title = _sessionsAutoClear
+        ? 'Autoclear on: inactive sessions are removed as soon as they stop. Click to turn off.'
+        : 'Autoclear off: each group keeps its 20 newest inactive sessions. Click to remove every inactive session as soon as it stops.';
+      btn.innerHTML = `<span class="autoclear-toggle${_sessionsAutoClear ? ' active' : ''}">${_sessionsAutoClear
         ? '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.5"/><polyline points="5 8.2 7.2 10.5 11 5.5"/></svg>'
-        : '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8a5.5 5.5 0 0 1 9.3-4"/><path d="M13.5 8a5.5 5.5 0 0 1-9.3 4"/><polyline points="12 1.5 12 4.5 9 4.5"/><polyline points="4 11.5 4 14.5 7 14.5"/></svg>';
-      autoToggle.addEventListener('click', (e) => {
-        e.stopPropagation();
-        _autoClearInactive = !_autoClearInactive;
-        localStorage.setItem('inspectorAutoClear', _autoClearInactive ? '1' : '0');
-        renderInspectorTabStrip();
-      });
-
-      const textSpan = document.createElement('span');
-      textSpan.className = 'autoclear-label-text';
-      textSpan.textContent = hasExited ? 'Clear inactive' : (_autoClearInactive ? 'Autoclear' : 'Clear inactive');
-
-      clearBtn.appendChild(autoToggle);
-      clearBtn.appendChild(textSpan);
-
-      // Manual clear works even with autoclear on — app-AI tabs are exempt from
-      // autoclear and would otherwise be unclearable.
-      if (hasExited) {
-        clearBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          const exitedIds = [];
-          for (const [id, info] of knownInstances) {
-            if (info.status === 'exited') exitedIds.push(id);
-          }
-          for (const id of exitedIds) knownInstances.delete(id);
-          if (exitedIds.length) sendWs({ type: 'inspector:clearInstances', instanceIds: exitedIds });
-          if (!knownInstances.has(activeInstanceTab)) {
-            const fallback = knownInstances.size > 0 ? knownInstances.keys().next().value : 'all';
-            switchInstanceTab(fallback);
-          } else renderInspectorTabStrip();
-        });
-      }
-
-      const pinnedContainer = document.getElementById('inspectorTabPinned');
-      if (pinnedContainer) {
-        pinnedContainer.innerHTML = '';
-        pinnedContainer.appendChild(clearBtn);
-      } else {
-        inspectorTabStrip.appendChild(clearBtn);
-      }
+        : '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8a5.5 5.5 0 0 1 9.3-4"/><path d="M13.5 8a5.5 5.5 0 0 1-9.3 4"/><polyline points="12 1.5 12 4.5 9 4.5"/><polyline points="4 11.5 4 14.5 7 14.5"/></svg>'
+      }</span><span class="autoclear-label-text">Autoclear</span>`;
+      btn.addEventListener('click', () => sendWs({ type: 'inspector:setAutoClear', value: !_sessionsAutoClear }));
+      pinned.innerHTML = '';
+      pinned.appendChild(btn);
     }
 
     updateStreamingState();
   }
 
+  function _showSessionsGrid(on) {
+    if (_sessionsGrid) _sessionsGrid.classList.toggle('hidden', !on);
+    if (_inspectorBody) _inspectorBody.classList.toggle('hidden', on);
+  }
+
+  function _cardHtml(s) {
+    const status = s.status === 'streaming' ? 'streaming' : s.status === 'running' ? 'running' : 'inactive';
+    const n = s.turns || s.apiCalls || 0;
+    const unit = s.turns ? 'turn' : 'API call';
+    const meta = [
+      `${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''}`,
+      s.cost != null ? formatCost(s.cost) : null,
+      s.lastAt ? `<span title="${escHtml(new Date(s.lastAt).toLocaleString())}">${_relTime(s.lastAt)}</span>` : null,
+    ].filter(Boolean).join(' · ');
+    return `<div class="insp-card-head">`
+      + `<span class="insp-card-label">${escHtml(instanceDisplayLabel(s.instanceId))}</span>`
+      + (s.kind === 'app' ? '<span class="insp-card-kind">ai.prompt</span>' : '')
+      + `<span class="insp-card-status is-${status}">${status}</span></div>`
+      + (s.cwd ? `<div class="insp-card-cwd" title="${escHtml(s.cwd)}">${escHtml(s.cwd)}</div>` : '')
+      + (s.model ? `<div class="insp-card-model">${escHtml(s.model)}</div>` : '')
+      + `<div class="insp-card-meta">${meta}</div>`;
+  }
+
+  // Redrawn on every summary push; skipped when nothing visible changed, so a
+  // click is not lost to a rebuild under the pointer.
+  let _gridHtml = '';
+  function renderSessionsGrid() {
+    if (!_sessionsGrid || activeInstanceTab !== SESSIONS_TAB) return;
+    const byKind = { cli: [], app: [], ext: [] };
+    for (const s of _sessions.values()) (byKind[s.kind] || byKind.ext).push(s);
+    let html = '';
+    for (const { kind, title } of SESSION_GROUPS) {
+      const list = byKind[kind].sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+      const inactive = list.filter(s => s.status === 'inactive').length;
+      html += `<section class="insp-group" data-kind="${kind}">`
+        + `<header class="insp-group-head"><h3>${escHtml(title)}</h3>`
+        + `<span class="insp-group-count">${list.length - inactive} running \u00b7 ${inactive} inactive</span>`
+        + `<button class="insp-group-clear" data-kind="${kind}"${inactive ? '' : ' disabled'}`
+        + ` title="Remove every inactive session of this group, with its stored data">Clear</button></header>`
+        + '<div class="insp-cards">';
+      if (!list.length) {
+        html += kind === 'ext'
+          ? '<p class="insp-empty">None. Point Claude Code at the proxy to see it here: <code>ANTHROPIC_BASE_URL=http://localhost:3456 claude</code></p>'
+          : '<p class="insp-empty">None.</p>';
+      }
+      for (const s of list) {
+        html += `<button class="insp-card${s.status === 'inactive' ? ' is-inactive' : ''}${_openTabs.has(s.instanceId) ? ' is-open' : ''}"`
+          + ` data-instance-id="${escHtml(s.instanceId)}">${_cardHtml(s)}</button>`;
+      }
+      html += '</div></section>';
+    }
+    if (html === _gridHtml) return;
+    _gridHtml = html;
+    _sessionsGrid.innerHTML = html;
+  }
+
+  if (_sessionsGrid) {
+    _sessionsGrid.addEventListener('click', (e) => {
+      const clear = e.target.closest('.insp-group-clear');
+      if (clear) {
+        if (!clear.disabled) sendWs({ type: 'inspector:clearKind', kind: clear.dataset.kind });
+        return;
+      }
+      const card = e.target.closest('.insp-card');
+      if (card) openSessionTab(card.dataset.instanceId);
+    });
+  }
+
+  // Open a session's tab (subscribing on first open) and focus it.
+  function openSessionTab(instanceId) {
+    if (!instanceId || instanceId === SESSIONS_TAB) { switchInstanceTab(SESSIONS_TAB); return; }
+    if (!_openTabs.has(instanceId)) {
+      _openTabs.set(instanceId, { loading: true });
+      sendWs({ type: 'inspector:subscribe', instanceId });
+    }
+    switchInstanceTab(instanceId);
+  }
+
+  // Close a session's tab: stop its traffic and forget everything held for it.
+  function closeSessionTab(instanceId) {
+    if (!_openTabs.has(instanceId)) return;
+    const order = [..._openTabs.keys()];
+    _openTabs.delete(instanceId);
+    sendWs({ type: 'inspector:unsubscribe', instanceId });
+    _dropInstance(instanceId);
+    if (activeInstanceTab === instanceId) {
+      const at = order.indexOf(instanceId);
+      const next = order[at + 1] ?? order[at - 1];
+      switchInstanceTab(next && _openTabs.has(next) ? next : SESSIONS_TAB);
+    } else {
+      renderInspectorTabStrip();
+    }
+  }
+
+  function _dropInstance(instanceId) {
+    const dropped = new Set();
+    state.interactions = state.interactions.filter(i => {
+      if (i.instanceId !== instanceId) return true;
+      dropped.add(i.id);
+      return false;
+    });
+    for (const id of dropped) {
+      stopDurationTimer(id);
+      _pendingSseRequests.delete(id);
+      _pendingDetailRequests.delete(id);
+      _sseIndex.delete(id);
+    }
+    for (let k = _recentFull.length - 1; k >= 0; k--) {
+      if (dropped.has(_recentFull[k])) _recentFull.splice(k, 1);
+    }
+    if ([..._splitInteractions].some(id => dropped.has(id))) exitSplitMode();
+    const sel = state.selection;
+    if (sel && dropped.has(sel.type === 'tool' ? sel.interactionId : sel.id)) {
+      state.selection = null;
+      _detailView = null;
+      detailContent.innerHTML = '';
+      detailContent.classList.add('hidden');
+      emptyState.classList.remove('hidden');
+    }
+    _sessionTotals.delete(instanceId);
+    _sessionTotalsAsked.delete(instanceId);
+  }
+
   function switchInstanceTab(instanceId) {
+    // Opening a session from elsewhere (a CLI or SDK panel) lands on its tab.
+    if (instanceId !== SESSIONS_TAB && !_openTabs.has(instanceId)) { openSessionTab(instanceId); return; }
+    if (_splitMode && activeInstanceTab !== instanceId) exitSplitMode();
     activeInstanceTab = instanceId;
+    _showSessionsGrid(instanceId === SESSIONS_TAB);
     renderInspectorTabStrip();
-    renderTimelineActive();
     updateStats();
-    // Select last matching interaction
-    const filtered = activeInstanceTab === 'all'
-      ? state.interactions.filter(i => !i.instanceId || !knownInstances.has(i.instanceId) )
-      : state.interactions.filter(i => i.instanceId === activeInstanceTab);
+    if (instanceId === SESSIONS_TAB) { renderSessionsGrid(); return; }
+    renderTimelineActive();
+    const filtered = state.interactions.filter(i => i.instanceId === activeInstanceTab);
     const last = filtered[filtered.length - 1];
     if (last) {
       select({ type: 'turn', id: last.id });
@@ -365,8 +384,26 @@
       document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
       detailContent.classList.add('hidden');
       emptyState.classList.remove('hidden');
+      renderEmptyState();
     }
   }
+
+  // The summary feed: cards, the autoclear switch, and every busy indicator.
+  let _stripSig = '';
+  function _applySessions(msg) {
+    _sessions.clear();
+    for (const s of msg.sessions || []) _sessions.set(s.instanceId, s);
+    _sessionsAutoClear = msg.autoClear === true;
+    // The strip is rebuilt only when an open tab's label or state moved.
+    const sig = JSON.stringify([_sessionsAutoClear, ...[..._openTabs.keys()].map(id => [id, _sessions.get(id)?.status === 'inactive', _sessions.get(id)?.label])]);
+    if (sig !== _stripSig) { _stripSig = sig; renderInspectorTabStrip(); } else updateStreamingState();
+    if (activeInstanceTab === SESSIONS_TAB && !document.getElementById('view-dashboard')?.classList.contains('hidden')) {
+      renderSessionsGrid();
+    }
+  }
+
+  // The grid is not redrawn while the Inspector is hidden; catch up on return.
+  window.dashboard.registerView?.('dashboard', () => renderSessionsGrid());
 
   const _faviconLink = document.querySelector('link[rel="icon"]');
   const _faviconNormal = 'favicon.svg';
@@ -403,23 +440,21 @@
     }
   }
 
+  // Busy state comes from the summary feed, which covers every session —
+  // this page holds the content of open tabs only.
   function updateStreamingState() {
     const busyInstances = new Set();
+    for (const s of _sessions.values()) {
+      if (s.status === 'streaming') busyInstances.add(s.instanceId);
+    }
     if (inspectorTabStrip) {
-      for (const [instanceId] of knownInstances) {
-        const tabBtn = inspectorTabStrip.querySelector(`[data-instance-id="${CSS.escape(instanceId)}"]`);
-        if (!tabBtn) continue;
-        const busy = state.interactions.some(
-          i => i.instanceId === instanceId && (i.status === 'pending' || i.status === 'streaming')
-        );
-        tabBtn.classList.toggle('instance-running', busy);
-        if (busy) busyInstances.add(instanceId);
+      for (const tabBtn of inspectorTabStrip.querySelectorAll('.view-tab[data-instance-id]')) {
+        tabBtn.classList.toggle('instance-running', busyInstances.has(tabBtn.dataset.instanceId));
       }
     }
     const inspectorTab = document.querySelector('[data-view="dashboard"]');
     if (inspectorTab) {
-      const count = busyInstances.size;
-      inspectorTab.classList.toggle('instance-running', count > 0);
+      inspectorTab.classList.toggle('instance-running', busyInstances.size > 0);
       inspectorTab.textContent = 'Inspector';
     }
     setFavicon(busyInstances.size > 0);
@@ -429,36 +464,9 @@
 
   if (inspectorTabStrip) {
     inspectorTabStrip.addEventListener('click', (e) => {
-      // Close button on instance tab
       if (e.target.classList.contains('view-tab-close')) {
-        const tabBtn = e.target.closest('.view-tab');
-        const id = tabBtn?.dataset.instanceId;
-        if (id && id !== 'all') {
-          const info = knownInstances.get(id);
-          if (info?.status === 'running') {
-            // Running instance — confirm before killing
-            if (!confirm(`"${instanceDisplayLabel(id)}" is still running.\n\nClosing this tab will terminate the Claude process. Continue?`)) return;
-            sendWs({ type: 'claude:killInstance', instanceId: id });
-          }
-          knownInstances.delete(id);
-          sendWs({ type: 'inspector:clearInstances', instanceIds: [id] });
-          if (activeInstanceTab === id) {
-            if (knownInstances.size > 0) {
-              switchInstanceTab(knownInstances.keys().next().value);
-            } else if (hasOrphanInteractions()) {
-              switchInstanceTab('all');
-            } else {
-              activeInstanceTab = 'all';
-              state.selection = null;
-              document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
-              detailContent.classList.add('hidden');
-              emptyState.classList.remove('hidden');
-              renderInspectorTabStrip();
-              renderTimelineActive();
-              updateStats();
-            }
-          } else renderInspectorTabStrip();
-        }
+        const id = e.target.closest('.view-tab')?.dataset.instanceId;
+        if (id && id !== SESSIONS_TAB) closeSessionTab(id);
         return;
       }
       const tabBtn = e.target.closest('.view-tab');
@@ -654,9 +662,22 @@
   }
 
   // --- SSE event handling ---
+  // Where each streaming interaction sits in state.interactions, checked on
+  // use: one lookup per token must not scan the whole list.
+  const _sseIndex = new Map();
+  function _findStreaming(id) {
+    const at = _sseIndex.get(id);
+    if (at !== undefined && state.interactions[at]?.id === id) return state.interactions[at];
+    const idx = state.interactions.findIndex(i => i.id === id);
+    if (idx < 0) { _sseIndex.delete(id); return null; }
+    _sseIndex.set(id, idx);
+    return state.interactions[idx];
+  }
+
   function handleSSEEvent(interactionId, event) {
-    const interaction = state.interactions.find(i => i.id === interactionId);
+    const interaction = _findStreaming(interactionId);
     if (!interaction) return;
+    if (event.eventType === 'message_stop') _sseIndex.delete(interactionId);
 
     if (!interaction.response) interaction.response = { sseEvents: [] };
     if (!interaction.response.sseEvents) interaction.response.sseEvents = [];
@@ -720,6 +741,7 @@
     } else if (_splitMode && _liveMode && event.eventType === 'message_start'
                && (interaction.status === 'streaming' || interaction.status === 'pending')
                && !interaction.isHook && !interaction.isMcp
+               && interaction.instanceId === activeInstanceTab
                && interaction.instanceId === _splitGroupInstance()) {
       // A new parallel streamer began after split mode was already active —
       // give it its own pane so all concurrent interactions stay visible.
@@ -736,7 +758,7 @@
       }
     } else if (_liveMode && !_splitMode && event.eventType === 'message_start'
                && (interaction.status === 'streaming' || interaction.status === 'pending')
-               && (activeInstanceTab === 'all' || interaction.instanceId === activeInstanceTab)) {
+               && interaction.instanceId === activeInstanceTab) {
       if (_trySplitMode(interactionId)) {
         appendSSEToDetail(event, interaction);
       }
@@ -1199,7 +1221,6 @@
     const idx = state.interactions.findIndex(i => i.id === updated.id);
     if (idx >= 0) {
       const localEvents = state.interactions[idx].response?.sseEvents || [];
-      const localInstanceId = state.interactions[idx].instanceId;
       const localSubagent = state.interactions[idx].subagent;
       const localInferred = state.interactions[idx]._subagentInferred;
       // Client-side running counter behind the response char gauge — the server
@@ -1207,10 +1228,6 @@
       const localRespChars = state.interactions[idx]._respChars;
       state.interactions[idx] = { ...updated, response: { ...updated.response, sseEvents: localEvents } };
       if (localRespChars) state.interactions[idx]._respChars = localRespChars;
-      // Preserve locally-stamped ext instanceId (server sends null for external sessions)
-      if (!updated.instanceId && localInstanceId) {
-        state.interactions[idx].instanceId = localInstanceId;
-      }
       if (localSubagent && !state.interactions[idx].subagent) {
         state.interactions[idx].subagent = localSubagent;
         // A guess stays a guess — the next column pass may revise it.
@@ -1281,6 +1298,7 @@
     if (!isStandardLlm(interaction) || !hasAssistantMessage(interaction)) return null;
     let n = 0;
     for (const i of state.interactions) {
+      if (i.instanceId !== interaction.instanceId) continue;
       if (!i.isMcp && !i.isHook && isStandardLlm(i) && hasAssistantMessage(i)) n++;
       if (i === interaction) return n;
     }
@@ -1292,15 +1310,11 @@
   // --- Timeline view mode toggle (single column vs parallel columns) ---
   let _timelineMode = 'parallel';
 
-  let _allHistoryLoaded = false;
-
   function initTimelineToggle() {
     const header = document.getElementById('timeline-header');
     if (!header || header.querySelector('.timeline-view-toggle')) return;
     const toggle = document.createElement('div');
     toggle.className = 'timeline-view-toggle';
-
-    const allSvg = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2h8v8H2z"/><line x1="2" y1="5" x2="10" y2="5"/><line x1="2" y1="8" x2="10" y2="8"/></svg>`;
 
     const liveOnSvg = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,6.5 5,9.5 10,3"/></svg>`;
     const liveOffSvg = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="3" y1="3" x2="9" y2="9"/><line x1="9" y1="3" x2="3" y2="9"/></svg>`;
@@ -1308,7 +1322,6 @@
 
     toggle.innerHTML = `
       <button class="tl-toggle-btn tl-live-btn${_liveMode ? ' active' : ''}" title="${_liveMode ? 'Live mode on' : 'Live mode off'}">${liveButtonContent(_liveMode)}</button>
-      <button class="tl-toggle-btn tl-load-all-btn${_allHistoryLoaded ? ' active' : ''}" title="Load full history from disk">${allSvg}</button>
     `;
     const liveBtn = toggle.querySelector('.tl-live-btn');
     liveBtn.addEventListener('click', () => {
@@ -1318,11 +1331,6 @@
       liveBtn.innerHTML = liveButtonContent(_liveMode);
       liveBtn.title = _liveMode ? 'Live mode on' : 'Live mode off';
       if (_liveMode) selectLastAndFollow();
-    });
-    toggle.querySelector('.tl-load-all-btn').addEventListener('click', (e) => {
-      if (_allHistoryLoaded) return;
-      e.currentTarget.style.opacity = '0.5';
-      sendWs({ type: 'inspector:loadAll' });
     });
     header.appendChild(toggle);
     const aside = document.getElementById('timeline');
@@ -1381,7 +1389,7 @@
       <div class="entry-header entry-idrow">
         <span class="entry-num">${turnLabel}</span>
         <span class="entry-model" data-model="${interaction.id}"><span class="entry-model-label" title="${escHtml(model)}">${escHtml(shortModel)}</span></span>
-        ${stepChip}${subagentTag}${o.instanceTag || ''}
+        ${stepChip}${subagentTag}
         <span class="entry-duration" data-duration="${interaction.id}">${durationHtml}</span>
         <span class="entry-badge ${statusClass}" data-badge="${interaction.id}">${status}</span>
       </div>
@@ -2538,10 +2546,7 @@
     el.className = 'timeline-entry turn-entry';
     el.dataset.id = interaction.id;
 
-    const instanceTag = (activeInstanceTab === 'all' && interaction.instanceId)
-      ? `<span class="entry-instance">${escHtml(instanceDisplayLabel(interaction.instanceId))}</span>` : '';
-
-    el.innerHTML = turnHeaderHtml(interaction, turnNum, isSubagentTurn, { instanceTag });
+    el.innerHTML = turnHeaderHtml(interaction, turnNum, isSubagentTurn);
 
     el.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -3037,10 +3042,6 @@
     }
   }
 
-  function updateInspectorBusy() {
-    updateStreamingState();
-  }
-
   function scrollTimelineToBottom() {
     const el = document.getElementById('timeline-list');
     el.scrollTop = el.scrollHeight;
@@ -3051,9 +3052,7 @@
   // ============================================================
 
   function selectLastAndFollow() {
-    const filtered = activeInstanceTab === 'all'
-      ? state.interactions.filter(i => !i.instanceId || !knownInstances.has(i.instanceId) )
-      : state.interactions.filter(i => i.instanceId === activeInstanceTab);
+    const filtered = state.interactions.filter(i => i.instanceId === activeInstanceTab);
     const last = filtered[filtered.length - 1];
     if (last) {
       select({ type: 'turn', id: last.id });
@@ -4630,7 +4629,7 @@
   }
 
   function updateStats() {
-    const source = state.interactions;
+    const source = state.interactions.filter(isVisibleInTimeline);
     let inputTokens = 0, outputTokens = 0, cacheRead = 0, cacheCreate = 0, toolCallCount = 0, totalCost = 0;
     let hasCost = false;
     _statsTab = activeInstanceTab;
@@ -4735,44 +4734,15 @@
   }
 
   function isVisibleInTimeline(interaction) {
-    if (activeInstanceTab === 'all') {
-      return !(interaction.instanceId && knownInstances.has(interaction.instanceId));
-    }
     return interaction.instanceId === activeInstanceTab;
   }
 
   function renderEmptyState() {
     if (!emptyState) return;
-    if (state.interactions.length > 0) return;
-    emptyState.innerHTML = '<p>No interaction selected.</p>'
-      + '<p class="empty-state-sub">Start capturing Claude Code API streams:</p>'
-      + '<ul class="empty-state-list">'
-      + '<li><b>External Claude</b> &mdash; run with the proxy env var:<br><code>ANTHROPIC_BASE_URL=http://localhost:3456 claude -p "prompt"</code></li>'
-      + '<li><b>Chat</b> &mdash; use the <span class="empty-state-link" data-view="claude">Chat</span> tab to talk to Claude directly through the proxy</li>'
-      + '</ul>';
-    emptyState.querySelectorAll('.empty-state-link').forEach(el => {
-      el.addEventListener('click', () => {
-        const view = el.dataset.view;
-        if (view) document.querySelector(`.header-tab[data-view="${view}"]`)?.click();
-      });
-    });
-  }
-
-  function handleCliSpawned(msg) {
-    if (!msg.instanceId) return;
-    const existing = knownInstances.get(msg.instanceId);
-    if (existing) {
-      existing.tabId = msg.tabId;
-      existing.cwd = msg.cwd || existing.cwd;
-      existing.status = 'running';
-    } else {
-      knownInstances.set(msg.instanceId, {
-        instanceId: msg.instanceId,
-        status: 'running', spawnedAt: Date.now(),
-        cwd: msg.cwd || null, tabId: msg.tabId || null,
-      });
-    }
-    renderInspectorTabStrip();
+    if (state.interactions.some(isVisibleInTimeline)) return;
+    emptyState.innerHTML = _openTabs.get(activeInstanceTab)?.loading
+      ? '<p>Loading session\u2026</p>'
+      : '<p>No interactions in this session yet.</p>';
   }
 
   // --- Message handler ---
@@ -4789,46 +4759,65 @@
 
   function handleMessage(msg) {
     switch (msg.type) {
-      case 'init':
-        extTabCounter = 0;
-        activeExtTab = null;
-        knownInstances.clear();
+      case 'init': {
+        // The toggle used to live in this browser only; it is the server's now.
+        const legacyAutoClear = localStorage.getItem('inspectorAutoClear');
+        if (legacyAutoClear !== null) {
+          localStorage.removeItem('inspectorAutoClear');
+          if (legacyAutoClear === '1' && !msg.autoClear) sendWs({ type: 'inspector:setAutoClear', value: true });
+        }
         // A new connection may be a restarted server; ask again.
         _sessionTotals.clear();
         _sessionTotalsAsked.clear();
-        state.interactions = msg.interactions || [];
-        // Stamp null-instanceId interactions as ext tabs, rebuild instance map
-        for (const i of state.interactions) {
-          stampExtInteraction(i);
-          if (i.instanceId && !knownInstances.has(i.instanceId)) {
-            knownInstances.set(i.instanceId, {
-              instanceId: i.instanceId, status: 'exited', spawnedAt: i.timestamp, cwd: null,
-            });
-          }
+        // A reconnect keeps the open tabs: subscribe again for a fresh snapshot.
+        for (const [id, tab] of _openTabs) {
+          tab.loading = true;
+          sendWs({ type: 'inspector:subscribe', instanceId: id });
         }
-        // Mark ext tabs as exited on init (they're historical)
-        for (let n = 1; n <= extTabCounter; n++) {
-          const ext = knownInstances.get(`ext-${n}`);
-          if (ext) ext.status = 'exited';
-        }
-        // Suppress autoclear during init — all instances appear exited until
-        // claude:instances arrives with actual running statuses
-        _suppressAutoClear = true;
-        renderInspectorTabStrip();
-        _suppressAutoClear = false;
         initTimelineToggle();
-        renderTimelineActive();
-        updateStats();
-        updateInspectorBusy();
-        if (state.interactions.length > 0) {
-          select({ type: 'turn', id: state.interactions[state.interactions.length - 1].id });
-        } else {
-          renderEmptyState();
-        }
+        _applySessions(msg);
+        switchInstanceTab(activeInstanceTab);
+        break;
+      }
+
+      case 'inspector:sessions':
+        _applySessions(msg);
         break;
 
+      case 'inspector:sessionsRemoved':
+        // Pruned, cleared or autocleared on the server: gone everywhere.
+        for (const id of msg.instanceIds || []) {
+          _sessions.delete(id);
+          closeSessionTab(id);
+        }
+        renderInspectorTabStrip();
+        renderSessionsGrid();
+        break;
+
+      case 'inspector:snapshot': {
+        const id = msg.instanceId;
+        const tab = _openTabs.get(id);
+        if (!tab) break;            // closed before it arrived
+        // The server subscribed this page before building the snapshot, so it
+        // holds every turn up to now and every live event follows it; it
+        // replaces whatever an earlier subscription left here.
+        _dropInstance(id);
+        state.interactions.push(...(msg.interactions || []));
+        state.interactions.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        tab.loading = false;
+        if (activeInstanceTab === id) switchInstanceTab(id);
+        else renderInspectorTabStrip();
+        break;
+      }
+
       case 'interaction:start':
-        stampExtInteraction(msg.interaction);
+        // Only sessions open here are sent; anything else is left over from a
+        // tab closed a moment ago.
+        if (!_openTabs.has(msg.interaction.instanceId)) break;
+        if (state.interactions.some(i => i.id === msg.interaction.id)) {
+          updateInteraction(msg.interaction);
+          break;
+        }
         // Insert in timestamp order — hooks and subagent turns arrive via
         // independent paths and may reach the client out of logical order.
         const _ts = msg.interaction.timestamp || 0;
@@ -4840,18 +4829,7 @@
         }
         state.interactions.splice(_lo, 0, msg.interaction);
         _touchFull(msg.interaction.id);
-        // Auto-discover instance from interaction
-        if (msg.interaction.instanceId && !knownInstances.has(msg.interaction.instanceId)) {
-          knownInstances.set(msg.interaction.instanceId, {
-            instanceId: msg.interaction.instanceId,
-            status: 'running', spawnedAt: msg.interaction.timestamp, cwd: null,
-          });
-          renderInspectorTabStrip();
-        }
-        // Only append to visible timeline if it matches current filter
-        const matchesFilter = activeInstanceTab === 'all'
-          ? (!msg.interaction.instanceId || !knownInstances.has(msg.interaction.instanceId))
-          : msg.interaction.instanceId === activeInstanceTab;
+        const matchesFilter = msg.interaction.instanceId === activeInstanceTab;
         if (matchesFilter) {
           if (_timelineMode === 'parallel') {
             const iStatus = msg.interaction.status || 'pending';
@@ -4875,10 +4853,10 @@
           }
         }
         updateStats();
-        updateInspectorBusy();
         break;
 
       case 'interaction:update':
+        if (!_openTabs.has(msg.interaction.instanceId)) break;
         updateInteraction(msg.interaction);
         // Re-render detail if this interaction is selected
         if (state.selection?.type === 'turn' && state.selection.id === msg.interaction.id) {
@@ -4891,14 +4869,14 @@
         break;
 
       case 'interaction:complete':
+        if (!_openTabs.has(msg.interaction.instanceId)) break;
+        _sseIndex.delete(msg.interaction.id);
         updateInteraction(msg.interaction);
-        updateInspectorBusy();
         _scheduleCompaction();
         break;
 
       case 'interaction:error':
         markInteractionError(msg.interactionId, msg.error);
-        updateInspectorBusy();
         break;
 
       case 'interaction:detail': {
@@ -4944,124 +4922,11 @@
         break;
       }
 
-      case 'cleared':
-        state.interactions = [];
-        state.selection = null;
-        knownInstances.clear();
-        activeInstanceTab = 'all';
-        extTabCounter = 0;
-        activeExtTab = null;
-        stopAllFlowAnimations();
-        clearAllFooterBadges();
-        _d3State = null;
-        renderInspectorTabStrip();
-        timelineList.innerHTML = '';
-        detailContent.innerHTML = '';
-        detailContent.classList.add('hidden');
-        emptyState.classList.remove('hidden');
-        updateStats();
-        updateInspectorBusy();
-        renderEmptyState();
-        break;
-
-      case 'claude:instances':
-        if (msg.instances) {
-          const activeIds = new Set(msg.instances.map(i => i.instanceId));
-          for (const inst of msg.instances) {
-            const existing = knownInstances.get(inst.instanceId);
-            knownInstances.set(inst.instanceId, {
-              instanceId: inst.instanceId,
-              status: inst.status, spawnedAt: inst.spawnedAt,
-              cwd: inst.cwd || existing?.cwd || null,
-              tabId: inst.tabId || existing?.tabId || null,
-            });
-          }
-          for (const [id, info] of knownInstances) {
-            if (id.startsWith('cli-') && info.status === 'exited' && !activeIds.has(id)) {
-              knownInstances.delete(id);
-            }
-          }
-          if (!knownInstances.has(activeInstanceTab)) {
-            const fallback = knownInstances.size > 0 ? knownInstances.keys().next().value : 'all';
-            switchInstanceTab(fallback);
-            break;
-          }
-        }
-        renderInspectorTabStrip();
-        break;
-
-      case 'inspector:instancesCleared': {
-        const cleared = new Set(msg.instanceIds || []);
-        state.interactions = state.interactions.filter(i => !cleared.has(i.instanceId));
-        // A running tab keeps its place, as on the server (removeInstances):
-        // Clear empties its timeline, but its footer still shows the whole
-        // session's totals.
-        for (const id of cleared) {
-          if (knownInstances.get(id)?.status !== 'running') knownInstances.delete(id);
-        }
-        if (!knownInstances.has(activeInstanceTab)) activeInstanceTab = 'all';
-        renderInspectorTabStrip();
-        renderTimelineActive();
-        updateStats();
-        if (state.selection && !state.interactions.some(i => i.id === state.selection.id)) {
-          state.selection = null;
-          document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
-          detailContent.classList.add('hidden');
-          emptyState.classList.remove('hidden');
-        }
-        break;
-      }
-
-      case 'inspector:sessionLoaded': {
-        const instanceId = msg.instanceId || `cli-${msg.sessId}`;
-        const newInteractions = msg.interactions || [];
-        const existingIds = new Set(state.interactions.map(i => i.id));
-        const toAdd = newInteractions.filter(i => !existingIds.has(i.id));
-        state.interactions.push(...toAdd);
-        state.interactions.sort((a, b) => a.timestamp - b.timestamp);
-        if (!knownInstances.has(instanceId)) {
-          knownInstances.set(instanceId, {
-            instanceId, status: 'running',
-            spawnedAt: toAdd[0]?.timestamp || Date.now(), cwd: null,
-          });
-        }
-        renderInspectorTabStrip();
-        if (activeInstanceTab === instanceId) renderTimelineActive();
-        updateStats();
-        break;
-      }
-
       case 'inspector:sessionTotals': {
         if (!msg.instanceId) break;
         if (msg.totals) _sessionTotals.set(msg.instanceId, msg.totals);
         else _sessionTotals.delete(msg.instanceId);
         if (activeInstanceTab === msg.instanceId) updateStats();
-        break;
-      }
-
-      case 'inspector:allLoaded': {
-        const allInteractions = msg.interactions || [];
-        const existingIds = new Set(state.interactions.map(i => i.id));
-        const toAdd = allInteractions.filter(i => !existingIds.has(i.id));
-        if (toAdd.length > 0) {
-          for (const i of toAdd) stampExtInteraction(i);
-          state.interactions.push(...toAdd);
-          state.interactions.sort((a, b) => a.timestamp - b.timestamp);
-          for (const i of toAdd) {
-            if (i.instanceId && !knownInstances.has(i.instanceId)) {
-              knownInstances.set(i.instanceId, {
-                instanceId: i.instanceId,
-                status: 'exited', spawnedAt: i.timestamp, cwd: null,
-              });
-            }
-          }
-          renderInspectorTabStrip();
-          renderTimelineActive();
-          updateStats();
-        }
-        _allHistoryLoaded = true;
-        const loadAllBtn = document.querySelector('.tl-load-all-btn');
-        if (loadAllBtn) { loadAllBtn.classList.add('active'); loadAllBtn.style.opacity = ''; }
         break;
       }
 
@@ -5097,50 +4962,28 @@
     }
   }
 
-  // Reset button — clears all interactions and zeroes the footer
-  const resetBtn = document.getElementById('footerReset');
-  if (resetBtn) {
-    resetBtn.addEventListener('click', () => {
-      const instanceIds = [...new Set(state.interactions.map(i => i.instanceId).filter(Boolean))];
-      if (instanceIds.length) sendWs({ type: 'inspector:clearInstances', instanceIds });
-      state.interactions.length = 0;
-      updateStats();
-      renderTimelineActive();
+  // Timeline Clear and the footer reset drop the focused session's finished
+  // turns from this page only; the session itself stays (Sessions tab Clear
+  // removes sessions).
+  function clearVisibleTurns() {
+    const toRemove = new Set();
+    for (const i of state.interactions) {
+      if (isVisibleInTimeline(i) && i.status !== 'streaming' && i.status !== 'pending') {
+        toRemove.add(i.id);
+      }
+    }
+    if (toRemove.size === 0) return;
+    state.interactions = state.interactions.filter(i => !toRemove.has(i.id));
+    if (state.selection && toRemove.has(state.selection.type === 'tool' ? state.selection.interactionId : state.selection.id)) {
       state.selection = null;
       detailContent.classList.add('hidden');
       emptyState.classList.remove('hidden');
-    });
+    }
+    renderTimelineActive();
+    updateStats();
   }
+  document.getElementById('footerReset')?.addEventListener('click', clearVisibleTurns);
+  document.getElementById('timeline-clear-btn')?.addEventListener('click', clearVisibleTurns);
 
-  // Timeline clear button — removes visible non-streaming interactions
-  const tlClearBtn = document.getElementById('timeline-clear-btn');
-  if (tlClearBtn) {
-    tlClearBtn.addEventListener('click', () => {
-      const toRemove = new Set();
-      for (const i of state.interactions) {
-        if (isVisibleInTimeline(i) && i.status !== 'streaming' && i.status !== 'pending') {
-          toRemove.add(i.id);
-        }
-      }
-      if (toRemove.size === 0) return;
-      // Collect instance IDs of removed interactions to clear from server
-      const instanceIds = [...new Set(
-        state.interactions.filter(i => toRemove.has(i.id) && i.instanceId).map(i => i.instanceId)
-      )];
-      state.interactions = state.interactions.filter(i => !toRemove.has(i.id));
-      // Only clear instances that have no remaining interactions
-      const remainingInstances = new Set(state.interactions.map(i => i.instanceId).filter(Boolean));
-      const toClear = instanceIds.filter(id => !remainingInstances.has(id));
-      if (toClear.length) sendWs({ type: 'inspector:clearInstances', instanceIds: toClear });
-      if (state.selection && toRemove.has(state.selection.id)) {
-        state.selection = null;
-        detailContent.classList.add('hidden');
-        emptyState.classList.remove('hidden');
-      }
-      renderTimelineActive();
-      updateStats();
-    });
-  }
-
-  window.inspectorModule = { handleMessage, handleCliSpawned, instanceDisplayLabel, renderInspectorTabStrip, switchInstanceTab, toggleFocusMode, isFocusMode: () => _focusMode };
+  window.inspectorModule = { handleMessage, instanceDisplayLabel, renderInspectorTabStrip, switchInstanceTab, openSession: openSessionTab, toggleFocusMode, isFocusMode: () => _focusMode };
 })();

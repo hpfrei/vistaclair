@@ -244,14 +244,10 @@ body.nav-loading .view-nav {
   border-right: 7px solid rgb(30 32 48 / 72%);
   transition: border-right-color 0.2s;
 }
+.view-tab-action.autoclear-switch { cursor: pointer; }
 .view-tab-action:not(.autoclear-on):hover {
-  color: #fff;
-  background: rgb(180 50 60 / 75%);
-  border-color: rgba(255, 80, 90, 0.4);
-  cursor: pointer;
-}
-.view-tab-action:not(.autoclear-on):hover::before {
-  border-right-color: rgb(180 50 60 / 75%);
+  color: rgba(255, 255, 255, 0.85);
+  border-color: rgba(255, 255, 255, 0.25);
 }
 /* Autoclear toggle icon inside button */
 .autoclear-toggle {
@@ -360,6 +356,97 @@ body.nav-loading .view-nav {
 .view-tab.instance-exited.active {
   color: var(--text-dim);
 }
+/* Inspector Sessions tab: one card per session, in three groups */
+.inspector-sessions {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  margin-top: -1px;
+  padding: 18px 24px 32px;
+  background: var(--paper-bg);
+  border-top: 1px solid var(--paper-border);
+}
+.inspector-sessions-tab { font-weight: 600; }
+.view-tab.instance-loading { opacity: 0.6; }
+.insp-group + .insp-group { margin-top: 22px; }
+.insp-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.insp-group-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright, var(--text));
+}
+.insp-group-count { font-size: 11px; color: var(--text-dim); }
+.insp-group-clear {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 10px;
+}
+.insp-group-clear:disabled { opacity: 0.4; cursor: default; }
+.insp-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.insp-empty { margin: 0; font-size: 12px; color: var(--text-dim); }
+.insp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, opacity 0.15s;
+}
+.insp-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+.insp-card.is-open { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.insp-card.is-inactive { opacity: 0.55; border-style: dashed; }
+.insp-card.is-inactive:hover { opacity: 0.85; }
+.insp-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.insp-card-label {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insp-card-kind {
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 3px;
+  color: var(--purple);
+  border: 1px solid color-mix(in srgb, var(--purple) 45%, transparent);
+}
+.insp-card-status {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 8px;
+  color: var(--text-dim);
+  background: var(--bg-hover);
+}
+.insp-card-status.is-running { color: var(--green); }
+.insp-card-status.is-streaming { color: var(--bg); background: var(--green); }
+.insp-card-cwd, .insp-card-model {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.insp-card-meta { font-size: 11px; color: var(--text-dim); }
 .entry-instance {
   font-size: 10px;
   padding: 1px 5px;

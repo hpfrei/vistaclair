@@ -221,8 +221,9 @@
       for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
       this.modelBtn.addEventListener('click', (e) => { e.stopPropagation(); openModelMenu(this, this.modelBtn); });
       q('.sdk-insp').addEventListener('click', () => {
+        // Straight to this session's tab, opened (and loaded) if need be.
         if (typeof switchView === 'function') switchView('dashboard');
-        window.inspectorModule?.switchInstanceTab?.(`cli-${this.sessId}`);
+        window.inspectorModule?.openSession?.(`cli-${this.sessId}`);
       });
 
       // Follow the stream only while the reader is at the bottom; scrolling up
