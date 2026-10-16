@@ -758,10 +758,10 @@
     }
     if (!r.orchestratorRunning) actions.push(action('Delete permanently', `data-act="delete-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-danger', DELETE_HINT));
     return `<article class="vc-card sc-card sc-run ${SC.accentOf(r.status)}">`
-      + `<div class="sc-head"><span class="sc-icon" title="Orchestration run ${escHtml(r.runId)}">\u{1F9ED}</span>`
-      + `<div class="sc-title"><span class="sc-name">${escHtml(name)}</span>`
-      + `<span class="sc-sub" title="${escHtml(r.cwd || '')}">run ${escHtml(r.runId)}${r.cwd ? ` · ${escHtml(r.cwd)}` : ''}</span></div>`
-      + SC.pill(r.status) + '</div>'
+      + SC.head({
+        icon: '\u{1F9ED}', iconTitle: `Orchestration run ${r.runId}`, name, status: r.status,
+        sub: `run ${escHtml(r.runId)}${r.cwd ? ` · ${escHtml(r.cwd)}` : ''}`, subTitle: r.cwd || '',
+      })
       + `<div class="sc-meta">${meta}</div>`
       + SC.todoList(r.todo)
       + workers
@@ -797,10 +797,10 @@
     else if (!s.isRunning) actions.push(action('Resume', `data-act="resume-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-primary', 'Continue where it left off.'));
     if (!s.isRunning) actions.push(action('Delete permanently', `data-act="delete-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-danger', DELETE_HINT));
     return `<article class="vc-card sc-card ${SC.accentOf(status)}">`
-      + `<div class="sc-head"><span class="sc-icon">${s.kind === 'sdk' ? '✨' : '⌨️'}</span>`
-      + `<div class="sc-title"><span class="sc-name">${escHtml(savedTitle(s))}</span>`
-      + `<span class="sc-sub" title="${escHtml(s.cwd || '')}">${escHtml(s.cwd || '')}</span></div>`
-      + SC.pill(status, status === 'running' && !tabId ? 'running' : status === 'running' ? 'open' : status) + '</div>'
+      + SC.head({
+        icon: s.kind === 'sdk' ? '✨' : '⌨️', name: savedTitle(s), sub: escHtml(s.cwd || ''), subTitle: s.cwd || '',
+        status, label: status === 'running' && !tabId ? 'running' : status === 'running' ? 'open' : status,
+      })
       + `<div class="sc-meta">${meta}</div>`
       + progress
       + (s.jsonlSize ? `<div class="sc-line">${contextGauge(s.jsonlSize)}</div>` : '')

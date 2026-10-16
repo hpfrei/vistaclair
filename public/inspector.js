@@ -241,21 +241,40 @@
 
   const _statusOf = (s) => (s.status === 'streaming' ? 'streaming' : s.status === 'running' ? 'running' : 'inactive');
 
-  function _usageMeta(turns, apiCalls, cost) {
+  const _KIND_ICON = { cli: '⌨️', app: '\u{1F916}', ext: '\u{1F50C}' };
+  const _KIND_TAG = { app: 'ai.prompt', ext: 'external' };
+
+  // The meta row shared by both cards: activity, usage, cost, tokens, model.
+  function _metaHtml({ lastAt, turns, apiCalls, cost, tokensIn, tokensOut, model, lead = '' }) {
+    const SC = window.sessionCards;
     const n = turns || apiCalls || 0;
     const unit = turns ? 'turn' : 'API call';
-    return [`${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''}`, cost != null ? formatCost(cost) : null].filter(Boolean).join(' · ');
+    const tok = tokensIn || tokensOut
+      ? `<span title="${(tokensIn || 0).toLocaleString()} tokens in (cache included) · ${(tokensOut || 0).toLocaleString()} out">${SC.tokens(tokensIn)} in · ${SC.tokens(tokensOut)} out</span>`
+      : '';
+    return [
+      SC.timeHtml(lastAt), lead,
+      `<span>${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''}</span>`,
+      cost != null ? `<span class="sc-cost" title="Cost so far">${formatCost(cost)}</span>` : '',
+      tok,
+      model ? `<span class="sc-chip">${escHtml(model)}</span>` : '',
+    ].filter(Boolean).join('');
   }
 
+  // A single session's card: the whole card opens its Inspector tab.
   function _cardHtml(s) {
-    const meta = [_usageMeta(s.turns, s.apiCalls, s.cost), window.sessionCards.timeHtml(s.lastAt)].filter(Boolean).join(' · ');
-    return `<div class="insp-card-head">`
-      + `<span class="insp-card-label">${escHtml(instanceDisplayLabel(s.instanceId))}</span>`
-      + (s.kind === 'app' ? '<span class="insp-card-kind">ai.prompt</span>' : '')
-      + window.sessionCards.pill(_statusOf(s)) + '</div>'
-      + (s.cwd ? `<div class="insp-card-cwd" title="${escHtml(s.cwd)}">${escHtml(s.cwd)}</div>` : '')
-      + (s.model ? `<div class="insp-card-model">${escHtml(s.model)}</div>` : '')
-      + `<div class="insp-card-meta">${meta}</div>`;
+    const SC = window.sessionCards;
+    const status = _statusOf(s);
+    const name = instanceDisplayLabel(s.instanceId);
+    const dir = SC.dirName(s.cwd);
+    // The directory leads the subtitle unless the name already is it.
+    const sub = [s.cwd && dir !== name ? SC.dirHtml(s.cwd) : '', _KIND_TAG[s.kind] || '',
+      s.cwd && dir === name ? escHtml(s.cwd) : ''].filter(Boolean).join(' · ');
+    return `<button type="button" class="vc-card sc-card insp-card ${SC.accentOf(status)}${s.status === 'inactive' ? ' is-inactive' : ''}${_openTabs.has(s.instanceId) ? ' is-open' : ''}"`
+      + ` data-instance-id="${escHtml(s.instanceId)}" title="Open this session's Inspector tab">`
+      + SC.head({ icon: _KIND_ICON[s.kind] || _KIND_ICON.ext, name, sub, subTitle: s.cwd || null, status })
+      + `<span class="sc-meta">${_metaHtml(s)}</span>`
+      + '</button>';
   }
 
   // One card per orchestration run: the header opens the orchestrator's tab,
@@ -272,35 +291,40 @@
     const status = info.status || (live ? 'running' : 'stopped');
     const running = workers.filter(m => m.status !== 'inactive').length;
     const total = info.workers ?? workers.length;
-    let turns = 0, apiCalls = 0, cost = null;
+    let turns = 0, apiCalls = 0, cost = null, tokensIn = 0, tokensOut = 0;
     for (const m of members) {
       turns += m.turns || 0;
       apiCalls += m.apiCalls || 0;
+      tokensIn += m.tokensIn || 0;
+      tokensOut += m.tokensOut || 0;
       if (m.cost != null) cost = (cost || 0) + m.cost;
     }
     const lastAt = Math.max(...members.map(m => m.lastAt || 0));
     const name = info.orchestrator || orchs[0]?.orchestration.name || `Run ${runId}`;
+    const cwd = info.cwd || head.cwd;
     const prefix = `${name}-`;
     // Earlier orchestrators (replaced by a refresh) are listed with the workers.
     const rows = [...orchs.slice(1), ...workers].map(m => {
       const label = m.orchestration.name || instanceDisplayLabel(m.instanceId);
+      const n = m.turns || m.apiCalls || 0;
       return {
         name: m.orchestration.role === 'orchestrator' ? `${label} (earlier orchestrator)` : label.startsWith(prefix) ? label.slice(prefix.length) : label,
         state: _statusOf(m),
-        detail: [_usageMeta(m.turns, m.apiCalls, m.cost), SC.relTime(m.lastAt)].filter(Boolean).join(' · '),
-        title: `${label}\nOpen this session's Inspector tab`,
+        detail: [`${n} ${m.turns ? 'turn' : 'call'}${n !== 1 ? 's' : ''}`, SC.relTime(m.lastAt)].filter(Boolean).join(' · '),
+        aside: m.cost != null ? formatCost(m.cost) : '',
+        title: [label, m.cwd, m.cost != null ? `cost so far ${formatCost(m.cost)}` : '', 'Open this session\'s Inspector tab'].filter(Boolean).join('\n'),
         attrs: `data-instance-id="${escHtml(m.instanceId)}"`,
       };
     });
     const open = members.some(m => _openTabs.has(m.instanceId));
+    const workersHtml = `<span>${total} worker${total !== 1 ? 's' : ''}${running ? ` · <b>${running} running</b>` : ''}</span>`;
     return `<div class="vc-card sc-card insp-run-card ${SC.accentOf(status)}${!live ? ' is-inactive' : ''}${open ? ' is-open' : ''}">`
       + `<button type="button" class="insp-run-head" data-instance-id="${escHtml(head.instanceId)}" title="Open the orchestrator's Inspector tab">`
-      + `<span class="sc-head"><span class="sc-icon">\u{1F9ED}</span>`
-      + `<span class="sc-title"><span class="sc-name">${escHtml(name)}</span>`
-      + `<span class="sc-sub" title="${escHtml(head.cwd || '')}">run ${escHtml(runId)}${head.cwd ? ` · ${escHtml(head.cwd)}` : ''}</span></span>`
-      + SC.pill(status) + '</span>'
-      + `<span class="sc-meta">${SC.timeHtml(lastAt)}<span>${total} worker${total !== 1 ? 's' : ''}${running ? ` · <b>${running} running</b>` : ''}</span>`
-      + `<span>${_usageMeta(turns, apiCalls, cost)}</span>${head.model ? `<span class="sc-chip">${escHtml(head.model)}</span>` : ''}</span>`
+      + SC.head({
+        icon: '\u{1F9ED}', iconTitle: `Orchestration run ${runId}`, name, status, subTitle: cwd || null,
+        sub: [cwd ? SC.dirHtml(cwd) : '', `run ${escHtml(runId)}`].filter(Boolean).join(' · '),
+      })
+      + `<span class="sc-meta">${_metaHtml({ lastAt, turns, apiCalls, cost, tokensIn, tokensOut, model: head.model, lead: workersHtml })}</span>`
       + '</button>'
       + SC.workerList(rows, rows.length ? 'Workers' : '')
       + '</div>';
@@ -322,7 +346,7 @@
         + `<span class="insp-group-count">${list.length - inactive} running \u00b7 ${inactive} inactive</span>`
         + `<button class="insp-group-clear" data-kind="${kind}"${inactive ? '' : ' disabled'}`
         + ` title="Remove every inactive session of this group, with its stored data">Clear</button></header>`
-        + '<div class="insp-cards">';
+        + '<div class="insp-cards sc-grid">';
       if (!list.length) {
         html += kind === 'ext'
           ? '<p class="insp-empty">None. Point Claude Code at the proxy to see it here: <code>ANTHROPIC_BASE_URL=http://localhost:3456 claude</code></p>'
@@ -343,8 +367,7 @@
           html += _runCardHtml(runId, runs.get(runId));
           continue;
         }
-        html += `<button class="insp-card${s.status === 'inactive' ? ' is-inactive' : ''}${_openTabs.has(s.instanceId) ? ' is-open' : ''}"`
-          + ` data-instance-id="${escHtml(s.instanceId)}">${_cardHtml(s)}</button>`;
+        html += _cardHtml(s);
       }
       html += '</div></section>';
     }

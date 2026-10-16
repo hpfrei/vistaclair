@@ -454,8 +454,9 @@
   .vc-sheet { --vc-sheet-cols: 72px minmax(0, 1fr); }
   .vc-sheet-n { display: none; }
 
-  /* --- CLIs: Sessions tab cards, one column ---------------------- */
-  .cli-sessions { padding: 12px 10px 24px; }
+  /* --- CLIs and Inspector: Sessions tab cards, one column -------- */
+  .cli-sessions, .inspector-sessions { padding: 12px 10px 24px; }
+  .insp-group-head { flex-wrap: wrap; }
   .sc-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .sc-toolbar { flex-wrap: wrap; }
   .sc-card { padding: 12px; }
