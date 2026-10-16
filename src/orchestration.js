@@ -309,7 +309,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         onlyAuth = creds.apiKey ? 'apikey' : creds.subscription ? 'subscription' : null;
         billing = onlyAuth
           ? `billed to the ${onlyAuth === 'apikey' ? 'Anthropic API key' : 'Claude subscription'} (the only Claude credential configured)`
-          : 'needs a Claude credential: none is configured (an API key on the Models page, or `claude /login`)';
+          : 'needs a Claude credential: none is configured (an API key on the Models page, or Sign in to Claude in the dashboard header)';
         description = `Agent SDK panel, ${billing}.`;
       }
     }

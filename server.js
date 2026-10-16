@@ -15,6 +15,7 @@ const { pendingQuestions } = createProxyRouter;
 const CliSessionManager = require('./src/cli-sessions');
 const SdkSession = require('./src/sdk-session');
 const caps = require('./src/capabilities');
+const claudeAuth = require('./src/claude-auth');
 const mcp = require('./src/mcp');
 const { createLicensing } = require('./src/licensing');
 const addons = require('./src/addons');
@@ -414,6 +415,10 @@ const orchestration = createOrchestration({
 });
 cliSessionManager.addExitListener(orchestration.onSessionExit);
 
+// Ask `claude auth status` now, so hasClaudeSubscription()'s first caller
+// gets a cached answer instead of waiting on the command.
+claudeAuth.authStatus.refresh().catch(() => {});
+
 // WebSocket server on dashboard (with auth)
 const wss = new WebSocketServer({ noServer: true });
 broadcaster = new DashboardBroadcaster(wss, store, { authToken: AUTH_TOKEN, proxyPort: PROXY_PORT, cliSessionManager });
@@ -721,6 +726,7 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
 // Clean shutdown: unregister MCP servers and stop running apps
 function gracefulShutdown() {
   tgLogin.stop();
+  claudeAuth.loginProcess.cancel('shutdown');
   cliSessionManager.saveAllToHistory();
   cliSessionManager.killAll();
   addons.shutdownAll();

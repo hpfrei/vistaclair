@@ -60,6 +60,7 @@ const caps = require('./capabilities');
 const { buildClaudeEnv, trackInstance, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
 const { modelFamily } = require('./proxy');
+const { notifyAuthFailed } = require('./ws/claude-auth-handler');
 
 const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';
 
@@ -395,8 +396,9 @@ class SdkSession {
     // unset follows the global default: the subscription when one is active,
     // else the API key (the claudeAuth pref may say API key first).
     const { credential, key } = caps.resolveAuth(DATA_HOME, { authMode: s.auth || undefined });
-    if (!credential) throw new Error('An Agent SDK session needs a Claude credential: add an Anthropic API key on the Models page, or log in to a Claude subscription with `claude /login`.');
+    if (!credential) throw new Error('An Agent SDK session needs a Claude credential: add an Anthropic API key on the Models page, or sign in to a Claude subscription (Sign in to Claude, in the dashboard header).');
     this._credential = credential;
+    this._authFailNotified = false;
     const env = buildClaudeEnv({
       proxyPort: this.proxyPort,
       dashboardPort: this._dashboardPort,
@@ -524,6 +526,12 @@ class SdkSession {
       this._setState(msg.queued_turn_count > 0 ? 'busy' : 'idle', { force: true });
       if (main) this._refreshContext();
     } else if (msg.type === 'assistant') {
+      // The CLI's login was refused (lapsed, signed out elsewhere): offer the
+      // dashboard's sign-in rather than a terminal /login.
+      if (msg.error === 'authentication_failed' && this._credential === 'subscription' && !this._authFailNotified) {
+        this._authFailNotified = true;
+        notifyAuthFailed(this.broadcaster, { sessId: this.sessId });
+      }
       const model = main ? msg.message?.model : null;
       const modelChanged = typeof model === 'string' && model !== '<synthetic>' && model !== this.actualModel;
       if (modelChanged) this.actualModel = model;

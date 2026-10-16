@@ -15,68 +15,51 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-// capabilities.js reads the CLI credential file from the real home dir, so the
-// subscription cases drive it through a temporary HOME.
-function withHome(creds, fn) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-auth-'));
-  const prevHome = process.env.HOME;
-  const prevUserProfile = process.env.USERPROFILE;
+// capabilities.js asks `claude auth status --json` whether a subscription is
+// signed in; these cases stub that command with what the CLI prints for each
+// login state. The real command is never run.
+const claudeAuth = require('../src/claude-auth');
+function withStatus(status, fn) {
+  const out = typeof status === 'string' ? status : JSON.stringify(status);
+  claudeAuth.authStatus.setRunner({ run: async () => out, runSync: () => out });
   try {
-    process.env.HOME = home;
-    process.env.USERPROFILE = home;
-    if (creds !== null) {
-      fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
-      fs.writeFileSync(
-        path.join(home, '.claude', '.credentials.json'),
-        JSON.stringify({ claudeAiOauth: creds }),
-      );
-    }
     delete require.cache[require.resolve('../src/capabilities')];
-    return fn(require('../src/capabilities'), home);
+    return fn(require('../src/capabilities'));
   } finally {
-    process.env.HOME = prevHome;
-    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
-    else process.env.USERPROFILE = prevUserProfile;
     delete require.cache[require.resolve('../src/capabilities')];
-    fs.rmSync(home, { recursive: true, force: true });
+    claudeAuth.authStatus.setRunner({ run: async () => '', runSync: () => '' });
   }
 }
 
-const HOUR = 3600 * 1000;
+// What the CLI prints (claude 2.1.300), less the directory fields.
 const LIVE = {
-  accessToken: 'at', refreshToken: 'rt',
-  expiresAt: Date.now() + HOUR,
-  refreshTokenExpiresAt: Date.now() + 30 * 24 * HOUR,
+  loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty',
+  email: 'user@example.com', orgName: 'Example', subscriptionType: 'max',
 };
-// The shape that used to read as "no subscription": the short-lived access
-// token has lapsed but the CLI can still refresh it transparently.
-const STALE_ACCESS = { ...LIVE, expiresAt: Date.now() - HOUR };
-const DEAD = { ...LIVE, expiresAt: Date.now() - HOUR, refreshTokenExpiresAt: Date.now() - HOUR };
+// Signed out: the CLI exits 1 but still prints this.
+const SIGNED_OUT = { loggedIn: false, authMethod: 'none', apiProvider: 'firstParty' };
+// Signed in, but to a Console (API billing) account, not a subscription.
+const CONSOLE = { loggedIn: true, authMethod: 'console', apiProvider: 'firstParty' };
 
 // A baseDir with no secrets store and no app-prefs: the default install.
 function emptyBase() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'vc-base-'));
 }
 
-test('an expired access token is still an active subscription while the refresh token lives', () => {
-  withHome(LIVE, (caps) => assert.equal(caps.hasClaudeSubscription(), true));
-  // The regression: keying on expiresAt made every Anthropic model blink out of
-  // the pickers a few hours after login, and silently moved live sessions onto
-  // the API key.
-  withHome(STALE_ACCESS, (caps) => assert.equal(caps.hasClaudeSubscription(), true));
-  withHome(DEAD, (caps) => assert.equal(caps.hasClaudeSubscription(), false));
-  withHome(null, (caps) => assert.equal(caps.hasClaudeSubscription(), false));
+test('a subscription is what `claude auth status` reports as a claude.ai login', () => {
+  withStatus(LIVE, (caps) => assert.equal(caps.hasClaudeSubscription(), true));
+  withStatus(SIGNED_OUT, (caps) => assert.equal(caps.hasClaudeSubscription(), false));
+  withStatus(CONSOLE, (caps) => assert.equal(caps.hasClaudeSubscription(), false));
 });
 
-test('a credential file with no refresh token falls back to the access token expiry', () => {
-  withHome({ accessToken: 'at', expiresAt: Date.now() + HOUR }, (caps) =>
-    assert.equal(caps.hasClaudeSubscription(), true));
-  withHome({ accessToken: 'at', expiresAt: Date.now() - HOUR }, (caps) =>
-    assert.equal(caps.hasClaudeSubscription(), false));
+test('a CLI that is missing or prints no status reads as no subscription', () => {
+  withStatus('', (caps) => assert.equal(caps.hasClaudeSubscription(), false));
+  withStatus('error: unknown command', (caps) => assert.equal(caps.hasClaudeSubscription(), false));
+  withStatus({ authMethod: 'claude.ai' }, (caps) => assert.equal(caps.hasClaudeSubscription(), false));
 });
 
 test('resolveAuth picks the subscription by default and reports which credential it chose', () => {
-  withHome(LIVE, (caps) => {
+  withStatus(LIVE, (caps) => {
     const base = emptyBase();
     try {
       assert.deepEqual(caps.resolveAuth(base), { credential: 'subscription', key: '' });
@@ -88,7 +71,7 @@ test('resolveAuth picks the subscription by default and reports which credential
 });
 
 test('an SDK session with no billing choice gets the global default: the subscription over a key', () => {
-  withHome(LIVE, (caps) => {
+  withStatus(LIVE, (caps) => {
     const base = emptyBase();
     const prevEnvKey = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'sk-env';
@@ -103,7 +86,7 @@ test('an SDK session with no billing choice gets the global default: the subscri
     }
   });
   // No subscription: the key.
-  withHome(null, (caps) => {
+  withStatus(SIGNED_OUT, (caps) => {
     const base = emptyBase();
     const prevEnvKey = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'sk-env';
@@ -118,7 +101,7 @@ test('an SDK session with no billing choice gets the global default: the subscri
 });
 
 test('with no subscription and no key there is no credential at all', () => {
-  withHome(null, (caps) => {
+  withStatus(SIGNED_OUT, (caps) => {
     const base = emptyBase();
     const prevEnvKey = process.env.ANTHROPIC_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
@@ -132,7 +115,7 @@ test('with no subscription and no key there is no credential at all', () => {
 });
 
 test('the apikey preference falls back to the subscription rather than failing the call', () => {
-  withHome(LIVE, (caps) => {
+  withStatus(LIVE, (caps) => {
     const base = emptyBase();
     const prevEnvKey = process.env.ANTHROPIC_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
@@ -150,7 +133,7 @@ test('the apikey preference falls back to the subscription rather than failing t
 });
 
 test('the stored preference is honoured for interactive sessions too, not just headless', () => {
-  withHome(LIVE, (caps) => {
+  withStatus(LIVE, (caps) => {
     const base = emptyBase();
     const prevEnvKey = process.env.ANTHROPIC_API_KEY;
     process.env.ANTHROPIC_API_KEY = 'sk-env';
@@ -170,7 +153,7 @@ test('the stored preference is honoured for interactive sessions too, not just h
 });
 
 test('an Anthropic model with no stored key is usable on a subscription', () => {
-  withHome(LIVE, (caps) => {
+  withStatus(LIVE, (caps) => {
     const base = emptyBase();
     try {
       const m = { name: 'claude-opus-5', providerKey: 'anthropic', lifecycle: 'current', apiKey: '' };
@@ -184,7 +167,7 @@ test('an Anthropic model with no stored key is usable on a subscription', () => 
 });
 
 test('a non-Anthropic model still needs its own key — the subscription does not cover it', () => {
-  withHome(LIVE, (caps) => {
+  withStatus(LIVE, (caps) => {
     const base = emptyBase();
     try {
       const keyless = { name: 'gpt-5', providerKey: 'openai', lifecycle: 'current', apiKey: '' };
@@ -200,7 +183,7 @@ test('a non-Anthropic model still needs its own key — the subscription does no
 });
 
 test('retirement outranks disabled, so a retired model never reports the wrong reason', () => {
-  withHome(LIVE, (caps) => {
+  withStatus(LIVE, (caps) => {
     const base = emptyBase();
     try {
       // capabilities.js forces `disabled` on retired models, so checking
@@ -235,7 +218,7 @@ function seedRegistry(base) {
 }
 
 test('every model reported usable has a credential, and no unusable one does', () => {
-  withHome(LIVE, (caps) => {
+  withStatus(LIVE, (caps) => {
     const base = emptyBase();
     try {
       seedRegistry(base);

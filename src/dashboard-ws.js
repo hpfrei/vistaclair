@@ -99,12 +99,14 @@ class DashboardBroadcaster {
     this._pluginHandlers = [];
     this._broadcastListeners = new Set();
 
-    // Built-in domain handlers (capability CRUD + CLI terminal) registered via
-    // the same plugin registry MCP/rules/Pro-apps use.
+    // Built-in domain handlers (capability CRUD, CLI terminal, Claude sign-in)
+    // registered via the same plugin registry MCP/rules/Pro-apps use.
     const capabilitiesHandler = require('./ws/capabilities-handler');
     const cliHandler = require('./ws/cli-handler');
     this.registerHandler(capabilitiesHandler.PREFIXES, capabilitiesHandler);
     this.registerHandler(cliHandler.PREFIXES, cliHandler);
+    const claudeAuthHandler = require('./ws/claude-auth-handler');
+    this.registerHandler(claudeAuthHandler.PREFIXES, claudeAuthHandler.create(this));
 
     this.sessions = new InspectorSessions({
       store, broadcaster: this, getInstances, removeInstances,

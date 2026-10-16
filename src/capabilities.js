@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { ensureDir, safeJoin, readJSON, writeJSON, tryRm, PACKAGE_ROOT, DATA_HOME } = require('./utils');
 const secretStore = require('./secret-store');
 const { nativeModelsFor } = require('./native-models');
+const claudeAuth = require('./claude-auth');
 
 const KNOWN_TOOLS = [
   'Read', 'Write', 'Edit', 'NotebookEdit',
@@ -552,27 +552,15 @@ function resolveModel(model, providers, secrets) {
   };
 }
 
-// True when the `claude` CLI holds usable subscription credentials.
-//
-// Deliberately keyed on the REFRESH token's expiry, not the access token's. The
-// access token is short-lived (hours) and the CLI refreshes it transparently on
-// the next spawn, so treating an expired access token as "no subscription" made
-// every Anthropic model blink out of the pickers on a few-hour timer and
-// silently moved live sessions onto the API key. The subscription is gone only
-// once the refresh token itself has lapsed (or was never there).
+// True when the `claude` CLI is signed in to a Claude subscription, as
+// `claude auth status --json` reports it (loggedIn, authMethod "claude.ai").
+// The CLI's credential file is its own internal format, so it is not read
+// here; the CLI is asked, and it already treats a lapsed access token with a
+// live refresh token as signed in. Answered from a short cache refreshed in
+// the background (src/claude-auth.js), so callers on hot paths do not wait on
+// the command.
 function hasClaudeSubscription() {
-  try {
-    const credsPath = path.join(os.homedir(), '.claude', '.credentials.json');
-    const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
-    const oauth = creds?.claudeAiOauth;
-    if (!oauth?.accessToken) return false;
-    // No refresh token → the access token is all there is, so its expiry rules.
-    if (!oauth.refreshToken) {
-      return !(oauth.expiresAt && Date.now() >= oauth.expiresAt);
-    }
-    if (oauth.refreshTokenExpiresAt && Date.now() >= oauth.refreshTokenExpiresAt) return false;
-    return true;
-  } catch { return false; }
+  return claudeAuth.isSubscription(claudeAuth.authStatus.get());
 }
 
 // Resolve the Anthropic API key for headless (-p) spawns: the key pasted into

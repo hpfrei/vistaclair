@@ -166,7 +166,7 @@
         const a = given.auth || nc.onlyAuth;
         slot.innerHTML = a
           ? `<span class="ncd-fixed">${esc(labels.auth[a] || a)}${given.auth ? '' : ' <em>the only Claude credential</em>'}</span>`
-          : '<span class="ncd-fixed ncd-warn-text">No Claude credential: an API key on the Models page, or <code>claude /login</code></span>';
+          : '<span class="ncd-fixed ncd-warn-text">No Claude credential: an API key on the Models page, or <button type="button" class="claude-signin-btn" data-claude-signin>Sign in to Claude</button></span>';
       }
     }
     authSlot();

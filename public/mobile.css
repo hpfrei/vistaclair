@@ -139,6 +139,9 @@
   footer,
   .footer-gradient-bar { display: none; }
   .status { font-size: 10px; padding: 3px 7px; }
+  /* The plan is enough on a phone; the email is in the pill's modal. */
+  .claude-auth-pill { font-size: 10px; padding: 3px 7px; }
+  .claude-auth-pill-email { display: none; }
   .toast-bell-btn { padding: 6px 9px; font-size: 15px; }
 
   /* --- Bottom tab bar ---------------------------------------- */
