@@ -590,9 +590,10 @@ button.sc-worker-main { cursor: pointer; }
 button.sc-worker-main:hover { background: var(--bg-hover); }
 .sc-worker-name { flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .sc-worker-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
-.sc-worker-actions { display: flex; gap: 3px; flex-shrink: 0; margin-left: 6px; }
-.sc-icon-btn { padding: 0 7px; line-height: 18px; }
-.sc-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 10px; border-top: 1px solid var(--vc-hair); }
+.sc-actions { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--vc-hair); }
+.sc-action { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.sc-action .vc-btn { flex-shrink: 0; min-width: 132px; }
+.sc-action-hint { flex: 1; min-width: 0; font-size: 11px; line-height: 1.4; color: var(--text-dim); }
 .sc-gauge { display: inline-flex; align-items: center; gap: 5px; }
 .sc-gauge-label { font-size: 10px; color: var(--text-dim); }
 @media (prefers-reduced-motion: reduce) { .sc-dot.is-live { animation: none; } }

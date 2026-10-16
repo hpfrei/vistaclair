@@ -641,7 +641,11 @@
   }
 
   function deleteRun(runId) {
-    if (!confirm(`Delete run ${runId} completely? Its orchestrator and every worker session, their TODO/NOTES folders, the run directory and its worktrees are removed. Unmerged branches are kept.`)) return;
+    if (!confirm(`Delete run ${runId} permanently?\n\n`
+      + 'This is not a rollback: your code, commits and merged work are not touched.\n\n'
+      + 'Removed: the conversation history of the orchestrator and every worker, their TODO/NOTES, '
+      + "the run's session folder and its git worktrees. Unmerged branches are kept.\n\n"
+      + 'This cannot be undone.')) return;
     sendWs({ type: 'cli:deleteRun', runId });
   }
 
@@ -654,12 +658,15 @@
     sendWs({ type: 'cli:resumeSaved', sessionId, cols, rows });
   }
 
-  // An orchestrator is deleted with its run (the server refuses it alone); an
-  // unfinished worker is confirmed again through cli:deleteRefused.
+  // An orchestrator is deleted with its run (the server refuses it alone); a
+  // refused delete is confirmed again through cli:deleteRefused.
   function deleteSaved(sess) {
     if (!sess) return;
     if (sess.group?.role === 'orchestrator') { deleteRun(sess.group.runId); return; }
-    if (!confirm(`Delete "${savedTitle(sess)}" completely? Its transcript, its interaction data and its TODO/NOTES folder are removed. This cannot be undone.`)) return;
+    if (!confirm(`Delete "${savedTitle(sess)}" permanently?\n\n`
+      + 'This is not a rollback: your code, commits and merged work are not touched.\n\n'
+      + 'Removed: its conversation history, its interaction data and its TODO/NOTES folder.\n\n'
+      + 'This cannot be undone.')) return;
     sendWs({ type: 'cli:deleteSavedSession', sessionId: sess.id });
   }
 
@@ -711,8 +718,14 @@
     return run.orchestratorSessId ? bySess.get(run.orchestratorSessId) || null : null;
   }
 
-  const btn = (label, attrs, cls = '', title = '') =>
-    `<button type="button" class="vc-btn vc-btn-sm ${cls}" ${attrs}${title ? ` title="${escHtml(title)}"` : ''}>${label}</button>`;
+  const btn = (label, attrs, cls = '') =>
+    `<button type="button" class="vc-btn vc-btn-sm ${cls}" ${attrs}>${label}</button>`;
+
+  // A card action: its button with a line saying what it does.
+  const action = (label, attrs, cls, hint) =>
+    `<div class="sc-action">${btn(label, attrs, cls)}<span class="sc-action-hint">${escHtml(hint)}</span></div>`;
+
+  const DELETE_HINT = 'Removes the conversation history and TODO/NOTES. Your code, commits and merged work are not touched.';
 
   function runCardHtml(r, bySess) {
     const tabId = runTabId(r, bySess);
@@ -729,26 +742,21 @@
     const workers = SC.workerList(w.list.map(x => {
       const wTab = x.sessId ? bySess.get(x.sessId) : null;
       const report = x.lastReport ? `${x.lastReport.status}: ${x.lastReport.summary}` : '';
-      const actions = [
-        !wTab && !x.running && x.sessId ? btn('▶', `data-act="resume-saved" data-sess="${escHtml(x.sessId)}"`, 'sc-icon-btn', 'Resume this worker') : '',
-        !x.running && x.sessId ? btn('×', `data-act="delete-saved" data-sess="${escHtml(x.sessId)}"`, 'sc-icon-btn vc-btn-danger', 'Delete this worker session') : '',
-      ].join('');
       return {
         name: x.name.startsWith(prefix) ? x.name.slice(prefix.length) : x.name,
         state: x.state,
         detail: report || (x.title || ''),
         title: [x.name, x.title, report, x.lastActivityAt ? `last activity ${new Date(x.lastActivityAt).toLocaleString()}` : ''].filter(Boolean).join('\n'),
         attrs: wTab ? `data-act="switch" data-tab="${escHtml(wTab)}"` : null,
-        actions,
       };
     }), 'Workers');
     const actions = [];
-    if (tabId) actions.push(btn('Switch to tab', `data-act="switch" data-tab="${escHtml(tabId)}"`, 'vc-btn-primary'));
+    if (tabId) actions.push(action('Switch to tab', `data-act="switch" data-tab="${escHtml(tabId)}"`, 'vc-btn-primary', 'The orchestrator of this run is open in a tab.'));
     else if (!r.orchestratorRunning && !r.runMissing) {
-      actions.push(btn('Resume run', `data-act="resume-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-primary', 'The orchestrator continues its own session and resumes its paused workers'));
-      actions.push(btn('Fresh from notes', `data-act="resume-run" data-fresh="1" data-run="${escHtml(r.runId)}"`, '', 'A new orchestrator with a clean context, seeded from the notes, TODOs and reports of the run'));
+      actions.push(action('Resume', `data-act="resume-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-primary', 'The orchestrator continues its conversation and wakes its paused workers.'));
+      actions.push(action('Resume from notes', `data-act="resume-run" data-fresh="1" data-run="${escHtml(r.runId)}"`, '', "Start a fresh orchestrator with a clean memory from the run's TODOs, notes and reports. Use it when the old conversation got too long or confused."));
     }
-    if (!r.orchestratorRunning) actions.push(btn('Delete run', `data-act="delete-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-danger sc-push', 'Delete the whole run'));
+    if (!r.orchestratorRunning) actions.push(action('Delete permanently', `data-act="delete-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-danger', DELETE_HINT));
     return `<article class="vc-card sc-card sc-run ${SC.accentOf(r.status)}">`
       + `<div class="sc-head"><span class="sc-icon" title="Orchestration run ${escHtml(r.runId)}">\u{1F9ED}</span>`
       + `<div class="sc-title"><span class="sc-name">${escHtml(name)}</span>`
@@ -785,9 +793,9 @@
         + `</div>${bits ? `<div class="sc-line" title="${escHtml(bits)}">${escHtml(bits)}</div>` : ''}</div>`;
     }
     const actions = [];
-    if (tabId) actions.push(btn('Switch to tab', `data-act="switch" data-tab="${escHtml(tabId)}"`, 'vc-btn-primary'));
-    else if (!s.isRunning) actions.push(btn('Resume', `data-act="resume-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-primary'));
-    if (!s.isRunning) actions.push(btn('Delete', `data-act="delete-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-danger sc-push'));
+    if (tabId) actions.push(action('Switch to tab', `data-act="switch" data-tab="${escHtml(tabId)}"`, 'vc-btn-primary', 'This session is open in a tab.'));
+    else if (!s.isRunning) actions.push(action('Resume', `data-act="resume-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-primary', 'Continue where it left off.'));
+    if (!s.isRunning) actions.push(action('Delete permanently', `data-act="delete-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-danger', DELETE_HINT));
     return `<article class="vc-card sc-card ${SC.accentOf(status)}">`
       + `<div class="sc-head"><span class="sc-icon">${s.kind === 'sdk' ? '✨' : '⌨️'}</span>`
       + `<div class="sc-title"><span class="sc-name">${escHtml(savedTitle(s))}</span>`
