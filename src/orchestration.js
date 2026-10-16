@@ -58,7 +58,7 @@ const { execFileSync } = require('child_process');
 const folders = require('./session-folders');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
 
-const MAX_WORKERS = 3;
+const MAX_WORKERS = 5;
 // The model a worker may be launched on (launch_cli `model`), as Claude Code's
 // Agent tool takes it. Unset: the dashboard's default model for new tabs.
 const WORKER_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
@@ -179,9 +179,11 @@ function workerCard(run, worker) {
   ].join('\n');
 }
 
-function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS }) {
+function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS }) {
   // Which Claude credentials exist: { apiKey, subscription }. Read per ask.
   const claudeCredentials = credentials || (() => require('./capabilities').claudeCredentials(dataHome));
+  // The model catalog with availability (capabilities.listModelsWithAvailability).
+  const modelCatalog = models || (() => require('./capabilities').listModelsWithAvailability(dataHome));
   const HOOK_SCRIPT = path.join(coreRoot, 'lib', 'orchestration-hook.js');
   const runDirs = new Map();       // runId -> runDir (rebuilt from stamps on miss)
   const volatile = new Map();      // session name -> { agents, reported, nudged }
@@ -219,25 +221,80 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   const ENGINE_LABELS = { cli: 'CLI terminal', sdk: 'Agent SDK panel' };
   const AUTH_LABELS = { apikey: 'API key', subscription: 'Claude subscription' };
+  // The orchestrator's own model, picked in the New CLI dialog. Workers get
+  // theirs from the orchestrator's launch_cli calls.
+  const ORCHESTRATOR_MODELS = [
+    { value: 'opus[1m]', label: 'Opus', detail: '1M context' },
+    { value: 'fable[1m]', label: 'Fable', detail: '1M context' },
+  ];
+  const MODEL_FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'];
+
+  // The models a session's model family can be routed to (the proxy's tab
+  // modelMap): usable, not retired. Only what the dialog shows, never a key.
+  function remapTargets() {
+    let list = [];
+    try { list = modelCatalog() || []; } catch { list = []; }
+    let providers = {};
+    try {
+      for (const p of require('./capabilities').listProviders(dataHome) || []) providers[p.key] = p.label;
+    } catch { providers = {}; }
+    return list
+      .filter(m => m && m.name && m.usable && (m.lifecycle || 'current') !== 'retired')
+      .map(m => ({
+        name: m.name,
+        label: m.label || m.name,
+        providerKey: m.providerKey || null,
+        providerLabel: providers[m.providerKey] || m.providerKey || null,
+        contextWindow: Number(m.contextWindow) || null,
+        inputCostPerMTok: typeof m.inputCostPerMTok === 'number' ? m.inputCostPerMTok : null,
+        outputCostPerMTok: typeof m.outputCostPerMTok === 'number' ? m.outputCostPerMTok : null,
+        lifecycle: m.lifecycle || 'current',
+        retiresAt: m.retiresAt || null,
+        isNew: !!m.isNew,
+      }));
+  }
+
+  // A dialog's modelMap answer (an object, or its JSON) to a full tab modelMap,
+  // or null when nothing is routed. Unknown families and targets that are not
+  // usable now are dropped.
+  function parseModelMap(value, targets) {
+    if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return null; } }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const usable = new Set(targets.map(t => t.name));
+    const map = {};
+    let any = false;
+    for (const family of MODEL_FAMILIES) {
+      const target = typeof value[family] === 'string' && usable.has(value[family]) ? value[family] : null;
+      map[family] = target;
+      if (target) any = true;
+    }
+    return any ? map : null;
+  }
 
   // Ask what is still open — the session type, the engine, an SDK session's
   // billing — in one form. Billing is a question only when both credentials
-  // exist; with one, the form names it and the session is pinned to it.
-  // Resolves { mode, engine, auth } (the asked ones filled in; auth null for a
-  // CLI terminal), or null when cancelled.
+  // exist; with one, the form names it and the session is pinned to it. The
+  // form defaults to an orchestrator in the SDK panel, on the subscription.
+  // formData.kind 'new-cli' (with formData.newCli) lets the dashboard draw its
+  // own dialog, which also asks the orchestrator's model and an optional
+  // routing of model families for the whole session or run; the questions are
+  // the generic form's fallback.
+  // Resolves { mode, engine, auth, model, modelMap } (the asked ones filled in;
+  // auth null for a CLI terminal; model only for an orchestrator), or null
+  // when cancelled.
   async function askMode({ cwd, title, mode = null, engine = null, auth = null }) {
     const questions = [];
     let description = null;
     let onlyAuth = null;
     let billing = '';
     let authQuestion = null;
+    const creds = claudeCredentials() || {};
     if (!auth && engine !== 'cli') {
-      const creds = claudeCredentials();
       if (creds.apiKey && creds.subscription) {
         authQuestion = {
           id: 'auth', type: 'select', header: 'Billing',
           question: 'Bill the Agent SDK session to the API key or to your Claude subscription?',
-          defaultValue: AUTH_LABELS.apikey,
+          defaultValue: AUTH_LABELS.subscription,
           options: [
             { label: AUTH_LABELS.apikey, description: 'Per token, to the Anthropic API key on the Models page.' },
             { label: AUTH_LABELS.subscription, description: 'Your Claude Max/Pro plan, as a CLI terminal is.' },
@@ -257,7 +314,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       questions.push({
         id: 'mode', type: 'select', header: 'Session type',
         question: 'Open a simple CLI, or an orchestrator that delegates the work to worker CLIs?',
-        defaultValue: 'Simple CLI',
+        defaultValue: 'Orchestrator CLI',
         options: [
           { label: 'Simple CLI', description: 'One Claude Code session, as usual.' },
           { label: 'Orchestrator CLI', description: `Plans and delegates to up to ${MAX_WORKERS} worker CLIs, tracks them in a TODO, never codes itself.` },
@@ -268,7 +325,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       questions.push({
         id: 'engine', type: 'select', header: 'Engine',
         question: 'Run it in a terminal, or in the Agent SDK panel?',
-        defaultValue: ENGINE_LABELS.cli,
+        defaultValue: ENGINE_LABELS.sdk,
         options: [
           { label: ENGINE_LABELS.cli, description: 'Claude Code in a terminal tab, on your usual Claude credential.' },
           { label: ENGINE_LABELS.sdk, description: `The same Claude Code in an HTML panel (live thinking, tool calls, images)${billing ? `, ${billing}` : ''}.` },
@@ -277,11 +334,26 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
     if (authQuestion) questions.push(authQuestion);
     // Nothing to ask: the mode and the SDK engine were given, one credential.
-    if (!questions.length) return { mode, engine, auth: auth || onlyAuth };
+    if (!questions.length) return { mode, engine, auth: auth || onlyAuth, model: null, modelMap: null };
+    const targets = remapTargets();
+    let defaultModel = 'opus';
+    try { defaultModel = require('./capabilities').getCliModelPref(dataHome) || 'opus'; } catch { /* the fallback */ }
+    const newCli = {
+      given: { mode, engine, auth },
+      credentials: { apiKey: !!creds.apiKey, subscription: !!creds.subscription },
+      onlyAuth,
+      maxWorkers: MAX_WORKERS,
+      defaultModel,
+      orchestratorModels: ORCHESTRATOR_MODELS.map(m => ({ ...m, available: !!(creds.apiKey || creds.subscription) || engine === 'cli' })),
+      orchestratorModel: ORCHESTRATOR_MODELS[0].value,
+      families: MODEL_FAMILIES,
+      remapTargets: targets,
+      labels: { engine: ENGINE_LABELS, auth: AUTH_LABELS, mode: { simple: 'Simple CLI', orchestrator: 'Orchestrator CLI' } },
+    };
     let answer;
     try {
       answer = await askUser({
-        formData: { title: 'New CLI', submitLabel: 'Open', cancelLabel: 'Cancel', ...(description ? { description } : {}) },
+        formData: { kind: 'new-cli', newCli, title: 'New CLI', submitLabel: 'Open', cancelLabel: 'Cancel', ...(description ? { description } : {}) },
         questions,
         title: title || 'New CLI',
         cwd,
@@ -297,14 +369,19 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!engine) {
       // Unanswered falls back to the form's default.
       const value = String(answer.find(a => a?.id === 'engine')?.answer || '');
-      engine = /sdk/i.test(value) ? 'sdk' : 'cli';
+      engine = /terminal/i.test(value) ? 'cli' : 'sdk';
     }
     if (engine === 'sdk' && !auth) {
-      // Unanswered falls back to the form's default, the API key.
+      // Unanswered falls back to the form's default, the subscription.
       if (!authQuestion) auth = onlyAuth;
-      else auth = /subscription/i.test(String(answer.find(a => a?.id === 'auth')?.answer || '')) ? 'subscription' : 'apikey';
+      else auth = /api key/i.test(String(answer.find(a => a?.id === 'auth')?.answer || '')) ? 'apikey' : 'subscription';
     }
-    return { mode, engine, auth: engine === 'sdk' ? auth : null };
+    // Only an offered orchestrator model counts; unanswered keeps the default
+    // pin (the global CLI model).
+    const picked = String(answer.find(a => a?.id === 'model')?.answer || '');
+    const model = mode === 'orchestrator' && ORCHESTRATOR_MODELS.some(m => m.value === picked) ? picked : null;
+    const modelMap = parseModelMap(answer.find(a => a?.id === 'modelMap')?.answer, targets);
+    return { mode, engine, auth: engine === 'sdk' ? auth : null, model, modelMap };
   }
 
   // --- Runs ---
@@ -442,6 +519,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       isolation: isolation || (gitToplevel(root) ? 'worktree' : 'none'),
       engine: (engine || settings.engine) === 'sdk' ? 'sdk' : 'cli',
       auth: null,
+      // The orchestrator's model, for a refresh or a fresh start (orchestratorSettings).
+      orchestratorModel: settings.model || null,
       maxBudgetUsd: maxBudgetUsd || null,
       base: { appendSystemPrompt: appendSystemPrompt || '', settingsFile: settingsFile || null, stamps },
       createdAt: new Date().toISOString(),
@@ -487,6 +566,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     let engine = given === 'cli' || given === 'sdk' ? given : null;
     const givenAuth = opts.auth || opts.settings?.auth;
     let auth = givenAuth === 'apikey' || givenAuth === 'subscription' ? givenAuth : null;
+    let model = null;
+    let modelMap = null;
     if (!mode || !engine || (engine === 'sdk' && !auth)) {
       // One pending question per target: a double click joins the open ask.
       const key = opts.tabId || `cwd:${opts.cwd}`;
@@ -498,10 +579,17 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const picked = await pendingAsks.get(key);
       if (!picked) return { cancelled: true };
       ({ mode, engine, auth } = picked);
+      model = picked.model || null;
+      modelMap = picked.modelMap || null;
     }
     if (engine !== 'sdk') auth = null;
     const tabId = opts.tabId || mgr.nextTabId();
     const { auth: _a, ...callerSettings } = opts.settings || {};
+    // The dialog's picks: the routing covers the session, and a run's members
+    // through the stamps; the model is the orchestrator's alone (prepareRun
+    // keeps it off the stamps, on the run).
+    if (modelMap) callerSettings.modelMap = modelMap;
+    if (model) callerSettings.model = model;
     const launch = {
       cwd: opts.cwd, cols: opts.cols, rows: opts.rows, title: opts.title,
       settings: { ...callerSettings, engine, ...(auth ? { auth } : {}) }, hidden: opts.hidden, autoMemory: opts.autoMemory,
@@ -517,7 +605,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
     if (opts.beforeLaunch) opts.beforeLaunch(tabId);
     mgr.launchSession(tabId, launch);
-    return { tabId, mode, engine, auth };
+    return { tabId, mode, engine, auth, ...(model ? { model } : {}), ...(modelMap ? { modelMap } : {}) };
   }
 
   // --- Workers ---

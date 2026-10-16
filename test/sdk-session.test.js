@@ -63,7 +63,7 @@ function fakeSdk() {
     sessionMessages: [],
     query({ prompt, options }) {
       const out = channel();
-      const call = { prompt, options, inputs: [], interrupts: 0, models: [], closed: false, emit: (m) => out.push(m), end: () => out.end(), fail: (e) => out.fail(e) };
+      const call = { prompt, options, inputs: [], interrupts: 0, models: [], contextAsks: [], closed: false, emit: (m) => out.push(m), end: () => out.end(), fail: (e) => out.fail(e) };
       options.abortController?.signal.addEventListener('abort', () => out.end());
       (async () => { for await (const m of prompt) call.inputs.push(m); call.inputEnded = true; })();
       calls.push(call);
@@ -73,6 +73,7 @@ function fakeSdk() {
         return: async () => { out.end(); return { value: undefined, done: true }; },
         interrupt: async () => { call.interrupts++; },
         setModel: async (m) => { call.models.push(m); },
+        getContextUsage: async (o) => { call.contextAsks.push(o); return sdk.contextUsage || null; },
         close: () => { call.closed = true; out.end(); },
       };
     },
@@ -365,6 +366,52 @@ test('status: the init model when none is chosen, and the model of the last main
   // A switch clears it until the next reply.
   await s.setModel('haiku');
   assert.deepStrictEqual([statuses(events).at(-1).model, statuses(events).at(-1).actualModel], ['haiku', null]);
+  s.kill();
+});
+
+test('status: the main agent\'s context from each reply\'s usage, the window from the result, corrected by getContextUsage', async () => {
+  const { s, sdk, calls, events } = makeSession({ model: 'opus[1m]' });
+  s.spawn(tmp('proj-'), 80, 24, {});
+  const q = calls[0];
+  const usage = (n) => ({ input_tokens: 2, cache_read_input_tokens: n, cache_creation_input_tokens: 1000, output_tokens: 50 });
+  const reply = (n, pk = null) => q.emit({ type: 'assistant', message: { model: 'claude-opus-5-5', usage: usage(n), content: [] }, parent_tool_use_id: pk });
+  reply(141000);
+  await tick();
+  // Before any result: a [1m] model's window.
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 142002, window: 1000000, compactAt: null });
+  // The same reply's next block, and a subagent's reply, are no news.
+  const before = statuses(events).length;
+  reply(141000);
+  reply(5000, 'toolu_sub');
+  await tick();
+  assert.strictEqual(statuses(events).length, before);
+  assert.strictEqual(s.context.tokens, 142002);
+  // The result names the window of the model that answered (not the subagent's), then the SDK's count corrects it.
+  sdk.contextUsage = { totalTokens: 150000, maxTokens: 980000, rawMaxTokens: 1000000, autoCompactThreshold: 900000, isAutoCompactEnabled: true };
+  q.emit({ type: 'result', subtype: 'success', total_cost_usd: 1, modelUsage: {
+    'claude-haiku-4-5': { contextWindow: 200000 }, 'claude-opus-5-5[1m]': { contextWindow: 1000000 },
+  } });
+  await tick();
+  assert.deepStrictEqual(q.contextAsks, [{ detail: 'summary' }], 'summary only: no token-count call');
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 150000, window: 1000000, compactAt: 900000 });
+  // A compaction drops it at once.
+  q.emit({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000, post_tokens: 20000 } });
+  await tick();
+  assert.strictEqual(statuses(events).at(-1).context.tokens, 20000);
+  // A switch to a model without [1m]: the window is unknown until its first result.
+  await s.setModel('haiku');
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 20000, window: null, compactAt: null });
+  s.kill();
+});
+
+test('status: no context field before a main-agent reply has counted one', async () => {
+  const { s, calls, events } = makeSession();
+  s.spawn(tmp('proj-'), 80, 24, {});
+  calls[0].emit({ type: 'system', subtype: 'init', model: 'claude-sonnet-5' });
+  calls[0].emit({ type: 'assistant', message: { model: 'claude-sonnet-5', content: [] }, parent_tool_use_id: null });
+  await tick();
+  assert.ok(statuses(events).length > 0);
+  assert.ok(statuses(events).every(st => !('context' in st)));
   s.kill();
 });
 

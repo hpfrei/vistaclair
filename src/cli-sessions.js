@@ -18,6 +18,26 @@ const SESSIONS_ROOT = path.join(DATA_HOME, 'data', 'sessions');
 const RESTORE_STAGGER_MS = 500;
 const RECENT_DIRS_FILE = path.join(DATA_HOME, 'data', 'cli-recent-dirs.json');
 const MAX_RECENT_DIRS = 12;
+// The recent list stays at the orchestrator level: never deeper than an app.
+const APPS_DIR = process.env.VISTACLAIR_APPS_DIR || path.join(PACKAGE_ROOT, 'vistaclair-apps');
+const WORKTREES_DIR = path.join(DATA_HOME, 'data', 'worktrees');
+
+function _isInside(dir, root) {
+  const rel = path.relative(root, dir);
+  return !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+// How `cwd` shows in the recent list: a directory inside an app as the app
+// (vistaclair-apps/<app>), a run's worktree not at all (null), others as is.
+function _recentDirOf(cwd) {
+  if (!cwd) return null;
+  if (_isInside(cwd, WORKTREES_DIR)) return null;
+  if (_isInside(cwd, APPS_DIR)) {
+    const app = path.relative(APPS_DIR, cwd).split(path.sep)[0];
+    return app ? path.join(APPS_DIR, app) : APPS_DIR;
+  }
+  return cwd;
+}
 
 // Claude Code's own config root; every spawn reads and writes it (core never
 // sets CLAUDE_CONFIG_DIR).
@@ -229,7 +249,8 @@ class CliSessionManager {
       ...(flags.pausedAt ? { pausedAt: flags.pausedAt } : {}),
     });
     writeJSON(HISTORY_FILE, deduped);
-    this.recordRecentDir(entry.cwd);
+    // A worker's directory is its orchestrator's pick, not the user's.
+    if (entry.settings?.orchestration?.role !== 'worker') this.recordRecentDir(entry.cwd);
   }
 
   findSaved(id) {
@@ -492,12 +513,24 @@ class CliSessionManager {
 
   // --- Recent directories ---
 
+  // Entries written before the orchestrator-level rule are mapped on read:
+  // worktrees dropped, a directory inside an app merged into the app.
   _loadRecentDirs() {
     const dirs = readJSON(RECENT_DIRS_FILE, []);
-    return Array.isArray(dirs) ? dirs : [];
+    if (!Array.isArray(dirs)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const d of dirs) {
+      const p = _recentDirOf(d?.path);
+      if (!p || seen.has(p)) continue;
+      seen.add(p);
+      out.push({ ...d, path: p });
+    }
+    return out;
   }
 
   recordRecentDir(cwd) {
+    cwd = _recentDirOf(cwd);
     if (!cwd) return;
     const now = Date.now();
     const dirs = this._loadRecentDirs().filter(d => d.path !== cwd);

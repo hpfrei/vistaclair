@@ -24,11 +24,16 @@
 //                  <sessionDir>/transcript.jsonl, which sdk:history replays
 //                  after a reload or restart.
 //   status         `{ platform: { kind: 'status', state, costUsd, model,
-//                  actualModel, mappedTo } }`: the chosen model (setModel
+//                  actualModel, mappedTo, context? } }`: the chosen model (setModel
 //                  switches it live), the model the last main-agent reply came
 //                  from (cleared by a switch), and the tab's modelMap target for its family. The
 //                  cost of a resume starts from the last one its transcript
-//                  recorded and never goes below it.
+//                  recorded and never goes below it. `context` ({ tokens,
+//                  window, compactAt }, once a main-agent reply has counted
+//                  it): the main agent's context from each reply's usage, the
+//                  window from the turn's modelUsage, both corrected at the
+//                  end of a turn by getContextUsage (summary: no API call),
+//                  which also names the auto-compact threshold.
 //   files          `{ platform: { kind: 'files', todo, notes } }` when a
 //                  main-agent tool call that wrote the folder's TODO.md /
 //                  NOTES.md has returned: the panel re-reads them (sdk:todo).
@@ -99,6 +104,26 @@ function requestCost(usage, pricing) {
     + per(usage.output_tokens, pricing.outputCostPerMTok)
     + per(usage.cache_read_input_tokens, pricing.cacheReadCostPerMTok || pricing.inputCostPerMTok)
     + per(usage.cache_creation_input_tokens, pricing.cacheCreateCostPerMTok || pricing.inputCostPerMTok);
+}
+
+// The context a request sent: everything on its input side.
+function contextTokens(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const n = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+  return n > 0 ? n : null;
+}
+
+// The main agent's context window from a result's modelUsage (keyed by model,
+// subagents' models included): the entry of the model that answered, else
+// the only one. Without either, a chosen `[1m]` model is a million tokens
+// (the answering model's id never carries the suffix).
+function contextWindowOf(modelUsage, answered, chosen) {
+  const bare = (m) => String(m || '').replace(/\[1m\]$/i, '').replace(/^claude-/, '');
+  const entries = Object.entries(modelUsage || {}).filter(([, u]) => u?.contextWindow > 0);
+  const hit = answered && entries.find(([k, u]) => bare(k) === bare(answered) || bare(u.canonicalModel) === bare(answered));
+  if (hit) return hit[1].contextWindow;
+  if (entries.length === 1) return entries[0][1].contextWindow;
+  return /\[1m\]$/i.test(String(chosen || '')) ? 1000000 : null;
 }
 
 // The session's transcript file (envelopes, one per line).
@@ -220,6 +245,7 @@ class SdkSession {
     this._costFloor = 0;      // a resume's carried-over cost: no result lowers it
     this._initModel = null;   // the model system/init reported
     this.actualModel = null;  // the model of the last main-agent reply
+    this.context = { tokens: null, window: null, compactAt: null };   // the main agent's
     this._fileTools = new Map();   // tool_use id -> { todo, notes } it writes
     this.autoMemory = false;
     this._authToken = opts.authToken || '';
@@ -453,14 +479,26 @@ class SdkSession {
       // Cumulative for the query: the latest wins, but never below the cost a
       // resume carried over.
       if (Number.isFinite(cost)) this.costUsd = Math.max(cost, this._costFloor);
+      const window = main ? contextWindowOf(msg.modelUsage, this.actualModel, this.settings.model || this._initModel) : null;
+      if (window) this.context.window = window;
       this._setState(msg.queued_turn_count > 0 ? 'busy' : 'idle', { force: true });
+      if (main) this._refreshContext();
     } else if (msg.type === 'assistant') {
       const model = main ? msg.message?.model : null;
       const modelChanged = typeof model === 'string' && model !== '<synthetic>' && model !== this.actualModel;
       if (modelChanged) this.actualModel = model;
       if (main) this._noteFileTools(msg.message?.content);
+      // One API reply arrives as one message per content block, each with the
+      // same usage: only a new count is news.
+      const tokens = main ? contextTokens(msg.message?.usage) : null;
+      const contextChanged = tokens != null && tokens !== this.context.tokens;
+      if (contextChanged) this.context.tokens = tokens;
+      if (contextChanged && !this.context.window) this.context.window = contextWindowOf(null, null, this.settings.model || this._initModel);
       if (this.state === 'idle') this._setState('busy');
-      else if (modelChanged) this._emitStatus();
+      else if (modelChanged || contextChanged) this._emitStatus();
+    } else if (msg.type === 'system' && msg.subtype === 'compact_boundary' && main) {
+      const post = msg.compact_metadata?.post_tokens;
+      if (post > 0) { this.context.tokens = post; this._emitStatus(); }
     } else if (msg.type === 'user' && main) {
       this._fileToolsDone(msg.message?.content);
     }
@@ -587,7 +625,27 @@ class SdkSession {
     const model = this.settings.model || this._initModel || null;
     const family = model ? modelFamily(model) : null;
     const mappedTo = (family && this.settings.modelMap?.[family]) || null;
-    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, model, actualModel: this.actualModel, mappedTo } });
+    const context = this.context.tokens != null ? { ...this.context } : undefined;
+    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, model, actualModel: this.actualModel, mappedTo, ...(context ? { context } : {}) } });
+  }
+
+  // The end of a turn: the SDK's own count (its summary answers from the
+  // last reply's usage and local estimates, without a token-count call),
+  // with the effective window and the auto-compact threshold.
+  _refreshContext() {
+    const q = this._query;
+    if (!q || typeof q.getContextUsage !== 'function') return;
+    const gen = this._spawnGen;
+    Promise.resolve().then(() => q.getContextUsage({ detail: 'summary' })).then((u) => {
+      if (gen !== this._spawnGen || !u) return;
+      const tokens = u.totalTokens > 0 ? u.totalTokens : this.context.tokens;
+      const window = u.rawMaxTokens > 0 ? u.rawMaxTokens : u.maxTokens > 0 ? u.maxTokens : this.context.window;
+      const compactAt = u.isAutoCompactEnabled && u.autoCompactThreshold > 0 ? u.autoCompactThreshold : null;
+      const c = this.context;
+      if (tokens === c.tokens && window === c.window && compactAt === c.compactAt) return;
+      this.context = { tokens, window, compactAt };
+      this._emitStatus();
+    }, () => {});
   }
 
   // Switch the model: live on a running query (the next turn uses it), and in
@@ -599,6 +657,8 @@ class SdkSession {
     if (this._query) await this._query.setModel(model);
     this.settings = { ...this.settings, model };
     this.actualModel = null; // unknown until the next reply
+    // Another model may have another window; the end of its first turn tells.
+    this.context = { ...this.context, window: contextWindowOf(null, null, model), compactAt: null };
     this.onSettingsChange?.(this);
     this._emitStatus();
     return { ok: true, model };

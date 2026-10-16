@@ -2,9 +2,15 @@
 // tab, drawn as a diagram: the orchestrator's box spans the top, one box per
 // worker sits in a row below it (workers are hidden sessions with no tab of
 // their own), and an SVG behind the boxes joins them. A plain SDK tab has a
-// single box. Each box shows one view at a time — TODO, Notes or Live
-// (thinking and text; every tool call is in the Inspector) — under a caption
-// on its top border: name, model (click to switch), state, cost.
+// single box. Each box shows one view at a time — Live or Notes — under a
+// caption on its top border: name, model (click to switch), state, cost; at
+// its right end the main agent's context use, then the Inspector button. Live
+// is split: the TODO table on top, below it the agent's text and the
+// `description` of its tool calls, and the same of its subagents, chipped by
+// type and launch order ("Explore 2"); thinking, notices and messages are
+// only in the Inspector. A splitter between the two moves (double-click:
+// back to the table's own height); the last position is kept for new boxes.
+// Every box opens on Live.
 //
 // Everything shown is server state: on mount and after a reconnect each box
 // asks for `sdk:history` (the session's transcript, no stream deltas),
@@ -23,9 +29,12 @@
   const HISTORY_WAIT_MS = 10000;
   const FOLLOW_SLACK_PX = 48;
   const LINK_FLASH_MS = 1600;
-  const VIEWS = ['todo', 'notes', 'live'];
+  const VIEWS = ['live', 'notes'];
   const VIEW_STORE = 'sdkPanelViews';
   const VIEW_STORE_MAX = 200;
+  const SPLIT_STORE = 'sdkTodoSplit';   // the TODO table's share of the view, %
+  const SPLIT_MIN = 10;
+  const SPLIT_MAX = 90;
   const FALLBACK_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
 
   const panels = new Map();   // tabId -> Panel
@@ -53,6 +62,9 @@
   const STATE_TEXT = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing' };
   // `claude-sonnet-5-5` → `sonnet-5-5`; aliases and `[1m]` stay as they are.
   const fmtModel = (m) => String(m || '').replace(/^claude-/, '');
+  const fmtTokens = (n) => n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+  const CTX_WARM = 0.7;            // of the auto-compact threshold (else the window)
+  const CTX_HOT = 0.9;
 
   // The tool's one-line gist, as the Inspector shows it.
   function toolSummary(name, input) {
@@ -125,10 +137,12 @@
       this.mappedTo = null;          // the tab's modelMap target, when it rewrites
       this.initModel = null;         // system/init, before any status names one
       this.todo = null;
+      this.context = null;           // { tokens, window, compactAt } from the status
       this.follow = true;
       this.queue = [];
       this.historyPending = false;
-      this.view = storedView(sessId) || (role === 'worker' ? 'todo' : 'live');
+      // A stored view this panel no longer has (the old TODO) opens Live.
+      this.view = storedView(sessId) || 'live';
       this._build();
       this.reset();
       this.setView(this.view, { store: false });
@@ -139,31 +153,39 @@
       const root = this.el = el('section', `sdk-area sdk-area-${this.role}`);
       root.dataset.sessId = this.sessId;
       root.innerHTML = `
-        <div class="sdk-cap">
-          <span class="sdk-area-name"></span>
-          <button type="button" class="sdk-model" title="Change this session's model"></button>
-          <span class="sdk-chip sdk-area-state"></span>
-          <span class="sdk-chip sdk-area-report hidden"></span>
-          <span class="sdk-area-cost"></span>
+        <div class="sdk-top">
+          <div class="sdk-cap">
+            <span class="sdk-area-name"></span>
+            <button type="button" class="sdk-model" title="Change this session's model"></button>
+            <span class="sdk-chip sdk-area-state"></span>
+            <span class="sdk-chip sdk-area-report hidden"></span>
+            <span class="sdk-area-cost"></span>
+          </div>
+          <div class="sdk-cap-right">
+            <span class="sdk-ctx hidden"><span class="sdk-ctx-bar"><i></i></span><span class="sdk-ctx-txt"></span></span>
+            <button type="button" class="sdk-insp" title="Open this session in the Inspector: every request, tool call and result"><span class="sdk-insp-l">Inspector</span></button>
+          </div>
         </div>
-        <button type="button" class="sdk-insp" title="Open this session in the Inspector: every request, tool call and result">Inspector</button>
         <div class="sdk-bar">
           <div class="sdk-seg">
-            <button type="button" data-v="todo">TODO</button><button type="button" data-v="notes">Notes</button><button type="button" data-v="live">Live</button>
+            <button type="button" data-v="live">Live</button><button type="button" data-v="notes">Notes</button>
           </div>
           <div class="sdk-now"></div>
         </div>
         <div class="sdk-area-awaiting hidden">Awaiting your answer: the question is open in the dialog.</div>
         <div class="sdk-main">
-          <div class="sdk-view sdk-view-todo">
-            <div class="sdk-area-final hidden"></div>
-            <div class="sdk-todo-wrap"></div>
+          <div class="sdk-view sdk-view-live">
+            <div class="sdk-todo-top">
+              <div class="sdk-area-final hidden"></div>
+              <div class="sdk-todo-wrap"></div>
+            </div>
+            <div class="sdk-todo-split" title="Drag to resize · double-click to reset"></div>
+            <div class="sdk-todo-lite">
+              <div class="sdk-feed lite"></div>
+              <button type="button" class="sdk-live-pill hidden">↓ jump to live</button>
+            </div>
           </div>
           <div class="sdk-view sdk-view-notes markdown-body"></div>
-          <div class="sdk-view sdk-view-live">
-            <div class="sdk-feed"></div>
-            <button type="button" class="sdk-live-pill hidden">↓ jump to live</button>
-          </div>
         </div>`;
       const q = (s) => root.querySelector(s);
       this.nameEl = q('.sdk-area-name');
@@ -171,13 +193,16 @@
       this.stateEl = q('.sdk-area-state');
       this.reportEl = q('.sdk-area-report');
       this.costEl = q('.sdk-area-cost');
+      this.ctxEl = q('.sdk-ctx');
+      this.ctxFill = q('.sdk-ctx-bar > i');
+      this.ctxTxt = q('.sdk-ctx-txt');
       this.nowEl = q('.sdk-now');
       this.awaitEl = q('.sdk-area-awaiting');
       this.finalEl = q('.sdk-area-final');
-      this.todoView = q('.sdk-view-todo');
+      this.todoView = q('.sdk-todo-top');
+      this._initSplit(q('.sdk-view-live'), q('.sdk-todo-split'));
       this.todoEl = q('.sdk-todo-wrap');
       this.notesEl = q('.sdk-view-notes');
-      this.liveView = q('.sdk-view-live');
       this.feed = q('.sdk-feed');
       this.pill = q('.sdk-live-pill');
       this.segBtns = Object.fromEntries([...root.querySelectorAll('.sdk-seg button')].map(b => [b.dataset.v, b]));
@@ -212,6 +237,48 @@
       this._ro = new ResizeObserver(() => { if (this.view === 'live' && this.follow) this._scrollSoon(); });
       this._ro.observe(this.feed);
       this.renderHeader();
+    }
+
+    // The TODO table's height: the stored share, or (none) its own content
+    // height up to the CSS cap.
+    _initSplit(view, handle) {
+      const apply = (pct) => {
+        this.todoView.style.flexBasis = pct == null ? '' : `${pct}%`;
+        this.todoView.classList.toggle('sized', pct != null);
+      };
+      let stored = null;
+      try { stored = parseFloat(localStorage.getItem(SPLIT_STORE)); } catch {}
+      apply(isFinite(stored) ? stored : null);
+      let dragging = false;
+      let pct = null;
+      handle.addEventListener('pointerdown', (e) => {
+        dragging = true;
+        handle.classList.add('dragging');
+        handle.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      });
+      handle.addEventListener('pointermove', (e) => {
+        if (!dragging) return;
+        const r = view.getBoundingClientRect();
+        if (!r.height) return;
+        pct = Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, ((e.clientY - r.top) / r.height) * 100));
+        apply(Math.round(pct * 10) / 10);
+      });
+      const end = (e) => {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove('dragging');
+        try { handle.releasePointerCapture(e.pointerId); } catch {}
+        if (pct != null) { try { localStorage.setItem(SPLIT_STORE, String(Math.round(pct * 10) / 10)); } catch {} }
+        if (this.follow) this._scrollSoon();
+      };
+      handle.addEventListener('pointerup', end);
+      handle.addEventListener('pointercancel', end);
+      handle.addEventListener('dblclick', () => {
+        pct = null;
+        apply(null);
+        try { localStorage.removeItem(SPLIT_STORE); } catch {}
+      });
     }
 
     _scrollSoon() {
@@ -249,14 +316,13 @@
         this.follow = true;
         this.pill.classList.add('hidden');
         this._scrollSoon();
-      } else if (v === 'todo') {
         this.renderTodo({ scroll: true });
       } else {
         this.renderNotes({ scroll: true });
       }
     }
 
-    // Something new to read in Live while another view is showing.
+    // Something new to read in Live while Notes is showing.
     markUnread() {
       if (this.view !== 'live' && !this._replaying) this.segBtns.live.classList.add('unread');
     }
@@ -299,7 +365,7 @@
         this.reportEl.title = r.summary || '';
         this.reportEl.className = `sdk-chip sdk-area-report sdk-report-${rs}`;
       }
-      // The last report heads the TODO view once ended, or when there is no TODO.
+      // The last report heads the TODO table once ended, or when there is no TODO.
       this.finalEl.classList.toggle('hidden', !(r?.summary && (ended || !this.todo?.rows?.length)));
       if (r?.summary) this.finalEl.textContent = `${r.status || 'report'}: ${r.summary}`;
       this.costEl.textContent = fmtCost(this.cost);
@@ -314,8 +380,30 @@
       this.modelBtn.disabled = ended;
       const t = this.todo?.rows || [];
       const done = t.filter(x => isDone(x.status)).length;
-      this.segBtns.todo.textContent = t.length ? `TODO ${done}/${t.length}` : 'TODO';
+      this.segBtns.live.textContent = t.length ? `Live ${done}/${t.length}` : 'Live';
+      this.renderContext();
       this.renderNow();
+    }
+
+    // The main agent's context: % of the window (tokens while the window is
+    // unknown), warmer as it nears the auto-compact threshold.
+    renderContext() {
+      const c = this.context;
+      this.ctxEl.classList.toggle('hidden', !(c?.tokens > 0));
+      if (!(c?.tokens > 0)) return;
+      const pct = c.window > 0 ? (c.tokens / c.window) * 100 : null;
+      const limit = c.compactAt || c.window;
+      const level = limit ? c.tokens / limit : 0;
+      this.ctxEl.className = `sdk-ctx${level >= CTX_HOT ? ' hot' : level >= CTX_WARM ? ' warm' : ''}${pct == null ? ' no-window' : ''}`;
+      this.ctxTxt.textContent = pct == null ? fmtTokens(c.tokens) : pct < 1 ? '<1%' : `${Math.round(pct)}%`;
+      this.ctxFill.style.width = pct == null ? '0' : `${Math.min(100, pct)}%`;
+      const n = (v) => Math.round(v).toLocaleString();
+      this.ctxEl.title = [
+        `Context: ${n(c.tokens)}${c.window ? ` of ${n(c.window)}` : ''} tokens${pct != null ? ` (${pct.toFixed(1)}%)` : ''}`,
+        c.compactAt ? `Auto-compacts at ${n(c.compactAt)} tokens (${Math.round((c.tokens / c.compactAt) * 100)}% of the way)` : null,
+        this.compactions ? `Compacted ${this.compactions}× so far` : null,
+        'The main agent only: each subagent has its own context.',
+      ].filter(Boolean).join('\n');
     }
 
     // One line under the caption: what the agent is doing right now.
@@ -377,7 +465,7 @@
           }).join('')}</tbody></table>`
           : '<div class="sdk-empty">No TODO.md yet.</div>';
       }
-      if (scroll && this.view === 'todo') {
+      if (scroll && this.view === 'live') {
         const doing = this.todoEl.querySelectorAll('.sdk-todo-doing');
         if (doing.length) scrollToNode(this.todoView, doing[doing.length - 1]);
         else this.todoView.scrollTop = this.todoView.scrollHeight;
@@ -404,6 +492,9 @@
       this.msgs = new Map();      // message.id -> {id, pk, blocks}
       this.streams = new Map();   // parent_tool_use_id|'' -> {rec, byIndex}
       this.tools = new Map();     // tool_use_id -> {id, name, input, done, startedAt}
+      this.subs = new Map();      // Agent tool_use_id -> {label, color, description}
+      this.subCounts = new Map(); // subagent type -> runs so far
+      this.compactions = 0;
       this.nowTool = null;
       this.seen = new Set();
       this.follow = true;
@@ -478,6 +569,7 @@
         if (p.model !== undefined) { this.model = p.model || null; this._modelBefore = undefined; }
         if (p.actualModel !== undefined) this.actualModel = p.actualModel || null;
         if (p.mappedTo !== undefined) this.mappedTo = p.mappedTo || null;
+        if (p.context && typeof p.context === 'object') this.context = p.context;
         this.setState(p.state);
         this.renderHeader();
       }
@@ -519,8 +611,9 @@
       if (type === 'tool_use') {
         const blk = { type, partial: '', final: false, toolId: opts.toolId || null, tool: this.toolStarted(opts.toolId, opts.toolName, rec.pk) };
         if (!blk.tool.lineEl) {
-          const line = blk.tool.lineEl = el('div', 'sdk-toolline');
+          const line = blk.tool.lineEl = el('div', `sdk-toolline${rec.pk ? ' sub' : ''}`);
           if (rec.pk) line.appendChild(this.subChip(rec.pk));
+          blk.tool.lineName = line.appendChild(el('span', 'sdk-toolline-name'));
           blk.tool.lineText = line.appendChild(el('span', 'sdk-toolline-text'));
           this.renderToolLine(blk.tool);
           this.feed.appendChild(line);
@@ -551,15 +644,28 @@
       return blk;
     }
 
-    // The chip on a subagent's blocks: its type (Explore, coder, …), the
-    // Agent call's description on hover, one colour per subagent run.
+    // A subagent run, named on its Agent call: its type numbered in launch
+    // order ("Explore 1", "Explore 2", "Coder 1"), one colour per run. A
+    // history replay names them again in the same order.
+    subOf(pk) {
+      let s = this.subs.get(pk);
+      if (!s) {
+        const input = this.tools.get(pk)?.input || {};
+        const type = String(input.subagent_type || 'subagent');
+        const n = (this.subCounts.get(type) || 0) + 1;
+        this.subCounts.set(type, n);
+        s = { label: `${type.charAt(0).toUpperCase()}${type.slice(1)} ${n}`, color: this.subs.size % 4, description: input.description || '' };
+        this.subs.set(pk, s);
+      }
+      return s;
+    }
+
+    // The chip on a subagent's blocks and on the Agent call that started it;
+    // the call's description on hover.
     subChip(pk) {
-      const agent = this.tools.get(pk);
-      const input = (agent && agent.input) || {};
-      if (!this.subColors) this.subColors = new Map();
-      if (!this.subColors.has(pk)) this.subColors.set(pk, this.subColors.size % 4);
-      const chip = el('span', `sdk-subchip sdk-subchip-c${this.subColors.get(pk)}`, input.subagent_type || 'subagent');
-      chip.title = input.description || '';
+      const s = this.subOf(pk);
+      const chip = el('span', `sdk-subchip sdk-subchip-c${s.color}`, s.label);
+      chip.title = s.description;
       return chip;
     }
 
@@ -576,6 +682,11 @@
     setToolInput(t, input) {
       if (!t) return;
       t.input = input;
+      // A main-agent Agent call is numbered as it is made, and its line
+      // carries the chip its subagent's output will.
+      if ((t.name === 'Agent' || t.name === 'Task') && !t.sub && input?.subagent_type && t.lineEl && !t.chipEl) {
+        t.chipEl = t.lineEl.insertBefore(this.subChip(t.id), t.lineName);
+      }
       this.renderToolLine(t);
       if (t === this.nowTool) this.renderNow();
     }
@@ -583,9 +694,13 @@
     renderToolLine(t) {
       const line = t.lineEl;
       if (!line) return;
-      const gist = oneLine((t.input && t.input.description) || toolSummary(t.name, t.input));
-      t.lineText.textContent = gist ? `${prettyTool(t.name)} · ${gist}` : prettyTool(t.name);
+      const desc = oneLine(t.input && t.input.description);
+      const gist = desc || oneLine(toolSummary(t.name, t.input));
+      // The lite feed shows the description alone, without the tool's name.
+      t.lineName.textContent = gist ? `${prettyTool(t.name)} · ` : prettyTool(t.name);
+      t.lineText.textContent = gist;
       line.title = gist;
+      line.classList.toggle('has-desc', !!desc);
       line.classList.toggle('done', !!t.done);
       line.classList.toggle('error', !!t.error);
     }
@@ -726,6 +841,7 @@
           return;
         case 'compact_boundary': {
           const md = m.compact_metadata || {};
+          if (!m.parent_tool_use_id) { this.compactions++; this.renderContext(); }
           const k = (n) => n ? `${Math.round(n / 1000)}k` : '?';
           this.notice(`Context compacted (${md.trigger || 'auto'}, ${k(md.pre_tokens)} → ${k(md.post_tokens)} tokens)`);
           return;
@@ -893,7 +1009,7 @@
             <span class="sdk-spacer"></span>
             <button type="button" class="sdk-tb-btn" data-act="interrupt">Interrupt</button>
             <button type="button" class="sdk-tb-btn" data-act="pause">Pause</button>
-            <button type="button" class="sdk-tb-btn hidden" data-act="board" title="Workers, reports and TODO of the run">☰ Run board</button>
+            <button type="button" class="sdk-tb-btn hidden" data-act="refresh">Refresh orchestrator</button>
           </div>
           <div class="sdk-stage">
             <svg class="sdk-links" aria-hidden="true"></svg>
@@ -913,12 +1029,12 @@
       this.workersEl = q('.sdk-workers');
       this.interruptBtn = q('[data-act="interrupt"]');
       this.pauseBtn = q('[data-act="pause"]');
-      this.boardBtn = q('[data-act="board"]');
+      this.refreshBtn = q('[data-act="refresh"]');
       this.composer = q('vc-composer');
 
       this.interruptBtn.addEventListener('click', () => this.interrupt());
       this.pauseBtn.addEventListener('click', () => this.pause());
-      this.boardBtn.addEventListener('click', () => { if (this.runId) window.cliModule?.openRunBoard?.(this.runId); });
+      this.refreshBtn.addEventListener('click', () => this.refresh());
       this.composer.addEventListener('send', (e) => this.openPicker('send', e.detail));
       this.composer.addEventListener('interrupt', () => this.interrupt());
       // Images dropped anywhere on the panel go to the composer.
@@ -1301,7 +1417,23 @@
         ? 'Pausing… (writing the resume note). Click to interrupt now.'
         : this.runId ? 'Workers write their notes and close, then the orchestrator. Resume from the "+" menu.'
           : 'The session finishes its step, writes its resume note and closes. Resume from the "+" menu.';
-      this.boardBtn.classList.toggle('hidden', !this.runId);
+      // A run's orchestrator can hand over to a fresh one; suggested once it
+      // has compacted a few times.
+      const run = this.run;
+      this.refreshBtn.classList.toggle('hidden', !this.runId || isWorkerTab);
+      this.refreshBtn.disabled = !(run?.orchestratorRunning && !run.pausing && !info.pausing);
+      this.refreshBtn.classList.toggle('suggested', !!run?.refreshSuggested && !this.refreshBtn.disabled);
+      this.refreshBtn.title = [
+        'The orchestrator writes its notes and is replaced by a fresh session with a clean context, seeded from the run. Workers keep running.',
+        run?.refreshSuggested ? `Suggested: the orchestrator has compacted ${run.compactions} times.` : null,
+      ].filter(Boolean).join('\n');
+    }
+
+    refresh() {
+      if (!this.runId) return;
+      if (!confirm('Refresh the orchestrator? It writes its notes, then a fresh orchestrator continues the run from them. Workers keep running.')) return;
+      this.refreshBtn.disabled = true;
+      sendWs({ type: 'cli:refreshOrchestrator', runId: this.runId });
     }
 
     reloadHistory() {

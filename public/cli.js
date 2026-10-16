@@ -1702,6 +1702,32 @@
     }
     modal.appendChild(header);
 
+    // The New CLI ask (orchestration.askMode) draws its own dialog (new-cli.js).
+    const nc = forms.length === 1 && forms[0].formData?.kind === 'new-cli' && window.newCliDialog;
+    if (nc) {
+      const f = forms[0];
+      if (!meta.title || meta.title === 'New CLI') titleEl.textContent = 'New session';
+      modal.classList.add('ncd-modal');
+      const dlg = window.newCliDialog.render(f.formData.newCli, {
+        uid: askId,
+        onSubmit: (answer) => {
+          sendWs({ type: 'ask:answer', toolUseId: f.toolUseId, answer });
+          dismissAskModal(askId);
+        },
+        onCancel: () => {
+          sendWs({ type: 'ask:answer', toolUseId: f.toolUseId, answer: [{ id: '_cancelled', question: '', answer: 'cancelled' }] });
+          dismissAskModal(askId);
+        },
+      });
+      modal.appendChild(dlg.el);
+      makeAskDraggable(modal, header);
+      layer.appendChild(modal);
+      pendingAskOverlays.set(askId, { overlayEl: modal, tabId: meta.tabId || null });
+      renderTabStrip();
+      dlg.focus();
+      return;
+    }
+
     const isSingle = forms.length === 1;
     const binders = [];
 

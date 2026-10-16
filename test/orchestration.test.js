@@ -111,6 +111,7 @@ function setup(extra = {}) {
     broadcaster, control,
     // An API key and no subscription: an SDK session's billing is never asked.
     credentials: () => ({ apiKey: true, subscription: false }),
+    models: () => [],
     pushDebounceMs: 20,
     relayFallbackMs: 40,
     ...extra,
@@ -147,6 +148,8 @@ test('openCli without a mode asks, and the answer decides the launch', async () 
   assert.ok(ask, 'the ask is broadcast');
   // The dashboard builds the form from formData.questions (askFormBuildHTML).
   assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.options.map(o => o.label)), [['Simple CLI', 'Orchestrator CLI'], ['CLI terminal', 'Agent SDK panel']]);
+  // The form defaults to an orchestrator in the SDK panel.
+  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.defaultValue), ['Orchestrator CLI', 'Agent SDK panel']);
   // One credential: the SDK option names it instead of asking.
   assert.match(ask.forms[0].formData.questions[1].options[1].description, /billed to the Anthropic API key \(the only Claude credential configured\)/);
   assert.deepStrictEqual([...pendingQuestions.values()][0].message, ask, 'the entry keeps its broadcast for replay on reconnect');
@@ -248,12 +251,16 @@ test('openCli: an SDK session\'s billing is asked only when both credentials exi
   assert.strictEqual(rb.auth, null);
   assert.strictEqual(mgr.sessions.get(rb.tabId).settings.auth, undefined);
 
-  // Mode and SDK engine given: a form with billing alone; an unanswered one is the API key.
+  // Mode and SDK engine given: a form with billing alone; an unanswered one is the subscription.
   const c = orch.openCli({ cwd, mode: 'simple', engine: 'sdk' });
   assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['auth']);
   assert.strictEqual(lastAsk().forms[0].formData.questions[0].showIf, undefined);
+  assert.strictEqual(lastAsk().forms[0].formData.questions[0].defaultValue, 'Claude subscription');
   reply({});
-  assert.strictEqual((await c).auth, 'apikey');
+  assert.strictEqual((await c).auth, 'subscription');
+  const c2 = orch.openCli({ cwd, mode: 'simple', engine: 'sdk' });
+  reply({ auth: 'API key' });
+  assert.strictEqual((await c2).auth, 'apikey');
 
   // Billing given, or a CLI terminal: never asked.
   const asks = broadcasts.filter(m => m.type === 'ask:question').length;
@@ -269,6 +276,59 @@ test('openCli: an SDK session\'s billing is asked only when both credentials exi
   reply({ mode: 'Simple CLI' });
   const rd = await d;
   assert.strictEqual(mgr.sessions.get(rd.tabId).settings.auth, 'subscription');
+});
+
+test('the New CLI dialog: its payload, the orchestrator model and a run-wide model routing', async () => {
+  const catalog = [
+    { name: 'gpt-x', label: 'GPT X', providerKey: 'openai', apiKey: 'sk-secret', contextWindow: 400000, inputCostPerMTok: 1, outputCostPerMTok: 4, usable: true },
+    { name: 'old', label: 'Old', providerKey: 'openai', apiKey: 'sk-secret', usable: true, lifecycle: 'retired' },
+    { name: 'nokey', label: 'No key', providerKey: 'google', usable: false, unusableReason: 'no-credential' },
+  ];
+  const { mgr, orch, pendingQuestions, broadcasts } = setup({ models: () => catalog });
+  const cwd = tmpDir();
+  const reply = (answers) => [...pendingQuestions.values()][0].resolve(Object.entries(answers).map(([id, answer]) => ({ id, question: 'x', answer })));
+  const lastAsk = () => broadcasts.filter(m => m.type === 'ask:question').at(-1);
+
+  const a = orch.openCli({ cwd });
+  const fd = lastAsk().forms[0].formData;
+  assert.strictEqual(fd.kind, 'new-cli', 'the dashboard draws its own dialog');
+  assert.deepStrictEqual(fd.newCli.orchestratorModels.map(m => m.value), ['opus[1m]', 'fable[1m]']);
+  assert.strictEqual(fd.newCli.orchestratorModel, 'opus[1m]');
+  assert.strictEqual(fd.newCli.maxWorkers, 5);
+  assert.deepStrictEqual(fd.newCli.remapTargets.map(m => m.name), ['gpt-x'], 'only usable, unretired targets');
+  assert.ok(!JSON.stringify(lastAsk()).includes('sk-secret'), 'no key reaches the dashboard');
+  assert.deepStrictEqual(fd.questions.map(q => q.id), ['mode', 'engine'], 'the generic fallback is unchanged');
+  reply({
+    mode: 'Orchestrator CLI', engine: 'Agent SDK panel', model: 'fable[1m]',
+    modelMap: { sonnet: 'gpt-x', haiku: 'nokey', opus: '', bogus: 'gpt-x' },
+  });
+  const ra = await a;
+  assert.strictEqual(ra.model, 'fable[1m]');
+  assert.deepStrictEqual(ra.modelMap, { fable: null, opus: null, sonnet: 'gpt-x', haiku: null }, 'unknown families and unusable targets are dropped');
+  const orchSession = mgr.sessions.get(ra.tabId);
+  assert.strictEqual(orchSession.settings.model, 'fable[1m]');
+  assert.deepStrictEqual(orchSession.settings.modelMap, ra.modelMap);
+  const run = orch.getRun(orchSession.settings.orchestration.runId);
+  assert.strictEqual(run.orchestratorModel, 'fable[1m]', 'a refresh or a fresh start keeps the model');
+  const w = mgr.sessions.get(orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' }).tabId);
+  assert.deepStrictEqual(w.settings.modelMap, ra.modelMap, 'the routing covers the run\'s workers');
+  assert.strictEqual(w.settings.model, undefined, 'a worker never inherits the orchestrator\'s model');
+
+  // A simple CLI takes the routing, never a model; a model not offered, or
+  // nothing routed, leaves both unset.
+  const b = orch.openCli({ cwd });
+  reply({ mode: 'Simple CLI', engine: 'CLI terminal', model: 'fable[1m]', modelMap: JSON.stringify({ opus: 'gpt-x' }) });
+  const rb = await b;
+  assert.strictEqual(rb.model, undefined);
+  assert.strictEqual(mgr.sessions.get(rb.tabId).settings.model, undefined);
+  assert.strictEqual(mgr.sessions.get(rb.tabId).settings.modelMap.opus, 'gpt-x');
+  const c = orch.openCli({ cwd });
+  reply({ mode: 'Orchestrator CLI', engine: 'CLI terminal', model: 'sonnet', modelMap: { opus: '' } });
+  const rc = await c;
+  const sc = mgr.sessions.get(rc.tabId).settings;
+  assert.strictEqual(sc.model, undefined);
+  assert.strictEqual(sc.modelMap, undefined);
+  assert.strictEqual(orch.getRun(sc.orchestration.runId).orchestratorModel, null);
 });
 
 test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds its own', async (t) => {
@@ -318,12 +378,12 @@ test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds it
   assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'bad', task: 'x', model: 'gpt' }), /model must be one of fable, opus, sonnet, haiku/);
 });
 
-test('launch_cli guards: orchestrator only, at most 3 running, cwd inside the root', async (t) => {
+test('launch_cli guards: orchestrator only, at most 5 running, cwd inside the root', async (t) => {
   const { orch, orchSession, mgr, cwd } = await openOrchestrator(t, { isolation: 'none' });
-  const ids = [1, 2, 3].map(i => orch.launchWorker(orchSession.instanceId, { title: `t${i}`, task: 'x' }));
-  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 't4', task: 'x' }), /3 workers are running/);
+  const ids = [1, 2, 3, 4, 5].map(i => orch.launchWorker(orchSession.instanceId, { title: `t${i}`, task: 'x' }));
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' }), /5 workers are running/);
   mgr.sessions.get(ids[0].tabId).running = false;
-  assert.doesNotThrow(() => orch.launchWorker(orchSession.instanceId, { title: 't4', task: 'x' }), 'an exited worker frees its slot');
+  assert.doesNotThrow(() => orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' }), 'an exited worker frees its slot');
 
   assert.throws(() => orch.launchWorker(mgr.sessions.get(ids[1].tabId).instanceId, { title: 'w', task: 'x' }), /only an orchestrator/);
   mgr.sessions.get(ids[1].tabId).running = false;
