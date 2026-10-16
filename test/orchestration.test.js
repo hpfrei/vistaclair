@@ -715,6 +715,40 @@ test('close guards: a worker closes when complete or forced, an orchestrator not
   assert.deepStrictEqual(orch.closeCheck('tab-unknown'), { ok: true });
 });
 
+test('close guards: a finished, idle worker with an empty TODO no longer holds the orchestrator', async (t) => {
+  const { orch, orchSession, mgr } = await openOrchestrator(t, { isolation: 'none' });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const s1 = mgr.sessions.get(w1.tabId);
+  const todo = (...rows) => fs.writeFileSync(path.join(w1.folder, 'TODO.md'),
+    ['| id | description | depends on | status |', '|---|---|---|---|', ...rows.map((r, i) => `| ${i + 1} | step | — | ${r} |`)].join('\n') + '\n');
+  const closable = () => orch.closeCheck(orchSession.tabId);
+
+  todo('done', 'dropped');
+  orch.report(s1.instanceId, { status: 'started', summary: 'on it' });
+  assert.strictEqual(closable().ok, false, 'started');
+  orch.report(s1.instanceId, { status: 'update', summary: 'half way' });
+  assert.strictEqual(closable().ok, false, 'update');
+
+  orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
+  assert.strictEqual(closable().ok, true, 'done, idle, TODO all done');
+
+  s1.busy = true;
+  const busy = closable();
+  assert.strictEqual(busy.ok, false, 'busy');
+  assert.match(busy.reason, /\(.*\)/);
+  s1.busy = false;
+
+  todo('done', 'doing');
+  assert.strictEqual(closable().ok, false, 'a row still doing');
+  todo('done', 'todo');
+  assert.strictEqual(closable().ok, false, 'a row still open');
+  todo('done', 'done');
+  assert.strictEqual(closable().ok, true);
+
+  fs.unlinkSync(path.join(w1.folder, 'TODO.md'));
+  assert.strictEqual(closable().ok, true, 'no TODO rows');
+});
+
 test('deleting a run: refused over uncommitted worktree changes, keeps unmerged branches', async (t) => {
   const repo = tmpDir('vistaclair-orch-repo-');
   const g = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'pipe' }).toString();

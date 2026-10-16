@@ -1193,9 +1193,20 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     saveRun(run);
   }
 
+  // A live worker that no longer holds its orchestrator's close: its last
+  // report is done/failed (or it was abandoned), it is idle, and its TODO has
+  // no open row (no rows counts as none).
+  function workerFinished(run, w) {
+    const live = workerSession(run, w.id);
+    if (!live || live.session.busy) return false;
+    if (!w.abandoned && !['done', 'failed'].includes(w.lastReport?.status)) return false;
+    const progress = folderSummary(w.sessionDir);
+    return !progress || progress.done >= progress.total;
+  }
+
   // May this tab be closed? A worker only once its work is complete (its last
   // report is done/failed, and it is idle) — or when forced, which abandons it;
-  // an orchestrator only while none of its workers runs.
+  // an orchestrator only while none of its workers is still at work.
   function closeCheck(tabId, { force = false } = {}) {
     const session = mgr.get ? mgr.get(tabId) : mgr.sessions.get(tabId);
     const stamp = stampOf(session);
@@ -1214,7 +1225,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       return { ok: false, canForce: true, reason: `${w.name} has not finished its work. A worker is paused through its orchestrator, and closes once it reports done or failed. Force-closing abandons it.` };
     }
-    const running = runningWorkers(run);
+    const running = runningWorkers(run).filter(w => !workerFinished(run, w));
     if (running.length) {
       return { ok: false, canForce: false, reason: `Workers of this run are still running (${running.map(w => w.name).join(', ')}). Pause the run, or wait for them to finish.` };
     }
