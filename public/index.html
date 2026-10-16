@@ -173,9 +173,7 @@
       <button class="cli-model-cog" id="cliModelCog" title="Model and engine for new CLI tabs">&#9881;</button>
     </div>
     <div class="cli-container" id="cliContainer">
-      <div class="cli-placeholder" id="cliPlaceholder">
-        Click <strong>+</strong> to spawn a new Claude Code CLI
-      </div>
+      <div class="cli-sessions" id="cliSessions"></div>
     </div>
   </div>
 
@@ -1008,6 +1006,7 @@ jq -r '.tool_input.command' |
   </div>
 
   <script src="core.js"></script>
+  <script src="session-cards.js"></script>
   <script src="toast.js"></script>
   <script src="wide-layout.js"></script>
   <script src="inspector.js"></script>

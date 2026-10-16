@@ -204,7 +204,7 @@ function handleMessage(ws, msg, bc) {
       }
       break;
     case 'cli:getSavedSessions':
-      send({ type: 'cli:savedSessions', sessions: mgr.getSavedSessions() });
+      send(mgr.savedSessionsMessage());
       break;
     case 'cli:deleteSavedSession':
       if (msg.sessionId) {
@@ -223,7 +223,7 @@ function handleMessage(ws, msg, bc) {
         }
         mgr.deleteSavedSession(msg.sessionId);
         if (st?.role === 'worker') bc.orchestration?.noteMemberDeleted(entry);
-        send({ type: 'cli:savedSessions', sessions: mgr.getSavedSessions() });
+        send(mgr.savedSessionsMessage());
       }
       break;
     // --- Pause / resume (src/session-control.js, src/orchestration.js) ---
@@ -264,7 +264,7 @@ function handleMessage(ws, msg, bc) {
       break;
     case 'cli:deleteRun':
       actionResult(send, 'deleteRun', msg, () => bc.orchestration.deleteRun(String(msg.runId || ''), { force: msg.force === true }));
-      send({ type: 'cli:savedSessions', sessions: mgr.getSavedSessions() });
+      send(mgr.savedSessionsMessage());
       break;
     // --- Agent SDK panel ---
     case 'sdk:send': {

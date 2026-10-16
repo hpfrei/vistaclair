@@ -123,6 +123,7 @@
     { kind: 'ext', title: 'External' },
   ];
   const _sessions = new Map();          // instanceId → card from the summary feed
+  let _runs = {};                       // runId → { status, orchestrator, workers } from the feed
   let _sessionsAutoClear = false;
   const _openTabs = new Map();          // instanceId → { loading }, in opening order
   let activeInstanceTab = SESSIONS_TAB;
@@ -152,15 +153,6 @@
       if (label && label !== tabId) return label.replace(/^>/, '');
     }
     return _sessions.get(instanceId)?.label || instanceId;
-  }
-
-  function _relTime(ms) {
-    if (!ms) return '';
-    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-    if (s < 60) return 'just now';
-    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-    return new Date(ms).toLocaleDateString();
   }
 
   function renderInspectorTabStrip() {
@@ -247,22 +239,71 @@
     if (_inspectorBody) _inspectorBody.classList.toggle('hidden', on);
   }
 
+  const _statusOf = (s) => (s.status === 'streaming' ? 'streaming' : s.status === 'running' ? 'running' : 'inactive');
+
+  function _usageMeta(turns, apiCalls, cost) {
+    const n = turns || apiCalls || 0;
+    const unit = turns ? 'turn' : 'API call';
+    return [`${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''}`, cost != null ? formatCost(cost) : null].filter(Boolean).join(' · ');
+  }
+
   function _cardHtml(s) {
-    const status = s.status === 'streaming' ? 'streaming' : s.status === 'running' ? 'running' : 'inactive';
-    const n = s.turns || s.apiCalls || 0;
-    const unit = s.turns ? 'turn' : 'API call';
-    const meta = [
-      `${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''}`,
-      s.cost != null ? formatCost(s.cost) : null,
-      s.lastAt ? `<span title="${escHtml(new Date(s.lastAt).toLocaleString())}">${_relTime(s.lastAt)}</span>` : null,
-    ].filter(Boolean).join(' · ');
+    const meta = [_usageMeta(s.turns, s.apiCalls, s.cost), window.sessionCards.timeHtml(s.lastAt)].filter(Boolean).join(' · ');
     return `<div class="insp-card-head">`
       + `<span class="insp-card-label">${escHtml(instanceDisplayLabel(s.instanceId))}</span>`
       + (s.kind === 'app' ? '<span class="insp-card-kind">ai.prompt</span>' : '')
-      + `<span class="insp-card-status is-${status}">${status}</span></div>`
+      + window.sessionCards.pill(_statusOf(s)) + '</div>'
       + (s.cwd ? `<div class="insp-card-cwd" title="${escHtml(s.cwd)}">${escHtml(s.cwd)}</div>` : '')
       + (s.model ? `<div class="insp-card-model">${escHtml(s.model)}</div>` : '')
       + `<div class="insp-card-meta">${meta}</div>`;
+  }
+
+  // One card per orchestration run: the header opens the orchestrator's tab,
+  // each worker row that worker's. Figures add up over the members listed.
+  function _runCardHtml(runId, members) {
+    const SC = window.sessionCards;
+    const byNewest = (a, b) => (b.lastAt || 0) - (a.lastAt || 0);
+    const orchs = members.filter(m => m.orchestration.role === 'orchestrator').sort(byNewest);
+    const workers = members.filter(m => m.orchestration.role !== 'orchestrator')
+      .sort((a, b) => String(a.orchestration.workerId).localeCompare(String(b.orchestration.workerId), undefined, { numeric: true }));
+    const head = orchs[0] || [...members].sort(byNewest)[0];
+    const info = _runs[runId] || {};
+    const live = members.some(m => m.status !== 'inactive');
+    const status = info.status || (live ? 'running' : 'stopped');
+    const running = workers.filter(m => m.status !== 'inactive').length;
+    const total = info.workers ?? workers.length;
+    let turns = 0, apiCalls = 0, cost = null;
+    for (const m of members) {
+      turns += m.turns || 0;
+      apiCalls += m.apiCalls || 0;
+      if (m.cost != null) cost = (cost || 0) + m.cost;
+    }
+    const lastAt = Math.max(...members.map(m => m.lastAt || 0));
+    const name = info.orchestrator || orchs[0]?.orchestration.name || `Run ${runId}`;
+    const prefix = `${name}-`;
+    // Earlier orchestrators (replaced by a refresh) are listed with the workers.
+    const rows = [...orchs.slice(1), ...workers].map(m => {
+      const label = m.orchestration.name || instanceDisplayLabel(m.instanceId);
+      return {
+        name: m.orchestration.role === 'orchestrator' ? `${label} (earlier orchestrator)` : label.startsWith(prefix) ? label.slice(prefix.length) : label,
+        state: _statusOf(m),
+        detail: [_usageMeta(m.turns, m.apiCalls, m.cost), SC.relTime(m.lastAt)].filter(Boolean).join(' · '),
+        title: `${label}\nOpen this session's Inspector tab`,
+        attrs: `data-instance-id="${escHtml(m.instanceId)}"`,
+      };
+    });
+    const open = members.some(m => _openTabs.has(m.instanceId));
+    return `<div class="vc-card sc-card insp-run-card ${SC.accentOf(status)}${!live ? ' is-inactive' : ''}${open ? ' is-open' : ''}">`
+      + `<button type="button" class="insp-run-head" data-instance-id="${escHtml(head.instanceId)}" title="Open the orchestrator's Inspector tab">`
+      + `<span class="sc-head"><span class="sc-icon">\u{1F9ED}</span>`
+      + `<span class="sc-title"><span class="sc-name">${escHtml(name)}</span>`
+      + `<span class="sc-sub" title="${escHtml(head.cwd || '')}">run ${escHtml(runId)}${head.cwd ? ` · ${escHtml(head.cwd)}` : ''}</span></span>`
+      + SC.pill(status) + '</span>'
+      + `<span class="sc-meta">${SC.timeHtml(lastAt)}<span>${total} worker${total !== 1 ? 's' : ''}${running ? ` · <b>${running} running</b>` : ''}</span>`
+      + `<span>${_usageMeta(turns, apiCalls, cost)}</span>${head.model ? `<span class="sc-chip">${escHtml(head.model)}</span>` : ''}</span>`
+      + '</button>'
+      + SC.workerList(rows, rows.length ? 'Workers' : '')
+      + '</div>';
   }
 
   // Redrawn on every summary push; skipped when nothing visible changed, so a
@@ -287,7 +328,21 @@
           ? '<p class="insp-empty">None. Point Claude Code at the proxy to see it here: <code>ANTHROPIC_BASE_URL=http://localhost:3456 claude</code></p>'
           : '<p class="insp-empty">None.</p>';
       }
+      // A run's members make one card, placed where its newest member is.
+      const runs = new Map();
       for (const s of list) {
+        const runId = s.orchestration?.runId;
+        if (runId) (runs.get(runId) || runs.set(runId, []).get(runId)).push(s);
+      }
+      const placed = new Set();
+      for (const s of list) {
+        const runId = s.orchestration?.runId;
+        if (runId) {
+          if (placed.has(runId)) continue;
+          placed.add(runId);
+          html += _runCardHtml(runId, runs.get(runId));
+          continue;
+        }
         html += `<button class="insp-card${s.status === 'inactive' ? ' is-inactive' : ''}${_openTabs.has(s.instanceId) ? ' is-open' : ''}"`
           + ` data-instance-id="${escHtml(s.instanceId)}">${_cardHtml(s)}</button>`;
       }
@@ -305,8 +360,8 @@
         if (!clear.disabled) sendWs({ type: 'inspector:clearKind', kind: clear.dataset.kind });
         return;
       }
-      const card = e.target.closest('.insp-card');
-      if (card) openSessionTab(card.dataset.instanceId);
+      const target = e.target.closest('[data-instance-id]');
+      if (target) openSessionTab(target.dataset.instanceId);
     });
   }
 
@@ -393,6 +448,7 @@
   function _applySessions(msg) {
     _sessions.clear();
     for (const s of msg.sessions || []) _sessions.set(s.instanceId, s);
+    _runs = msg.runs || {};
     _sessionsAutoClear = msg.autoClear === true;
     // The strip is rebuilt only when an open tab's label or state moved.
     const sig = JSON.stringify([_sessionsAutoClear, ...[..._openTabs.keys()].map(id => [id, _sessions.get(id)?.status === 'inactive', _sessions.get(id)?.label])]);

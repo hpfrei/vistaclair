@@ -4,11 +4,17 @@
   const tabNewBtn = document.getElementById('cliTabNew');
   const modelCog = document.getElementById('cliModelCog');
   const container = document.getElementById('cliContainer');
-  const placeholder = document.getElementById('cliPlaceholder');
+  const sessionsView = document.getElementById('cliSessions');
   const settingsModal = document.getElementById('cliSettingsModal');
 
   const tabs = new Map();
+  // null while the Sessions tab shows (cards of every saved session).
   let activeTabId = null;
+  const SC = window.sessionCards;
+  let _savedData = null;          // { sessions, runs } from cli:savedSessions
+  let _sessionsPinned = false;    // picked by the user: a tab-list sync leaves it
+  let _sessionsReqTimer = null;
+  let _sessionsHtml = '';
   const pendingAskOverlays = new Map(); // askId -> { overlayEl, tabId }
   let _askCascade = 0;
   const _scrollbackLoaded = new Set();
@@ -217,6 +223,7 @@
     function onTabChange(tab) {
       pill.classList.add('hidden');
       view.classList.toggle('sdk-tab-active', isSdk(tab));
+      view.classList.toggle('cli-sessions-active', !tab);
       if (tab?.terminal && !tab._mobileScrollHooked) {
         tab._mobileScrollHooked = true;
         tab.terminal.onScroll(() => { if (atBottom(tab.terminal)) pill.classList.add('hidden'); });
@@ -358,7 +365,8 @@
       tab.wrap.style.display = id === tabId ? '' : 'none';
     }
     activeTabId = tabId;
-    if (placeholder) placeholder.style.display = tabs.size > 0 ? 'none' : '';
+    _sessionsPinned = false;
+    if (sessionsView) sessionsView.style.display = 'none';
     renderTabStrip();
     const tab = tabs.get(tabId);
     window.sdkPanel?.setActive(isSdk(tab) ? tabId : null);
@@ -395,6 +403,14 @@
   function renderTabStrip() {
     if (!tabStrip) return;
     tabStrip.querySelectorAll('.view-tab').forEach(el => el.remove());
+
+    // The Sessions tab: always first, no close button.
+    const home = document.createElement('button');
+    home.className = 'view-tab cli-sessions-tab' + (activeTabId === null ? ' active' : '');
+    home.textContent = 'Sessions';
+    home.title = 'Every saved session: resume, switch to or delete it';
+    home.addEventListener('click', () => showSessions(true));
+    tabStrip.insertBefore(home, tabStrip.firstChild);
 
     for (const [tabId, tab] of tabs) {
       const btn = document.createElement('button');
@@ -472,8 +488,8 @@
         pauseBtn.title = tab.pausing
           ? 'Pausing… (the session is writing its resume note). Click to interrupt now.'
           : orchRole === 'orchestrator'
-            ? 'Pause the run: workers write their notes and close, then the orchestrator. Resume from the "+" menu.'
-            : 'Pause: the session finishes its step, writes its resume note and closes. Resume from the "+" menu.';
+            ? 'Pause the run: workers write their notes and close, then the orchestrator. Resume from the Sessions tab.'
+            : 'Pause: the session finishes its step, writes its resume note and closes. Resume from the Sessions tab.';
         pauseBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           if (tab.pausing) {
@@ -519,15 +535,11 @@
     }
     if (activeTabId === tabId) {
       const remaining = Array.from(tabs.keys());
-      if (remaining.length > 0) {
-        switchTab(remaining[remaining.length - 1]);
-      } else {
-        activeTabId = null;
-        if (placeholder) placeholder.style.display = '';
-        window.sdkPanel?.setActive(null);
-        _mobileBar?.onTabChange(null);
-        renderTabStrip();
-      }
+      if (remaining.length > 0) switchTab(remaining[remaining.length - 1]);
+      else showSessions(false);
+    } else if (sessionsShown()) {
+      renderTabStrip();
+      requestSavedSessions();
     }
   }
 
@@ -594,235 +606,246 @@
     menu.remove();
   }
 
-  // --- "+" button: menu with New + saved sessions ---
-  tabNewBtn?.addEventListener('click', () => {
-    sendWs({ type: 'cli:getSavedSessions' });
-    state._showNewMenu = true;
+  // --- "+" button: a new CLI in a directory ---
+  tabNewBtn?.addEventListener('click', () => openNewCli());
+
+  async function openNewCli() {
+    const picked = await openFsDirPicker();
+    if (!picked) return;
+    // The server asks Simple / Orchestrator, CLI terminal / Agent SDK panel
+    // and an SDK session's billing (openCli), mints the tab and launches it;
+    // cli:opened switches to it. Size the PTY like the active tab.
+    const { cols, rows } = terminalSize(80, 24);
+    sendWs({
+      type: 'cli:open',
+      reqId: `open-${++_reqSeq}`,
+      cwd: picked.dir,
+      autoMemory: picked.autoMemory === true,
+      cols,
+      rows,
+    });
+  }
+
+  // The size of the active terminal, else of any open one.
+  function terminalSize(cols, rows) {
+    const t = tabs.get(activeTabId)?.terminal || [...tabs.values()].find(x => x.terminal)?.terminal;
+    return t ? { cols: t.cols, rows: t.rows } : { cols, rows };
+  }
+
+  // --- Saved-session actions (the Sessions tab's cards) ---
+
+  // An orchestrator resumes its whole run: its own transcript (it warms its
+  // workers up), or a fresh orchestrator from the notes.
+  function resumeRun(runId, fresh) {
+    sendWs({ type: 'cli:resumeRun', runId, fresh: fresh === true });
+  }
+
+  function deleteRun(runId) {
+    if (!confirm(`Delete run ${runId} completely? Its orchestrator and every worker session, their TODO/NOTES folders, the run directory and its worktrees are removed. Unmerged branches are kept.`)) return;
+    sendWs({ type: 'cli:deleteRun', runId });
+  }
+
+  // The server resumes it: a paused or interrupted one is told to pick up
+  // from its folder, a run worker goes through its orchestration, and one
+  // whose conversation is gone starts fresh from its folder instead of dying
+  // on open.
+  function resumeSaved(sessionId) {
+    const { cols, rows } = terminalSize(120, 32);
+    sendWs({ type: 'cli:resumeSaved', sessionId, cols, rows });
+  }
+
+  // An orchestrator is deleted with its run (the server refuses it alone); an
+  // unfinished worker is confirmed again through cli:deleteRefused.
+  function deleteSaved(sess) {
+    if (!sess) return;
+    if (sess.group?.role === 'orchestrator') { deleteRun(sess.group.runId); return; }
+    if (!confirm(`Delete "${savedTitle(sess)}" completely? Its transcript, its interaction data and its TODO/NOTES folder are removed. This cannot be undone.`)) return;
+    sendWs({ type: 'cli:deleteSavedSession', sessionId: sess.id });
+  }
+
+  function savedTitle(sess) {
+    const parts = String(sess.cwd || '').replace(/\/+$/, '').split('/');
+    return sess.title || parts[parts.length - 1] || sess.cwd || sess.id;
+  }
+
+  // --- Sessions tab ---
+  // The fixed first tab of the strip, never closed, shown whenever no CLI tab
+  // is: every saved session as a card. A run (orchestrator and workers) is
+  // one card from the server's run summary (cli:savedSessions `runs`); a
+  // plain session is a card of its own. Refreshed on cli:savedSessions, on
+  // tab open/close and on orchestration:run.
+  const sessionsShown = () => activeTabId === null;
+
+  function requestSavedSessions(delay = 300) {
+    if (!sessionsShown()) return;
+    clearTimeout(_sessionsReqTimer);
+    _sessionsReqTimer = setTimeout(() => {
+      if (sessionsShown()) sendWs({ type: 'cli:getSavedSessions' });
+    }, delay);
+  }
+
+  function showSessions(pinned) {
+    if (pinned) _sessionsPinned = true;
+    for (const tab of tabs.values()) tab.wrap.style.display = 'none';
+    activeTabId = null;
+    if (sessionsView) sessionsView.style.display = '';
+    window.sdkPanel?.setActive(null);
+    _mobileBar?.onTabChange(null);
+    renderTabStrip();
+    renderSessions();
+    requestSavedSessions(0);
+  }
+
+  // The open tab of a session, by its sessId.
+  function openTabsBySess() {
+    const m = new Map();
+    for (const [tabId, tab] of tabs) if (tab.sessId) m.set(tab.sessId, tabId);
+    return m;
+  }
+
+  function runTabId(run, bySess) {
+    for (const [tabId, tab] of tabs) {
+      const st = tab.settings?.orchestration;
+      if (st?.runId === run.runId && st.role === 'orchestrator') return tabId;
+    }
+    return run.orchestratorSessId ? bySess.get(run.orchestratorSessId) || null : null;
+  }
+
+  const btn = (label, attrs, cls = '', title = '') =>
+    `<button type="button" class="vc-btn vc-btn-sm ${cls}" ${attrs}${title ? ` title="${escHtml(title)}"` : ''}>${label}</button>`;
+
+  function runCardHtml(r, bySess) {
+    const tabId = runTabId(r, bySess);
+    const name = r.title || r.orchestrator || `Run ${r.runId}`;
+    const w = r.workers;
+    const meta = [
+      SC.timeHtml(r.lastActivityAt),
+      `<span>${w.total} worker${w.total !== 1 ? 's' : ''}${w.running ? ` · <b>${w.running} running</b>` : ''}</span>`,
+      r.model ? `<span class="sc-chip">${escHtml(r.model)}</span>` : '',
+      r.engine === 'sdk' ? '<span class="sc-chip">SDK</span>' : '',
+      r.isolation ? `<span class="sc-chip">${escHtml(r.isolation)}</span>` : '',
+    ].filter(Boolean).join('');
+    const prefix = r.orchestrator ? `${r.orchestrator}-` : '';
+    const workers = SC.workerList(w.list.map(x => {
+      const wTab = x.sessId ? bySess.get(x.sessId) : null;
+      const report = x.lastReport ? `${x.lastReport.status}: ${x.lastReport.summary}` : '';
+      const actions = [
+        !wTab && !x.running && x.sessId ? btn('▶', `data-act="resume-saved" data-sess="${escHtml(x.sessId)}"`, 'sc-icon-btn', 'Resume this worker') : '',
+        !x.running && x.sessId ? btn('×', `data-act="delete-saved" data-sess="${escHtml(x.sessId)}"`, 'sc-icon-btn vc-btn-danger', 'Delete this worker session') : '',
+      ].join('');
+      return {
+        name: x.name.startsWith(prefix) ? x.name.slice(prefix.length) : x.name,
+        state: x.state,
+        detail: report || (x.title || ''),
+        title: [x.name, x.title, report, x.lastActivityAt ? `last activity ${new Date(x.lastActivityAt).toLocaleString()}` : ''].filter(Boolean).join('\n'),
+        attrs: wTab ? `data-act="switch" data-tab="${escHtml(wTab)}"` : null,
+        actions,
+      };
+    }), 'Workers');
+    const actions = [];
+    if (tabId) actions.push(btn('Switch to tab', `data-act="switch" data-tab="${escHtml(tabId)}"`, 'vc-btn-primary'));
+    else if (!r.orchestratorRunning && !r.runMissing) {
+      actions.push(btn('Resume run', `data-act="resume-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-primary', 'The orchestrator continues its own session and resumes its paused workers'));
+      actions.push(btn('Fresh from notes', `data-act="resume-run" data-fresh="1" data-run="${escHtml(r.runId)}"`, '', 'A new orchestrator with a clean context, seeded from the notes, TODOs and reports of the run'));
+    }
+    if (!r.orchestratorRunning) actions.push(btn('Delete run', `data-act="delete-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-danger sc-push', 'Delete the whole run'));
+    return `<article class="vc-card sc-card sc-run ${SC.accentOf(r.status)}">`
+      + `<div class="sc-head"><span class="sc-icon" title="Orchestration run ${escHtml(r.runId)}">\u{1F9ED}</span>`
+      + `<div class="sc-title"><span class="sc-name">${escHtml(name)}</span>`
+      + `<span class="sc-sub" title="${escHtml(r.cwd || '')}">run ${escHtml(r.runId)}${r.cwd ? ` · ${escHtml(r.cwd)}` : ''}</span></div>`
+      + SC.pill(r.status) + '</div>'
+      + `<div class="sc-meta">${meta}</div>`
+      + SC.todoList(r.todo)
+      + workers
+      + (actions.length ? `<div class="sc-actions">${actions.join('')}</div>` : '')
+      + '</article>';
+  }
+
+  function plainCardHtml(s, bySess) {
+    const tabId = bySess.get(s.id) || null;
+    const status = tabId || s.isRunning ? 'running' : s.paused ? 'paused' : s.interrupted ? 'interrupted' : 'saved';
+    const lastAt = s.lastInteractionAt || s.savedAt;
+    const mappings = formatModelMap(s.settings?.modelMap);
+    const meta = [
+      SC.timeHtml(lastAt),
+      s.startedAt ? `<span title="Started">started ${escHtml(formatDateTime(s.startedAt))}</span>` : '',
+      s.settings?.model ? `<span class="sc-chip">${escHtml(s.settings.model)}</span>` : '',
+      s.kind === 'sdk' ? '<span class="sc-chip">SDK</span>' : '',
+      s.autoMemory === true ? '<span class="sc-chip">memory</span>' : '',
+      mappings ? `<span class="sc-chip" title="${escHtml(mappings)}">${escHtml(mappings)}</span>` : '',
+    ].filter(Boolean).join('');
+    // TODO.md progress from the session folder: 3/5 · doing 2: <item>.
+    const p = s.progress;
+    let progress = '';
+    if (p && (p.total || p.hasResume)) {
+      const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+      const bits = [p.doing ? `doing ${p.doing.id}: ${p.doing.description || ''}` : '', p.hasResume ? 'resume note' : ''].filter(Boolean).join(' · ');
+      progress = '<div class="sc-todo"><div class="sc-todo-head"><span>TODO</span>'
+        + (p.total ? `<span class="sc-progress"><span style="width:${pct}%"></span></span><span>${p.done}/${p.total}</span>` : '')
+        + `</div>${bits ? `<div class="sc-line" title="${escHtml(bits)}">${escHtml(bits)}</div>` : ''}</div>`;
+    }
+    const actions = [];
+    if (tabId) actions.push(btn('Switch to tab', `data-act="switch" data-tab="${escHtml(tabId)}"`, 'vc-btn-primary'));
+    else if (!s.isRunning) actions.push(btn('Resume', `data-act="resume-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-primary'));
+    if (!s.isRunning) actions.push(btn('Delete', `data-act="delete-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-danger sc-push'));
+    return `<article class="vc-card sc-card ${SC.accentOf(status)}">`
+      + `<div class="sc-head"><span class="sc-icon">${s.kind === 'sdk' ? '✨' : '⌨️'}</span>`
+      + `<div class="sc-title"><span class="sc-name">${escHtml(savedTitle(s))}</span>`
+      + `<span class="sc-sub" title="${escHtml(s.cwd || '')}">${escHtml(s.cwd || '')}</span></div>`
+      + SC.pill(status, status === 'running' && !tabId ? 'running' : status === 'running' ? 'open' : status) + '</div>'
+      + `<div class="sc-meta">${meta}</div>`
+      + progress
+      + (s.jsonlSize ? `<div class="sc-line">${contextGauge(s.jsonlSize)}</div>` : '')
+      + (actions.length ? `<div class="sc-actions">${actions.join('')}</div>` : '')
+      + '</article>';
+  }
+
+  // Redrawn only when something visible changed, so a click is not lost to
+  // a rebuild under the pointer.
+  function renderSessions() {
+    if (!sessionsView || !sessionsShown()) return;
+    let html;
+    if (!_savedData) {
+      html = '<p class="sc-empty">Loading sessions…</p>';
+    } else {
+      const bySess = openTabsBySess();
+      const { sessions, runs } = _savedData;
+      const plain = sessions.filter(s => !s.group?.runId);
+      const cards = [
+        ...runs.map(r => ({ at: r.lastActivityAt || 0, html: runCardHtml(r, bySess) })),
+        ...plain.map(s => ({ at: s.lastInteractionAt || s.savedAt || 0, html: plainCardHtml(s, bySess) })),
+      ].sort((a, b) => b.at - a.at);
+      const count = [
+        runs.length ? `${runs.length} run${runs.length !== 1 ? 's' : ''}` : '',
+        `${plain.length} session${plain.length !== 1 ? 's' : ''}`,
+        tabs.size ? `${tabs.size} open` : '',
+      ].filter(Boolean).join(' · ');
+      html = `<div class="sc-toolbar"><h3>Sessions</h3><span class="sc-count">${count}</span>`
+        + btn('+ New CLI in directory…', 'data-act="new"', 'vc-btn-primary sc-push') + '</div>'
+        + (cards.length
+          ? `<div class="sc-grid">${cards.map(c => c.html).join('')}</div>`
+          : '<p class="sc-empty">No saved sessions yet. Click <strong>+</strong> to start a Claude Code CLI in a directory.</p>');
+    }
+    if (html === _sessionsHtml) return;
+    _sessionsHtml = html;
+    sessionsView.innerHTML = html;
+  }
+
+  sessionsView?.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]');
+    if (!b || b.disabled) return;
+    const { act, run, sess, tab, fresh } = b.dataset;
+    const saved = () => _savedData?.sessions.find(s => s.id === sess);
+    if (act === 'new') openNewCli();
+    else if (act === 'switch' && tabs.has(tab)) switchTab(tab);
+    else if (act === 'resume-run') { b.disabled = true; resumeRun(run, fresh === '1'); }
+    else if (act === 'delete-run') deleteRun(run);
+    else if (act === 'resume-saved') { b.disabled = true; resumeSaved(sess); }
+    else if (act === 'delete-saved') deleteSaved(saved());
   });
 
-  // The saved sessions in menu order: a run's orchestrator where the run's
-  // newest member would be, its workers indented right below it.
-  function groupSavedSessions(savedSessions) {
-    const runs = new Map();
-    for (const s of savedSessions) {
-      const g = s.group;
-      if (!g?.runId) continue;
-      if (!runs.has(g.runId)) runs.set(g.runId, { orchestrator: null, workers: [] });
-      const r = runs.get(g.runId);
-      if (g.role === 'orchestrator') r.orchestrator = r.orchestrator || s;
-      else r.workers.push(s);
-    }
-    const out = [];
-    const placed = new Set();
-    for (const s of savedSessions) {
-      const runId = s.group?.runId;
-      if (!runId) { out.push({ sess: s, indent: false }); continue; }
-      if (placed.has(runId)) continue;
-      placed.add(runId);
-      const r = runs.get(runId);
-      if (r.orchestrator) out.push({ sess: r.orchestrator, indent: false });
-      r.workers.sort((a, b) => String(a.group.workerId).localeCompare(String(b.group.workerId), undefined, { numeric: true }));
-      for (const w of r.workers) out.push({ sess: w, indent: !!r.orchestrator });
-    }
-    return out;
-  }
-
-  function showNewMenu(savedSessions) {
-    closeNewMenu();
-    const menu = document.createElement('div');
-    menu.className = 'cli-new-menu';
-    menu.id = 'cliNewMenu';
-
-    const newItem = document.createElement('div');
-    newItem.className = 'cli-new-menu-item cli-new-menu-new';
-    newItem.textContent = 'New CLI in directory…';
-    newItem.addEventListener('click', async () => {
-      closeNewMenu();
-      const picked = await openFsDirPicker();
-      if (!picked) return;
-      // The server asks Simple / Orchestrator, CLI terminal / Agent SDK panel
-      // and an SDK session's billing (openCli), mints the tab and launches it;
-      // cli:opened switches to it. Size the PTY like the active tab.
-      const active = activeTabId ? tabs.get(activeTabId) : null;
-      sendWs({
-        type: 'cli:open',
-        reqId: `open-${++_reqSeq}`,
-        cwd: picked.dir,
-        autoMemory: picked.autoMemory === true,
-        cols: active?.terminal?.cols || 80,
-        rows: active?.terminal?.rows || 24,
-      });
-    });
-    menu.appendChild(newItem);
-
-    if (savedSessions.length > 0) {
-      const divider = document.createElement('div');
-      divider.className = 'cli-new-menu-divider';
-      menu.appendChild(divider);
-
-      const header = document.createElement('div');
-      header.className = 'cli-new-menu-header';
-      header.textContent = 'Resume session';
-      menu.appendChild(header);
-
-      for (const { sess, indent } of groupSavedSessions(savedSessions)) {
-        const parts = sess.cwd.replace(/\/+$/, '').split('/');
-        const dirName = parts[parts.length - 1] || sess.cwd;
-        const mappings = formatModelMap(sess.settings?.modelMap);
-        const lastAt = sess.lastInteractionAt || sess.savedAt;
-        const age = formatAge(lastAt);
-        const displayTitle = sess.title || dirName;
-
-        const role = sess.group?.role || null;
-        const item = document.createElement('div');
-        item.className = 'cli-new-menu-item cli-new-menu-session' + (indent ? ' cli-new-menu-session-worker' : '');
-        if (sess.isRunning) item.classList.add('cli-new-menu-session-running');
-        item.title = sess.cwd;
-
-        const info = document.createElement('div');
-        info.className = 'cli-new-menu-session-info';
-        const tags = [];
-        if (sess.isRunning) tags.push('<span class="cli-new-menu-running">running</span>');
-        if (role) tags.push(`<span class="cli-new-menu-state">${role === 'orchestrator' ? '\u{1F9ED} orchestrator' : '⚙️ worker'}</span>`);
-        if (sess.paused) tags.push('<span class="cli-new-menu-state cli-new-menu-paused">paused</span>');
-        else if (sess.interrupted) tags.push('<span class="cli-new-menu-state cli-new-menu-interrupted" title="It was mid-turn when the server stopped">interrupted</span>');
-        if (role === 'worker' && sess.group.lastReport) tags.push(`<span class="cli-new-menu-state" title="${escHtml(sess.group.lastReport.summary || '')}">${escHtml(sess.group.lastReport.status)}</span>`);
-        info.innerHTML = `<span class="cli-new-menu-dir">${escHtml(displayTitle)}</span>${tags.join('')}<span class="cli-new-menu-age">${escHtml(age)}</span>`;
-        item.appendChild(info);
-
-        // TODO.md progress from the session folder: 3/5 · doing: <item> · 12m ago.
-        const p = sess.progress;
-        if (p && (p.total || p.hasResume)) {
-          const prog = document.createElement('div');
-          prog.className = 'cli-new-menu-progress';
-          const bits = [];
-          if (p.total) bits.push(`${p.done}/${p.total}`);
-          if (p.doing) bits.push(`doing ${p.doing.id}: ${p.doing.description || ''}`);
-          if (p.updatedAt) bits.push(`TODO ${formatAge(p.updatedAt)}`);
-          if (p.hasResume) bits.push('resume note');
-          prog.textContent = bits.join(' · ');
-          item.appendChild(prog);
-        }
-
-        const timeRow = document.createElement('div');
-        timeRow.className = 'cli-new-menu-time-row';
-        const startedEl = document.createElement('span');
-        startedEl.className = 'cli-new-menu-time';
-        startedEl.innerHTML = `<span class="cli-new-menu-time-lbl">started</span> ${escHtml(formatDateTime(sess.startedAt))}`;
-        timeRow.appendChild(startedEl);
-        const lastEl = document.createElement('span');
-        lastEl.className = 'cli-new-menu-time';
-        const lastSizeStr = sess.lastEntrySize ? ` · ${formatBytes(sess.lastEntrySize)}` : '';
-        lastEl.innerHTML = `<span class="cli-new-menu-time-lbl">last</span> ${escHtml(formatDateTime(lastAt))}${escHtml(lastSizeStr)}`;
-        timeRow.appendChild(lastEl);
-        item.appendChild(timeRow);
-
-        const metaRow = document.createElement('div');
-        metaRow.className = 'cli-new-menu-meta-row';
-        const dirLine = document.createElement('span');
-        dirLine.className = 'cli-new-menu-meta cli-new-menu-path';
-        dirLine.textContent = sess.cwd;
-        metaRow.appendChild(dirLine);
-        if (sess.autoMemory === true) {
-          const memBadge = document.createElement('span');
-          memBadge.className = 'cli-new-menu-badge';
-          memBadge.textContent = 'memory';
-          metaRow.appendChild(memBadge);
-        }
-        if (mappings) {
-          const mapSpan = document.createElement('span');
-          mapSpan.className = 'cli-new-menu-badge cli-new-menu-badge-model';
-          mapSpan.textContent = mappings;
-          metaRow.appendChild(mapSpan);
-        }
-        item.appendChild(metaRow);
-
-        if (sess.jsonlSize) {
-          const gaugeLine = document.createElement('div');
-          gaugeLine.className = 'cli-new-menu-gauge-row';
-          gaugeLine.innerHTML = contextGauge(sess.jsonlSize);
-          item.appendChild(gaugeLine);
-        }
-
-        // An orchestrator resumes its whole run: its own transcript (it warms
-        // its workers up), or a fresh orchestrator from the notes.
-        if (role === 'orchestrator' && !sess.isRunning && !sess.group.runMissing) {
-          const actions = document.createElement('div');
-          actions.className = 'cli-new-menu-actions';
-          const action = (label, title, fresh) => {
-            const b = document.createElement('button');
-            b.className = 'cli-new-menu-action';
-            b.textContent = label;
-            b.title = title;
-            b.addEventListener('click', (e) => {
-              e.stopPropagation();
-              closeNewMenu();
-              sendWs({ type: 'cli:resumeRun', runId: sess.group.runId, fresh });
-            });
-            actions.appendChild(b);
-          };
-          action('Resume run', 'The orchestrator continues its own session and resumes its paused workers', false);
-          action('Fresh from notes', 'A new orchestrator with a clean context, seeded from the notes, TODOs and reports of the run', true);
-          item.appendChild(actions);
-        }
-
-        if (!sess.isRunning) {
-          const del = document.createElement('span');
-          del.className = 'cli-new-menu-del';
-          del.textContent = '×';
-          del.title = role === 'orchestrator' ? 'Delete the whole run' : 'Delete';
-          del.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (role === 'orchestrator') {
-              if (!confirm(`Delete run ${sess.group.runId} completely? Its orchestrator and every worker session, their TODO/NOTES folders, the run directory and its worktrees are removed. Unmerged branches are kept.`)) return;
-              sendWs({ type: 'cli:deleteRun', runId: sess.group.runId });
-              closeNewMenu();
-              return;
-            }
-            if (!confirm(`Delete "${displayTitle}" completely? Its transcript, its interaction data and its TODO/NOTES folder are removed. This cannot be undone.`)) return;
-            sendWs({ type: 'cli:deleteSavedSession', sessionId: sess.id });
-            item.remove();
-          });
-          item.appendChild(del);
-        }
-
-        item.addEventListener('click', () => {
-          closeNewMenu();
-          if (role === 'orchestrator') {
-            if (!sess.isRunning && !sess.group.runMissing) sendWs({ type: 'cli:resumeRun', runId: sess.group.runId, fresh: false });
-            return;
-          }
-          // The server resumes it: a paused or interrupted one is told to pick
-          // up from its folder, and one whose conversation is gone starts
-          // fresh from that folder instead of dying on open.
-          const active = activeTabId ? tabs.get(activeTabId) : null;
-          sendWs({ type: 'cli:resumeSaved', sessionId: sess.id, cols: active?.terminal?.cols || 120, rows: active?.terminal?.rows || 32 });
-        });
-        menu.appendChild(item);
-      }
-    }
-
-    document.body.appendChild(menu);
-    const rect = tabNewBtn.getBoundingClientRect();
-    menu.style.position = 'fixed';
-    menu.style.top = rect.bottom + 4 + 'px';
-    const menuWidth = menu.offsetWidth || 260;
-    let left = rect.right - menuWidth;
-    if (left < 8) left = 8;
-    if (left + menuWidth > window.innerWidth - 8) left = window.innerWidth - menuWidth - 8;
-    menu.style.left = left + 'px';
-    const onClickOutside = (e) => {
-      if (!menu.contains(e.target) && e.target !== tabNewBtn) {
-        closeNewMenu();
-        document.removeEventListener('click', onClickOutside, true);
-      }
-    };
-    setTimeout(() => document.addEventListener('click', onClickOutside, true), 0);
-  }
-
-  function closeNewMenu() {
-    document.getElementById('cliNewMenu')?.remove();
-  }
+  // Relative times age while the tab is open.
+  setInterval(() => { if (sessionsShown()) renderSessions(); }, 60000);
 
   // --- Default model for new CLI tabs ---
 
@@ -874,7 +897,6 @@
 
   function showModelMenu() {
     closeModelMenu();
-    closeNewMenu();
     const menu = document.createElement('div');
     menu.className = 'cli-new-menu';
     menu.id = 'cliModelMenu';
@@ -985,13 +1007,6 @@
     return `${date} ${time}`;
   }
 
-  function formatBytes(bytes) {
-    if (!bytes) return '0 B';
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  }
-
   function contextGauge(bytes) {
     if (!bytes) return '';
     const MAX_BYTES = 300 * 1024;
@@ -1004,7 +1019,7 @@
     const label = bytes < 1024 ? bytes + ' B'
       : bytes < 1024 * 1024 ? Math.round(bytes / 1024) + ' KB'
       : (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    return `<span class="cli-new-menu-gauge"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" rx="2" fill="var(--bg, #111)" stroke="var(--border, #333)" stroke-width="0.5"/><rect width="${fill}" height="${h}" rx="2" fill="${color}"/></svg><span class="cli-new-menu-gauge-label">${label}</span></span>`;
+    return `<span class="sc-gauge" title="Transcript size"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" rx="2" fill="var(--bg, #111)" stroke="var(--border, #333)" stroke-width="0.5"/><rect width="${fill}" height="${h}" rx="2" fill="${color}"/></svg><span class="sc-gauge-label">${label}</span></span>`;
   }
 
   // --- Filesystem directory picker ---
@@ -1481,10 +1496,8 @@
         break;
       }
       case 'cli:savedSessions': {
-        if (state._showNewMenu) {
-          state._showNewMenu = false;
-          showNewMenu(msg.sessions || []);
-        }
+        _savedData = { sessions: msg.sessions || [], runs: msg.runs || [] };
+        renderSessions();
         break;
       }
       case 'cli:lastTurnRemoved': {
@@ -1550,10 +1563,11 @@
         break;
       }
       case 'cli:paused': {
+        requestSavedSessions();
         window.dashboard.showToast?.({
           sender: 'CLI',
           title: msg.interrupted ? 'Session interrupted' : 'Session paused',
-          message: `${msg.title || 'A session'} is saved${msg.interrupted ? ' as interrupted' : ' with its resume note'}. Resume it from the "+" menu.`,
+          message: `${msg.title || 'A session'} is saved${msg.interrupted ? ' as interrupted' : ' with its resume note'}. Resume it from the Sessions tab.`,
           level: msg.interrupted ? 'warning' : 'success',
         });
         break;
@@ -1629,11 +1643,15 @@
       if (typeof st.costUsd === 'number') tab.costUsd = st.costUsd;
       if (isSdk(tab)) window.sdkPanel?.update(st.tabId, sdkInfo(tab));
     }
-    if (!activeTabId && tabs.size > 0) {
+    if (!activeTabId && !_sessionsPinned && tabs.size > 0) {
       const first = Array.from(tabs.keys())[0];
       switchTab(first);
     }
     renderTabStrip();
+    if (sessionsShown()) {
+      if (sessionsView) sessionsView.style.display = '';
+      requestSavedSessions();
+    }
     window.inspectorModule?.renderInspectorTabStrip?.();
   }
 
@@ -1934,7 +1952,7 @@
     const canPause = run.orchestratorRunning && !run.pausing;
     const controls = `
       <div class="cli-run-board-controls">
-        <button class="cli-run-board-action" data-run-action="pause" ${canPause ? '' : 'disabled'} title="Workers stop non-critical work, write their resume notes and close; then the orchestrator. Resume from the &quot;+&quot; menu.">Pause run</button>
+        <button class="cli-run-board-action" data-run-action="pause" ${canPause ? '' : 'disabled'} title="Workers stop non-critical work, write their resume notes and close; then the orchestrator. Resume from the Sessions tab.">Pause run</button>
         <button class="cli-run-board-action" data-run-action="refresh" ${canPause ? '' : 'disabled'} title="The orchestrator writes its notes and is replaced by a fresh session with a clean context, seeded from the run. Workers keep running.">Refresh orchestrator</button>
         ${run.refreshSuggested ? `<span class="cli-run-board-hint">Refresh suggested: the orchestrator has compacted ${run.compactions} times.</span>` : ''}
       </div>`;
@@ -1993,7 +2011,13 @@
   window.dashboard.registerModule?.('orchestration:', (msg) => {
     if (msg.type === 'orchestration:run' && _runBoard && msg.runId === _runBoard.runId) renderRunBoard();
     if (msg.type === 'orchestration:run') window.sdkPanel?.onRunUpdate(msg);
+    if (msg.type === 'orchestration:run') requestSavedSessions(1000);
   });
+
+  // The Sessions tab is there before the first tab list arrives.
+  renderTabStrip();
+  renderSessions();
+  _mobileBar?.onTabChange(null);
 
   // Expose module
   window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, openRunBoard, modelPickerOptions };
