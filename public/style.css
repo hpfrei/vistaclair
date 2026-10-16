@@ -184,6 +184,12 @@ body.nav-loading .view-nav {
   opacity: 0.55;
 }
 .cli-new-menu-item.is-selected { font-weight: 600; }
+.cli-model-menu-note {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.55;
+}
 /* Inspector tab strip: scrollable tabs + pinned action button */
 .inspector-tab-wrapper {
   overflow: hidden;

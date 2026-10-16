@@ -863,7 +863,8 @@
   function updateModelCog() {
     if (!modelCog) return;
     const current = state.cliModel || 'opus';
-    modelCog.title = `New CLI tabs use: ${current} — click to change`;
+    const engine = state.cliFallbackEngine === 'terminal' ? ', terminal engine' : '';
+    modelCog.title = `New CLI tabs use: ${current}${engine} — click to change`;
   }
 
   modelCog?.addEventListener('click', (e) => {
@@ -877,6 +878,29 @@
     const menu = document.createElement('div');
     menu.className = 'cli-new-menu';
     menu.id = 'cliModelMenu';
+
+    // New sessions open in the Agent SDK panel; the terminal engine is a
+    // fallback preference, not a per-launch question.
+    const engineHeader = document.createElement('div');
+    engineHeader.className = 'cli-new-menu-header';
+    engineHeader.textContent = 'Engine for new CLI tabs';
+    menu.appendChild(engineHeader);
+    const terminal = state.cliFallbackEngine === 'terminal';
+    const engineItem = document.createElement('div');
+    engineItem.className = 'cli-new-menu-item' + (terminal ? ' is-selected' : '');
+    engineItem.textContent = (terminal ? '✓ ' : '') + 'Use the terminal engine for new sessions';
+    const engineNote = document.createElement('div');
+    engineNote.className = 'cli-model-menu-note';
+    engineNote.textContent = 'Fallback if Agent SDK use on subscriptions becomes restricted';
+    engineItem.appendChild(engineNote);
+    engineItem.addEventListener('click', () => {
+      closeModelMenu();
+      sendWs({ type: 'prefs:fallbackEngine:set', value: terminal ? 'sdk' : 'terminal' });
+    });
+    menu.appendChild(engineItem);
+    const engineDivider = document.createElement('div');
+    engineDivider.className = 'cli-new-menu-divider';
+    menu.appendChild(engineDivider);
 
     const header = document.createElement('div');
     header.className = 'cli-new-menu-header';

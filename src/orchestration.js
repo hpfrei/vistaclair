@@ -2,11 +2,12 @@
 // that do the work, Claude Code's own cross-session messaging between them.
 //
 //   openCli(opts)        the one user-facing "new CLI" entry. `mode` unset asks
-//                        Simple / Orchestrator, `engine` unset asks CLI terminal
-//                        / Agent SDK panel, `auth` unset asks an SDK session's
-//                        billing, in one dashboard ask form.
+//                        Simple / Orchestrator, `auth` unset asks an SDK
+//                        session's billing, in one dashboard ask form.
 //   engine               settings.engine 'cli' (a PTY tab) | 'sdk' (an Agent SDK
-//                        session, src/sdk-session.js). A run has one engine
+//                        session, src/sdk-session.js). Never asked: `engine`
+//                        unset is the Agent SDK panel, or a terminal when the
+//                        app pref fallbackEngine says so. A run has one engine
 //                        (run.engine); its workers inherit it. SDK workers are
 //                        hidden: they are areas of the run's panel.
 //   auth                 settings.auth 'apikey' | 'subscription': what an SDK
@@ -179,9 +180,12 @@ function workerCard(run, worker) {
   ].join('\n');
 }
 
-function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS }) {
+function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS }) {
   // Which Claude credentials exist: { apiKey, subscription }. Read per ask.
   const claudeCredentials = credentials || (() => require('./capabilities').claudeCredentials(dataHome));
+  // The engine of a new session nobody named one for: 'sdk' | 'terminal'
+  // (capabilities.getFallbackEnginePref). Read per open.
+  const newSessionEngine = fallbackEngine || (() => require('./capabilities').getFallbackEnginePref(dataHome));
   // The model catalog with availability (capabilities.listModelsWithAvailability).
   const modelCatalog = models || (() => require('./capabilities').listModelsWithAvailability(dataHome));
   const HOOK_SCRIPT = path.join(coreRoot, 'lib', 'orchestration-hook.js');
@@ -271,10 +275,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return any ? map : null;
   }
 
-  // Ask what is still open — the session type, the engine, an SDK session's
-  // billing — in one form. Billing is a question only when both credentials
-  // exist; with one, the form names it and the session is pinned to it. The
-  // form defaults to an orchestrator in the SDK panel, on the subscription.
+  // Ask what is still open — the session type, an SDK session's billing — in
+  // one form. The engine is decided before (openCli), never asked. Billing is a
+  // question only when both credentials exist; with one, the form names it and
+  // the session is pinned to it. The form defaults to an orchestrator, on the
+  // subscription.
   // formData.kind 'new-cli' (with formData.newCli) lets the dashboard draw its
   // own dialog, which also asks the orchestrator's model and an optional
   // routing of model families for the whole session or run; the questions are
@@ -282,7 +287,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // Resolves { mode, engine, auth, model, modelMap } (the asked ones filled in;
   // auth null for a CLI terminal; model only for an orchestrator), or null
   // when cancelled.
-  async function askMode({ cwd, title, mode = null, engine = null, auth = null }) {
+  async function askMode({ cwd, title, mode = null, engine, auth = null }) {
     const questions = [];
     let description = null;
     let onlyAuth = null;
@@ -299,15 +304,13 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
             { label: AUTH_LABELS.apikey, description: 'Per token, to the Anthropic API key on the Models page.' },
             { label: AUTH_LABELS.subscription, description: 'Your Claude Max/Pro plan, as a CLI terminal is.' },
           ],
-          // Only when the engine picked in this form is the SDK panel.
-          ...(engine ? {} : { showIf: { questionId: 'engine', equals: ENGINE_LABELS.sdk } }),
         };
       } else {
         onlyAuth = creds.apiKey ? 'apikey' : creds.subscription ? 'subscription' : null;
         billing = onlyAuth
           ? `billed to the ${onlyAuth === 'apikey' ? 'Anthropic API key' : 'Claude subscription'} (the only Claude credential configured)`
           : 'needs a Claude credential: none is configured (an API key on the Models page, or `claude /login`)';
-        if (engine) description = `Agent SDK panel, ${billing}.`;
+        description = `Agent SDK panel, ${billing}.`;
       }
     }
     if (!mode) {
@@ -321,19 +324,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         ],
       });
     }
-    if (!engine) {
-      questions.push({
-        id: 'engine', type: 'select', header: 'Engine',
-        question: 'Run it in a terminal, or in the Agent SDK panel?',
-        defaultValue: ENGINE_LABELS.sdk,
-        options: [
-          { label: ENGINE_LABELS.cli, description: 'Claude Code in a terminal tab, on your usual Claude credential.' },
-          { label: ENGINE_LABELS.sdk, description: `The same Claude Code in an HTML panel (live thinking, tool calls, images)${billing ? `, ${billing}` : ''}.` },
-        ],
-      });
-    }
     if (authQuestion) questions.push(authQuestion);
-    // Nothing to ask: the mode and the SDK engine were given, one credential.
+    // Nothing to ask: the mode was given, a terminal or one credential.
     if (!questions.length) return { mode, engine, auth: auth || onlyAuth, model: null, modelMap: null };
     const targets = remapTargets();
     let defaultModel = 'opus';
@@ -365,11 +357,6 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       if (/orchestrat/i.test(value)) mode = 'orchestrator';
       else if (/simple/i.test(value)) mode = 'simple';
       else return null;
-    }
-    if (!engine) {
-      // Unanswered falls back to the form's default.
-      const value = String(answer.find(a => a?.id === 'engine')?.answer || '');
-      engine = /terminal/i.test(value) ? 'cli' : 'sdk';
     }
     if (engine === 'sdk' && !auth) {
       // Unanswered falls back to the form's default, the subscription.
@@ -562,13 +549,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   async function openCli(opts = {}) {
     let mode = opts.mode === 'simple' || opts.mode === 'orchestrator' ? opts.mode : null;
+    // Unnamed, the engine is the Agent SDK panel unless the fallback pref says
+    // terminal; a caller (a resume, Pro) may still name either.
     const given = opts.engine || opts.settings?.engine;
-    let engine = given === 'cli' || given === 'sdk' ? given : null;
+    const engine = given === 'cli' || given === 'sdk' ? given : newSessionEngine() === 'terminal' ? 'cli' : 'sdk';
     const givenAuth = opts.auth || opts.settings?.auth;
     let auth = givenAuth === 'apikey' || givenAuth === 'subscription' ? givenAuth : null;
     let model = null;
     let modelMap = null;
-    if (!mode || !engine || (engine === 'sdk' && !auth)) {
+    if (!mode || (engine === 'sdk' && !auth)) {
       // One pending question per target: a double click joins the open ask.
       const key = opts.tabId || `cwd:${opts.cwd}`;
       if (!pendingAsks.has(key)) {
@@ -578,7 +567,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       const picked = await pendingAsks.get(key);
       if (!picked) return { cancelled: true };
-      ({ mode, engine, auth } = picked);
+      ({ mode, auth } = picked);
       model = picked.model || null;
       modelMap = picked.modelMap || null;
     }

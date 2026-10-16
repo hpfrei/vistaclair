@@ -392,8 +392,9 @@ class SdkSession {
   _buildOptions({ resumeSessionId } = {}) {
     const s = this.settings;
     // The session's billing choice (settings.auth, from the New CLI form);
-    // unset is the API key, falling back to the subscription without one.
-    const { credential, key } = caps.resolveAuth(DATA_HOME, { authMode: s.auth || 'apikey' });
+    // unset follows the global default: the subscription when one is active,
+    // else the API key (the claudeAuth pref may say API key first).
+    const { credential, key } = caps.resolveAuth(DATA_HOME, { authMode: s.auth || undefined });
     if (!credential) throw new Error('An Agent SDK session needs a Claude credential: add an Anthropic API key on the Models page, or log in to a Claude subscription with `claude /login`.');
     this._credential = credential;
     const env = buildClaudeEnv({

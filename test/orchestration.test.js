@@ -147,15 +147,18 @@ test('openCli without a mode asks, and the answer decides the launch', async () 
   const ask = broadcasts.find(m => m.type === 'ask:question');
   assert.ok(ask, 'the ask is broadcast');
   // The dashboard builds the form from formData.questions (askFormBuildHTML).
-  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.options.map(o => o.label)), [['Simple CLI', 'Orchestrator CLI'], ['CLI terminal', 'Agent SDK panel']]);
-  // The form defaults to an orchestrator in the SDK panel.
-  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.defaultValue), ['Orchestrator CLI', 'Agent SDK panel']);
-  // One credential: the SDK option names it instead of asking.
-  assert.match(ask.forms[0].formData.questions[1].options[1].description, /billed to the Anthropic API key \(the only Claude credential configured\)/);
+  // The engine is never a question.
+  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.options.map(o => o.label)), [['Simple CLI', 'Orchestrator CLI']]);
+  // The form defaults to an orchestrator.
+  assert.deepStrictEqual(ask.forms[0].formData.questions.map(q => q.defaultValue), ['Orchestrator CLI']);
+  assert.strictEqual(ask.forms[0].formData.newCli.given.engine, 'sdk', 'the dialog is told the engine, not asked it');
+  // One credential: the form names it instead of asking.
+  assert.match(ask.forms[0].formData.description, /Agent SDK panel, billed to the Anthropic API key \(the only Claude credential configured\)/);
   assert.deepStrictEqual([...pendingQuestions.values()][0].message, ask, 'the entry keeps its broadcast for replay on reconnect');
   answer(pendingQuestions, 'Simple CLI');
   const s = await simple;
   assert.strictEqual(s.mode, 'simple');
+  assert.strictEqual(s.engine, 'sdk', 'a new session is an Agent SDK session');
   assert.strictEqual(mgr.sessions.get(s.tabId).settings.orchestration, undefined);
   assert.strictEqual(pendingQuestions.size, 0, 'the answered question is gone');
 
@@ -191,35 +194,46 @@ test('openCli with a mode and an engine never asks', async () => {
   assert.ok(!broadcasts.some(m => m.type === 'ask:question'));
 });
 
-test('openCli asks only what is open: the engine when the mode is given, the mode when the engine is', async () => {
-  const { mgr, orch, pendingQuestions, broadcasts } = setup();
+test('openCli never asks the engine: the Agent SDK panel, a terminal by the fallbackEngine pref, or the caller\'s', async () => {
+  const dataHome = tmpDir('vistaclair-orch-home-');
+  const { mgr, orch, pendingQuestions, broadcasts } = setup({ dataHome });
   const cwd = tmpDir();
   const reply = (answers) => [...pendingQuestions.values()][0].resolve(Object.entries(answers).map(([id, answer]) => ({ id, question: 'x', answer })));
   const lastAsk = () => broadcasts.filter(m => m.type === 'ask:question').at(-1);
 
-  const a = orch.openCli({ cwd, mode: 'simple' });
-  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['engine']);
-  reply({ engine: 'Agent SDK panel' });
-  const ra = await a;
-  assert.deepStrictEqual({ mode: ra.mode, engine: ra.engine }, { mode: 'simple', engine: 'sdk' });
+  // The mode given, one credential: nothing to ask; the SDK panel on it.
+  const ra = await orch.openCli({ cwd, mode: 'simple' });
+  assert.deepStrictEqual({ mode: ra.mode, engine: ra.engine, auth: ra.auth }, { mode: 'simple', engine: 'sdk', auth: 'apikey' });
   assert.strictEqual(mgr.sessions.get(ra.tabId).settings.engine, 'sdk');
+  assert.ok(!broadcasts.some(m => m.type === 'ask:question'));
 
-  const b = orch.openCli({ cwd, engine: 'sdk' });
+  const b = orch.openCli({ cwd });
   assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['mode']);
-  reply({ mode: 'Orchestrator CLI' });
+  reply({ mode: 'Orchestrator CLI', engine: 'CLI terminal' });
   const rb = await b;
-  assert.deepStrictEqual({ mode: rb.mode, engine: rb.engine }, { mode: 'orchestrator', engine: 'sdk' });
+  assert.deepStrictEqual({ mode: rb.mode, engine: rb.engine }, { mode: 'orchestrator', engine: 'sdk' }, 'an engine answer is ignored');
   assert.strictEqual(orch.getRun(mgr.sessions.get(rb.tabId).settings.orchestration.runId).engine, 'sdk');
 
-  // Both open: one form, both answers.
-  const c = orch.openCli({ cwd });
-  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['mode', 'engine']);
-  reply({ mode: 'Simple CLI', engine: 'CLI terminal' });
-  assert.strictEqual((await c).engine, 'cli');
-  // The engine can also come in the caller's settings (Pro passes settings).
-  const d = await orch.openCli({ cwd, mode: 'simple', settings: { engine: 'sdk' } });
-  assert.strictEqual(d.engine, 'sdk');
-  assert.strictEqual(d.auth, 'apikey', 'the one credential is pinned without a form');
+  // The fallback pref (app-prefs fallbackEngine) makes new sessions terminals.
+  const caps = require('../src/capabilities');
+  assert.strictEqual(caps.getFallbackEnginePref(dataHome), 'sdk', 'unset is the SDK');
+  assert.strictEqual(caps.setFallbackEnginePref(dataHome, 'terminal'), true);
+  assert.strictEqual(caps.setFallbackEnginePref(dataHome, 'pty'), false);
+  const rc = await orch.openCli({ cwd, mode: 'simple' });
+  assert.deepStrictEqual({ engine: rc.engine, auth: rc.auth }, { engine: 'cli', auth: null });
+  assert.strictEqual(mgr.sessions.get(rc.tabId).settings.engine, 'cli');
+  const d = orch.openCli({ cwd });
+  assert.strictEqual(lastAsk().forms[0].formData.newCli.given.engine, 'cli');
+  reply({ mode: 'Orchestrator CLI' });
+  const rd = await d;
+  assert.strictEqual(orch.getRun(mgr.sessions.get(rd.tabId).settings.orchestration.runId).engine, 'cli');
+
+  // A caller (Pro, a resume) may still name either engine, whatever the pref.
+  assert.strictEqual((await orch.openCli({ cwd, mode: 'simple', settings: { engine: 'sdk' } })).engine, 'sdk');
+  caps.setFallbackEnginePref(dataHome, 'sdk');
+  assert.deepStrictEqual(caps.readAppPrefs(dataHome), {}, 'back to the default leaves no key behind');
+  assert.strictEqual((await orch.openCli({ cwd, mode: 'simple', engine: 'cli' })).engine, 'cli');
+  assert.strictEqual((await orch.openCli({ cwd, mode: 'simple' })).engine, 'sdk');
 });
 
 test('openCli: an SDK session\'s billing is asked only when both credentials exist; a run\'s workers inherit it', async () => {
@@ -229,13 +243,14 @@ test('openCli: an SDK session\'s billing is asked only when both credentials exi
   const reply = (answers) => [...pendingQuestions.values()][0].resolve(Object.entries(answers).map(([id, answer]) => ({ id, question: 'x', answer })));
   const lastAsk = () => broadcasts.filter(m => m.type === 'ask:question').at(-1);
 
-  // The engine open: billing is in the same form, shown only for the SDK panel.
+  // The mode open: billing is in the same form, always shown (the SDK panel).
   const a = orch.openCli({ cwd });
   const qs = lastAsk().forms[0].formData.questions;
-  assert.deepStrictEqual(qs.map(q => q.id), ['mode', 'engine', 'auth']);
-  assert.deepStrictEqual(qs[2].showIf, { questionId: 'engine', equals: 'Agent SDK panel' });
-  assert.deepStrictEqual(qs[2].options.map(o => o.label), ['API key', 'Claude subscription']);
-  reply({ mode: 'Orchestrator CLI', engine: 'Agent SDK panel', auth: 'Claude subscription' });
+  assert.deepStrictEqual(qs.map(q => q.id), ['mode', 'auth']);
+  assert.strictEqual(qs[1].showIf, undefined);
+  assert.deepStrictEqual(qs[1].options.map(o => o.label), ['API key', 'Claude subscription']);
+  assert.strictEqual(qs[1].defaultValue, 'Claude subscription');
+  reply({ mode: 'Orchestrator CLI', auth: 'Claude subscription' });
   const ra = await a;
   assert.deepStrictEqual({ engine: ra.engine, auth: ra.auth }, { engine: 'sdk', auth: 'subscription' });
   const orchSession = mgr.sessions.get(ra.tabId);
@@ -244,9 +259,10 @@ test('openCli: an SDK session\'s billing is asked only when both credentials exi
   const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
   assert.strictEqual(mgr.sessions.get(w.tabId).settings.auth, 'subscription', 'a worker inherits the run\'s billing');
 
-  // A CLI terminal carries no billing, whatever the form held.
-  const b = orch.openCli({ cwd });
-  reply({ mode: 'Simple CLI', engine: 'CLI terminal', auth: 'Claude subscription' });
+  // A CLI terminal carries no billing, and is not asked it.
+  const b = orch.openCli({ cwd, engine: 'cli' });
+  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['mode']);
+  reply({ mode: 'Simple CLI', auth: 'Claude subscription' });
   const rb = await b;
   assert.strictEqual(rb.auth, null);
   assert.strictEqual(mgr.sessions.get(rb.tabId).settings.auth, undefined);
@@ -297,9 +313,9 @@ test('the New CLI dialog: its payload, the orchestrator model and a run-wide mod
   assert.strictEqual(fd.newCli.maxWorkers, 5);
   assert.deepStrictEqual(fd.newCli.remapTargets.map(m => m.name), ['gpt-x'], 'only usable, unretired targets');
   assert.ok(!JSON.stringify(lastAsk()).includes('sk-secret'), 'no key reaches the dashboard');
-  assert.deepStrictEqual(fd.questions.map(q => q.id), ['mode', 'engine'], 'the generic fallback is unchanged');
+  assert.deepStrictEqual(fd.questions.map(q => q.id), ['mode'], 'the generic fallback asks the mode alone');
   reply({
-    mode: 'Orchestrator CLI', engine: 'Agent SDK panel', model: 'fable[1m]',
+    mode: 'Orchestrator CLI', model: 'fable[1m]',
     modelMap: { sonnet: 'gpt-x', haiku: 'nokey', opus: '', bogus: 'gpt-x' },
   });
   const ra = await a;
@@ -317,13 +333,13 @@ test('the New CLI dialog: its payload, the orchestrator model and a run-wide mod
   // A simple CLI takes the routing, never a model; a model not offered, or
   // nothing routed, leaves both unset.
   const b = orch.openCli({ cwd });
-  reply({ mode: 'Simple CLI', engine: 'CLI terminal', model: 'fable[1m]', modelMap: JSON.stringify({ opus: 'gpt-x' }) });
+  reply({ mode: 'Simple CLI', model: 'fable[1m]', modelMap: JSON.stringify({ opus: 'gpt-x' }) });
   const rb = await b;
   assert.strictEqual(rb.model, undefined);
   assert.strictEqual(mgr.sessions.get(rb.tabId).settings.model, undefined);
   assert.strictEqual(mgr.sessions.get(rb.tabId).settings.modelMap.opus, 'gpt-x');
   const c = orch.openCli({ cwd });
-  reply({ mode: 'Orchestrator CLI', engine: 'CLI terminal', model: 'sonnet', modelMap: { opus: '' } });
+  reply({ mode: 'Orchestrator CLI', model: 'sonnet', modelMap: { opus: '' } });
   const rc = await c;
   const sc = mgr.sessions.get(rc.tabId).settings;
   assert.strictEqual(sc.model, undefined);

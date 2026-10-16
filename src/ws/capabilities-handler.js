@@ -141,6 +141,15 @@ function handleMessage(ws, msg, bc) {
       bc.broadcast({ type: 'prefs:cliModel', ...cliModelState() });
       break;
     }
+    case 'prefs:fallbackEngine:set': {
+      const ok = caps.setFallbackEnginePref(PROJECT_ROOT, msg.value);
+      if (!ok) {
+        send({ type: 'chat:error', text: `Invalid engine: ${msg.value}` });
+        break;
+      }
+      bc.broadcast({ type: 'prefs:cliModel', ...cliModelState() });
+      break;
+    }
     case 'prefs:claudeAuth:set': {
       const ok = caps.setClaudeAuthPref(PROJECT_ROOT, msg.value);
       if (!ok) {
@@ -153,12 +162,13 @@ function handleMessage(ws, msg, bc) {
   }
 }
 
-// Snapshot of the default-model-for-new-CLI-tabs choice, plus the alias list the
-// picker offers alongside the resolved model catalog.
+// Snapshot of the settings for new CLI tabs: the default model, the alias list
+// the picker offers alongside the resolved model catalog, and the engine.
 function cliModelState() {
   return {
     model: caps.getCliModelPref(PROJECT_ROOT),
     aliases: caps.CLI_MODEL_ALIASES,
+    fallbackEngine: caps.getFallbackEnginePref(PROJECT_ROOT),
   };
 }
 

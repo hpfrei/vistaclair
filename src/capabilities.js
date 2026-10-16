@@ -752,6 +752,22 @@ function setCliModelPref(baseDir, value) {
   return true;
 }
 
+// The engine every NEW session opens in. Unset is the Agent SDK panel; the
+// terminal engine (a PTY tab) is kept as a fallback in case Agent SDK use on a
+// Claude subscription becomes restricted. Valid values: 'terminal' | 'sdk'.
+function getFallbackEnginePref(baseDir) {
+  return readAppPrefs(baseDir).fallbackEngine === 'terminal' ? 'terminal' : 'sdk';
+}
+
+function setFallbackEnginePref(baseDir, value) {
+  if (value !== 'terminal' && value !== 'sdk') return false;
+  const prefs = readAppPrefs(baseDir);
+  if (value === 'terminal') prefs.fallbackEngine = 'terminal';
+  else delete prefs.fallbackEngine;
+  writeAppPrefs(baseDir, prefs);
+  return true;
+}
+
 // THE credential decision for any `claude` spawn, headless or interactive.
 //
 // This is the single join between what the credential store holds and what the
@@ -1813,4 +1829,6 @@ module.exports = {
   CLI_MODEL_ALIASES,
   getCliModelPref,
   setCliModelPref,
+  getFallbackEnginePref,
+  setFallbackEnginePref,
 };

@@ -439,7 +439,7 @@ Rules are the most powerful part of vistaclair. Each one is a small JavaScript f
 
 ## Built-in rules
 
-vistaclair ships with six rules you can flip on without writing any code. They cover the things people reach for most. Four are on out of the box; the two that change auth or cost behaviour are left off until you opt in.
+vistaclair ships with five rules you can flip on without writing any code. They cover the things people reach for most. Four are on out of the box; the one that changes cost behaviour is left off until you opt in.
 
 | Rule | What it does | Default |
 |------|--------------|---------|
@@ -447,7 +447,6 @@ vistaclair ships with six rules you can flip on without writing any code. They c
 | **AskUserQuestion → MCP** | Reroute Claude's native question tool to vistaclair's own, so prompts pop up in this dashboard instead of the terminal. | **on** |
 | **Tool Filter** | Remove specific tools from the request by name, so the model simply can't call them. Edit the block-list inside. | **on** |
 | **Strip Git Status** | Delete the large git-status block Claude Code injects into the system prompt — saves tokens on every turn. | **on** |
-| **Auth Inject** | Attach your Anthropic OAuth token (from a Max/Pro subscription) so requests authenticate without an API key. | off |
 | **Title Schema Shortcut** | Answer Claude Code's tiny "generate a title" requests with a canned response instead of paying for a round-trip. | off |
 
 Click any built-in to read or edit its source — they're ordinary rule files, fully editable.

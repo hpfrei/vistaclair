@@ -147,6 +147,7 @@ class DashboardBroadcaster {
         type: 'prefs:cliModel',
         model: caps.getCliModelPref(PROJECT_ROOT),
         aliases: caps.CLI_MODEL_ALIASES,
+        fallbackEngine: caps.getFallbackEnginePref(PROJECT_ROOT),
       }));
 
       // Send running Claude process count and instance list
