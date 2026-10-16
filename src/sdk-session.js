@@ -57,7 +57,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const caps = require('./capabilities');
-const { buildClaudeEnv, sanitizeForDashboard, trackInstance, DATA_HOME } = require('./utils');
+const { buildClaudeEnv, trackInstance, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
 const { modelFamily } = require('./proxy');
 
@@ -352,18 +352,6 @@ class SdkSession {
     this._instanceExit = trackInstance(this.instanceId, { kill: () => this.kill() }, { tabId: this.tabId }, cwd, this.autoMemory);
 
     if (resumeSessionId) {
-      const { store, sessId, instanceId, broadcaster } = this;
-      setImmediate(() => {
-        const historical = store.loadSessionIntoMemory(sessId);
-        if (historical.length > 0) {
-          broadcaster.broadcast({
-            type: 'inspector:sessionLoaded',
-            sessId,
-            instanceId,
-            interactions: historical.map(sanitizeForDashboard).filter(Boolean),
-          });
-        }
-      });
       this._seedTranscript(mod, resumeSessionId);
     }
     // Turns a previous spawn left waiting (the server stopped under it) never

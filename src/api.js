@@ -8,7 +8,7 @@ const crypto = require('crypto');
 const { pipeline } = require('stream');
 const { spawn } = require('child_process');
 const express = require('express');
-const { MIME_TYPES, DATA_HOME, ensureDir } = require('./utils');
+const { MIME_TYPES, DATA_HOME, ensureDir, removeInside } = require('./utils');
 
 const VIDEO_THUMB_DIR = path.join(DATA_HOME, 'data', 'video-thumbs');
 const VIDEO_FASTSTART_DIR = path.join(DATA_HOME, 'data', 'video-faststart');
@@ -487,32 +487,11 @@ function createApiRouter({ broadcaster, store, proxyPort, dashboardPort, authTok
         errors.push({ path: p, error: 'Must be an absolute path' });
         continue;
       }
-      const resolved = path.resolve(p);
       try {
-        // Lexical check first (cheap), then realpath the *parent* only. A
-        // symlinked path component must not become a way out of cwd, while a
-        // symlink entry itself stays deletable as a link.
-        if (path.dirname(resolved) !== parent
-            || fs.realpathSync(path.dirname(resolved)) !== realParent) {
-          errors.push({ path: p, error: 'Outside the current directory' });
-          continue;
-        }
-        // lstat, not stat: a symlink to a directory must be unlinked, never
-        // followed and recursed into. It also keeps a genuine ENOENT visible,
-        // which rm's force:true would otherwise swallow.
-        const st = fs.lstatSync(resolved);
-        if (st.isSymbolicLink()) {
-          fs.unlinkSync(resolved);
-          summary.links++;
-        } else if (st.isDirectory()) {
-          // Async: a sync recursive delete of a large tree blocks the event
-          // loop and stalls the WebSocket and every other request.
-          await fs.promises.rm(resolved, { recursive: true, force: true });
-          summary.dirs++;
-        } else {
-          fs.unlinkSync(resolved);
-          summary.files++;
-        }
+        const kind = await removeInside(parent, p, realParent);
+        if (kind === 'link') summary.links++;
+        else if (kind === 'dir') summary.dirs++;
+        else summary.files++;
         deleted.push(p);
       } catch (err) {
         errors.push({ path: p, error: err.message });

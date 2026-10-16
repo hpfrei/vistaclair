@@ -46,6 +46,38 @@ function tryRm(p) {
   try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
 }
 
+// Delete `target`, which must sit directly inside `parent`: the one rule that
+// keeps a recursive delete from reaching anywhere the owner can read. Lexical
+// check first (cheap), then realpath the target's *parent* only, so a symlinked
+// path component cannot lead out while a symlink entry stays deletable as a
+// link (unlinked, never followed). `realParent` may be passed in when the
+// caller deletes several entries of one parent. Resolves 'file' | 'dir' |
+// 'link'; throws when the target is outside `parent` or does not exist.
+async function removeInside(parent, target, realParent) {
+  const root = path.resolve(parent);
+  const resolved = path.resolve(target);
+  if (path.dirname(resolved) !== root
+      || fs.realpathSync(path.dirname(resolved)) !== (realParent || fs.realpathSync(root))) {
+    throw new Error('Outside the current directory');
+  }
+  // lstat, not stat: a symlink to a directory must be unlinked, never followed
+  // and recursed into. It also keeps a genuine ENOENT visible, which rm's
+  // force:true would otherwise swallow.
+  const st = fs.lstatSync(resolved);
+  if (st.isSymbolicLink()) {
+    fs.unlinkSync(resolved);
+    return 'link';
+  }
+  if (st.isDirectory()) {
+    // Async: a sync recursive delete of a large tree blocks the event loop and
+    // stalls the WebSocket and every other request.
+    await fs.promises.rm(resolved, { recursive: true, force: true });
+    return 'dir';
+  }
+  fs.unlinkSync(resolved);
+  return 'file';
+}
+
 let counter = 0;
 
 const MIME_TYPES = {
@@ -618,6 +650,7 @@ module.exports = {
   safeJoin,
   killGracefully,
   tryRm,
+  removeInside,
   MIME_TYPES,
   PACKAGE_ROOT,
   DATA_HOME,

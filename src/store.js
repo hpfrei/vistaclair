@@ -21,12 +21,6 @@ class InteractionStore {
     this.requestIdIndex = new Map(); // request-id → filePath (survives eviction)
     this.diskIndex = new Map();    // interaction id → file path (any file ever parsed; survives memory eviction)
 
-    // Ids _loadFromDisk pulled in at boot, i.e. history from previous processes
-    // rather than anything this one produced. The dashboard's `init` payload
-    // uses this to tell "a session that is still around" from "whichever dirs
-    // happened to have the newest mtime".
-    this.bootLoadedIds = new Set();
-
     // Authoritative subagent attribution from Claude's trace files.
     this.traceIndexes = new Map();   // sessId → TraceIndex
     this.pendingRequestEnrich = new Map(); // request-id → true (awaiting trace resolution)
@@ -262,7 +256,6 @@ class InteractionStore {
       const dup = this.interactions.has(interaction.id);
       this.interactions.set(interaction.id, interaction);
       if (!dup) this.order.push(interaction.id);
-      this.bootLoadedIds.add(interaction.id);
       this.filePaths.set(interaction.id, filePath);
       const reqId = interaction.response?.headers?.['request-id'];
       if (reqId) this.requestIdIndex.set(reqId, filePath);
@@ -392,7 +385,6 @@ class InteractionStore {
     for (const id of toRemove) {
       this.interactions.delete(id);
       this.filePaths.delete(id);
-      this.bootLoadedIds.delete(id);
     }
     this.order = this.order.filter(id => !toRemove.has(id));
     for (const [id, fp] of this.diskIndex) {
@@ -696,46 +688,6 @@ class InteractionStore {
     return interaction;
   }
 
-  getAllFromDisk() {
-    const dirs = [];
-    try { dirs.push(...fs.readdirSync(INTERACTIONS_DIR)); } catch { return []; }
-    const sessionDirs = dirs.filter(name => {
-      try { return fs.statSync(path.join(INTERACTIONS_DIR, name)).isDirectory(); } catch { return false; }
-    });
-    const allFiles = [];
-    for (const sessId of sessionDirs) {
-      const dir = path.join(INTERACTIONS_DIR, sessId);
-      let files;
-      try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch { continue; }
-      for (const file of files) {
-        const seqNum = parseInt(file);
-        allFiles.push({ sessId, seqNum, filePath: path.join(dir, file) });
-      }
-    }
-    // Build reverse lookup: filePath → in-memory ID (for files saved before id was persisted)
-    const pathToMemId = new Map();
-    for (const [id, fp] of this.filePaths) pathToMemId.set(fp, id);
-
-    // Legacy data can hold one interaction in several files; show it once,
-    // preferring the in-memory copy.
-    const byId = new Map();
-    for (const { sessId, seqNum, filePath } of allFiles) {
-      const memId = pathToMemId.get(filePath);
-      if (memId) {
-        const memInteraction = this.interactions.get(memId);
-        if (memInteraction) { byId.set(memId, memInteraction); continue; }
-      }
-      const interaction = this._parseInteractionFile(sessId, seqNum, filePath);
-      if (!interaction) continue;
-      const existing = byId.get(interaction.id);
-      if (existing && this.interactions.get(interaction.id) === existing) continue;
-      byId.set(interaction.id, interaction);
-    }
-    const results = [...byId.values()];
-    results.sort((a, b) => a.timestamp - b.timestamp);
-    return results;
-  }
-
   removeFromMemory(instanceIds) {
     const idSet = new Set(instanceIds);
     const toRemove = new Set();
@@ -751,6 +703,48 @@ class InteractionStore {
     }
     this.order = this.order.filter(id => !toRemove.has(id));
     return toRemove.size;
+  }
+
+  // Everything memory holds for a session that is being removed: its turns
+  // (by instance, and by file under its dir), turn counter, whole-session
+  // totals and transcript watcher. The dir itself is the caller's to delete
+  // (src/inspector-sessions.js, confined to the interactions root).
+  forgetSession(instanceId, sessId) {
+    this.removeFromMemory([instanceId]);
+    if (!sessId) return;
+    this._evictSweptFromMemory([sessId]);
+    this.sessionSeqs.delete(sessId);
+    this.totals.forget(sessId);
+    const ti = this.traceIndexes.get(sessId);
+    if (ti) { ti.close(); this.traceIndexes.delete(sessId); }
+  }
+
+  // What an inspector tab shows when it opens: the newest maxSize turns this
+  // instance wrote to its session dir, overlaid with memory (turns still in
+  // flight, ones never written). Read only: nothing is pulled into memory, so
+  // opening an old session never evicts a live one. A dir can be shared (a
+  // headless ai.prompt run and the tab that resumes its Claude session), hence
+  // the filter on instanceId.
+  sessionInteractions(instanceId, sessId) {
+    const byId = new Map();
+    if (sessId && !sessId.includes('/') && !sessId.includes('\\') && !sessId.startsWith('.')) {
+      const dir = path.join(INTERACTIONS_DIR, sessId);
+      let files = [];
+      try { files = fs.readdirSync(dir).filter(f => /^\d+\.json$/.test(f)); } catch {}
+      const newest = files
+        .map(file => ({ file, seqNum: parseInt(file, 10) }))
+        .sort((a, b) => a.seqNum - b.seqNum)
+        .slice(-this.maxSize);
+      for (const { file, seqNum } of newest) {
+        const interaction = this._parseInteractionFile(sessId, seqNum, path.join(dir, file));
+        if (interaction && interaction.instanceId === instanceId) byId.set(interaction.id, interaction);
+      }
+    }
+    for (const id of this.order) {
+      const interaction = this.interactions.get(id);
+      if (interaction && (interaction.instanceId || 'ext') === instanceId) byId.set(id, interaction);
+    }
+    return [...byId.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   }
 
   loadSessionIntoMemory(sessId) {

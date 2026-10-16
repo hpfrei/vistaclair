@@ -3,6 +3,7 @@ const { sanitizeForDashboard, getActiveProcessCount, getInstances, killInstance,
 const createProxyRouter = require('./proxy');
 const { pendingQuestions } = createProxyRouter;
 const caps = require('./capabilities');
+const { InspectorSessions } = require('./inspector-sessions');
 
 const PROJECT_ROOT = DATA_HOME;
 
@@ -67,6 +68,25 @@ function forClients(message) {
   return { ...message, interaction: { ...interaction, response: { ...interaction.response, sseEvents: undefined } } };
 }
 
+// Messages that belong to one session's content: a browser gets them only for
+// the sessions it has open (inspector:subscribe).
+const SESSION_SCOPED = new Set([
+  'interaction:start', 'interaction:update', 'interaction:complete', 'interaction:error',
+  'interaction:enriched', 'sse_event', 'inspector:turnsDeleted', 'inspector:sessionTotals',
+]);
+
+// A turn as a freshly opened tab gets it: the summary shape (src/inspector.js
+// refetches detail on select), except a turn still streaming keeps the events
+// so far, since the rest arrive one by one as sse_event.
+function forSnapshot(interaction, instanceId) {
+  const s = sanitizeForDashboard(interaction);
+  if (!s) return null;
+  s.instanceId = instanceId;
+  const live = s.status === 'pending' || s.status === 'streaming';
+  if (s.response && !live) s.response = { ...s.response, sseEvents: undefined };
+  return live ? s : summarizeForInit(s);
+}
+
 
 class DashboardBroadcaster {
   constructor(wss, store, opts = {}) {
@@ -86,24 +106,19 @@ class DashboardBroadcaster {
     this.registerHandler(capabilitiesHandler.PREFIXES, capabilitiesHandler);
     this.registerHandler(cliHandler.PREFIXES, cliHandler);
 
+    this.sessions = new InspectorSessions({
+      store, broadcaster: this, getInstances, removeInstances,
+      cliSessionManager: this.cliSessionManager,
+      getPricing: (model) => caps.getModelPricing(DATA_HOME, model),
+      ...opts.sessions,
+    });
+
     this.wss.on('connection', (ws) => {
-      // At boot the store loads whichever session dirs were touched most
-      // recently, which has nothing to do with the tabs that came back —
-      // shipping all of it rebuilds inspector tabs for dead sessions, labelled
-      // by cwd so they look like the real thing. Drop that carried-over history
-      // unless its instance is still around; anything this process produced is
-      // kept, so an exited ai.prompt run stays inspectable for the rest of the
-      // run. Older sessions remain reachable through inspector:loadSession
-      // (clicking a saved session) and inspector:loadAll.
-      const live = this.liveInstanceIds();
-      const interactions = this.store.getAll().map(i => {
-        if (this.store.bootLoadedIds.has(i.id) && !live.has(i.instanceId)) return null;
-        const s = sanitizeForDashboard(i);
-        if (!s) return null;
-        if (s.response) s.response = { ...s.response, sseEvents: undefined };
-        return summarizeForInit(s);
-      }).filter(Boolean);
-      ws.send(JSON.stringify({ type: 'init', interactions }));
+      // Instances whose content this browser has open (inspector tabs).
+      ws.inspectorSubs = new Set();
+      // The session cards only; a session's interactions follow when its tab
+      // opens (inspector:subscribe).
+      ws.send(JSON.stringify({ ...this.sessions.summaryMessage(), type: 'init' }));
 
       // Send settings
       let mcpServers = [];
@@ -173,39 +188,17 @@ class DashboardBroadcaster {
           const tabId = msg.tabId || 'tab-1';
           if (msg.type === 'claude:killInstance') {
             if (msg.instanceId) killInstance(msg.instanceId);
-          } else if (msg.type === 'inspector:clearInstances') {
-            if (Array.isArray(msg.instanceIds) && msg.instanceIds.length > 0) {
-              this.store.removeFromMemory(msg.instanceIds);
-              removeInstances(msg.instanceIds);
-              this.broadcast({ type: 'inspector:instancesCleared', instanceIds: msg.instanceIds });
-            }
-          } else if (msg.type === 'inspector:loadSession') {
-            if (msg.sessId) {
-              const loaded = this.store.loadSessionIntoMemory(msg.sessId);
-              const interactions = loaded.map(i => {
-                const s = sanitizeForDashboard(i);
-                if (!s) return null;
-                if (s.response) s.response = { ...s.response, sseEvents: undefined };
-                return summarizeForInit(s);
-              }).filter(Boolean);
-              ws.send(JSON.stringify({
-                type: 'inspector:sessionLoaded',
-                sessId: msg.sessId,
-                instanceId: `cli-${msg.sessId}`,
-                interactions,
-              }));
-            }
-          } else if (msg.type === 'inspector:loadAll') {
-            const all = this.store.getAllFromDisk().map(i => {
-              const s = sanitizeForDashboard(i);
-              if (!s) return null;
-              if (s.response) s.response = { ...s.response, sseEvents: undefined };
-              return summarizeForInit(s);
-            }).filter(Boolean);
-            ws.send(JSON.stringify({ type: 'inspector:allLoaded', interactions: all }));
+          } else if (msg.type === 'inspector:subscribe') {
+            if (typeof msg.instanceId === 'string' && msg.instanceId) this.subscribe(ws, msg.instanceId);
+          } else if (msg.type === 'inspector:unsubscribe') {
+            ws.inspectorSubs.delete(msg.instanceId);
+          } else if (msg.type === 'inspector:clearKind') {
+            if (['cli', 'app', 'ext'].includes(msg.kind)) this.sessions.clearKind(msg.kind);
+          } else if (msg.type === 'inspector:setAutoClear') {
+            this.sessions.setAutoClear(!!msg.value);
           } else if (msg.type === 'inspector:getSessionTotals') {
             // CLI tab ids are cli-<session dir>. Later progress and every new
-            // turn arrive as broadcast inspector:sessionTotals.
+            // turn arrive as inspector:sessionTotals while the tab is open.
             const m = /^cli-([0-9a-f-]{36})$/i.exec(msg.instanceId || '');
             const totals = m ? this.store.totals.get(m[1]) : null;
             ws.send(JSON.stringify({ type: 'inspector:sessionTotals', instanceId: msg.instanceId, totals }));
@@ -258,20 +251,6 @@ class DashboardBroadcaster {
     });
   }
 
-  // Instance ids that currently exist: registered inspector sessions (CLI tabs
-  // and headless ai.prompt runs), live CLI tabs, and tracked child processes.
-  // The three overlap; the union is what "not a dead session" means.
-  liveInstanceIds() {
-    const live = new Set(this.store.sessionMap.keys());
-    for (const tab of this.cliSessionManager?.list() || []) {
-      if (tab.instanceId) live.add(tab.instanceId);
-    }
-    for (const inst of getInstances()) {
-      if (inst.instanceId) live.add(inst.instanceId);
-    }
-    return live;
-  }
-
   registerHandler(prefix, handler) {
     const prefixes = Array.isArray(prefix) ? prefix : [prefix];
     for (const p of prefixes) this._pluginHandlers.push({ prefix: p, handler });
@@ -296,17 +275,50 @@ class DashboardBroadcaster {
     return () => this._broadcastListeners.delete(fn);
   }
 
+  // Open a session for one browser: subscribe first, then send the snapshot,
+  // in the same tick. Every live event broadcast after this point reaches the
+  // browser after the snapshot, none before it, so a turn opened mid-stream is
+  // neither lost nor doubled (the browser also dedupes by id).
+  subscribe(ws, instanceId) {
+    ws.inspectorSubs.add(instanceId);
+    const sessId = this.store.sessionMap.get(instanceId)
+      || this.sessions.sessions.get(instanceId)?.sessId
+      || (/^cli-([0-9a-f-]{36})$/i.exec(instanceId) || [])[1];
+    const interactions = this.store.sessionInteractions(instanceId, sessId)
+      .map(i => forSnapshot(i, instanceId)).filter(Boolean);
+    ws.send(JSON.stringify({ type: 'inspector:snapshot', instanceId, interactions }));
+  }
+
+  // The instance a session-scoped message belongs to. External clients carry
+  // no instance of their own; their turns go under 'ext' (proxy.js names a
+  // Claude Code session ext-<id> where its requests say which).
+  _instanceOf(message) {
+    if (message.instanceId !== undefined) return message.instanceId || 'ext';
+    if (message.interaction) return message.interaction.instanceId || 'ext';
+    return this.store.interactions.get(message.interactionId)?.instanceId || 'ext';
+  }
+
   broadcast(message) {
     for (const fn of this._broadcastListeners) {
       try { fn(message); } catch (err) { console.error('broadcast listener error:', err); }
     }
-    const data = JSON.stringify(forClients(message));
-    for (const client of this.wss.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        try {
-          client.send(data);
-        } catch (err) { console.error('WS broadcast error:', err); }
+    const scoped = SESSION_SCOPED.has(message.type) ? this._instanceOf(message) : null;
+    if (message.type === 'inspector:sessionsRemoved') {
+      for (const client of this.wss.clients) {
+        for (const id of message.instanceIds || []) client.inspectorSubs?.delete(id);
       }
+    }
+    let out = forClients(message);
+    if (scoped && message.interaction && !message.interaction.instanceId) {
+      out = { ...out, interaction: { ...out.interaction, instanceId: scoped } };
+    }
+    const data = JSON.stringify(out);
+    for (const client of this.wss.clients) {
+      if (client.readyState !== WebSocket.OPEN) continue;
+      if (scoped && !client.inspectorSubs?.has(scoped)) continue;
+      try {
+        client.send(data);
+      } catch (err) { console.error('WS broadcast error:', err); }
     }
   }
 }

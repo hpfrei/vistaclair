@@ -216,6 +216,8 @@ test('the inspector gets totals for every turn on disk, not just those in memory
   wss.clients.add(ws);
   wss.emit('connection', ws);
 
+  // Progress reaches the browsers that have the session open.
+  onMessage(JSON.stringify({ type: 'inspector:subscribe', instanceId: `cli-${SESS}` }));
   onMessage(JSON.stringify({ type: 'inspector:getSessionTotals', instanceId: `cli-${SESS}` }));
   const deadline = Date.now() + 5000;
   let final;

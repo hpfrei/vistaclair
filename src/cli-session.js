@@ -4,7 +4,7 @@ const path = require('path');
 const os = require('os');
 const caps = require('./capabilities');
 const { conventionNote } = require('./session-folders');
-const { buildCliArgs, spawnClaudePty, sanitizeForDashboard, killGracefully, PACKAGE_ROOT, DATA_HOME } = require('./utils');
+const { buildCliArgs, spawnClaudePty, killGracefully, PACKAGE_ROOT, DATA_HOME } = require('./utils');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
 
@@ -70,24 +70,6 @@ class CliSession {
     }
     this._instanceId = `cli-${this.sessId}`;
     this.store.registerSession(this.instanceId, this.sessId);
-
-    if (resumeSessionId) {
-      const store = this.store;
-      const sessId = this.sessId;
-      const instanceId = this.instanceId;
-      const broadcaster = this.broadcaster;
-      setImmediate(() => {
-        const historical = store.loadSessionIntoMemory(sessId);
-        if (historical.length > 0) {
-          broadcaster.broadcast({
-            type: 'inspector:sessionLoaded',
-            sessId,
-            instanceId,
-            interactions: historical.map(sanitizeForDashboard).filter(Boolean),
-          });
-        }
-      });
-    }
 
     const mergedSettings = { ...this.settings, appendSystemPrompt: buildAppendSystemPrompt(this.settings) };
     const args = ['--dangerously-skip-permissions', ...buildCliArgs(mergedSettings)];

@@ -9,6 +9,7 @@ const caps = require('./capabilities');
 const { getModelPricing } = caps;
 const enhancedAskTool = require('./ask-schema');
 const InteractionStore = require('./store');
+const { externalInstanceId } = require('./inspector-sessions');
 
 const PROJECT_ROOT = DATA_HOME;
 
@@ -273,6 +274,8 @@ function trackSSEEvent(event, interaction, activeToolBlocks, broadcaster, instan
   broadcaster.broadcast({
     type: 'sse_event',
     interactionId: interaction.id,
+    // Routes the event to the browsers that have this session open.
+    instanceId: instanceId || interaction.instanceId || null,
     event,
   });
 }
@@ -396,7 +399,9 @@ function createProxyRouter(store, broadcaster, targetUrl) {
       timestamp: Date.now(),
       endpoint: '/v1/messages',
       disableAutoMemory: !instCtx?.autoMemory,
-      instanceId: req.instanceId || null,
+      // An external client (no /i/<instance> prefix) is grouped by the Claude
+      // Code session its request names, for the inspector's session list.
+      instanceId: req.instanceId || externalInstanceId(body),
       stepId: instCtx?.stepId || null,
       runId: instCtx?.runId || null,
       request: { ...body },
@@ -841,7 +846,7 @@ function createProxyRouter(store, broadcaster, targetUrl) {
       id: generateId(),
       timestamp: Date.now(),
       endpoint: '/v1/messages/count_tokens',
-      instanceId: req.instanceId || null,
+      instanceId: req.instanceId || externalInstanceId(body),
       request: { ...body },
       response: { status: null, headers: {}, body: null, sseEvents: [] },
       timing: { startedAt: Date.now(), ttfb: null, duration: null },
