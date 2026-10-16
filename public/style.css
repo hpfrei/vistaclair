@@ -4500,6 +4500,47 @@ footer {
 .cli-auth-hint code { background: var(--bg-alt); padding: 1px 5px; border-radius: 3px; }
 .cli-auth-hint-ok { background: color-mix(in srgb, var(--green, #2ecc71) 12%, transparent); border: 1px solid color-mix(in srgb, var(--green, #2ecc71) 30%, transparent); }
 .cli-auth-hint-warn { background: var(--bg-alt); border: 1px solid var(--border); color: var(--text-dim); }
+.cli-auth-hint .claude-signin-btn, .provider-hint .claude-signin-btn, .ncd-warn-text .claude-signin-btn { margin: 0 2px; }
+
+/* Header pill: Claude sign-in state (claude-signin.js) */
+.claude-auth-pill {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 260px;
+  font-size: 11px; padding: 2px 8px; border-radius: 3px; line-height: 1.4;
+  background: var(--bg-hover); color: var(--text-dim); border: 1px solid transparent;
+}
+.claude-auth-pill.claude-auth-ok { background: var(--status-connected-bg); color: var(--green); }
+.claude-auth-pill.claude-auth-warn { background: var(--status-disconnected-bg); color: var(--orange); border-color: color-mix(in srgb, var(--orange) 40%, transparent); }
+.claude-auth-pill-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .75; }
+
+/* Sign-in modal */
+.claude-signin-box { max-width: 640px; }
+.claude-signin-notice {
+  font-size: 12px; padding: 8px 10px; margin: 0 0 10px; border-radius: 5px; line-height: 1.4;
+  background: color-mix(in srgb, var(--orange) 12%, transparent); border: 1px solid color-mix(in srgb, var(--orange) 35%, transparent);
+}
+.claude-signin-status { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--text-bright); }
+.claude-signin-explain { font-size: 12px; color: var(--text-dim); margin: 0 0 8px; line-height: 1.4; }
+.claude-signin-explain code { font-size: 11px; background: var(--bg-hover); padding: 1px 5px; border-radius: 3px; }
+.claude-signin-term {
+  height: 184px; margin: 8px 0; padding: 4px 6px; border-radius: 5px; overflow: hidden;
+  background: #1a1a2e;
+}
+.claude-signin-paste { display: flex; gap: 6px; }
+.claude-signin-paste input {
+  flex: 1; min-width: 0; font: 12px "Cascadia Code", Menlo, Monaco, monospace; padding: 4px 8px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+}
+.claude-signin-result { font-size: 12px; margin-top: 8px; }
+.claude-signin-result-ok { color: var(--green); font-weight: 600; }
+.claude-signin-result-error { color: var(--red); }
+.claude-signin-btn {
+  font-size: 11px; padding: 2px 10px; border-radius: 4px; line-height: 1.5;
+  background: var(--bg-surface); color: var(--accent); border: 1px solid var(--accent);
+}
+.claude-signin-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.claude-signin-btn:disabled { opacity: .45; cursor: default; border-color: var(--border); color: var(--text-dim); }
+.claude-signin-btn.claude-signin-btn-primary { font-size: 13px; padding: 6px 16px; background: var(--accent); color: #fff; font-weight: 600; }
+.claude-signin-btn.claude-signin-btn-primary:hover { opacity: .9; background: var(--accent); }
 
 /* Model cards grid */
 .model-card-grid {

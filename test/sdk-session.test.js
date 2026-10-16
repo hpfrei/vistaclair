@@ -29,6 +29,13 @@ utils.spawnClaudePty = (args, o) => {
   ptySpawns.push({ args, o });
   return { pid: 0, onData() {}, onExit() {}, write() {}, resize() {} };
 };
+// Whether a subscription is signed in is `claude auth status --json`'s answer
+// (src/claude-auth.js): stubbed, signed out unless a test says otherwise.
+const claudeAuth = require('../src/claude-auth');
+const SIGNED_OUT = JSON.stringify({ loggedIn: false, authMethod: 'none' });
+const SIGNED_IN = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' });
+function setLogin(out) { claudeAuth.authStatus.setRunner({ run: async () => out, runSync: () => out }); }
+setLogin(SIGNED_OUT);
 const CliSession = require('../src/cli-session');
 const SdkSession = require('../src/sdk-session');
 const CliSessionManager = require('../src/cli-sessions');
@@ -176,9 +183,7 @@ test('options: env is the whole buildClaudeEnv, with API-key auth (no subscripti
 });
 
 test('options: settings.auth subscription runs on the OAuth login, with no API key in the env', async () => {
-  const creds = path.join(HOME, '.claude', '.credentials.json');
-  fs.mkdirSync(path.dirname(creds), { recursive: true });
-  fs.writeFileSync(creds, JSON.stringify({ claudeAiOauth: { accessToken: 'a', refreshToken: 'r' } }));
+  setLogin(SIGNED_IN);
   try {
     const { s, calls, events } = makeSession({ auth: 'subscription' });
     s.spawn(tmp('proj-'), 80, 24, {});
@@ -207,7 +212,31 @@ test('options: settings.auth subscription runs on the OAuth login, with no API k
     assert.strictEqual(c.calls[0].options.env.ANTHROPIC_API_KEY, 'sk-ant-test');
     c.s.kill();
   } finally {
-    fs.rmSync(creds, { force: true });
+    setLogin(SIGNED_OUT);
+  }
+});
+
+test('a refused subscription login asks the dashboard to sign in, once per spawn', async () => {
+  setLogin(SIGNED_IN);
+  try {
+    const { s, calls, broadcasts } = makeSession({ auth: 'subscription' });
+    s.spawn(tmp('proj-'), 80, 24, {});
+    const refused = { type: 'assistant', error: 'authentication_failed', message: { content: [] }, parent_tool_use_id: null, session_id: s.sessId };
+    calls[0].emit(refused);
+    calls[0].emit(refused);
+    await tick();
+    const needed = broadcasts.filter(b => b.type === 'claude-auth:needed');
+    assert.deepEqual(needed, [{ type: 'claude-auth:needed', reason: 'authentication_failed', sessId: s.sessId }]);
+    s.kill();
+    // On the API key it is not a sign-in matter.
+    const k = makeSession({ auth: 'apikey' });
+    k.s.spawn(tmp('proj-'), 80, 24, {});
+    k.calls[0].emit({ ...refused, session_id: k.s.sessId });
+    await tick();
+    assert.ok(!k.broadcasts.some(b => b.type === 'claude-auth:needed'));
+    k.s.kill();
+  } finally {
+    setLogin(SIGNED_OUT);
   }
 });
 

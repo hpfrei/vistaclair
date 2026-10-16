@@ -308,7 +308,7 @@ Available templates in this skill directory:
     const pref = ca.pref || 'subscription'; // default shown selection
     const subBadge = ca.hasSubscription
       ? '<span class="mm-key-ok">subscription active</span>'
-      : '<span class="mm-key-missing">no subscription &mdash; run <code>/login</code> in a CLI tab</span>';
+      : '<span class="mm-key-missing">no subscription</span> <button type="button" class="claude-signin-btn" data-claude-signin>Sign in to Claude</button>';
     const checked = (v) => pref === v ? 'checked' : '';
     return `<div class="provider-claude-auth" id="claudeAuthSection">
       <div class="provider-claude-auth-head">
@@ -434,7 +434,7 @@ Available templates in this skill directory:
     let html = `<div class="provider-header">
       <span class="provider-url">${escHtml(prov.apiBaseUrl || '')}</span>
       <span class="provider-key-area">
-        ${prov.key === 'anthropic' ? '<span class="provider-hint">Optional. Claude calls run on your Max/Pro login when one is active &mdash; run <code>/login</code> in a CLI tab. Add a key to bill per token to the API instead, or to use Claude without a subscription.</span>' : ''}
+        ${prov.key === 'anthropic' ? '<span class="provider-hint">Optional. Claude calls run on your Max/Pro login when one is active (<button type="button" class="claude-signin-btn" data-claude-signin>Sign in to Claude</button>). Add a key to bill per token to the API instead, or to use Claude without a subscription.</span>' : ''}
         <input type="password" id="${keyId}" class="provider-key-input" value="${escHtml(prov.apiKey || '')}" placeholder="Paste API key..." autocomplete="off">
         <button type="button" class="provider-key-toggle" data-target="${keyId}" title="Show/hide key">&#128065;</button>
         <button type="button" class="provider-key-save" data-provider="${escHtml(prov.key)}" title="Save key">${hasKey ? 'Update' : 'Set key'}</button>

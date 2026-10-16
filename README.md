@@ -72,7 +72,9 @@ Open **http://localhost:3457** and log in with the auth token printed to the con
 
 ### Claude subscription and terms
 
-vistaclair runs on your own machine with your own Claude credential: each user signs in to Claude Code with their own Claude account, or adds their own Anthropic API key. Usage is under Anthropic's terms — see [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) and [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance). vistaclair never reads, stores or forwards your Claude login tokens: Claude Code itself handles the sign-in.
+vistaclair runs on your own machine with your own Claude credential: each user signs in to Claude Code with their own Claude account, or adds their own Anthropic API key. Usage is under Anthropic's terms — see [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) and [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance). vistaclair never reads or stores your Claude login: sign-in runs Claude Code's own `claude auth login`, and Claude Code's requests pass through the local inspector proxy to Anthropic without vistaclair touching their credentials (the inspector redacts `Authorization` / `x-api-key` and does not write request headers to the saved interactions).
+
+**Sign in to Claude** — the pill in the header shows whether Claude Code is signed in (plan and email, from `claude auth status`) and opens a sign-in window when it isn't. It runs `claude auth login` in a small terminal: open the sign-in page it prints, sign in on Anthropic's site, and paste the code it shows if asked. The window also opens by itself when a session's Claude login is refused, so you never need a terminal to sign in again.
 
 ---
 

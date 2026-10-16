@@ -69,6 +69,7 @@
       <button id="proUpdateBtn" class="pro-update-btn" style="display:none" title="Update pro to latest version">&#8593; Update</button>
       <button id="proHeaderBtn" class="pro-header-btn" title="VistaClair Pro">PRO</button>
       <button class="restart-server-btn" id="restartServerBtn" title="Restart vistaclair server">&#8635; Restart</button>
+      <button id="claudeAuthPill" class="claude-auth-pill hidden" type="button" title="Claude sign-in"></button>
       <span id="status" class="status disconnected">disconnected</span>
       <button class="theme-toggle" id="themeToggle" title="Toggle theme">bright</button>
     </div>
@@ -211,6 +212,35 @@
       <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:12px 16px">
         <button class="cli-settings-cancel" style="padding:6px 16px;cursor:pointer">Cancel</button>
         <button class="cli-settings-save" style="padding:6px 16px;cursor:pointer;background:var(--accent);color:#fff;border:none;border-radius:4px">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sign in to Claude (claude-signin.js): shows the server's `claude auth login` pty -->
+  <div class="modal-overlay hidden" id="claudeSignInModal">
+    <div class="modal-box claude-signin-box">
+      <div class="modal-header">
+        <span>Sign in to Claude</span>
+        <button class="modal-close" id="claudeSignInClose" type="button" title="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="claudeSignInNotice" class="claude-signin-notice hidden"></div>
+        <div id="claudeSignInStatus" class="claude-signin-status"></div>
+        <button id="claudeSignInStart" class="claude-signin-btn" type="button">Sign in to Claude</button>
+        <div id="claudeSignInLogin" class="claude-signin-login hidden">
+          <p class="claude-signin-explain">This runs Claude Code's own <code>claude auth login</code>. Sign in on Anthropic's page; if it shows a code, paste it below.</p>
+          <button id="claudeSignInOpenUrl" class="claude-signin-btn" type="button" disabled>Open sign-in page</button>
+          <div id="claudeSignInTerm" class="claude-signin-term"></div>
+          <form id="claudeSignInPaste" class="claude-signin-paste" autocomplete="off">
+            <input type="text" id="claudeSignInCode" placeholder="Paste code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+            <button type="submit" class="claude-signin-btn">Submit</button>
+          </form>
+          <div id="claudeSignInResult" class="claude-signin-result hidden"></div>
+        </div>
+      </div>
+      <div class="cap-modal-footer">
+        <button class="cap-cancel-btn" id="claudeSignInCancel" type="button">Close</button>
+        <button class="cap-save-btn hidden" id="claudeSignInRetry" type="button">Try again</button>
       </div>
     </div>
   </div>
@@ -985,6 +1015,7 @@ jq -r '.tool_input.command' |
   <script src="sdk-panel.js"></script>
   <script src="new-cli.js"></script>
   <script src="cli.js"></script>
+  <script src="claude-signin.js"></script>
   <script src="capabilities.js"></script>
   <script src="mcp.js"></script>
   <script src="home.js"></script>

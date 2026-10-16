@@ -1198,9 +1198,9 @@
   }
 
   // --- Settings modal ---
-  // On a newly spawned CLI tab with no active Claude subscription, remind the user
-  // that running /login takes effect only in a NEW tab (this tab snapshotted creds
-  // at spawn time). Shown at most once per page load.
+  // On a newly spawned CLI tab with no active Claude subscription, point at the
+  // header pill's sign-in and remind the user that it takes effect only in a NEW
+  // tab (this tab snapshotted creds at spawn time). Shown at most once per page load.
   let _noSubToastShown = false;
   function maybeNotifyNoSubscription() {
     if (_noSubToastShown) return;
@@ -1210,7 +1210,7 @@
     window.dashboard.showToast?.({
       sender: 'CLI',
       title: 'No Claude subscription detected',
-      message: 'Run /login in this tab to activate your Max/Pro subscription, then open a NEW CLI tab for it to take effect (this session already started without it).',
+      message: 'Sign in to Claude from the header pill, then open a NEW CLI tab for it to take effect (this session already started without it).',
       level: 'warning',
       duration: 12000,
     });
@@ -1244,7 +1244,7 @@
         hint.innerHTML = 'Claude subscription active &mdash; interactive sessions use it automatically.';
       } else {
         hint.className = 'cli-auth-hint cli-auth-hint-warn';
-        hint.innerHTML = 'No Claude subscription detected. Run <code>/login</code> in this CLI tab to activate your Max/Pro subscription for interactive sessions. Without a subscription, sessions fall back to the Anthropic API key.';
+        hint.innerHTML = 'No Claude subscription detected. <button type="button" class="claude-signin-btn" data-claude-signin>Sign in to Claude</button> to use your Max/Pro plan; until then sessions fall back to the Anthropic API key.';
       }
     }
     const modelMap = settings.modelMap || { fable: null, opus: null, sonnet: null, haiku: null };
