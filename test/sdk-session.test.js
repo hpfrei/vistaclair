@@ -71,7 +71,7 @@ function fakeSdk() {
         [Symbol.asyncIterator]() { return this; },
         next: () => out.next(),
         return: async () => { out.end(); return { value: undefined, done: true }; },
-        interrupt: async () => { call.interrupts++; },
+        interrupt: async () => { call.interrupts++; return sdk.interruptReceipt; },
         setModel: async (m) => { call.models.push(m); },
         getContextUsage: async (o) => { call.contextAsks.push(o); return sdk.contextUsage || null; },
         close: () => { call.closed = true; out.end(); },
@@ -493,11 +493,13 @@ test('submit: a user message per call, priority passed through, a user envelope 
   await tick();
   const inputs = calls[0].inputs;
   assert.strictEqual(inputs.length, 3);
-  assert.deepStrictEqual(inputs[0], { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'plain' }] }, parent_tool_use_id: null });
+  assert.match(inputs[0].uuid, /^[0-9a-f-]{36}$/);
+  assert.deepStrictEqual(inputs[0], { type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'plain' }] }, parent_tool_use_id: null, uuid: inputs[0].uuid });
+  assert.strictEqual(new Set(inputs.map(m => m.uuid)).size, 3, 'one uuid per message');
   assert.strictEqual(inputs[1].priority, 'next');
   assert.strictEqual(inputs[2].priority, 'now');
   const users = events().filter(e => e.ev.user).map(e => e.ev.user);
-  assert.deepStrictEqual(users[0], { text: 'plain', images: [] });
+  assert.deepStrictEqual(users[0], { id: inputs[0].uuid, text: 'plain', images: [], pending: true });
   assert.deepStrictEqual(users[1], { text: '[message from orch-x] do it', images: [], from: 'orch-x' });
   assert.ok(lines(s.settings.sessionDir).some(e => e.ev.user?.from === 'orch-x'));
 
@@ -522,6 +524,7 @@ test('submit: images are saved under uploads/, sent as base64 blocks, served by 
   const file = path.join(s.settings.sessionDir, 'uploads', name);
   assert.deepStrictEqual(fs.readFileSync(file), png);
   const user = events().find(e => e.ev.user).ev.user;
+  assert.strictEqual(user.pending, true);
   assert.deepStrictEqual(user.images, [{ name, url: `/api/sdk/upload?sessId=${s.sessId}&name=${encodeURIComponent(name)}` }]);
 
   // Refusals: type, size, together.
@@ -548,6 +551,132 @@ test('submit: images are saved under uploads/, sent as base64 blocks, served by 
   assert.strictEqual((await call({ sessId: 'not-a-uuid', name })).code, 400);
   assert.strictEqual((await call({ sessId: '00000000-0000-0000-0000-000000000000', name })).code, 404);
   s.kill();
+});
+
+// --- The owner's turns: waiting, then taken in ---
+
+// The CLI's echo of an input message (--replay-user-messages).
+const echo = (m, sessId) => ({ type: 'user', message: m.message, parent_tool_use_id: null, uuid: m.uuid, session_id: sessId, isReplay: true });
+
+test('input: pending at submit, delivered when the CLI echoes it; the echo is not broadcast', async () => {
+  const { s, calls, events } = makeSession();
+  s.spawn(tmp('proj-'), 80, 24, {});
+  assert.deepStrictEqual(calls[0].options.extraArgs, { 'replay-user-messages': null });
+  const q = calls[0];
+  const png = Buffer.from('89504e470d0a1a0a0000', 'hex').toString('base64');
+  const r1 = s.submit('first', { images: [{ mediaType: 'image/png', base64: png, name: 'a.png' }] });
+  s.submit('second');
+  s.submit('brief', { from: 'orch-x' });
+  await tick();
+  const [m1, m2, m3] = q.inputs;
+  assert.strictEqual(r1.id, m1.uuid);
+  const users = () => events().filter(e => e.ev.user).map(e => e.ev.user);
+  assert.deepStrictEqual(users().map(u => [u.id, !!u.pending]), [[m1.uuid, true], [m2.uuid, true], [undefined, false]], 'a `from` turn is drawn at once');
+
+  q.emit(echo(m1, s.sessId));
+  q.emit({ type: 'system', subtype: 'init', session_id: s.sessId });
+  q.emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'one' }] }, parent_tool_use_id: null });
+  q.emit(echo(m3, s.sessId));
+  q.emit({ type: 'result', subtype: 'success', total_cost_usd: 0.1, queued_turn_count: 1 });
+  await tick();
+  const delivered = users()[3];
+  assert.deepStrictEqual(delivered, { id: m1.uuid, text: 'first', images: r1.images }, 'the bubble, images and all');
+  assert.strictEqual(users().length, 4, 'the second waits on through a result; the `from` echo adds nothing');
+  assert.ok(!events().some(e => e.ev.sdk?.isReplay), 'echoes are never broadcast');
+
+  // Two waiting turns folded into one: a bubble each, where each is taken in.
+  s.submit('third');
+  await tick();
+  q.emit(echo(m2, s.sessId));
+  q.emit(echo(q.inputs[3], s.sessId));
+  await tick();
+  assert.deepStrictEqual(users().slice(-2).map(u => [u.text, !!u.pending]), [['second', false], ['third', false]]);
+
+  // History holds the same sequence: pending, then delivered.
+  const hist = lines(s.settings.sessionDir).filter(e => e.ev.user?.id === m1.uuid).map(e => !!e.ev.user.pending);
+  assert.deepStrictEqual(hist, [true, false]);
+  assert.ok(!lines(s.settings.sessionDir).some(e => e.ev.sdk?.isReplay));
+  s.kill();
+});
+
+test('input: a CLI that never echoes delivers what waits at the next init or result', async () => {
+  const { s, calls, events } = makeSession();
+  s.spawn(tmp('proj-'), 80, 24, {});
+  const q = calls[0];
+  const users = () => events().filter(e => e.ev.user).map(e => e.ev.user);
+  s.submit('a');
+  await tick();
+  q.emit({ type: 'system', subtype: 'init', session_id: s.sessId });
+  await tick();
+  assert.deepStrictEqual(users().map(u => [u.text, !!u.pending]), [['a', true], ['a', false]], 'at the turn\'s init');
+  s.submit('b');
+  await tick();
+  q.emit({ type: 'result', subtype: 'success', queued_turn_count: 1, parent_tool_use_id: 'toolu_sub' });
+  await tick();
+  assert.strictEqual(users().length, 3, 'a subagent\'s result is not the turn\'s');
+  q.emit({ type: 'result', subtype: 'success', queued_turn_count: 1 });
+  await tick();
+  assert.deepStrictEqual(users().map(u => [u.text, !!u.pending]), [['a', true], ['a', false], ['b', true], ['b', false]], 'at the turn\'s result');
+
+  // Once the CLI has echoed one, init and result no longer stand in.
+  s.submit('c');
+  await tick();
+  q.emit(echo(q.inputs[2], s.sessId));
+  await tick();
+  s.submit('d');
+  await tick();
+  q.emit({ type: 'result', subtype: 'success', queued_turn_count: 1 });
+  q.emit({ type: 'system', subtype: 'init', session_id: s.sessId });
+  await tick();
+  assert.deepStrictEqual(users().slice(-3).map(u => [u.text, !!u.pending]), [['c', true], ['c', false], ['d', true]], 'd waits for its echo');
+  s.kill();
+});
+
+test('input: cancelled by an interrupt that lists it, or when the session ends; stale ones on the next spawn', async () => {
+  const { s, sdk, calls, events } = makeSession();
+  s.spawn(tmp('proj-'), 80, 24, {});
+  const users = () => events().filter(e => e.ev.user).map(e => e.ev.user);
+  s.submit('keep');
+  s.submit('drop');
+  await tick();
+  const [keep, drop] = calls[0].inputs;
+  sdk.interruptReceipt = { still_queued: [keep.uuid], cancelled: [drop.uuid, 'not-ours'] };
+  await s.interrupt();
+  assert.deepStrictEqual(users().at(-1), { id: drop.uuid, cancelled: true, reason: 'interrupted' });
+  assert.strictEqual(users().filter(u => u.cancelled).length, 1, 'unknown uuids are ignored');
+  // An older CLI's interrupt resolves to nothing: the turns wait on.
+  sdk.interruptReceipt = undefined;
+  await s.interrupt();
+  assert.strictEqual(users().filter(u => u.cancelled).length, 1);
+
+  // The query ending: what still waits will never run.
+  calls[0].end();
+  await tick();
+  assert.deepStrictEqual(users().at(-1), { id: keep.uuid, cancelled: true, reason: 'ended' });
+  const exitAt = events().findIndex(e => e.ev.platform?.state === 'exited');
+  assert.ok(events().findIndex(e => e.ev.user?.cancelled && e.ev.user.id === keep.uuid) < exitAt, 'before the exit status');
+
+  // kill() and a respawn alike.
+  const b = makeSession();
+  b.s.spawn(tmp('proj-'), 80, 24, {});
+  b.s.submit('x');
+  b.s.spawn(tmp('proj-'), 80, 24, {});
+  await tick();
+  assert.deepStrictEqual(b.events().filter(e => e.ev.user).map(e => [!!e.ev.user.pending, !!e.ev.user.cancelled]), [[true, false], [false, true]]);
+  b.s.kill();
+
+  // A transcript a stopped server left with a waiting turn: the next spawn
+  // in that folder cancels it.
+  const c = makeSession();
+  const dir = c.s.settings.sessionDir;
+  fs.writeFileSync(path.join(dir, 'transcript.jsonl'), [
+    { sessId: 'old', ts: 1, ev: { user: { id: 'u-left', text: 'lost', images: [], pending: true } } },
+    { sessId: 'old', ts: 2, ev: { user: { id: 'u-done', text: 'ran', images: [], pending: true } } },
+    { sessId: 'old', ts: 3, ev: { user: { id: 'u-done', text: 'ran', images: [] } } },
+  ].map(e => JSON.stringify(e)).join('\n') + '\n');
+  c.s.spawn(tmp('proj-'), 80, 24, {});
+  assert.deepStrictEqual(c.events().filter(e => e.ev.user).map(e => e.ev.user), [{ id: 'u-left', cancelled: true, reason: 'ended' }]);
+  c.s.kill();
 });
 
 test('interrupt calls query.interrupt; the PTY contract: Esc interrupts, typed text submits on CR', async () => {
