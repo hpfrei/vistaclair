@@ -40,7 +40,6 @@
      dimmed and always present. */
   .jt-copy,
   .jt-expand-btn,
-  .cli-new-menu-del,
   .dir-picker-recent-del,
   .dir-preview-cb {
     opacity: 0.55;
@@ -50,6 +49,9 @@
   .view-tab { min-height: 40px; padding: 8px 14px; font-size: 13px; }
   .view-tab-close { padding: 6px; margin: -6px; font-size: 16px; }
   .view-tab-new, .cli-model-cog { min-width: 40px; min-height: 40px; }
+  .sc-worker-main { padding: 7px 6px; }
+  .sc-icon-btn { min-width: 34px; min-height: 30px; }
+  .sc-actions .vc-btn { min-height: 34px; }
   .toast-item-close { font-size: 20px; padding: 6px 8px; }
   .modal-close, .cap-modal-close { min-width: 40px; min-height: 40px; }
 
@@ -452,6 +454,13 @@
   .vc-chips { flex-basis: 100%; margin-left: 0; }
   .vc-sheet { --vc-sheet-cols: 72px minmax(0, 1fr); }
   .vc-sheet-n { display: none; }
+
+  /* --- CLIs: Sessions tab cards, one column ---------------------- */
+  .cli-sessions { padding: 12px 10px 24px; }
+  .sc-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .sc-toolbar { flex-wrap: wrap; }
+  .sc-card { padding: 12px; }
+  #view-claude.cli-sessions-active .mobile-cli-bar { display: none !important; }
 
   /* --- CLIs: read-only terminal + key row + composer ------------ */
   .cli-terminal-wrap { touch-action: pan-y; }

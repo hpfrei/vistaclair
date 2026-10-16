@@ -1,0 +1,100 @@
+// Shared pieces of the session cards drawn by the CLI view's Sessions tab
+// (cli.js) and the Inspector's Sessions tab (inspector.js): status pill,
+// relative time, the compact TODO list and the worker list. Each returns an
+// HTML string; the views own the cards, their actions and their clicks.
+(function () {
+  const esc = (s) => window.dashboard.escHtml(String(s ?? ''));
+
+  // "just now", "3 min ago", "2 h ago", "4 d ago"; a date after a month.
+  function relTime(ms) {
+    if (!ms) return '';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    if (s < 30 * 86400) return `${Math.floor(s / 86400)} d ago`;
+    return new Date(ms).toLocaleDateString();
+  }
+
+  // A <time> with the full date on hover.
+  function timeHtml(ms) {
+    if (!ms) return '';
+    return `<time class="sc-time" datetime="${new Date(ms).toISOString()}" title="${esc(new Date(ms).toLocaleString())}">${esc(relTime(ms))}</time>`;
+  }
+
+  // A status word's tone: ok (working), live (streaming), warn, bad, done,
+  // or muted (not running).
+  function toneOf(status) {
+    const s = String(status || '').toLowerCase();
+    if (s === 'streaming' || s === 'busy' || s === 'working') return 'live';
+    if (['running', 'idle', 'awaiting', 'open', 'started', 'update'].includes(s)) return 'ok';
+    if (['pausing', 'paused', 'interrupted', 'blocked'].includes(s)) return 'warn';
+    if (['failed', 'missing', 'abandoned', 'error'].includes(s)) return 'bad';
+    if (['done', 'completed', 'closed'].includes(s)) return 'done';
+    return 'muted';
+  }
+
+  // The vc-card accent bar for a status.
+  function accentOf(status) {
+    return { live: 'is-ok', ok: 'is-ok', warn: 'is-warn', bad: 'is-bad', done: 'is-info' }[toneOf(status)] || '';
+  }
+
+  function pill(status, label) {
+    return `<span class="sc-pill is-${toneOf(status)}">${esc(label || status)}</span>`;
+  }
+
+  function dot(status) {
+    return `<span class="sc-dot is-${toneOf(status)}"></span>`;
+  }
+
+  // A TODO row's icon by its status word (free text may follow the word).
+  function todoKind(status) {
+    const s = String(status || '').toLowerCase();
+    if (/^(done|complete|finished|merged|✓|✔)/.test(s)) return { kind: 'done', icon: '✓' };
+    if (/^(doing|in[ _-]?progress|wip|active|started|running)/.test(s)) return { kind: 'doing', icon: '▸' };
+    if (/^(blocked|paused|waiting)/.test(s)) return { kind: 'blocked', icon: '!' };
+    if (/^(failed|error)/.test(s)) return { kind: 'failed', icon: '✗' };
+    if (/^(dropped|skipped|cancel)/.test(s)) return { kind: 'dropped', icon: '–' };
+    return { kind: 'queued', icon: '○' };
+  }
+
+  // The last TODO rows with a progress bar: `todo` is { done, total, rows }.
+  function todoList(todo) {
+    if (!todo?.rows?.length) return '';
+    const pct = todo.total ? Math.round((todo.done / todo.total) * 100) : 0;
+    const head = todo.total
+      ? `<div class="sc-todo-head"><span>TODO</span><span class="sc-progress"><span style="width:${pct}%"></span></span><span>${todo.done}/${todo.total}</span></div>`
+      : '';
+    const rows = todo.rows.map(r => {
+      const k = todoKind(r.status);
+      return `<li class="sc-todo-row is-${k.kind}" title="${esc(`${r.id}: ${r.description}\n${r.status}`)}">`
+        + `<span class="sc-todo-icon">${k.icon}</span>`
+        + `<span class="sc-todo-id">${esc(r.id)}</span>`
+        + `<span class="sc-todo-desc">${esc(r.description || '')}</span>`
+        + `<span class="sc-todo-status">${esc(String(r.status || '').split(/\s/)[0])}</span></li>`;
+    }).join('');
+    return `<div class="sc-todo">${head}<ul>${rows}</ul></div>`;
+  }
+
+  // The worker list: each item is { name, state, detail, title, attrs,
+  // actions } — `attrs` (pre-escaped) makes a row clickable, `actions` is
+  // pre-built button HTML.
+  function workerList(items, heading) {
+    if (!items.length) return '';
+    const rows = items.map(w => {
+      const tag = w.attrs ? 'button' : 'div';
+      return `<li class="sc-worker">`
+        + `<${tag} class="sc-worker-main"${w.attrs ? ` type="button" ${w.attrs}` : ''}${w.title ? ` title="${esc(w.title)}"` : ''}>`
+        + dot(w.state)
+        + `<span class="sc-worker-name">${esc(w.name)}</span>`
+        + pill(w.state)
+        + (w.detail ? `<span class="sc-worker-detail">${esc(w.detail)}</span>` : '')
+        + `</${tag}>`
+        + (w.actions ? `<span class="sc-worker-actions">${w.actions}</span>` : '')
+        + '</li>';
+    }).join('');
+    return `<div class="sc-workers">${heading ? `<div class="sc-section-head">${esc(heading)}</div>` : ''}<ul>${rows}</ul></div>`;
+  }
+
+  window.sessionCards = { relTime, timeHtml, toneOf, accentOf, pill, dot, todoKind, todoList, workerList };
+})();

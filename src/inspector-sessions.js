@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { readJSON, writeJSON, removeInside, DATA_HOME } = require('./utils');
 const { toEntry } = require('./session-totals');
+const { readRun, runStatus } = require('./run-summary');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
 const PREFS_FILE = path.join(DATA_HOME, 'data', 'inspector-prefs.json');
@@ -268,12 +269,43 @@ class InspectorSessions {
     return rec.instanceId === 'ext' ? 'External' : `External ${rec.instanceId.slice(4, 12)}`;
   }
 
+  // A CLI session's orchestration stamp (run, role, worker), from its live
+  // session or its saved entry; resolved once per session. `saved` reads the
+  // history at most once per list().
+  _orchOf(rec, saved) {
+    if (rec.kind !== 'cli') return null;
+    if (rec.orch !== undefined) return rec.orch;
+    const mgr = this.cliSessionManager;
+    let settings = mgr?.getByInstanceId?.(rec.instanceId)?.getSettings?.() || null;
+    let known = !!settings?.orchestration;
+    if (!known && rec.sessId) {
+      const entry = saved().get(rec.sessId);
+      settings = entry?.settings || null;
+      known = !!entry;
+    }
+    const st = settings?.orchestration;
+    // `name` is the member's cross-session address (a worker's --name).
+    const orch = st?.runId ? {
+      runId: st.runId, role: st.role, workerId: st.workerId || null,
+      name: (st.role === 'orchestrator' ? st.orchestrator : settings.name) || null, runDir: st.runDir || null,
+    } : null;
+    // Not live and not saved yet: look again next time.
+    if (known) rec.orch = orch;
+    return orch;
+  }
+
   /** The cards, newest activity first, with each one's status. */
   list() {
     const running = this._runningSet();
     const out = [];
+    let history = null;
+    const saved = () => {
+      if (!history) history = new Map((this.cliSessionManager?.listSaved?.() || []).map(e => [e.id, e]));
+      return history;
+    };
     for (const rec of this.sessions.values()) {
       const t = rec.totals;
+      const orch = this._orchOf(rec, saved);
       out.push({
         instanceId: rec.instanceId,
         kind: rec.kind,
@@ -286,13 +318,39 @@ class InspectorSessions {
         cost: t ? (t.hasCost ? t.cost : null) : (rec.hasCost ? rec.cost : null),
         firstAt: rec.firstAt,
         lastAt: Math.max(rec.lastAt, t?.lastAt || 0),
+        orchestration: orch ? { runId: orch.runId, role: orch.role, workerId: orch.workerId, name: orch.name } : null,
       });
     }
     return out.sort((a, b) => b.lastAt - a.lastAt);
   }
 
+  // One record per run among the sessions: its status from the run record
+  // (running while any member listed here is), the orchestrator's address and
+  // how many workers the run has. The Sessions tab groups a run into one card.
+  _runs(sessions) {
+    const members = new Map();
+    for (const s of sessions) {
+      const o = s.orchestration;
+      if (!o) continue;
+      const m = members.get(o.runId) || { runDir: null, running: false };
+      m.runDir = m.runDir || this.sessions.get(s.instanceId)?.orch?.runDir || null;
+      if (s.status !== 'inactive') m.running = true;
+      members.set(o.runId, m);
+    }
+    const runs = {};
+    for (const [runId, m] of members) {
+      const run = readRun(m.runDir);
+      runs[runId] = {
+        status: runStatus(run, m.running),
+        orchestrator: run?.orchestrator || null,
+        workers: run ? (run.workers || []).length : null,
+      };
+    }
+    return runs;
+  }
+
   summaryMessage(sessions = this.list()) {
-    return { type: 'inspector:sessions', sessions, autoClear: this.autoClear, limit: this.limit };
+    return { type: 'inspector:sessions', sessions, runs: this._runs(sessions), autoClear: this.autoClear, limit: this.limit };
   }
 
   // Throttled push: at most one summary per throttleMs, the last change always

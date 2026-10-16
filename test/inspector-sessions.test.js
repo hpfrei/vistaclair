@@ -213,3 +213,35 @@ test('external requests are grouped by the Claude Code session they name', () =>
   assert.strictEqual(kindOf('cli-x'), 'cli');
   assert.strictEqual(kindOf('rule-gen-1'), 'app');
 });
+
+test('run members carry their run and role; the summary names each run\'s status', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-insp-run-'));
+  const runDir = path.join(home, 'run');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify({ runId: 'r9', orchestrator: 'orch-r9', workers: [{ id: 'w1' }, { id: 'w2' }] }));
+  const stamp = (role, workerId) => ({ settings: { orchestration: { runId: 'r9', role, workerId, orchestrator: 'orch-r9', runDir } } });
+  // The orchestrator is live; a worker is known only from its saved entry.
+  const live = { ['cli-' + uuid(21)]: stamp('orchestrator') };
+  const history = [{ id: uuid(22), settings: { ...stamp('worker', 'w1').settings, name: 'orch-r9-w1-ui' } }, { id: uuid(23), settings: {} }];
+  let historyReads = 0;
+  const cliSessionManager = {
+    getByInstanceId: (id) => (live[id] ? { getSettings: () => live[id].settings } : null),
+    listSaved: () => { historyReads++; return history; },
+    list: () => [],
+  };
+  const { reg, turn, spawn, done } = setup({ cliSessionManager });
+  spawn('cli-' + uuid(21));
+  turn('cli-' + uuid(22));
+  turn('cli-' + uuid(23));
+  const by = Object.fromEntries(reg.list().map(s => [s.instanceId, s]));
+  assert.deepStrictEqual(by['cli-' + uuid(21)].orchestration, { runId: 'r9', role: 'orchestrator', workerId: null, name: 'orch-r9' });
+  assert.deepStrictEqual(by['cli-' + uuid(22)].orchestration, { runId: 'r9', role: 'worker', workerId: 'w1', name: 'orch-r9-w1-ui' });
+  assert.strictEqual(by['cli-' + uuid(23)].orchestration, null, 'a plain session');
+  const reads = historyReads;
+  reg.list();
+  assert.strictEqual(historyReads, reads, 'resolved once, then cached');
+  const msg = reg.summaryMessage();
+  assert.deepStrictEqual(msg.runs, { r9: { status: 'running', orchestrator: 'orch-r9', workers: 2 } });
+  done();
+  fs.rmSync(home, { recursive: true, force: true });
+});
