@@ -76,9 +76,8 @@
     return `<div class="sc-todo">${head}<ul>${rows}</ul></div>`;
   }
 
-  // The worker list: each item is { name, state, detail, title, attrs,
-  // actions } — `attrs` (pre-escaped) makes a row clickable, `actions` is
-  // pre-built button HTML.
+  // The worker list: each item is { name, state, detail, title, attrs } —
+  // `attrs` (pre-escaped) makes a row clickable.
   function workerList(items, heading) {
     if (!items.length) return '';
     const rows = items.map(w => {
@@ -90,7 +89,6 @@
         + pill(w.state)
         + (w.detail ? `<span class="sc-worker-detail">${esc(w.detail)}</span>` : '')
         + `</${tag}>`
-        + (w.actions ? `<span class="sc-worker-actions">${w.actions}</span>` : '')
         + '</li>';
     }).join('');
     return `<div class="sc-workers">${heading ? `<div class="sc-section-head">${esc(heading)}</div>` : ''}<ul>${rows}</ul></div>`;

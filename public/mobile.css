@@ -50,7 +50,6 @@
   .view-tab-close { padding: 6px; margin: -6px; font-size: 16px; }
   .view-tab-new, .cli-model-cog { min-width: 40px; min-height: 40px; }
   .sc-worker-main { padding: 7px 6px; }
-  .sc-icon-btn { min-width: 34px; min-height: 30px; }
   .sc-actions .vc-btn { min-height: 34px; }
   .toast-item-close { font-size: 20px; padding: 6px 8px; }
   .modal-close, .cap-modal-close { min-width: 40px; min-height: 40px; }
@@ -460,6 +459,7 @@
   .sc-grid { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .sc-toolbar { flex-wrap: wrap; }
   .sc-card { padding: 12px; }
+  .sc-action { flex-direction: column; align-items: stretch; gap: 3px; }
   #view-claude.cli-sessions-active .mobile-cli-bar { display: none !important; }
 
   /* --- CLIs: read-only terminal + key row + composer ------------ */
