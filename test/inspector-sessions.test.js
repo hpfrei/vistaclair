@@ -241,7 +241,33 @@ test('run members carry their run and role; the summary names each run\'s status
   reg.list();
   assert.strictEqual(historyReads, reads, 'resolved once, then cached');
   const msg = reg.summaryMessage();
-  assert.deepStrictEqual(msg.runs, { r9: { status: 'running', orchestrator: 'orch-r9', workers: 2 } });
+  assert.deepStrictEqual(msg.runs, { r9: { status: 'running', orchestrator: 'orch-r9', workers: 2, cwd: null } });
+  done();
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+test('cards name their directory and tokens; a run its root', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-insp-dir-'));
+  const runDir = path.join(home, 'run');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'run.json'), JSON.stringify({ runId: 'r7', orchestrator: 'orch-r7', root: '/src/shop', workers: [] }));
+  // A closed tab known only from its saved entry; a run member likewise.
+  const history = [
+    { id: uuid(31), cwd: '/src/blog', settings: {} },
+    { id: uuid(32), cwd: '/src/shop', settings: { orchestration: { runId: 'r7', role: 'orchestrator', orchestrator: 'orch-r7', runDir } } },
+  ];
+  const cliSessionManager = { getByInstanceId: () => null, listSaved: () => history, list: () => [] };
+  const { reg, turn, done } = setup({ cliSessionManager });
+  turn('cli-' + uuid(31), { usage: { input_tokens: 100, cache_read_input_tokens: 900, output_tokens: 50 } });
+  turn('cli-' + uuid(32));
+  // An ai.prompt run with no process entry: the directory from its system prompt.
+  turn('app-qmd-ai-cd34', { request: { model: 'claude-x', system: [{ type: 'text', text: 'Primary working directory: /apps/qmd' }] } });
+  const by = Object.fromEntries(reg.list().map(s => [s.instanceId, s]));
+  assert.strictEqual(by['cli-' + uuid(31)].cwd, '/src/blog');
+  assert.strictEqual(by['cli-' + uuid(31)].label, 'blog', 'labelled by its directory');
+  assert.deepStrictEqual([by['cli-' + uuid(31)].tokensIn, by['cli-' + uuid(31)].tokensOut], [1000, 50]);
+  assert.strictEqual(by['app-qmd-ai-cd34'].cwd, '/apps/qmd');
+  assert.strictEqual(reg.summaryMessage().runs.r7.cwd, '/src/shop');
   done();
   fs.rmSync(home, { recursive: true, force: true });
 });

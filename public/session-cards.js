@@ -1,7 +1,8 @@
 // Shared pieces of the session cards drawn by the CLI view's Sessions tab
 // (cli.js) and the Inspector's Sessions tab (inspector.js): status pill,
-// relative time, the compact TODO list and the worker list. Each returns an
-// HTML string; the views own the cards, their actions and their clicks.
+// relative time, the card head, the directory name, the compact TODO list and
+// the worker list. Each returns an HTML string; the views own the cards, their
+// actions and their clicks.
 (function () {
   const esc = (s) => window.dashboard.escHtml(String(s ?? ''));
 
@@ -47,6 +48,34 @@
     return `<span class="sc-dot is-${toneOf(status)}"></span>`;
   }
 
+  // The card head: icon, name over a subtitle (pre-escaped HTML), the status
+  // pill. All spans, so it may sit inside a <button>.
+  function head({ icon, iconTitle, name, sub, subTitle, status, label }) {
+    return `<span class="sc-head"><span class="sc-icon"${iconTitle ? ` title="${esc(iconTitle)}"` : ''}>${icon}</span>`
+      + `<span class="sc-title"><span class="sc-name" title="${esc(name)}">${esc(name)}</span>`
+      + (sub ? `<span class="sc-sub"${subTitle != null ? ` title="${esc(subTitle)}"` : ''}>${sub}</span>` : '')
+      + '</span>' + pill(status, label) + '</span>';
+  }
+
+  // The app or directory a session runs in: the path's last part, the full
+  // path on hover.
+  function dirName(cwd) {
+    return String(cwd || '').replace(/\/+$/, '').split('/').pop() || cwd || '';
+  }
+
+  function dirHtml(cwd) {
+    if (!cwd) return '';
+    return `<span class="sc-dir" title="${esc(cwd)}">${esc(dirName(cwd))}</span>`;
+  }
+
+  // 950, 12.4k, 3.1M.
+  function tokens(n) {
+    if (!n) return '0';
+    if (n < 1000) return String(n);
+    if (n < 1e6) return `${(n / 1000).toFixed(n < 1e4 ? 1 : 0)}k`;
+    return `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)}M`;
+  }
+
   // A TODO row's icon by its status word (free text may follow the word).
   function todoKind(status) {
     const s = String(status || '').toLowerCase();
@@ -76,8 +105,9 @@
     return `<div class="sc-todo">${head}<ul>${rows}</ul></div>`;
   }
 
-  // The worker list: each item is { name, state, detail, title, attrs } —
-  // `attrs` (pre-escaped) makes a row clickable.
+  // The worker list: each item is { name, state, detail, aside, title, attrs }
+  // — `aside` sits at the row's end (a cost), `attrs` (pre-escaped) makes a
+  // row clickable.
   function workerList(items, heading) {
     if (!items.length) return '';
     const rows = items.map(w => {
@@ -88,11 +118,12 @@
         + `<span class="sc-worker-name">${esc(w.name)}</span>`
         + pill(w.state)
         + (w.detail ? `<span class="sc-worker-detail">${esc(w.detail)}</span>` : '')
+        + (w.aside ? `<span class="sc-worker-aside">${esc(w.aside)}</span>` : '')
         + `</${tag}>`
         + '</li>';
     }).join('');
     return `<div class="sc-workers">${heading ? `<div class="sc-section-head">${esc(heading)}</div>` : ''}<ul>${rows}</ul></div>`;
   }
 
-  window.sessionCards = { relTime, timeHtml, toneOf, accentOf, pill, dot, todoKind, todoList, workerList };
+  window.sessionCards = { relTime, timeHtml, toneOf, accentOf, pill, dot, head, dirName, dirHtml, tokens, todoKind, todoList, workerList };
 })();
