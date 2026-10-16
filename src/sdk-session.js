@@ -15,11 +15,20 @@
 //                  system prompt, --settings, the MCP servers, the env
 //                  (buildClaudeEnv, auth forced to settings.auth's credential).
 //   input          an async queue of SDKUserMessages: submit() pushes one
-//                  (text + base64 images, optional priority now|next|later).
+//                  (text + base64 images, optional priority now|next|later),
+//                  stamped with a uuid the CLI echoes back (--replay-user-
+//                  messages) when it takes the message into a turn.
 //   events         every SDK message is broadcast as
 //                  `sdk:event { sessId, runId?, ev: { sdk } }`; the platform adds
 //                  `{ user }` (a submitted turn) and `{ platform }` (status,
-//                  notice, inter-agent message, files). Everything but
+//                  notice, inter-agent message, files). The owner's own turn
+//                  is `{ user: { id, text, images, pending: true } }` when
+//                  submitted, then `{ user: { id, text, images } }` when the
+//                  CLI echoes it (or, from a CLI that never echoes, at the
+//                  next turn's init or result), or `{ user: { id, cancelled:
+//                  true, reason } }` when it will never run; the echo itself
+//                  is not broadcast. A platform or peer turn (`from`) is one
+//                  `{ user }` at submit, as before. Everything but
 //                  stream_event deltas and `files` signals is appended to
 //                  <sessionDir>/transcript.jsonl, which sdk:history replays
 //                  after a reload or restart.
@@ -72,7 +81,7 @@ const MAX_IMAGES_BYTES = 18 * 1024 * 1024;
 const PRIORITIES = new Set(['now', 'next', 'later']);
 const HISTORY_LIMIT = 5000;            // envelopes replayed by sdk:history
 const STDERR_TAIL = 4096;
-const COST_TAIL_BYTES = 256 * 1024;    // transcript tail read for a resume's cost
+const TAIL_BYTES = 256 * 1024;         // transcript tail read for a resume's cost and stale input
 const MODEL_RE = /^[A-Za-z0-9._-]+(\[1m\])?$/;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -150,21 +159,27 @@ function readTranscript(dir, { sessId, limit = HISTORY_LIMIT } = {}) {
   return out;
 }
 
-// The cost a transcript recorded for one session id (status envelopes and
-// results), from its tail only; 0 when there is none. Costs are cumulative, so
-// the highest wins: a resume made before the floor existed logged a 0 status.
-function recordedCost(dir, sessId) {
+// The transcript's last bytes, whole lines only ('' when there is none).
+function transcriptTail(dir) {
   let fd;
   let text = '';
   try {
     fd = fs.openSync(transcriptFile(dir), 'r');
     const size = fs.fstatSync(fd).size;
-    const len = Math.min(size, COST_TAIL_BYTES);
+    const len = Math.min(size, TAIL_BYTES);
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, size - len);
     text = buf.toString('utf8');
     if (len < size) text = text.slice(text.indexOf('\n') + 1);   // a cut first line
-  } catch { return 0; } finally { if (fd !== undefined) fs.closeSync(fd); }
+  } catch { return ''; } finally { if (fd !== undefined) fs.closeSync(fd); }
+  return text;
+}
+
+// The cost a transcript recorded for one session id (status envelopes and
+// results), from its tail only; 0 when there is none. Costs are cumulative, so
+// the highest wins: a resume made before the floor existed logged a 0 status.
+function recordedCost(dir, sessId) {
+  const text = transcriptTail(dir);
   let best = 0;
   for (const line of text.split('\n')) {
     if (!line.includes(sessId)) continue;
@@ -177,6 +192,21 @@ function recordedCost(dir, sessId) {
     if (typeof cost === 'number' && Number.isFinite(cost) && cost > best) best = cost;
   }
   return best;
+}
+
+// The owner's turns a transcript left waiting (pending, never delivered nor
+// cancelled), from its tail: the spawn that took them is gone.
+function stalePending(dir) {
+  const open = new Set();
+  for (const line of transcriptTail(dir).split('\n')) {
+    if (!line.includes('"user"')) continue;
+    let u;
+    try { u = JSON.parse(line).ev?.user; } catch { continue; }
+    if (!u?.id) continue;
+    if (u.pending) open.add(u.id);
+    else open.delete(u.id);
+  }
+  return [...open];
 }
 
 // A user turn's text, when the message is a prompt rather than tool results.
@@ -247,6 +277,8 @@ class SdkSession {
     this.actualModel = null;  // the model of the last main-agent reply
     this.context = { tokens: null, window: null, compactAt: null };   // the main agent's
     this._fileTools = new Map();   // tool_use id -> { todo, notes } it writes
+    this._pending = new Map();     // the owner's turns not yet taken in: uuid -> { text, images }
+    this._echoes = false;          // this spawn's CLI echoes taken-in turns
     this.autoMemory = false;
     this._authToken = opts.authToken || '';
     this._dashboardPort = opts.dashboardPort || 3457;
@@ -309,6 +341,7 @@ class SdkSession {
     this._initModel = null;
     this.actualModel = null;
     this._fileTools.clear();
+    this._echoes = false;
     // A resume carries its cost on (the forced idle status below shows it).
     this._costFloor = resumeSessionId && this.sessionDir() ? recordedCost(this.sessionDir(), this.sessId) : 0;
     this.costUsd = this._costFloor;
@@ -333,6 +366,9 @@ class SdkSession {
       });
       this._seedTranscript(mod, resumeSessionId);
     }
+    // Turns a previous spawn left waiting (the server stopped under it) never
+    // reach this one.
+    if (this.sessionDir()) for (const id of stalePending(this.sessionDir())) this._cancelInput(id, 'ended');
 
     this._input = new InputQueue();
     this._query = mod.query({ prompt: this._input, options });
@@ -409,6 +445,9 @@ class SdkSession {
       pathToClaudeCodeExecutable: this._claudeBin || resolveClaudeBinary(env.PATH),
       abortController: (this._abort = new AbortController()),
       stderr: (d) => { this._stderr = (this._stderr + d).slice(-STDERR_TAIL); },
+      // Echo each input message (isReplay, same uuid) as the CLI takes it
+      // into a turn: the panel's "waiting" chip becomes the user's bubble.
+      extraArgs: { 'replay-user-messages': null },
     };
     if (s.settingsFile) options.settings = s.settingsFile;
     const mcpServers = buildMcpServers({ settings: s, instanceId: this.instanceId, dashboardPort: this._dashboardPort, authToken: this._authToken });
@@ -446,6 +485,7 @@ class SdkSession {
       }
     }
     if (gen !== this._spawnGen) return;
+    this._dropPending('ended');
     this._input?.close();
     this._query = null;
     this.store.unregisterSession(this.instanceId);
@@ -456,10 +496,21 @@ class SdkSession {
   }
 
   _onMessage(msg) {
+    // The echo of a message submit() pushed: it is in a turn now. Not
+    // broadcast (it repeats the images' base64); the `{ user }` stands for it.
+    if (msg?.type === 'user' && msg.isReplay) {
+      this._echoes = true;
+      this._deliver(msg.uuid);
+      return;
+    }
     this.emitEvent({ sdk: msg });
     if (!msg || typeof msg !== 'object') return;
     const main = !msg.parent_tool_use_id;
+    // A CLI that does not echo: what was waiting is in the turn starting or
+    // the one about to.
+    if (main && !this._echoes && msg.type === 'result') this._deliverAll();
     if (msg.type === 'system' && msg.subtype === 'init') {
+      if (!this._echoes) this._deliverAll();
       const onKey = msg.apiKeySource === 'ANTHROPIC_API_KEY';
       if (msg.apiKeySource && onKey !== (this._credential === 'api-key')) {
         const want = this._credential === 'api-key' ? 'the API key' : 'the Claude subscription';
@@ -528,6 +579,30 @@ class SdkSession {
       }
       if (hit) this._fileTools.set(b.id, hit);
     }
+  }
+
+  // The owner's turn `id` has been taken in (or is cancelled): its bubble, in
+  // place of the waiting chip.
+  _deliver(id) {
+    const u = this._pending.get(id);
+    if (!u) return;
+    this._pending.delete(id);
+    this.emitEvent({ user: { id, text: u.text, images: u.images } });
+  }
+
+  _deliverAll() {
+    for (const id of [...this._pending.keys()]) this._deliver(id);
+  }
+
+  // reason: 'interrupted' (the interrupt cancelled it) | 'ended' (the
+  // session stopped before taking it in).
+  _cancelInput(id, reason) {
+    this._pending.delete(id);
+    this.emitEvent({ user: { id, cancelled: true, reason } });
+  }
+
+  _dropPending(reason) {
+    for (const id of [...this._pending.keys()]) this._cancelInput(id, reason);
   }
 
   // Their results are in: tell the panel which file to re-read.
@@ -728,21 +803,37 @@ class SdkSession {
       ...decoded.map(d => ({ type: 'image', source: { type: 'base64', media_type: d.img.mediaType, data: d.buf.toString('base64') } })),
       ...(body ? [{ type: 'text', text: body }] : []),
     ];
+    const id = crypto.randomUUID();
     const message = {
       type: 'user',
       message: { role: 'user', content },
       parent_tool_use_id: null,
+      uuid: id,
       ...(priority ? { priority } : {}),
     };
-    this.emitEvent({ user: { text: body, images: saved, ...(from ? { from } : {}) } });
+    // The owner's turn waits as a chip until the CLI takes it in; a platform
+    // or peer turn is drawn (or skipped) at once, as it always was.
+    if (from) {
+      this.emitEvent({ user: { text: body, images: saved, from } });
+    } else {
+      this._pending.set(id, { text: body, images: saved });
+      this.emitEvent({ user: { id, text: body, images: saved, pending: true } });
+    }
     this._input.push(message);
     if (this.state === 'idle') this._setState('busy');
-    return { ok: true, images: saved };
+    return { ok: true, id, images: saved };
   }
 
+  // A CLI that lists the queued turns its interrupt cancelled (the receipt's
+  // `cancelled`): their chips say so instead of waiting on.
   async interrupt() {
     if (!this._query) return;
-    try { await this._query.interrupt(); } catch (e) {
+    try {
+      const receipt = await this._query.interrupt();
+      for (const id of Array.isArray(receipt?.cancelled) ? receipt.cancelled : []) {
+        if (this._pending.has(id)) this._cancelInput(id, 'interrupted');
+      }
+    } catch (e) {
       this.emitEvent({ platform: { kind: 'notice', level: 'error', text: `Interrupt failed: ${e.message}` } });
     }
   }
@@ -780,6 +871,7 @@ class SdkSession {
   kill() {
     const q = this._query;
     this._query = null;
+    this._dropPending('ended');
     if (q || this._input) {
       this._input?.close();
       try { this._abort?.abort(); } catch {}

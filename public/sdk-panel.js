@@ -7,8 +7,10 @@
 // its right end the main agent's context use, then the Inspector button. Live
 // is split: the TODO table on top, below it the agent's text and the
 // `description` of its tool calls, and the same of its subagents, chipped by
-// type and launch order ("Explore 2"); thinking, notices and messages are
-// only in the Inspector. A splitter between the two moves (double-click:
+// type and launch order ("Explore 2"), the user's turns and, at each stop of
+// the main agent, a rule with its time; thinking, notices and messages are
+// only in the Inspector. A turn the agent has not taken in yet waits as a
+// chip under the feed; its bubble lands where the agent took it in. A splitter between the two moves (double-click:
 // back to the table's own height); the last position is kept for new boxes.
 // Every box opens on Live.
 //
@@ -81,6 +83,11 @@
     for (const v of Object.values(input)) if (typeof v === 'string' && v) return v;
     return '';
   }
+  // A user turn in one line: its text, its images as a count.
+  const userGist = (u) => {
+    const n = Array.isArray(u.images) ? u.images.length : 0;
+    return [oneLine(u.text), n ? `${n} image${n === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
+  };
   const prettyTool = (name) => {
     const m = /^mcp__(.+?)__(.+)$/.exec(name || '');
     return m ? `${m[1]} · ${m[2]}` : (name || 'tool');
@@ -181,8 +188,11 @@
             </div>
             <div class="sdk-todo-split" title="Drag to resize · double-click to reset"></div>
             <div class="sdk-todo-lite">
-              <div class="sdk-feed lite"></div>
-              <button type="button" class="sdk-live-pill hidden">↓ jump to live</button>
+              <div class="sdk-feed-wrap">
+                <div class="sdk-feed lite"></div>
+                <button type="button" class="sdk-live-pill hidden">↓ jump to live</button>
+              </div>
+              <div class="sdk-pending hidden"></div>
             </div>
           </div>
           <div class="sdk-view sdk-view-notes markdown-body"></div>
@@ -205,6 +215,7 @@
       this.notesEl = q('.sdk-view-notes');
       this.feed = q('.sdk-feed');
       this.pill = q('.sdk-live-pill');
+      this.pendingEl = q('.sdk-pending');
       this.segBtns = Object.fromEntries([...root.querySelectorAll('.sdk-seg button')].map(b => [b.dataset.v, b]));
 
       for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
@@ -333,6 +344,8 @@
       if (!s || s === this.state) return;
       this.state = s;
       if (s !== 'busy' && s !== 'awaiting') this.nowTool = null;
+      // A session that ended will take nothing more in.
+      if (ENDED.has(s)) for (const id of [...this.pending.keys()]) this.cancelPending(id, 'ended');
       this.renderHeader();
       this.panel.renderToolbar();
       this.panel.drawLinksSoon();
@@ -497,6 +510,9 @@
       this.compactions = 0;
       this.nowTool = null;
       this.seen = new Set();
+      this.pending = new Map();   // user turn id -> its "waiting" chip
+      this.pendingEl.innerHTML = '';
+      this.pendingEl.classList.add('hidden');
       this.follow = true;
       this.pill.classList.add('hidden');
     }
@@ -522,7 +538,7 @@
       for (const rec of events) {
         const ev = unwrap(rec);
         keys.add(envKey(ev));
-        try { this.apply(ev, false); } catch (e) { console.warn('sdk-panel: history event', e, ev); }
+        try { this.apply(ev, false, ev !== rec ? rec.ts : null); } catch (e) { console.warn('sdk-panel: history event', e, ev); }
       }
       this._replaying = false;
       if (error) this.notice(`History: ${error}`, 'warn');
@@ -531,23 +547,24 @@
       this.historyPending = false;
       // Live events that raced the history reply; the ones history already
       // holds are skipped (deltas are never in history and always pass).
-      for (const ev of queued) {
+      for (const { ev, ts } of queued) {
         if (ev?.sdk?.type !== 'stream_event' && keys.has(envKey(ev))) continue;
-        try { this.apply(ev, true); } catch (e) { console.warn('sdk-panel: live event', e, ev); }
+        try { this.apply(ev, true, ts); } catch (e) { console.warn('sdk-panel: live event', e, ev); }
       }
       this.follow = true;
       this._scrollSoon();
       this.renderNow();
     }
 
-    receive(ev) {
-      if (this.historyPending) { this.queue.push(ev); return; }
-      try { this.apply(ev, true); } catch (e) { console.warn('sdk-panel: event', e, ev); }
+    // ts: the envelope's server time (ms), when it has one.
+    receive(ev, ts) {
+      if (this.historyPending) { this.queue.push({ ev, ts }); return; }
+      try { this.apply(ev, true, ts); } catch (e) { console.warn('sdk-panel: event', e, ev); }
     }
 
-    apply(ev, live) {
+    apply(ev, live, ts) {
       if (!ev || typeof ev !== 'object') return;
-      if (ev.sdk) return this.applySdk(ev.sdk, live);
+      if (ev.sdk) return this.applySdk(ev.sdk, live, ts);
       if (ev.user) return this.applyUser(ev.user, live);
       const p = ev.platform;
       if (!p) return;
@@ -575,7 +592,7 @@
       }
     }
 
-    applySdk(m, live) {
+    applySdk(m, live, ts) {
       if (m.uuid && m.type !== 'stream_event') {
         if (this.seen.has(m.uuid)) return;
         this.seen.add(m.uuid);
@@ -584,7 +601,7 @@
         case 'stream_event': if (live) this.applyStream(m); return;
         case 'assistant': return this.applyAssistant(m);
         case 'user': return this.applySdkUser(m);
-        case 'result': return this.applyResult(m);
+        case 'result': return this.applyResult(m, ts);
         case 'system': return this.applySystem(m);
         case 'tool_progress': {
           const t = this.tools.get(m.tool_use_id);
@@ -797,7 +814,10 @@
       if (m.error) this.notice(`API error: ${typeof m.error === 'string' ? m.error : JSON.stringify(m.error)}`, 'error');
     }
 
+    // Tool results. The CLI's echo of a user turn (isReplay) is not
+    // broadcast; one in an older transcript draws nothing.
     applySdkUser(m) {
+      if (m.isReplay) return;
       const c = m.message?.content;
       if (!Array.isArray(c)) return;
       for (const b of c) {
@@ -812,7 +832,10 @@
       }
     }
 
-    applyResult(m) {
+    // The main agent's stop: a rule across the feed, the summary and the
+    // wall-clock time of the stop on it (the record's, in a replay; none for
+    // a seeded one).
+    applyResult(m, ts) {
       if (m.parent_tool_use_id) return;
       const bits = [];
       if (m.subtype && m.subtype !== 'success') bits.push(m.subtype.replace(/_/g, ' '));
@@ -820,7 +843,14 @@
       if (m.num_turns) bits.push(`${m.num_turns} turn${m.num_turns === 1 ? '' : 's'}`);
       if (m.duration_ms) bits.push(fmtSecs(m.duration_ms));
       if (typeof m.total_cost_usd === 'number') bits.push(`${fmtCost(m.total_cost_usd)} so far`);
-      this.feed.appendChild(el('div', `sdk-result${m.is_error ? ' error' : ''}`, bits.join(' · ')));
+      const line = el('div', `sdk-result${m.is_error ? ' error' : ''}`);
+      const at = typeof ts === 'number' && ts > 0 ? new Date(ts) : null;
+      if (at) {
+        line.appendChild(el('span', 'sdk-result-time', at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })));
+        line.title = at.toLocaleString();
+      }
+      line.appendChild(el('span', 'sdk-result-text', bits.join(' · ')));
+      this.feed.appendChild(line);
       // total_cost_usd is the running total of this query(), so the latest wins.
       if (typeof m.total_cost_usd === 'number') this.setCost(m.total_cost_usd);
       this.nowTool = null;
@@ -859,6 +889,11 @@
     }
 
     applyUser(u, live) {
+      // The owner's turn: a chip while it waits, then (same id) its bubble
+      // where the agent took it in, or a line if it never will be.
+      if (u.cancelled) return this.cancelPending(u.id, u.reason);
+      if (u.pending && u.id) return this.addPending(u);
+      if (u.id) this.removePending(u.id);
       const text = String(u.text || '');
       if (u.from) {
         // A peer's message is drawn once, from its platform `message` event;
@@ -894,6 +929,36 @@
       }
       this.feed.appendChild(bubble);
       if (!this.gotStatus) this.setState('busy');
+    }
+
+    addPending(u) {
+      if (this.pending.has(u.id)) return;
+      const chip = el('div', 'sdk-pending-chip');
+      chip.append(el('span', 'sdk-pending-tag', 'waiting'), el('span', 'sdk-pending-text', userGist(u)));
+      chip.title = `Queued: the agent takes it in when it is ready for it.\n\n${String(u.text || '')}`;
+      this.pending.set(u.id, { u, chip });
+      this.pendingEl.appendChild(chip);
+      this.pendingEl.classList.remove('hidden');
+      if (!this.gotStatus) this.setState('busy');
+    }
+
+    removePending(id) {
+      const p = this.pending.get(id);
+      if (!p) return null;
+      this.pending.delete(id);
+      p.chip.remove();
+      this.pendingEl.classList.toggle('hidden', !this.pending.size);
+      return p;
+    }
+
+    // reason: 'interrupted' (the interrupt cancelled it) | 'ended'.
+    cancelPending(id, reason) {
+      const p = this.removePending(id);
+      if (!p) return;
+      const line = el('div', 'sdk-user-dropped');
+      line.append(el('span', 'sdk-user-dropped-tag', reason === 'interrupted' ? 'cancelled' : 'not sent'), el('span', 'sdk-user-dropped-text', userGist(p.u)));
+      line.title = `${reason === 'interrupted' ? 'Cancelled by the interrupt' : 'The session ended before taking it in'}.\n\n${String(p.u.text || '')}`;
+      this.feed.appendChild(line);
     }
 
     // One per SendMessage, emitted on both the sender's and the receiver's
@@ -1538,7 +1603,7 @@
           || (!areas.has(msg.sessId) && msg.ev?.platform?.kind === 'notice' ? activePanel()?.main : null);
         // A freshly adopted area has just asked for history, which queues
         // this event and drops it if history already holds it.
-        a?.receive(msg.ev);
+        a?.receive(msg.ev, msg.ts);
         break;
       }
       case 'sdk:history':
