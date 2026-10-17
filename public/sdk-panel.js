@@ -30,6 +30,7 @@
   const TICK_MS = 1000;            // the "now:" line's elapsed time
   const HISTORY_WAIT_MS = 10000;
   const FOLLOW_SLACK_PX = 48;
+  const USER_SCROLL_MS = 800;      // a scroll this soon after the reader's input is theirs
   const LINK_FLASH_MS = 1600;
   const VIEWS = ['live', 'notes'];
   const VIEW_STORE = 'sdkPanelViews';
@@ -110,6 +111,97 @@
     box.scrollTop = Math.max(0, top - box.clientHeight / 3);
   }
 
+  // Navigation keys scroll whatever the reader last clicked; typing does not.
+  const NAV_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+  let _navKeyAt = 0;
+  document.addEventListener('keydown', (e) => {
+    if (NAV_KEYS.has(e.key) && !e.target?.closest?.('input, textarea, select, [contenteditable], vc-composer')) _navKeyAt = Date.now();
+  }, true);
+
+  // Live follow for one scroller (the feed, the TODO table): pinned to the
+  // bottom while following. Only the reader stops it, by scrolling up (wheel,
+  // touch, the scrollbar, keys); the "Go to bottom" chip then shows until
+  // they click it or scroll back down. Any other move is undone: a box put
+  // back into the DOM resets its scrollers to the top, a hidden view comes
+  // back at the top; it returns to the bottom, or to the reader's place.
+  class Follower {
+    constructor(box, chip, { skip } = {}) {
+      this.box = box;
+      this.chip = chip;
+      this.skip = skip;          // () => true while a pin must wait (a selection inside)
+      this.on = true;
+      this.top = 0;              // the reader's place while not following
+      this._userAt = 0;
+      this._held = false;
+      const user = () => { this._userAt = Date.now(); };
+      const release = () => {
+        this._held = false;
+        user();
+        document.removeEventListener('pointerup', release, true);
+        document.removeEventListener('pointercancel', release, true);
+      };
+      box.addEventListener('wheel', user, { passive: true });
+      box.addEventListener('touchmove', user, { passive: true });
+      // The scrollbar, or a selection dragged past the edge.
+      box.addEventListener('pointerdown', () => {
+        this._held = true;
+        document.addEventListener('pointerup', release, true);
+        document.addEventListener('pointercancel', release, true);
+      });
+      box.addEventListener('scroll', () => this._onScroll(), { passive: true });
+      chip.addEventListener('click', () => this.pin());
+      // Every change inside (new rows, deltas, the debounced markdown render
+      // that lands later, a line shown) and every resize (the splitter, the
+      // box shown again) goes through here, so following never lags a render.
+      this._mo = new MutationObserver(() => this.settle());
+      this._mo.observe(box, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+      this._ro = new ResizeObserver(() => this.settle());
+      this._ro.observe(box);
+    }
+
+    destroy() {
+      this._mo.disconnect();
+      this._ro.disconnect();
+      cancelAnimationFrame(this._raf);
+    }
+
+    _atBottom() {
+      const b = this.box;
+      return b.scrollHeight - b.scrollTop - b.clientHeight <= FOLLOW_SLACK_PX;
+    }
+    _byUser() { return this._held || Date.now() - Math.max(this._userAt, _navKeyAt) < USER_SCROLL_MS; }
+    _set(on) {
+      this.on = on;
+      this.chip.classList.toggle('hidden', on);
+    }
+
+    _onScroll() {
+      const b = this.box;
+      if (!b.clientHeight) return;   // hidden: nothing the reader did
+      if (this._atBottom()) this._set(true);
+      else if (this._byUser()) { this._set(false); this.top = b.scrollTop; }
+      else if (this.on || (b.scrollTop === 0 && this.top > 0)) this.settle();
+      else this.top = b.scrollTop;   // the browser kept the reader's rows in view
+    }
+
+    // The chip: to the bottom, following again.
+    pin() {
+      this._set(true);
+      this.box.scrollTop = this.box.scrollHeight;
+    }
+
+    settle() {
+      if (this._raf) return;
+      this._raf = requestAnimationFrame(() => {
+        this._raf = null;
+        const b = this.box;
+        if (!b.clientHeight) return;
+        if (this.on) { if (!this.skip?.()) b.scrollTop = b.scrollHeight; }
+        else if (b.scrollTop === 0 && this.top > 0) b.scrollTop = this.top;
+      });
+    }
+  }
+
   // The view each box shows, per session, across reloads (most recent last).
   function storedView(key) {
     try { return JSON.parse(localStorage.getItem(VIEW_STORE) || '{}')?.[key] || null; } catch { return null; }
@@ -145,7 +237,6 @@
       this.initModel = null;         // system/init, before any status names one
       this.todo = null;
       this.context = null;           // { tokens, window, compactAt } from the status
-      this.follow = true;
       this.queue = [];
       this.historyPending = false;
       // A stored view this panel no longer has (the old TODO) opens Live.
@@ -183,14 +274,17 @@
         <div class="sdk-main">
           <div class="sdk-view sdk-view-live">
             <div class="sdk-todo-top">
-              <div class="sdk-area-final hidden"></div>
-              <div class="sdk-todo-wrap"></div>
+              <div class="sdk-todo-scroll">
+                <div class="sdk-area-final hidden"></div>
+                <div class="sdk-todo-wrap"></div>
+              </div>
+              <button type="button" class="sdk-live-pill hidden">↓ Go to bottom</button>
             </div>
             <div class="sdk-todo-split" title="Drag to resize · double-click to reset"></div>
             <div class="sdk-todo-lite">
               <div class="sdk-feed-wrap">
                 <div class="sdk-feed lite"></div>
-                <button type="button" class="sdk-live-pill hidden">↓ jump to live</button>
+                <button type="button" class="sdk-live-pill hidden">↓ Go to bottom</button>
               </div>
               <div class="sdk-pending hidden"></div>
             </div>
@@ -209,12 +303,12 @@
       this.nowEl = q('.sdk-now');
       this.awaitEl = q('.sdk-area-awaiting');
       this.finalEl = q('.sdk-area-final');
-      this.todoView = q('.sdk-todo-top');
+      this.todoTop = q('.sdk-todo-top');
+      this.todoView = q('.sdk-todo-scroll');
       this._initSplit(q('.sdk-view-live'), q('.sdk-todo-split'));
       this.todoEl = q('.sdk-todo-wrap');
       this.notesEl = q('.sdk-view-notes');
       this.feed = q('.sdk-feed');
-      this.pill = q('.sdk-live-pill');
       this.pendingEl = q('.sdk-pending');
       this.segBtns = Object.fromEntries([...root.querySelectorAll('.sdk-seg button')].map(b => [b.dataset.v, b]));
 
@@ -226,28 +320,10 @@
         window.inspectorModule?.openSession?.(`cli-${this.sessId}`);
       });
 
-      // Follow the stream only while the reader is at the bottom; scrolling up
-      // to read pauses it and offers the pill instead.
-      this.feed.addEventListener('scroll', () => {
-        const v = this.feed;
-        const atBottom = v.scrollHeight - v.scrollTop - v.clientHeight <= FOLLOW_SLACK_PX;
-        this.follow = atBottom;
-        if (atBottom) this.pill.classList.add('hidden');
-      }, { passive: true });
-      this.pill.addEventListener('click', () => { this.follow = true; this.pill.classList.add('hidden'); this._scrollNow(); });
-      // Every change to the feed (new blocks, deltas, the debounced markdown
-      // render that lands later) goes through one observer, so following
-      // never lags a render.
-      this._mo = new MutationObserver(() => {
-        if (this.view !== 'live') return;
-        if (this.follow) this._scrollSoon();
-        else this.pill.classList.remove('hidden');
-      });
-      this._mo.observe(this.feed, { childList: true, subtree: true, characterData: true });
-      // A feed filled while hidden (a background tab, another view) cannot
-      // scroll; it catches up when it is shown or resized.
-      this._ro = new ResizeObserver(() => { if (this.view === 'live' && this.follow) this._scrollSoon(); });
-      this._ro.observe(this.feed);
+      // Both halves of Live follow their newest rows until the reader scrolls
+      // up; a selection being made in the feed holds it where it is.
+      this.feedFollow = new Follower(this.feed, q('.sdk-feed-wrap > .sdk-live-pill'), { skip: () => selectionInside(this.feed) });
+      this.todoFollow = new Follower(this.todoView, q('.sdk-todo-top > .sdk-live-pill'));
       this.renderHeader();
     }
 
@@ -255,8 +331,8 @@
     // height up to the CSS cap.
     _initSplit(view, handle) {
       const apply = (pct) => {
-        this.todoView.style.flexBasis = pct == null ? '' : `${pct}%`;
-        this.todoView.classList.toggle('sized', pct != null);
+        this.todoTop.style.flexBasis = pct == null ? '' : `${pct}%`;
+        this.todoTop.classList.toggle('sized', pct != null);
       };
       let stored = null;
       try { stored = parseFloat(localStorage.getItem(SPLIT_STORE)); } catch {}
@@ -282,7 +358,6 @@
         handle.classList.remove('dragging');
         try { handle.releasePointerCapture(e.pointerId); } catch {}
         if (pct != null) { try { localStorage.setItem(SPLIT_STORE, String(Math.round(pct * 10) / 10)); } catch {} }
-        if (this.follow) this._scrollSoon();
       };
       handle.addEventListener('pointerup', end);
       handle.addEventListener('pointercancel', end);
@@ -293,18 +368,9 @@
       });
     }
 
-    _scrollSoon() {
-      if (this._raf) return;
-      this._raf = requestAnimationFrame(() => { this._raf = null; this._scrollNow(); });
-    }
-    _scrollNow() {
-      if (selectionInside(this.feed)) return;
-      this.feed.scrollTop = this.feed.scrollHeight;
-    }
-
     destroy() {
-      this._mo.disconnect();
-      this._ro.disconnect();
+      this.feedFollow.destroy();
+      this.todoFollow.destroy();
       clearTimeout(this._historyTimer);
       if (areas.get(this.sessId) === this) areas.delete(this.sessId);
       this.el.remove();
@@ -325,10 +391,7 @@
       for (const [k, b] of Object.entries(this.segBtns)) b.classList.toggle('on', k === v);
       if (v === 'live') {
         this.segBtns.live.classList.remove('unread');
-        this.follow = true;
-        this.pill.classList.add('hidden');
-        this._scrollSoon();
-        this.renderTodo({ scroll: true });
+        this.renderTodo();
       } else {
         this.renderNotes({ scroll: true });
       }
@@ -455,15 +518,15 @@
       this._todoSig = sig;
       const notesChanged = notes !== this.todo?.notes;
       this.todo = { rows, notes };
-      this.renderTodo({ scroll: true });
+      this.renderTodo();
       if (notesChanged) this.renderNotes({ scroll: true });
       this.renderHeader();
     }
 
     // The table fits its box: id and status stay narrow, a description wraps
-    // to two lines (the whole text is its tooltip). It scrolls to the row in
-    // progress, or to the newest row when none is.
-    renderTodo({ scroll } = {}) {
+    // to two lines (the whole text is its tooltip). Its follower keeps the
+    // newest rows in view.
+    renderTodo() {
       const rows = this.todo?.rows || [];
       const sig = this._todoSig || '';
       if (this._todoDrawn !== sig) {
@@ -478,11 +541,6 @@
               + `<td class="sdk-todo-st"><span class="sdk-chip sdk-todo-chip sdk-todo-chip-${cls}">${escHtml(clip(st || '—', 40))}</span></td></tr>`;
           }).join('')}</tbody></table>`
           : '<div class="sdk-empty">No TODO.md yet.</div>';
-      }
-      if (scroll && this.view === 'live') {
-        const doing = this.todoEl.querySelectorAll('.sdk-todo-doing');
-        if (doing.length) scrollToNode(this.todoView, doing[doing.length - 1]);
-        else this.todoView.scrollTop = this.todoView.scrollHeight;
       }
     }
 
@@ -514,8 +572,6 @@
       this.pending = new Map();   // user turn id -> its "waiting" chip
       this.pendingEl.innerHTML = '';
       this.pendingEl.classList.add('hidden');
-      this.follow = true;
-      this.pill.classList.add('hidden');
     }
 
     requestHistory() {
@@ -552,8 +608,6 @@
         if (ev?.sdk?.type !== 'stream_event' && keys.has(envKey(ev))) continue;
         try { this.apply(ev, true, ts); } catch (e) { console.warn('sdk-panel: live event', e, ev); }
       }
-      this.follow = true;
-      this._scrollSoon();
       this.renderNow();
     }
 
@@ -1221,7 +1275,12 @@
     // the running ones keep their room.
     layoutWorkers() {
       const list = this.sortedWorkers();
-      list.forEach(a => this.workersEl.appendChild(a.el));
+      // Only a box out of place moves: putting one back into the DOM resets
+      // its scrollers to the top.
+      list.forEach((a, i) => {
+        const at = this.workersEl.children[i] || null;
+        if (at !== a.el) this.workersEl.insertBefore(a.el, at);
+      });
       this.panelEl.classList.toggle('has-workers', list.length > 0);
       this.workersEl.classList.toggle('crowded', list.length > 3);
       this.drawLinksSoon();
