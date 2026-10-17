@@ -926,6 +926,98 @@ test('buildCliArgs passes the session name and subagent definitions', () => {
   assert.ok(args.includes('--max-budget-usd'));
 });
 
+test('buildCliArgs denies an orchestration role its tools; a session without a role gets no --disallowedTools', () => {
+  const { buildCliArgs, disallowedToolsFor } = require('../src/utils');
+  const denied = (role) => {
+    const args = buildCliArgs({ name: 'x', ...(role ? { orchestration: { role } } : {}) });
+    const i = args.indexOf('--disallowedTools');
+    return i < 0 ? null : args[i + 1].split(',');
+  };
+  assert.strictEqual(denied(null), null);
+  assert.deepStrictEqual(buildCliArgs({ name: 'x' }), ['--name', 'x'], 'unchanged without a role');
+  assert.deepStrictEqual(denied('orchestrator'), ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'Monitor', 'ReportFindings']);
+  assert.deepStrictEqual(denied('worker'), ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion', 'mcp__integrated__vista-AskUserQuestion']);
+  // Composable: an engine's own list first, no duplicates.
+  assert.deepStrictEqual(disallowedToolsFor({ orchestration: { role: 'worker' } }, ['SendMessage', 'Workflow']).slice(0, 3), ['SendMessage', 'Workflow', 'EnterPlanMode']);
+  assert.deepStrictEqual(disallowedToolsFor({}, ['SendMessage']), ['SendMessage']);
+});
+
+test('the explorer subagent names only tools Claude Code offers', () => {
+  const { WORKER_AGENTS } = require('../src/orchestration');
+  assert.deepStrictEqual(WORKER_AGENTS.explorer.tools, ['Read', 'Bash', 'WebFetch', 'WebSearch']);
+});
+
+test('the orchestrator card: plan confirmed before fanning out, cheap workers for trivial jobs, stop_worker', () => {
+  const { orchestratorCard } = require('../src/orchestration');
+  const card = orchestratorCard({ runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' });
+  assert.match(card, /non-trivial request, write the plan as TODO rows and confirm it with the user \(AskUserQuestion\) before fanning out to several workers/);
+  assert.match(card, /trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none/);
+  assert.match(card, /`stop_worker` ends its current turn and leaves it idle; then SendMessage it new instructions, or close_worker it/);
+});
+
+test('stop_worker: orchestrator only, refuses an idle worker, interrupts a busy one without a nudge or idle event', async (t) => {
+  for (const engine of ['cli', 'sdk']) {
+    const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine });
+    const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+    const ws = mgr.sessions.get(w.tabId);
+    let interrupts = 0;
+    if (engine === 'sdk') ws.interrupt = () => { interrupts++; };
+    const stopW = (worker, extra = {}) => orch.stopWorker(orchSession.instanceId, { worker, ...extra });
+
+    assert.throws(() => orch.stopWorker(ws.instanceId, { worker: 'w1' }), /only an orchestrator/);
+    assert.throws(() => stopW('w9'), /no worker w9/);
+    hook(orch, ws, { hook_event_name: 'UserPromptSubmit' });
+    orch.report(ws.instanceId, { status: 'started', summary: 'on it' });
+    ws.busy = false;
+    assert.throws(() => stopW('w1'), /is idle: nothing to stop/);
+    assert.throws(() => orch.closeWorker(orchSession.instanceId, { worker: 'w1' }), /last report: started/);
+
+    ws.busy = true;
+    hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit' });   // takes the 'started' report
+    const before = run().delivered;
+    assert.strictEqual(before, run().events.at(-1).seq);
+    const r = stopW('w1', { reason: 'wrong file' });
+    assert.strictEqual(r.stopped, true, engine);
+    if (engine === 'sdk') assert.strictEqual(interrupts, 1, 'the SDK session\'s interrupt');
+    else assert.strictEqual(mgr.writes.at(-1).data, '\x1b', 'Esc into the terminal');
+    const ev = run().events.at(-1);
+    assert.deepStrictEqual([ev.kind, ev.text], ['stopped', `${w.worker} was stopped by the orchestrator: wrong file`]);
+    assert.strictEqual(run().delivered, before + 1, 'recorded, not delivered back to the orchestrator');
+    assert.strictEqual(run().workers[0].turnStopped.reason, 'wrong file');
+
+    // The interrupted turn's Stop: neither nudged nor an idle event.
+    ws.busy = false;
+    assert.deepStrictEqual(hook(orch, ws, { hook_event_name: 'Stop', last_assistant_message: 'half done' }), {});
+    assert.ok(!run().events.some(e => e.kind === 'idle'));
+    assert.strictEqual(orch.describeRun(run()).workers[0].available, true, 'a stopped idle worker may be closed');
+    // The next turn is enforced again.
+    hook(orch, ws, { hook_event_name: 'UserPromptSubmit' });
+    assert.strictEqual(blockOf(hook(orch, ws, { hook_event_name: 'Stop' })) !== null, true);
+
+    // Closable without a done/failed report while it stays stopped.
+    assert.strictEqual(orch.closeWorker(orchSession.instanceId, { worker: 'w1' }).closed, true);
+    assert.strictEqual(run().workers[0].turnStopped, undefined);
+    assert.throws(() => stopW('w1'), /not running \(closed\)/);
+  }
+});
+
+test('stop_worker: new instructions or a report clear the stop', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const ws = mgr.sessions.get(w.tabId);
+  ws.interrupt = () => {};
+  ws.busy = true;
+  orch.stopWorker(orchSession.instanceId, { worker: 'w1' });
+  ws.busy = false;
+  orch.sendMessage(orchSession.instanceId, { to: 'w1', message: 'do Y instead' });
+  assert.strictEqual(run().workers[0].turnStopped, undefined);
+  assert.throws(() => orch.closeWorker(orchSession.instanceId, { worker: 'w1' }), /has not finished/);
+  ws.busy = true;
+  orch.stopWorker(orchSession.instanceId, { worker: 'w1' });
+  orch.report(ws.instanceId, { status: 'started', summary: 'again' });
+  assert.strictEqual(run().workers[0].turnStopped, undefined);
+});
+
 test('the orchestrator MCP server is attached only to stamped sessions, by role', () => {
   const CliSession = require('../src/cli-session');
   const fn = (role) => CliSession.prototype._orchestratorMcpServer.call({
@@ -1115,6 +1207,7 @@ test('the orchestrator MCP server offers SendMessage / ListAgents to SDK session
   assert.match(src, /name: "SendMessage",\s*path: "send-message"/);
   assert.match(src, /name: "ListAgents",\s*path: "list-agents"/);
   assert.match(src, /name: "close_worker",\s*path: "close-worker"/);
+  assert.match(src, /name: "stop_worker",\s*path: "stop-worker"/);
   const { MAX_WORKERS } = require('../src/orchestration');
   assert.doesNotMatch(src, /At most 3|3-worker/);
   assert.match(src, new RegExp(`MAX_WORKERS run(ning)? at once \\(${MAX_WORKERS}\\)`));
