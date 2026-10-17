@@ -765,6 +765,132 @@ test('close guards: a finished, idle worker with an empty TODO no longer holds t
   assert.strictEqual(closable().ok, true, 'no TODO rows');
 });
 
+test('close_worker: refuses a busy or unfinished worker, closes a done idle one and frees its slot', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  const ws = [1, 2, 3, 4, 5].map(i => orch.launchWorker(orchSession.instanceId, { title: `t${i}`, task: `brief ${i}` }));
+  const s1 = mgr.sessions.get(ws[0].tabId);
+  s1.context = { tokens: 50000, window: 200000, compactAt: 160000, windowEstimated: false };
+  const close = (worker) => orch.closeWorker(orchSession.instanceId, { worker });
+
+  assert.throws(() => close('w1'), /has not finished \(last report: none\)/);
+  orch.report(s1.instanceId, { status: 'started', summary: 'on it' });
+  assert.throws(() => close('w1'), /last report: started/);
+  orch.report(s1.instanceId, { status: 'done', summary: 'parser done' });
+  s1.busy = true;
+  assert.throws(() => close('w1'), /is busy/);
+  s1.busy = false;
+  assert.throws(() => close('w9'), /no worker w9/);
+  assert.throws(() => orch.closeWorker(s1.instanceId, { worker: 'w1' }), /only an orchestrator/);
+
+  // Full: the error names the finished worker and the two ways out.
+  let d = orch.describeRun(run());
+  assert.strictEqual(d.workers[0].available, true);
+  assert.strictEqual(d.workers[1].available, false);
+  assert.deepStrictEqual(d.workers[0].context, { tokens: 50000, window: 200000, compactAt: 160000, percent: 25 });
+  assert.strictEqual(d.workers[1].context, null, 'nothing counted yet');
+  assert.strictEqual(d.workers[0].brief, 'brief 1');
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' }),
+    new RegExp(`5 workers are running[\\s\\S]*available to close: ${ws[0].worker} \\(last report: done\\)[\\s\\S]*close_worker[\\s\\S]*SendMessage`));
+
+  // An open TODO row does not hold it; the result says so.
+  fs.writeFileSync(path.join(ws[0].folder, 'TODO.md'), '| id | description | depends on | status |\n|---|---|---|---|\n| 1 | step | — | todo |\n');
+  const r = close(ws[0].worker);
+  assert.strictEqual(r.closed, true);
+  assert.match(r.note, /1 open TODO row/);
+  assert.ok(mgr.closed.includes(ws[0].tabId), 'closed quietly');
+  assert.ok(mgr.findSaved(s1.sessId), 'its saved entry survives');
+  const w1 = run().workers[0];
+  assert.strictEqual(w1.closed, true);
+  assert.ok(w1.closedAt);
+  assert.ok(!run().events.some(e => e.kind === 'exited'), 'no exit event for its own close');
+  assert.throws(() => close('w1'), /not running \(already closed\)/);
+
+  // Still listed: describeRun in full (the GUI's contract), list_workers compact.
+  d = orch.describeRun(run());
+  const dw = d.workers[0];
+  assert.deepStrictEqual({ state: dw.state, closed: dw.closed, closedAt: dw.closedAt, sessId: dw.sessId, available: dw.available },
+    { state: 'closed', closed: true, closedAt: w1.closedAt, sessId: s1.sessId, available: false });
+  const lw = orch.listWorkers(orchSession.instanceId).workers;
+  assert.strictEqual(lw.length, 5);
+  assert.deepStrictEqual(lw[0].lastReport, { status: 'done', summary: 'parser done' });
+  assert.strictEqual(lw[0].state, 'closed');
+  assert.strictEqual(lw[0].progress, undefined, 'a compact entry');
+  assert.ok(lw[1].progress !== undefined, 'a running worker keeps its full entry');
+  assert.strictEqual(orch.listAgents(orchSession.instanceId).agents[1].state, 'closed');
+
+  // The slot is free again.
+  assert.doesNotThrow(() => orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' }));
+
+  // A pausing run closes nothing.
+  orch.report(mgr.sessions.get(ws[1].tabId).instanceId, { status: 'done', summary: 'ok' });
+  orch.pauseRun(run().runId);
+  assert.throws(() => close('w2'), /being paused/);
+});
+
+test('resume_worker brings a closed worker back and clears closed', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const s1 = mgr.sessions.get(w.tabId);
+  orch.report(s1.instanceId, { status: 'failed', summary: 'tests red' });
+  orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
+  assert.throws(() => orch.sendMessage(orchSession.instanceId, { to: 'w1', message: 'x' }), /not running.*resume_worker/);
+
+  const c = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue', message: 'fix the red tests' });
+  assert.strictEqual(c.mode, 'continue');
+  assert.strictEqual(mgr.sessions.get(c.tabId).sessId, s1.sessId, 'its own transcript');
+  assert.strictEqual(run().workers[0].closed, undefined);
+  assert.strictEqual(run().workers[0].closedAt, undefined);
+  assert.strictEqual(orch.describeRun(run()).workers[0].closed, false);
+  assert.deepStrictEqual(run().workers[0].followUps.map(f => f.text), ['fix the red tests']);
+});
+
+test('an orchestrator SendMessage to a worker is kept as a follow-up: in its recap, a fresh restart and the seed', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'THE ORIGINAL BRIEF' });
+  const s1 = mgr.sessions.get(w.tabId);
+  orch.sendMessage(orchSession.instanceId, { to: w.worker, message: 'now also do the exporter' });
+  orch.sendMessage(s1.instanceId, { to: 'orchestrator', message: 'a question' });
+  const ups = run().workers[0].followUps;
+  assert.deepStrictEqual(ups.map(f => f.text), ['now also do the exporter'], 'only the orchestrator\'s messages');
+  assert.ok(ups[0].at);
+  for (let i = 0; i < 12; i++) orch.sendMessage(orchSession.instanceId, { to: 'w1', message: `extra ${i}` });
+  assert.strictEqual(run().workers[0].followUps.length, 10, 'the last 10');
+  assert.strictEqual(run().workers[0].followUps[0].text, 'extra 2');
+
+  const ctx = JSON.parse(hook(orch, s1, { hook_event_name: 'SessionStart', source: 'compact' }).stdout).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /THE ORIGINAL BRIEF[\s\S]*Follow-ups from your orchestrator, oldest first[\s\S]*extra 2[\s\S]*extra 11/);
+  assert.ok(ctx.length <= 9001);
+
+  // A long brief and long follow-ups still fit, the newest follow-up kept.
+  const r = run();
+  r.workers[0].task = 'B'.repeat(20000);
+  r.workers[0].followUps = Array.from({ length: 10 }, (_, i) => ({ at: 'x', text: `${i}`.repeat(1999) + 'END' }));
+  fs.writeFileSync(path.join(r.runDir, 'run.json'), JSON.stringify(r));
+  const big = JSON.parse(hook(orch, s1, { hook_event_name: 'SessionStart', source: 'compact' }).stdout).hookSpecificOutput.additionalContext;
+  assert.ok(big.length <= 9001);
+  assert.match(big, /9{1999}END/);
+  assert.match(big, /older follow-up\(s\) left out/);
+  r.workers[0].task = 'THE ORIGINAL BRIEF';
+  r.workers[0].followUps = [{ at: 'x', text: 'do the exporter' }];
+  fs.writeFileSync(path.join(r.runDir, 'run.json'), JSON.stringify(r));
+
+  // A fresh restart is told its brief, then the follow-ups.
+  orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
+  orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
+  const f = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'fresh' });
+  assert.match(typedInto(mgr, f.tabId), /THE ORIGINAL BRIEF[\s\S]*Follow-ups from your orchestrator[\s\S]*do the exporter[\s\S]*fresh restart/);
+
+  // The seed of a fresh orchestrator lists them under the brief.
+  orch.refreshOrchestrator(run().runId);
+  await wait(15);
+  writeResume(orchSession, 'w1 closed');
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: '[vistaclair pause]' });
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  await wait(20);
+  const seed = fs.readFileSync(path.join(orchSession.settings.sessionDir, 'RESTART.md'), 'utf8');
+  assert.match(seed, /THE ORIGINAL BRIEF[\s\S]*Follow-ups you sent it[\s\S]*do the exporter/);
+});
+
 test('deleting a run: refused over uncommitted worktree changes, keeps unmerged branches', async (t) => {
   const repo = tmpDir('vistaclair-orch-repo-');
   const g = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'pipe' }).toString();
@@ -988,4 +1114,8 @@ test('the orchestrator MCP server offers SendMessage / ListAgents to SDK session
   const src = fs.readFileSync(path.join(CORE, 'lib', 'orchestrator-mcp.js'), 'utf8');
   assert.match(src, /name: "SendMessage",\s*path: "send-message"/);
   assert.match(src, /name: "ListAgents",\s*path: "list-agents"/);
+  assert.match(src, /name: "close_worker",\s*path: "close-worker"/);
+  const { MAX_WORKERS } = require('../src/orchestration');
+  assert.doesNotMatch(src, /At most 3|3-worker/);
+  assert.match(src, new RegExp(`MAX_WORKERS run(ning)? at once \\(${MAX_WORKERS}\\)`));
 });
