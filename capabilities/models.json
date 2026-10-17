@@ -1,7 +1,8 @@
 {
   "providers": {
     "anthropic": {
-      "label": "Anthropic"
+      "label": "Anthropic",
+      "apiBaseUrl": ""
     },
     "openai": {
       "label": "OpenAI",
@@ -2020,6 +2021,29 @@
       "outputCostPerMTok": 0.5,
       "cacheReadCostPerMTok": 0.01,
       "cacheCreateCostPerMTok": 0.125,
+      "lifecycle": "current",
+      "retiresAt": null,
+      "isNew": false
+    },
+    {
+      "name": "gemini-4-argon",
+      "label": "Gemini 4 Argon",
+      "description": "Gemini 4 Argon",
+      "providerKey": "google",
+      "provider": "gemini",
+      "modelId": "gemini-4-argon",
+      "systemPromptMode": "replace",
+      "toolOverrides": {},
+      "reasoning": false,
+      "context1m": false,
+      "disabled": true,
+      "contextWindow": 1048576,
+      "maxOutputTokens": 32768,
+      "useMaxCompletionTokens": false,
+      "inputCostPerMTok": 2,
+      "outputCostPerMTok": 10,
+      "cacheReadCostPerMTok": 0.1,
+      "cacheCreateCostPerMTok": null,
       "lifecycle": "current",
       "retiresAt": null,
       "isNew": false
