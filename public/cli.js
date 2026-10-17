@@ -612,8 +612,9 @@
   async function openNewCli() {
     const picked = await openFsDirPicker();
     if (!picked) return;
-    // The server asks Simple / Orchestrator, CLI terminal / Agent SDK panel
-    // and an SDK session's billing (openCli), mints the tab and launches it;
+    // The server decides the engine and the session type (an Agent SDK panel
+    // opens an orchestrator; a terminal asks Simple / Orchestrator), asks an
+    // SDK session's billing (openCli), mints the tab and launches it;
     // cli:opened switches to it. Size the PTY like the active tab.
     const { cols, rows } = terminalSize(80, 24);
     sendWs({

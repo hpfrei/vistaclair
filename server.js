@@ -397,8 +397,9 @@ dashboardServer.requestTimeout = 10 * 60 * 1000;
 
 const cliSessionManager = new CliSessionManager(PROXY_PORT, { broadcast: (...args) => broadcaster.broadcast(...args) }, store, { authToken: AUTH_TOKEN, dashboardPort: DASHBOARD_PORT });
 
-// Orchestrator CLI sessions and the one "new CLI" entry, openCli (asks Simple /
-// Orchestrator when the caller does not say). Owns the dashboard ask form too.
+// Orchestrator CLI sessions and the one "new CLI" entry, openCli (a new Agent SDK
+// session is an orchestrator; a terminal asks Simple / Orchestrator when the
+// caller does not say). Owns the dashboard ask form too.
 // Live state of every CLI session (busy, subagents, TODO progress) from its hook
 // events, and pause / resume (src/session-control.js).
 const sessionControl = createSessionControl({
