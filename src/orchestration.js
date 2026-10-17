@@ -33,7 +33,8 @@
 //                        is busy, or by typing a one-line notice into its tab when
 //                        it is idle (which starts a turn).
 //   tools                lib/orchestrator-mcp.js: launch_cli, resume_worker,
-//                        list_workers, end_run (orchestrator); report (workers);
+//                        close_worker, list_workers, end_run (orchestrator);
+//                        report (workers);
 //                        SendMessage, ListAgents (both, SDK runs: Claude Code's
 //                        own cross-session messaging is a CLI feature). A message
 //                        is submitted into its target with priority 'next' (an
@@ -158,6 +159,7 @@ function orchestratorCard(run) {
     '9. Where the instructions above this card tell the session to edit files, run project checks or update docs, that is workers\' work: put it in a brief, never do it yourself.',
     '10. To see how a worker is doing, read its TODO.md and NOTES.md (`list_workers` gives the paths, its current item and recent actions). Never message a worker just to ask for its status.',
     '11. A paused worker is resumed with `resume_worker` ("continue" keeps its own context; "fresh" starts a clean session from its brief and notes). Never relaunch a paused worker\'s task with launch_cli.',
+    '12. Unrelated new work goes to a new worker. Close a finished worker you will not reuse with `close_worker` (it stays listed and resumable with resume_worker); reuse a worker by SendMessage only for a follow-up in the area it just worked on.',
   ].join('\n');
 }
 
@@ -614,10 +616,16 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return { session, stamp, run };
   }
 
+  // A full run names the running workers that are finished, so the
+  // orchestrator closes one rather than pushing unrelated work into it.
   function assertCapacity(run) {
     const running = runningWorkers(run);
     if (running.length >= MAX_WORKERS) {
-      throw new Error(`${MAX_WORKERS} workers are running (${running.map(w => w.name).join(', ')}). Send a follow-up to one of them, or wait for an exit event.`);
+      const available = running.filter(w => workerAvailable(run, w));
+      const hint = available.length
+        ? `Finished and idle, available to close: ${available.map(w => `${w.name} (last report: ${w.lastReport.status})`).join(', ')}. Close one you will not reuse with close_worker, or send a follow-up with SendMessage to one that worked on the same area.`
+        : 'None of them is finished: send a follow-up with SendMessage to one that works on the same area, or wait for a report or an exit event.';
+      throw new Error(`${MAX_WORKERS} workers are running (${running.map(w => w.name).join(', ')}). ${hint}`);
     }
   }
 
@@ -694,9 +702,21 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return tabId;
   }
 
+  // list_workers: describeRun, with a compact entry for every worker that is
+  // gone (closed, stopped, exited) and not paused, so a long run stays readable.
+  // The GUI reads describeRun itself (GET /run), never this.
   function listWorkers(instanceId) {
     const { run } = callerRun(instanceId);
-    return describeRun(run);
+    const d = describeRun(run);
+    return { ...d, workers: d.workers.map(w => (w.running || w.paused ? w : compactWorker(w))) };
+  }
+
+  function compactWorker(w) {
+    return {
+      worker: w.worker, name: w.name, id: w.id, title: w.title, state: w.state, closedAt: w.closedAt,
+      lastReport: w.lastReport ? { status: w.lastReport.status, summary: clip(w.lastReport.summary, 160) } : null,
+      branch: w.branch, todo: w.todo, notes: w.notes,
+    };
   }
 
   // What a session folder shows at a glance: progress, the item in progress,
@@ -716,7 +736,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function memberState(session, w) {
     if (session?.running) return session.state && session.state !== 'exited' ? session.state : session.busy ? 'busy' : 'idle';
     if (!w) return 'exited';
-    return w.paused ? 'paused' : w.abandoned ? 'abandoned' : w.exitedAt ? 'exited' : 'stopped';
+    return w.paused ? 'paused' : w.closed ? 'closed' : w.abandoned ? 'abandoned' : w.exitedAt ? 'exited' : 'stopped';
+  }
+
+  // An SDK session's main-agent context ({ tokens, window, compactAt,
+  // percent of the window }), or null while nothing has counted it.
+  function contextOf(session) {
+    const c = session?.context;
+    if (!c || c.tokens == null) return null;
+    return { tokens: c.tokens, window: c.window || null, compactAt: c.compactAt || null, percent: c.window ? Math.round((c.tokens / c.window) * 100) : null };
   }
 
   // The higher of the live and the recorded cost: a member just resumed may
@@ -766,6 +794,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           cost: costOf(live?.session, w.costUsd),
           cwd: w.cwd, branch: w.branch, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: w.lastReport,
           paused: !!w.paused, abandoned: !!w.abandoned,
+          closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
+          brief: clip(w.task, 300),
+          ...(run.engine === 'sdk' ? { context: live?.session.running ? contextOf(live.session) : null } : {}),
           todo: w.sessionDir ? path.join(w.sessionDir, 'TODO.md') : null,
           notes: w.sessionDir ? path.join(w.sessionDir, 'NOTES.md') : null,
           progress: folderSummary(w.sessionDir),
@@ -1014,13 +1045,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     ];
     for (const w of run.workers) {
       const f = w.sessionDir ? folders.readFolder(w.sessionDir) : null;
-      const state = workerSession(run, w.id)?.session.running ? 'running' : w.paused ? 'paused' : w.abandoned ? 'abandoned' : 'stopped';
+      const state = workerSession(run, w.id)?.session.running ? 'running' : w.paused ? 'paused' : w.closed ? 'closed' : w.abandoned ? 'abandoned' : 'stopped';
       lines.push('', `### \`${w.name}\` — ${state}`, '');
       lines.push(`- Folder: ${w.sessionDir || '(none)'}`);
       if (w.branch) lines.push(`- Branch: ${w.branch}`);
       lines.push(`- Last report: ${w.lastReport ? `${w.lastReport.status}: ${clip(w.lastReport.summary, 600)}${w.lastReport.filesChanged?.length ? ` (files: ${w.lastReport.filesChanged.join(', ')})` : ''}` : '(none)'}`);
       if (f) lines.push(`- TODO: ${f.progress.done}/${f.progress.total} done${f.progress.doing ? `, doing ${f.progress.doing.id}: ${clip(f.progress.doing.description, 120)}` : ''}`);
       lines.push('- Brief:', '', '```', clip(w.task, 2000), '```');
+      const ups = followUpsText(w, '- Follow-ups you sent it, oldest first:', 3000);
+      if (ups) lines.push('', ups);
       if (f?.resume) lines.push('', '- Resume note:', '', clip(f.resume, 2000));
     }
     const recent = run.events.slice(-15);
@@ -1092,7 +1125,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     let tabId;
     if (mode === 'fresh' || lost) {
       const why = lost ? 'its earlier conversation could not be restored, so this is a fresh session' : 'this is a fresh restart';
-      const prompt = `${w.task}\n\n[vistaclair resume] You are worker \`${w.name}\` and ${why} with a clean context: the brief above is your original task, already partly done. Your TODO.md and NOTES.md in ${w.sessionDir} are your state — read them first, check the files they name, re-run whatever was cut off and continue from the \`## Resume\` note. ${from}`.trim();
+      const ups = followUpsText(w, 'Follow-ups from your orchestrator, oldest first:', 4000);
+      const task = ups ? 'the brief above is your original task and the follow-ups after it are what you were told since (the newest is your current task), already partly done' : 'the brief above is your original task, already partly done';
+      const prompt = `${w.task}\n\n${ups ? `${ups}\n\n` : ''}[vistaclair resume] You are worker \`${w.name}\` and ${why} with a clean context: ${task}. Your TODO.md and NOTES.md in ${w.sessionDir} are your state — read them first, check the files they name, re-run whatever was cut off and continue from the \`## Resume\` note. ${from}`.trim();
       tabId = spawnWorker(run, w, prompt);
       if (old && typeof mgr.forgetSaved === 'function') mgr.forgetSaved(old.id);
     } else {
@@ -1104,6 +1139,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const fw = fresh.workers.find(x => x.id === w.id);
     fw.paused = false;
     fw.exitedAt = null;
+    delete fw.closed;
+    delete fw.closedAt;
     fw.resumedAt = new Date().toISOString();
     if (!fresh.workers.some(x => x.paused)) fresh.paused = null;
     saveRun(fresh);
@@ -1118,7 +1155,46 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (run.pausing) throw new Error('this run is being paused');
     const w = run.workers.find(x => x.name === worker || x.id === worker);
     if (!w) throw new Error(`no worker ${worker} in this run`);
-    return bringBack(run, w, { mode, message });
+    const out = bringBack(run, w, { mode, message });
+    if (message) addFollowUp(loadRun(run.runDir), w.id, message);
+    return out;
+  }
+
+  // close_worker (orchestrator tool): close a finished worker the orchestrator
+  // will not reuse, freeing its slot. Saved like a pause (history entry kept,
+  // inspector data and transcript untouched) and closed quietly — no exit
+  // event: the orchestrator closed it itself. It stays listed, marked closed,
+  // and resume_worker brings it back.
+  function closeWorker(instanceId, { worker } = {}) {
+    const { run } = callerRun(instanceId, 'orchestrator');
+    if (run.pausing) throw new Error('this run is being paused');
+    const w = run.workers.find(x => x.name === worker || x.id === worker);
+    if (!w) throw new Error(`no worker ${worker} in this run`);
+    const live = workerSession(run, w.id);
+    if (!live?.session.running) throw new Error(`${w.name} is not running${w.closed ? ' (already closed)' : w.paused ? ' (paused)' : ''}`);
+    if (live.session.busy) throw new Error(`${w.name} is busy: close it once it has reported and gone idle`);
+    const status = w.lastReport?.status;
+    if (!['done', 'failed'].includes(status)) {
+      throw new Error(`${w.name} has not finished (last report: ${status || 'none'}): only a worker whose last report is done or failed can be closed`);
+    }
+    const s = live.session;
+    if (s.sessId && s.cwd) mgr.saveToHistory({ sessId: s.sessId, cwd: s.cwd, title: s.title, settings: s.getSettings(), autoMemory: s.autoMemory });
+    mgr.closeQuiet(live.tabId);
+    const now = new Date().toISOString();
+    w.closed = true;
+    w.closedAt = now;
+    w.exitedAt = now;
+    if (typeof s.costUsd === 'number') w.costUsd = s.costUsd;
+    volatile.delete(w.name);
+    inbox.delete(w.name);
+    saveRun(run);
+    const p = folderSummary(w.sessionDir);
+    const open = p ? p.total - p.done : 0;
+    return {
+      worker: w.name, closed: true, closedAt: now, lastReport: status,
+      ...(open > 0 ? { note: `closed with ${open} open TODO row(s): its last report was ${status}` } : {}),
+      resume: 'it stays in list_workers; resume_worker (continue or fresh) brings it back',
+    };
   }
 
   // A worker row clicked in the "+" menu: the same as resume_worker "continue",
@@ -1182,13 +1258,20 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     saveRun(run);
   }
 
-  // A live worker that no longer holds its orchestrator's close: its last
-  // report is done/failed (or it was abandoned), it is idle, and its TODO has
-  // no open row (no rows counts as none).
+  // A running worker the orchestrator may close (close_worker): idle, and its
+  // last report is done or failed. Open TODO rows do not hold it.
+  function workerAvailable(run, w) {
+    const live = workerSession(run, w.id);
+    return !!live?.session.running && !live.session.busy && ['done', 'failed'].includes(w.lastReport?.status);
+  }
+
+  // A live worker that no longer holds its orchestrator's close: available
+  // (or abandoned and idle), and its TODO has no open row (no rows counts as
+  // none).
   function workerFinished(run, w) {
     const live = workerSession(run, w.id);
     if (!live || live.session.busy) return false;
-    if (!w.abandoned && !['done', 'failed'].includes(w.lastReport?.status)) return false;
+    if (!w.abandoned && !workerAvailable(run, w)) return false;
     const progress = folderSummary(w.sessionDir);
     return !progress || progress.done >= progress.total;
   }
@@ -1274,6 +1357,31 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   const joinContext = (...parts) => parts.filter(Boolean).join('\n\n') || null;
 
+  // Keep what the orchestrator told a worker after its brief (the last 10): a
+  // reused worker's current task, for its recap, a fresh restart and the seed.
+  function addFollowUp(run, workerId, text) {
+    const w = run?.workers.find(x => x.id === workerId);
+    if (!w) return;
+    w.followUps = [...(w.followUps || []), { at: new Date().toISOString(), text: clip(text, 2000) }].slice(-10);
+    saveRun(run);
+  }
+
+  // A worker's follow-ups under `heading`, oldest first, within `budget` chars:
+  // the newest are kept, older ones left out. '' when there are none.
+  function followUpsText(w, heading, budget) {
+    const list = w.followUps || [];
+    if (!list.length) return '';
+    const lines = [];
+    let used = heading.length;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const line = `- ${list[i].at}: ${list[i].text}`;
+      if (used + line.length + 1 > budget) { lines.unshift(`- (${i + 1} older follow-up(s) left out)`); break; }
+      lines.unshift(line);
+      used += line.length + 1;
+    }
+    return [heading, ...lines].join('\n');
+  }
+
   // SendMessage: deliver `message` to a member of the caller's run as a user
   // turn "[message from <name>] …". An SDK target takes it with priority 'next'
   // (busy: read after its running tool calls, in the same turn; idle: starts a
@@ -1304,6 +1412,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       inbox.set(target.name, q);
       delivery = 'queued';
     }
+    if (stamp.role === 'orchestrator' && target.role === 'worker') addFollowUp(run, target.id, text);
     const ev = { platform: { kind: 'message', from, to: target.name, text } };
     emitTo(session, run, ev);
     emitTo(ts, run, ev);
@@ -1388,7 +1497,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // --- Hooks ---
 
   function workerLine(w) {
-    const state = w.running ? 'running' : w.paused ? 'paused — resume_worker brings it back' : w.abandoned ? 'abandoned' : 'stopped';
+    const state = w.running ? (w.available ? 'running, finished — close_worker if not reused' : 'running') : w.paused ? 'paused — resume_worker brings it back' : w.closed ? 'closed — resume_worker brings it back' : w.abandoned ? 'abandoned' : 'stopped';
     const p = w.progress;
     const progress = p ? ` — TODO ${p.done}/${p.total}${p.doing ? `, doing ${p.doing.id}: ${clip(p.doing.description, 80)}` : ''}${p.hasResumeNote ? ', has a resume note' : ''}` : '';
     const last = w.lastReport ? ` — last report: ${w.lastReport.status}: ${clip(w.lastReport.summary, 200)}` : '';
@@ -1407,9 +1516,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       ].join('\n');
     }
     const w = run.workers.find(x => x.id === stamp.workerId) || {};
+    // The follow-ups come first in the budget: they hold the current task.
+    const ups = followUpsText(w, 'Follow-ups from your orchestrator, oldest first (the newest is your current task):', 4000);
     return [
       `[orchestration] Context restored. You are WORKER \`${w.name}\` of run ${run.runId}, launched by \`${run.orchestrator}\`; your role card in the system prompt still applies. Report with the \`report\` tool; delegate to \`coder\` / \`explorer\`.`,
-      'Your original brief:', clip(w.task, 4000),
+      'Your original brief:', clip(w.task, Math.min(4000, CONTEXT_LIMIT - ups.length - 1200)),
+      ...(ups ? [ups] : []),
       w.lastReport ? `Your last report: ${w.lastReport.status}: ${clip(w.lastReport.summary, 500)}` : 'You have not reported yet.',
     ].join('\n');
   }
@@ -1583,6 +1695,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     r.post('/end', call(b => endRun(b.instanceId)));
     r.post('/report', call(b => report(b.instanceId, b)));
     r.post('/resume-worker', call(b => resumeWorker(b.instanceId, b)));
+    r.post('/close-worker', call(b => closeWorker(b.instanceId, b)));
     r.post('/send-message', call(b => sendMessage(b.instanceId, b)));
     r.post('/list-agents', call(b => listAgents(b.instanceId)));
     // The run board (GUI).
@@ -1601,7 +1714,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   return {
     router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report, sendMessage, listAgents,
     handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
-    pauseRun, refreshOrchestrator, resumeRun, resumeWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted,
+    pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted,
     memberModelChanged,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
