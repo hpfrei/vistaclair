@@ -1,9 +1,12 @@
 // Orchestrator CLI sessions: one CLI tab that plans and delegates, worker tabs
 // that do the work, Claude Code's own cross-session messaging between them.
 //
-//   openCli(opts)        the one user-facing "new CLI" entry. `mode` unset asks
-//                        Simple / Orchestrator, `auth` unset asks an SDK
-//                        session's billing, in one dashboard ask form.
+//   openCli(opts)        the one user-facing "new CLI" entry. `mode` unset is an
+//                        orchestrator for an Agent SDK session (a caller's
+//                        resume is then dropped: the role starts fresh) and asks
+//                        Simple / Orchestrator for a terminal; `auth` unset asks
+//                        an SDK session's billing, in one dashboard ask form. An
+//                        explicit mode wins.
 //   engine               settings.engine 'cli' (a PTY tab) | 'sdk' (an Agent SDK
 //                        session, src/sdk-session.js). Never asked: `engine`
 //                        unset is the Agent SDK panel, or a terminal when the
@@ -278,8 +281,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return any ? map : null;
   }
 
-  // Ask what is still open — the session type, an SDK session's billing — in
-  // one form. The engine is decided before (openCli), never asked. Billing is a
+  // Ask what is still open — the session type (a terminal's only: openCli
+  // makes an SDK session an orchestrator), an SDK session's billing — in one
+  // form. The engine is decided before (openCli), never asked. Billing is a
   // question only when both credentials exist; with one, the form names it and
   // the session is pinned to it. The form defaults to an orchestrator, on the
   // subscription.
@@ -560,6 +564,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     let auth = givenAuth === 'apikey' || givenAuth === 'subscription' ? givenAuth : null;
     let model = null;
     let modelMap = null;
+    // An Agent SDK session is an orchestrator: only a terminal asks Simple /
+    // Orchestrator. That holds for a caller asking a resume too (Pro's app
+    // Change): the role starts a fresh transcript, so the resume is dropped;
+    // an explicit 'simple' keeps it.
+    if (!mode && engine === 'sdk') mode = 'orchestrator';
     if (!mode || (engine === 'sdk' && !auth)) {
       // One pending question per target: a double click joins the open ask.
       const key = opts.tabId || `cwd:${opts.cwd}`;

@@ -52,7 +52,8 @@ function handleMessage(ws, msg, bc) {
       break;
     }
     case 'cli:open': {
-      // "New CLI in directory…": openCli asks Simple / Orchestrator and an SDK
+      // "New CLI in directory…": openCli opens an Agent SDK session as an
+      // orchestrator, asks a terminal Simple / Orchestrator and an SDK
       // session's billing (the same ask an app's Change gets) — only what the
       // message leaves open — then mints the tab and launches it. The tab reaches every
       // client through cli:tabs; the reply lets the requester switch to it.
