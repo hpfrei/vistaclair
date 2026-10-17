@@ -3,8 +3,8 @@
  * The server's New CLI ask (orchestration.askMode) carries formData.kind
  * 'new-cli' and formData.newCli; cli.js's ask overlay hands such a form here
  * instead of building the generic one. The dialog asks the session type (only
- * when the server leaves it open: a terminal, or a resumed SDK session — a new
- * SDK session comes with given.mode 'orchestrator'), an SDK session's billing, an orchestrator's own model, and an optional routing
+ * for a terminal: an SDK session comes with given.mode 'orchestrator'), an SDK
+ * session's billing, an orchestrator's own model, and an optional routing
  * of model families to other models (the tab's modelMap, applied by the proxy
  * to the whole session or run). The engine is never asked: the server decides
  * it (given.engine — the Agent SDK panel, or a terminal by the fallback pref).

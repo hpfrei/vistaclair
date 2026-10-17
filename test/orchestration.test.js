@@ -193,7 +193,7 @@ test('openCli with a mode and an engine never asks', async () => {
   assert.ok(!broadcasts.some(m => m.type === 'ask:question'));
 });
 
-test('openCli: a new Agent SDK session is an orchestrator, never asked Simple; an explicit simple or a resume is kept', async () => {
+test('openCli: an Agent SDK session is an orchestrator, never asked Simple, a resume included; an explicit simple is kept', async () => {
   let creds = { apiKey: true, subscription: false };
   const { mgr, orch, pendingQuestions, broadcasts } = setup({ credentials: () => creds });
   const cwd = tmpDir();
@@ -230,18 +230,21 @@ test('openCli: a new Agent SDK session is an orchestrator, never asked Simple; a
   const rb = await b;
   assert.deepStrictEqual({ mode: rb.mode, auth: rb.auth }, { mode: 'orchestrator', auth: 'apikey' });
 
-  // A resume (Pro's app Change on an app with content) is never made an
-  // orchestrator unasked: the mode is asked, and Simple keeps the resume.
+  // A resume (Pro's app Change on an app with content) is an orchestrator too,
+  // unasked: the role starts a fresh transcript, so the resume is dropped. An
+  // explicit simple keeps it.
   creds = { apiKey: true, subscription: false };
+  const before = asks().length;
   for (const spawnOpts of [{ resume: true }, { resumeSessionId: crypto.randomUUID() }]) {
-    const r = orch.openCli({ cwd, engine: 'sdk', spawnOpts });
-    assert.deepStrictEqual(asks().at(-1).forms[0].formData.questions.map(q => q.id), ['mode']);
-    reply({ mode: 'Simple CLI' });
-    const rr = await r;
-    assert.strictEqual(rr.mode, 'simple');
-    assert.strictEqual(mgr.sessions.get(rr.tabId).settings.orchestration, undefined);
-    assert.deepStrictEqual(mgr.launches.at(-1).opts.spawnOpts, spawnOpts, 'the resume is kept');
+    const rr = await orch.openCli({ cwd, engine: 'sdk', spawnOpts });
+    assert.strictEqual(rr.mode, 'orchestrator');
+    assert.strictEqual(mgr.sessions.get(rr.tabId).settings.orchestration.role, 'orchestrator');
+    assert.deepStrictEqual(mgr.launches.at(-1).opts.spawnOpts, {}, 'the resume is dropped');
+    const rk = await orch.openCli({ cwd, engine: 'sdk', mode: 'simple', spawnOpts });
+    assert.strictEqual(mgr.sessions.get(rk.tabId).settings.orchestration, undefined);
+    assert.deepStrictEqual(mgr.launches.at(-1).opts.spawnOpts, spawnOpts, 'an explicit simple keeps the resume');
   }
+  assert.strictEqual(asks().length, before, 'nothing asked');
 });
 
 test('openCli never asks the engine: the Agent SDK panel, a terminal by the fallbackEngine pref, or the caller\'s', async () => {
@@ -333,18 +336,11 @@ test('openCli: an SDK session\'s billing is asked only when both credentials exi
   assert.strictEqual((await orch.openCli({ cwd, mode: 'simple', engine: 'cli' })).auth, null);
   assert.strictEqual(broadcasts.filter(m => m.type === 'ask:question').length, asks);
 
-  // Only the subscription: the session is pinned to it; a form asking the
-  // mode (a resume) names it.
+  // Only the subscription: nothing left to ask; the session is pinned to it.
   creds = { apiKey: false, subscription: true };
   const asked = broadcasts.filter(m => m.type === 'ask:question').length;
-  const re = await orch.openCli({ cwd, engine: 'sdk' });
+  const rd = await orch.openCli({ cwd, engine: 'sdk' });
   assert.strictEqual(broadcasts.filter(m => m.type === 'ask:question').length, asked, 'nothing left to ask');
-  assert.strictEqual(mgr.sessions.get(re.tabId).settings.auth, 'subscription');
-  const d = orch.openCli({ cwd, engine: 'sdk', spawnOpts: { resume: true } });
-  assert.deepStrictEqual(lastAsk().forms[0].formData.questions.map(q => q.id), ['mode']);
-  assert.match(lastAsk().forms[0].formData.description, /Claude subscription \(the only Claude credential configured\)/);
-  reply({ mode: 'Simple CLI' });
-  const rd = await d;
   assert.strictEqual(mgr.sessions.get(rd.tabId).settings.auth, 'subscription');
 });
 

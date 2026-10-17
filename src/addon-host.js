@@ -83,8 +83,8 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       broadcaster, store, cliSessionManager, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab,
       isOwnerRequest,
       // The user-facing "new CLI" entry (src/orchestration.js): `mode` 'simple' |
-      // 'orchestrator', or unset: an orchestrator for a new Agent SDK session,
-      // asked for a terminal or a resume. Resolves { tabId, mode } or
+      // 'orchestrator', or unset: an orchestrator for an Agent SDK session
+      // (spawnOpts' resume dropped), asked for a terminal. Resolves { tabId, mode } or
       // { cancelled: true }. launchSession stays the never-asking primitive.
       openCli,
       // Whether external (Telegram) login is configured — one of the signals
