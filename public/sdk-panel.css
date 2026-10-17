@@ -2,8 +2,8 @@
    AGENT SDK PANEL (sdk-panel.js) and <vc-composer> (vc-composer.js)
    An SDK tab's wrap holds one panel: toolbar, a stage with the
    orchestrator's box across the top and the worker boxes in one row below,
-   joined by SVG curves drawn behind them, and the composer docked at the
-   bottom. Each box shows one view (TODO / Notes / Live) and scrolls it.
+   joined by SVG curves drawn behind them (the closed workers on a shelf at
+   the row's left end), and the composer docked at the bottom. Each box shows one view (TODO / Notes / Live) and scrolls it.
    ============================================================ */
 
 /* Tab strip: the "SDK" badge after the label. */
@@ -106,6 +106,8 @@
 .sdk-link-busy circle { fill: var(--busy); }
 .sdk-link-awaiting path { stroke: var(--orange); }
 .sdk-link-ended path { stroke-dasharray: 3 4; opacity: .6; }
+.sdk-link-shelf path { stroke-dasharray: 2 5; opacity: .4; }
+.sdk-link-shelf circle { opacity: .4; }
 .sdk-link path.flash-down, .sdk-link path.flash-up { stroke: var(--magenta); stroke-width: 2.4; stroke-dasharray: 7 6; }
 .sdk-link path.flash-down { animation: sdk-dash-down .45s linear infinite; }
 .sdk-link path.flash-up { animation: sdk-dash-up .45s linear infinite; }
@@ -117,6 +119,9 @@
 .sdk-workers { position: relative; z-index: 1; display: flex; justify-content: center; gap: 18px; flex: 1; min-height: 0; }
 .sdk-panel:not(.has-workers) .sdk-workers { display: none; }
 .sdk-workers > .sdk-area { flex: 1 1 0; min-width: 0; max-width: 50%; }
+/* The boxes centre in the room the shelf leaves. */
+.sdk-workers > .sdk-area:first-of-type { margin-left: auto; }
+.sdk-workers > .sdk-area:last-of-type { margin-right: auto; }
 .sdk-workers.crowded { gap: 10px; }
 .sdk-workers.crowded > .sdk-area { max-width: none; }
 .sdk-workers.crowded > .sdk-area-ended { flex-grow: .5; }
@@ -140,6 +145,85 @@
 .sdk-area-is-blocked { border-color: color-mix(in srgb, var(--red) 70%, var(--border)); }
 .sdk-area-ended { opacity: .62; }
 .sdk-area-ended:hover { opacity: 1; }
+/* A shelved worker's box, opened from its card. */
+.sdk-area-opened { border-style: dashed; opacity: 1; }
+.sdk-shelve { display: none; }
+.sdk-area-opened .sdk-shelve {
+  display: inline-block;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  line-height: 17px;
+  cursor: pointer;
+}
+.sdk-area-opened .sdk-shelve:hover { color: var(--accent); border-color: var(--accent); }
+
+/* --- the shelf: one card per closed worker, at the row's left end --- */
+.sdk-shelf {
+  flex: 0 0 176px;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  overflow: hidden;
+  transition: flex-basis .2s;
+}
+.sdk-shelf-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.sdk-shelf-tab:hover { color: var(--text); background: var(--bg-hover); }
+.sdk-shelf-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sdk-shelf-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 5px; padding: 6px; }
+/* Folded: a narrow tab, its text running down. */
+.sdk-shelf.folded { flex-basis: 28px; }
+.sdk-shelf.folded .sdk-shelf-list { display: none; }
+.sdk-shelf.folded .sdk-shelf-tab { flex: 1; flex-direction: column; padding: 8px 0; border-bottom: none; writing-mode: vertical-rl; }
+.sdk-shelf-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.sdk-shelf-card:hover { background: var(--bg-hover); }
+.sdk-shelf-card.open { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+.sdk-shelf-card:focus-visible, .sdk-shelf-tab:focus-visible, .sdk-shelve:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sdk-shelf-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sdk-shelf-meta { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
+.sdk-shelf-meta > .sdk-chip { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sdk-shelf-ago { color: var(--text-dim); font-family: var(--vc-mono, ui-monospace, monospace); font-size: 10px; }
+.sdk-shelf-cost { margin-left: auto; color: var(--green); font-family: var(--vc-mono, ui-monospace, monospace); font-size: 10px; }
+@media (prefers-reduced-motion: reduce) {
+  .sdk-shelf { transition: none; }
+}
 @keyframes sdk-glow {
   50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--busy) 22%, transparent); }
 }
@@ -246,7 +330,7 @@
 .sdk-state-awaiting { background: color-mix(in srgb, var(--orange) 25%, transparent); color: var(--orange); font-weight: 600; }
 .sdk-state-paused, .sdk-state-pausing { background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow); }
 .sdk-state-exited { background: var(--bg-hover); color: var(--text-dim); }
-.sdk-area-report { background: color-mix(in srgb, var(--cyan) 18%, transparent); color: var(--cyan); }
+.sdk-area-report, .sdk-shelf-rep { background: color-mix(in srgb, var(--cyan) 18%, transparent); color: var(--cyan); }
 .sdk-report-done, .sdk-report-complete { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
 .sdk-report-blocked, .sdk-report-failed { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
 @keyframes sdk-pulse { 50% { opacity: .35; } }
@@ -725,7 +809,14 @@
   .sdk-links { display: none; }
   .sdk-panel.has-workers .sdk-main-slot { flex: 0 0 auto; height: 62vh; }
   .sdk-workers { flex-direction: column; flex: 0 0 auto; }
-  .sdk-workers > .sdk-area { max-width: none; height: 55vh; flex: 0 0 auto; }
+  .sdk-workers > .sdk-area { max-width: none; height: 55vh; flex: 0 0 auto; margin: 0; }
+  /* The shelf: a strip of chips above the column. */
+  .sdk-shelf { flex: 0 0 auto; flex-direction: row; align-items: center; }
+  .sdk-shelf-tab { border-bottom: none; border-right: 1px solid var(--border); align-self: stretch; }
+  .sdk-shelf-list { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding: 5px; }
+  .sdk-shelf-card { flex-direction: row; align-items: center; gap: 6px; max-width: 70vw; padding: 3px 9px; border-radius: 999px; }
+  .sdk-shelf-cost { margin-left: 0; }
+  .sdk-shelf.folded .sdk-shelf-tab { flex: 0 0 auto; flex-direction: row; padding: 4px 8px; border-right: none; writing-mode: horizontal-tb; }
   .sdk-toolbar { padding: 4px 8px; gap: 6px; }
   .sdk-toolbar-meta { display: none; }
   .vc-composer { padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
