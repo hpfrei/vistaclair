@@ -181,6 +181,24 @@ function buildClaudeArgs(opts, { skipTools, outputFormat = 'stream-json' } = {})
   return _appendCommonFlags(args, opts);
 }
 
+// Tools an orchestration role never gets, on either engine (--disallowedTools
+// for a CLI tab, options.disallowedTools for an SDK session). Workflows and
+// plan mode would bypass the run's caps and flow; the orchestrator watches
+// workers through events, not Monitor, and reviews nothing itself; a worker
+// asks its orchestrator, not the user — so it loses AskUserQuestion in both
+// forms (the built-in, and the integrated MCP twin the proxy rewrites it to).
+const ROLE_DISALLOWED_TOOLS = {
+  orchestrator: ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'Monitor', 'ReportFindings'],
+  worker: ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion', 'mcp__integrated__vista-AskUserQuestion'],
+};
+
+// The tools a session's settings deny it: its orchestration role's list (none
+// without a role), after `base` (the engine's own), without duplicates.
+function disallowedToolsFor(settings, base = []) {
+  const role = settings?.orchestration?.role;
+  return [...new Set([...base, ...(ROLE_DISALLOWED_TOOLS[role] || [])])];
+}
+
 /**
  * Build CLI args for interactive PTY mode.
  * No -p, --output-format, or --verbose flags.
@@ -194,6 +212,8 @@ function buildCliArgs(settings) {
   // Session-scoped subagent definitions, e.g. an orchestration worker's
   // coder/explorer pair with their models fixed.
   if (settings.agents && typeof settings.agents === 'object') args.push('--agents', JSON.stringify(settings.agents));
+  const denied = disallowedToolsFor(settings);
+  if (denied.length) args.push('--disallowedTools', denied.join(','));
   return _appendCommonFlags(args, settings);
 }
 
@@ -635,6 +655,8 @@ module.exports = {
   buildClaudeArgs,
   spawnClaude,
   buildCliArgs,
+  disallowedToolsFor,
+  ROLE_DISALLOWED_TOOLS,
   spawnClaudePty,
   buildClaudeEnv,
   setProcessBroadcaster,

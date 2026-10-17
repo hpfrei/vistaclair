@@ -59,7 +59,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const caps = require('./capabilities');
-const { buildClaudeEnv, trackInstance, DATA_HOME } = require('./utils');
+const { buildClaudeEnv, trackInstance, disallowedToolsFor, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
 const { modelFamily } = require('./proxy');
 const { notifyAuthFailed } = require('./ws/claude-auth-handler');
@@ -74,7 +74,8 @@ const ready = import(SDK_PACKAGE).then(
 ready.catch(() => {});   // reported by whoever awaits it (server boot)
 
 // Claude Code's own cross-session messaging is replaced by the orchestrator
-// MCP server's tools of the same names (lib/orchestrator-mcp.js).
+// MCP server's tools of the same names (lib/orchestrator-mcp.js). A run
+// member also loses its role's tools (utils.disallowedToolsFor).
 const DISALLOWED_TOOLS = ['SendMessage', 'ListAgents'];
 const SETTING_SOURCES = ['user', 'project', 'local'];
 
@@ -432,7 +433,7 @@ class SdkSession {
       settingSources: [...SETTING_SOURCES],
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
-      disallowedTools: [...DISALLOWED_TOOLS],
+      disallowedTools: disallowedToolsFor(s, DISALLOWED_TOOLS),
       includePartialMessages: true,
       // Subagents' text and thinking too, not only their tool calls.
       forwardSubagentText: true,

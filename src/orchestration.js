@@ -33,8 +33,8 @@
 //                        is busy, or by typing a one-line notice into its tab when
 //                        it is idle (which starts a turn).
 //   tools                lib/orchestrator-mcp.js: launch_cli, resume_worker,
-//                        close_worker, list_workers, end_run (orchestrator);
-//                        report (workers);
+//                        close_worker, stop_worker, list_workers, end_run
+//                        (orchestrator); report (workers);
 //                        SendMessage, ListAgents (both, SDK runs: Claude Code's
 //                        own cross-session messaging is a CLI feature). A message
 //                        is submitted into its target with priority 'next' (an
@@ -88,7 +88,7 @@ const WORKER_AGENTS = {
     description: 'Read-only search and reading: finds code, traces call paths, answers questions about the codebase. Never modifies files.',
     prompt: `You are a read-only exploration subagent. Search and read to answer the question you were given. Do not modify any file. Return concise conclusions with file:line references, not file dumps. ${folders.CONTROL_TRUST}`,
     model: 'sonnet',
-    tools: ['Read', 'Grep', 'Glob', 'Bash', 'WebFetch', 'WebSearch'],
+    tools: ['Read', 'Bash', 'WebFetch', 'WebSearch'],
   },
 };
 
@@ -149,9 +149,9 @@ function orchestratorCard(run) {
     '',
     'Rules',
     `1. Never write or edit code or project files yourself. The only files you write are your TODO.md and NOTES.md in ${dir} (edits elsewhere are blocked). Reading, searching and read-only commands to plan are fine.`,
-    `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${MAX_WORKERS} workers run at once. A follow-up for a running worker goes to it with SendMessage — never relaunch it.`,
+    `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${MAX_WORKERS} workers run at once. A follow-up for a running worker goes to it with SendMessage — never relaunch it. A trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none.`,
     '3. A brief must be self-contained: the goal, the files or areas involved, acceptance criteria (how the worker proves it is done), constraints, and what is already ruled out. The worker knows only what you write.',
-    `4. Keep ${todo} current: update it after every launch, report and event. One row per task in its table (id | description | depends on | status): name the worker in the description; status is queued|running|blocked|done|failed followed by the last report in a few words. It is your memory — after a compaction or resume, read it and NOTES.md first.`,
+    `4. For a non-trivial request, write the plan as TODO rows and confirm it with the user (AskUserQuestion) before fanning out to several workers. Keep ${todo} current: update it after every launch, report and event. One row per task in its table (id | description | depends on | status): name the worker in the description; status is queued|running|blocked|done|failed followed by the last report in a few words. It is your memory — after a compaction or resume, read it and NOTES.md first.`,
     '5. Workers report with the `report` tool and SendMessage. Worker events (report, exited, idle without reporting) arrive in your context automatically, marked "[orchestration]". Act on each one and update the TODO.',
     `6. \`list_workers\` shows every worker's state. ${isolation}`,
     `7. You may run at most ${MAX_SUBAGENTS} subagents at once, for reading only (e.g. Explore). Never use a subagent to edit code.`,
@@ -160,6 +160,7 @@ function orchestratorCard(run) {
     '10. To see how a worker is doing, read its TODO.md and NOTES.md (`list_workers` gives the paths, its current item and recent actions). Never message a worker just to ask for its status.',
     '11. A paused worker is resumed with `resume_worker` ("continue" keeps its own context; "fresh" starts a clean session from its brief and notes). Never relaunch a paused worker\'s task with launch_cli.',
     '12. Unrelated new work goes to a new worker. Close a finished worker you will not reuse with `close_worker` (it stays listed and resumable with resume_worker); reuse a worker by SendMessage only for a follow-up in the area it just worked on.',
+    '13. A worker going the wrong way: `stop_worker` ends its current turn and leaves it idle; then SendMessage it new instructions, or close_worker it.',
   ].join('\n');
 }
 
@@ -192,7 +193,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   const modelCatalog = models || (() => require('./capabilities').listModelsWithAvailability(dataHome));
   const HOOK_SCRIPT = path.join(coreRoot, 'lib', 'orchestration-hook.js');
   const runDirs = new Map();       // runId -> runDir (rebuilt from stamps on miss)
-  const volatile = new Map();      // session name -> { agents, reported, nudged }
+  const volatile = new Map();      // session name -> { agents, reported, nudged, stopping }
   const pushTimers = new Map();    // runId -> timeout
   const pendingAsks = new Map();   // dedupe key -> Promise
   const relayTimers = new Map();   // worker name -> pause fallback timeout
@@ -795,6 +796,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           cwd: w.cwd, branch: w.branch, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: w.lastReport,
           paused: !!w.paused, abandoned: !!w.abandoned,
           closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
+          ...(w.turnStopped ? { turnStopped: w.turnStopped } : {}),
           brief: clip(w.task, 300),
           ...(run.engine === 'sdk' ? { context: live?.session.running ? contextOf(live.session) : null } : {}),
           todo: w.sessionDir ? path.join(w.sessionDir, 'TODO.md') : null,
@@ -1145,7 +1147,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!fresh.workers.some(x => x.paused)) fresh.paused = null;
     saveRun(fresh);
     const v = vol(w.name);
-    v.agents = 0; v.reported = false; v.nudged = false;
+    v.agents = 0; v.reported = false; v.nudged = false; v.stopping = false;
     return { worker: w.name, tabId, mode: mode === 'fresh' || lost ? 'fresh' : 'continue', ...(lost ? { fellBack: true, note: 'its conversation could not be restored, so it was started fresh from its brief and notes' } : {}) };
   }
 
@@ -1172,10 +1174,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!w) throw new Error(`no worker ${worker} in this run`);
     const live = workerSession(run, w.id);
     if (!live?.session.running) throw new Error(`${w.name} is not running${w.closed ? ' (already closed)' : w.paused ? ' (paused)' : ''}`);
-    if (live.session.busy) throw new Error(`${w.name} is busy: close it once it has reported and gone idle`);
+    if (live.session.busy) throw new Error(`${w.name} is busy: close it once it has reported and gone idle, or stop it first with stop_worker`);
     const status = w.lastReport?.status;
-    if (!['done', 'failed'].includes(status)) {
-      throw new Error(`${w.name} has not finished (last report: ${status || 'none'}): only a worker whose last report is done or failed can be closed`);
+    if (!['done', 'failed'].includes(status) && !w.turnStopped) {
+      throw new Error(`${w.name} has not finished (last report: ${status || 'none'}): only a worker whose last report is done or failed, or one stopped with stop_worker, can be closed`);
     }
     const s = live.session;
     if (s.sessId && s.cwd) mgr.saveToHistory({ sessId: s.sessId, cwd: s.cwd, title: s.title, settings: s.getSettings(), autoMemory: s.autoMemory });
@@ -1183,6 +1185,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const now = new Date().toISOString();
     w.closed = true;
     w.closedAt = now;
+    delete w.turnStopped;
     w.exitedAt = now;
     if (typeof s.costUsd === 'number') w.costUsd = s.costUsd;
     volatile.delete(w.name);
@@ -1194,6 +1197,33 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       worker: w.name, closed: true, closedAt: now, lastReport: status,
       ...(open > 0 ? { note: `closed with ${open} open TODO row(s): its last report was ${status}` } : {}),
       resume: 'it stays in list_workers; resume_worker (continue or fresh) brings it back',
+    };
+  }
+
+  // stop_worker (orchestrator tool): end a busy worker's current turn (the SDK
+  // session's interrupt, Esc in a terminal) without closing it. It stays
+  // running and idle with its folder, branch and transcript; the orchestrator
+  // sends it new instructions or closes it. The Stop that ends the interrupted
+  // turn, if any, is neither nudged nor reported as idle. Recorded as a run
+  // event, not delivered back: the orchestrator stopped it itself.
+  function stopWorker(instanceId, { worker, reason = '' } = {}) {
+    const { run } = callerRun(instanceId, 'orchestrator');
+    if (run.pausing) throw new Error('this run is being paused');
+    const w = run.workers.find(x => x.name === worker || x.id === worker);
+    if (!w) throw new Error(`no worker ${worker} in this run`);
+    const live = workerSession(run, w.id);
+    if (!live?.session.running) throw new Error(`${w.name} is not running${w.closed ? ' (closed)' : w.paused ? ' (paused)' : ''}`);
+    if (!live.session.busy) throw new Error(`${w.name} is idle: nothing to stop. Send it new instructions with SendMessage, or close it with close_worker`);
+    vol(w.name).stopping = true;
+    if (typeof live.session.interrupt === 'function') live.session.interrupt();
+    else live.session.write('\x1b');
+    const at = new Date().toISOString();
+    const why = clip(String(reason || '').trim(), 500);
+    w.turnStopped = { at, ...(why ? { reason: why } : {}) };
+    addEvent(run, { worker: w.name, kind: 'stopped', text: `${w.name} was stopped by the orchestrator${why ? `: ${why}` : ''}`, delivered: true });
+    return {
+      worker: w.name, stopped: true, at,
+      next: 'it stays running and goes idle: send it new instructions with SendMessage, or close it with close_worker',
     };
   }
 
@@ -1259,10 +1289,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // A running worker the orchestrator may close (close_worker): idle, and its
-  // last report is done or failed. Open TODO rows do not hold it.
+  // last report is done or failed, or it was stopped (stop_worker). Open TODO
+  // rows do not hold it.
   function workerAvailable(run, w) {
     const live = workerSession(run, w.id);
-    return !!live?.session.running && !live.session.busy && ['done', 'failed'].includes(w.lastReport?.status);
+    return !!live?.session.running && !live.session.busy && (['done', 'failed'].includes(w.lastReport?.status) || !!w.turnStopped);
   }
 
   // A live worker that no longer holds its orchestrator's close: available
@@ -1311,6 +1342,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const w = run.workers.find(x => x.id === stamp.workerId);
     if (!w) throw new Error('worker not found in run');
     w.lastReport = { status: status || 'update', summary: summary || '', filesChanged: filesChanged || [], verified: verified || '', open: open || '', at: new Date().toISOString() };
+    delete w.turnStopped;
     const parts = [`${w.name} reported ${w.lastReport.status}: ${clip(summary, 600)}`];
     if (w.lastReport.filesChanged.length) parts.push(`files: ${w.lastReport.filesChanged.join(', ')}`);
     if (verified) parts.push(`verified: ${clip(verified, 300)}`);
@@ -1412,7 +1444,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       inbox.set(target.name, q);
       delivery = 'queued';
     }
-    if (stamp.role === 'orchestrator' && target.role === 'worker') addFollowUp(run, target.id, text);
+    if (stamp.role === 'orchestrator' && target.role === 'worker') {
+      delete target.worker.turnStopped;   // its new instructions: no longer a stopped worker
+      addFollowUp(run, target.id, text);
+    }
     const ev = { platform: { kind: 'message', from, to: target.name, text } };
     emitTo(session, run, ev);
     emitTo(ts, run, ev);
@@ -1435,12 +1470,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // --- Events and delivery ---
 
-  function addEvent(run, { worker, kind, text }) {
+  // `delivered`: recorded for the run board only (the orchestrator caused it),
+  // unless older events still wait, which carry it along.
+  function addEvent(run, { worker, kind, text, delivered = false }) {
     const seq = (run.events.length ? run.events[run.events.length - 1].seq : 0) + 1;
     run.events.push({ seq, at: new Date().toISOString(), worker, kind, text });
     if (run.events.length > 200) run.events = run.events.slice(-200);
+    if (delivered && run.delivered === seq - 1) run.delivered = seq;
     saveRun(run);
-    schedulePush(run.runId);
+    if (run.delivered < seq) schedulePush(run.runId);
   }
 
   function takeEvents(run) {
@@ -1564,7 +1602,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     switch (ev) {
       case 'SessionStart': {
         const src = input.source;
-        if (src === 'startup' || src === 'resume' || src === 'clear') { v.agents = 0; v.reported = false; v.nudged = false; }
+        if (src === 'startup' || src === 'resume' || src === 'clear') { v.agents = 0; v.reported = false; v.nudged = false; v.stopping = false; }
         if (isOrch) {
           run.busy = false;
           if (src === 'compact') run.compactions = (run.compactions || 0) + 1;
@@ -1587,7 +1625,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         return ctxOut('SessionStart', clip(text, CONTEXT_LIMIT));
       }
       case 'UserPromptSubmit': {
-        if (!isOrch) { v.reported = false; v.nudged = false; return ctxOut('UserPromptSubmit', takeInbox(name)); }
+        if (!isOrch) { v.reported = false; v.nudged = false; v.stopping = false; return ctxOut('UserPromptSubmit', takeInbox(name)); }
         run.busy = true;
         // The run's original request, for a fresh orchestrator's seed: the first
         // prompt that is not one of the dashboard's own notices.
@@ -1657,6 +1695,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           saveRun(run);
           return {};
         }
+        // The orchestrator stopped this turn (stop_worker): it ends here.
+        if (v.stopping) { v.stopping = false; return {}; }
         // A message arrived during the turn: it continues with it.
         const msgs = takeInbox(name);
         if (msgs) return { stdout: JSON.stringify({ decision: 'block', reason: msgs }) };
@@ -1696,6 +1736,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     r.post('/report', call(b => report(b.instanceId, b)));
     r.post('/resume-worker', call(b => resumeWorker(b.instanceId, b)));
     r.post('/close-worker', call(b => closeWorker(b.instanceId, b)));
+    r.post('/stop-worker', call(b => stopWorker(b.instanceId, b)));
     r.post('/send-message', call(b => sendMessage(b.instanceId, b)));
     r.post('/list-agents', call(b => listAgents(b.instanceId)));
     // The run board (GUI).
@@ -1714,7 +1755,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   return {
     router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report, sendMessage, listAgents,
     handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
-    pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted,
+    pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted,
     memberModelChanged,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
