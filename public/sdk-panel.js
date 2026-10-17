@@ -236,7 +236,7 @@
       this.mappedTo = null;          // the tab's modelMap target, when it rewrites
       this.initModel = null;         // system/init, before any status names one
       this.todo = null;
-      this.context = null;           // { tokens, window, compactAt } from the status
+      this.context = null;           // { tokens, window, compactAt, windowEstimated } from the status
       this.queue = [];
       this.historyPending = false;
       // A stored view this panel no longer has (the old TODO) opens Live.
@@ -428,7 +428,8 @@
       const s = this.state || 'idle';
       const ended = ENDED.has(s);
       this.stateEl.textContent = STATE_TEXT[s] || s;
-      this.stateEl.className = `sdk-chip sdk-area-state sdk-state-${ended ? 'exited' : s}`;
+      // Idle says nothing the header does not: no chip (and no gap) for it.
+      this.stateEl.className = `sdk-chip sdk-area-state sdk-state-${ended ? 'exited' : s}${s === 'idle' ? ' hidden' : ''}`;
       this.awaitEl.classList.toggle('hidden', s !== 'awaiting');
       const r = this.lastReport;
       const rs = String(r?.status || '').toLowerCase().replace(/[^a-z]/g, '');
@@ -462,8 +463,9 @@
       this.renderNow();
     }
 
-    // The main agent's context: % of the window (tokens while the window is
-    // unknown), warmer as it nears the auto-compact threshold.
+    // The main agent's context: % of the window, exact or the model
+    // catalogue's estimate (tokens only for a model the catalogue does not
+    // know), warmer as it nears the auto-compact threshold.
     renderContext() {
       const c = this.context;
       this.ctxEl.classList.toggle('hidden', !(c?.tokens > 0));
@@ -476,9 +478,11 @@
       this.ctxFill.style.width = pct == null ? '0' : `${Math.min(100, pct)}%`;
       const n = (v) => Math.round(v).toLocaleString();
       this.ctxEl.title = [
-        `Context: ${n(c.tokens)}${c.window ? ` of ${n(c.window)}` : ''} tokens${pct != null ? ` (${pct.toFixed(1)}%)` : ''}`,
+        pct != null ? `Context: ${n(c.tokens)} of ${n(c.window)} tokens (${pct.toFixed(1)}%)` : `Context: ${n(c.tokens)} tokens`,
+        pct == null ? 'Context window not known yet: this model is not in the model catalogue, the end of the turn tells.'
+          : c.windowEstimated ? 'Window estimated from the model catalogue until the end of the turn gives the exact one.' : null,
         c.compactAt ? `Auto-compacts at ${n(c.compactAt)} tokens (${Math.round((c.tokens / c.compactAt) * 100)}% of the way)` : null,
-        this.compactions ? `Compacted ${this.compactions}× so far` : null,
+        this.compactions ? `Compacted ${this.compactions}× so far` : 'Not compacted yet',
         'The main agent only: each subagent has its own context.',
       ].filter(Boolean).join('\n');
     }
