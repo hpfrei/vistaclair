@@ -102,8 +102,8 @@
 .sdk-links { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; overflow: visible; }
 .sdk-link path { fill: none; stroke: var(--border); stroke-width: 1.6; transition: stroke .3s; }
 .sdk-link circle { fill: var(--border); }
-.sdk-link-busy path { stroke: color-mix(in srgb, var(--accent) 70%, var(--border)); }
-.sdk-link-busy circle { fill: var(--accent); }
+.sdk-link-busy path { stroke: color-mix(in srgb, var(--busy) 70%, var(--border)); }
+.sdk-link-busy circle { fill: var(--busy); }
 .sdk-link-awaiting path { stroke: var(--orange); }
 .sdk-link-ended path { stroke-dasharray: 3 4; opacity: .6; }
 .sdk-link path.flash-down, .sdk-link path.flash-up { stroke: var(--magenta); stroke-width: 2.4; stroke-dasharray: 7 6; }
@@ -135,13 +135,13 @@
   transition: border-color .3s, box-shadow .3s, opacity .3s;
   container-type: inline-size;
 }
-.sdk-area-is-busy { border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); animation: sdk-glow 2.4s ease-in-out infinite; }
+.sdk-area-is-busy { border-color: color-mix(in srgb, var(--busy) 65%, var(--border)); animation: sdk-glow 2.4s ease-in-out infinite; }
 .sdk-area-is-awaiting { border-color: var(--orange); box-shadow: 0 0 0 1px var(--orange); }
 .sdk-area-is-blocked { border-color: color-mix(in srgb, var(--red) 70%, var(--border)); }
 .sdk-area-ended { opacity: .62; }
 .sdk-area-ended:hover { opacity: 1; }
 @keyframes sdk-glow {
-  50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+  50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--busy) 22%, transparent); }
 }
 
 /* The top border's row: the caption on the left, context and Inspector on
@@ -241,7 +241,7 @@
 }
 .sdk-insp:hover { color: var(--accent); border-color: var(--accent); }
 
-.sdk-state-busy { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.sdk-state-busy { background: color-mix(in srgb, var(--busy) 22%, transparent); color: var(--busy); }
 .sdk-state-busy::before { content: '● '; animation: sdk-pulse 1.2s ease-in-out infinite; }
 .sdk-state-awaiting { background: color-mix(in srgb, var(--orange) 25%, transparent); color: var(--orange); font-weight: 600; }
 .sdk-state-paused, .sdk-state-pausing { background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow); }
@@ -254,7 +254,7 @@
    and a breathing fill, whichever view is open. Other states keep the chip. */
 .sdk-area-worker.sdk-area-is-busy .sdk-area-state.sdk-state-busy { display: none; }
 .sdk-area-worker.sdk-area-is-busy .sdk-seg button[data-v="live"] {
-  color: var(--accent);
+  color: var(--busy);
   font-weight: 600;
   animation: sdk-live-breathe 1.6s ease-in-out infinite;
 }
@@ -263,13 +263,13 @@
   animation: sdk-pulse 1.2s ease-in-out infinite;
 }
 @keyframes sdk-live-breathe {
-  0%, 100% { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
-  50% { background: color-mix(in srgb, var(--accent) 42%, var(--bg)); }
+  0%, 100% { background: color-mix(in srgb, var(--busy) 14%, var(--bg)); }
+  50% { background: color-mix(in srgb, var(--busy) 42%, var(--bg)); }
 }
 @media (prefers-reduced-motion: reduce) {
   .sdk-area-worker.sdk-area-is-busy .sdk-seg button[data-v="live"],
   .sdk-area-worker.sdk-area-is-busy .sdk-seg button[data-v="live"]::before { animation: none; }
-  .sdk-area-worker.sdk-area-is-busy .sdk-seg button[data-v="live"] { background: color-mix(in srgb, var(--accent) 30%, var(--bg)); }
+  .sdk-area-worker.sdk-area-is-busy .sdk-seg button[data-v="live"] { background: color-mix(in srgb, var(--busy) 30%, var(--bg)); }
 }
 
 /* --- the toggle and the "now:" line --- */
@@ -308,7 +308,7 @@
   font-size: 11px;
   color: var(--text-dim);
 }
-.sdk-now-busy { color: var(--accent); }
+.sdk-now-busy { color: var(--busy); }
 .sdk-now-awaiting { color: var(--orange); font-weight: 600; }
 
 .sdk-area-awaiting {
@@ -331,7 +331,9 @@
 .sdk-empty { padding: 14px; color: var(--text-dim); font-size: 12px; text-align: center; }
 
 /* Live: the TODO table on top (as tall as it is, up to about half), the lite feed below */
-.sdk-todo-top { flex: 0 1 auto; max-height: 55%; min-height: 0; overflow-y: auto; }
+.sdk-todo-top { flex: 0 1 auto; max-height: 55%; min-height: 0; position: relative; display: flex; flex-direction: column; }
+.sdk-todo-scroll { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+.sdk-todo-top > .sdk-live-pill { bottom: 6px; }
 /* Moved by the splitter: its flex-basis is the stored share. */
 .sdk-todo-top.sized { flex-grow: 0; flex-shrink: 0; max-height: none; }
 .sdk-todo-split {
