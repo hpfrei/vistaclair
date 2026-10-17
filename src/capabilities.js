@@ -1146,6 +1146,49 @@ function getModelPricing(baseDir, modelName) {
   return null;
 }
 
+// --- Context window lookup ---
+
+// The catalogue's context window for a model string as the CLI and the API
+// name it: a `[1m]` suffix is a million tokens; otherwise the Anthropic
+// catalogue (hardcoded fallback, anthropic-pricing.json, models.json's
+// anthropic rows) by id with or without `claude-` and a date suffix, then by
+// the longest id it extends (claude-opus-5-5 → claude-opus-5). A family alias
+// (opus, sonnet[1m], opusplan) is its family's newest non-retired entry.
+// Null when nothing matches (default, best, a non-Anthropic model).
+function contextWindowFor(baseDir, model) {
+  const raw = String(model || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (/\[1m\]$/.test(raw)) return 1000000;
+  const bare = (id) => String(id || '').toLowerCase().replace(/^claude-/, '').replace(ANTHROPIC_DATED_RE, '');
+  const windows = new Map();   // bare id -> { window, lifecycle }
+  const add = (id, meta) => {
+    if (typeof meta?.contextWindow === 'number' && meta.contextWindow > 0) windows.set(bare(id), { window: meta.contextWindow, lifecycle: meta.lifecycle });
+  };
+  for (const m of readModelsFile(baseDir).models) if (m.providerKey === 'anthropic') add(m.modelId || m.name, m);
+  for (const [k, meta] of Object.entries(ANTHROPIC_CATALOG_FALLBACK)) add(k, meta);
+  try {
+    const file = JSON.parse(fs.readFileSync(path.join(baseDir, 'capabilities', 'anthropic-pricing.json'), 'utf-8')) || {};
+    for (const [k, meta] of Object.entries(file)) add(k, { ...(ANTHROPIC_CATALOG_FALLBACK[k] || {}), ...meta });
+  } catch {}
+  const id = bare(raw);
+  if (windows.has(id)) return windows.get(id).window;
+  const extended = [...windows.keys()].filter(k => id.startsWith(`${k}-`)).sort((a, b) => b.length - a.length)[0];
+  if (extended) return windows.get(extended).window;
+  const family = { opus: 'opus', opusplan: 'opus', sonnet: 'sonnet', haiku: 'haiku', fable: 'fable' }[id];
+  if (!family) return null;
+  // Newest by the version numbers in the id (opus-4-8 < opus-5).
+  const version = (k) => (k.match(/\d+/g) || []).map(Number);
+  const newer = (a, b) => {
+    const va = version(a), vb = version(b);
+    for (let i = 0; i < Math.max(va.length, vb.length); i++) if ((va[i] || 0) !== (vb[i] || 0)) return (va[i] || 0) - (vb[i] || 0);
+    return 0;
+  };
+  const newest = [...windows.entries()]
+    .filter(([k, v]) => v.lifecycle !== 'retired' && new RegExp(`(^|-)${family}(-|$)`).test(k))
+    .sort(([a], [b]) => newer(b, a))[0];
+  return newest ? newest[1].window : null;
+}
+
 // --- Refresh merge (server side) ---
 //
 // The refresh subprocesses only look things up and return JSON; the writes below
@@ -1782,6 +1825,7 @@ module.exports = {
   saveProvider,
   deleteProvider,
   getModelPricing,
+  contextWindowFor,
   scanProviderModels,
   refreshModelRegistry,
   reconcileAnthropicCatalog,

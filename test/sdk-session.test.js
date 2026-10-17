@@ -412,8 +412,8 @@ test('status: the main agent\'s context from each reply\'s usage, the window fro
   const reply = (n, pk = null) => q.emit({ type: 'assistant', message: { model: 'claude-opus-5-5', usage: usage(n), content: [] }, parent_tool_use_id: pk });
   reply(141000);
   await tick();
-  // Before any result: a [1m] model's window.
-  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 142002, window: 1000000, compactAt: null });
+  // Before any result: a [1m] model's window, an estimate.
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 142002, window: 1000000, compactAt: null, windowEstimated: true });
   // The same reply's next block, and a subagent's reply, are no news.
   const before = statuses(events).length;
   reply(141000);
@@ -428,14 +428,55 @@ test('status: the main agent\'s context from each reply\'s usage, the window fro
   } });
   await tick();
   assert.deepStrictEqual(q.contextAsks, [{ detail: 'summary' }], 'summary only: no token-count call');
-  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 150000, window: 1000000, compactAt: 900000 });
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 150000, window: 1000000, compactAt: 900000, windowEstimated: false });
   // A compaction drops it at once.
   q.emit({ type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 150000, post_tokens: 20000 } });
   await tick();
   assert.strictEqual(statuses(events).at(-1).context.tokens, 20000);
-  // A switch to a model without [1m]: the window is unknown until its first result.
+  // A switch: the catalogue's window for the new model until its first result.
   await s.setModel('haiku');
-  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 20000, window: null, compactAt: null });
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 20000, window: 200000, compactAt: null, windowEstimated: true });
+  // A model the catalogue does not know: no window at all.
+  await s.setModel('default');
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 20000, window: null, compactAt: null, windowEstimated: false });
+  s.kill();
+});
+
+test('status: a first turn without [1m] estimates the window from the catalogue, the answering model first', async () => {
+  const { s, sdk, calls, events } = makeSession({ model: 'sonnet' });
+  s.spawn(tmp('proj-'), 80, 24, {});
+  const q = calls[0];
+  const usage = { input_tokens: 2, cache_read_input_tokens: 40000, cache_creation_input_tokens: 0, output_tokens: 50 };
+  q.emit({ type: 'assistant', message: { model: 'claude-haiku-4-5-20251001', usage, content: [] }, parent_tool_use_id: null });
+  await tick();
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 40002, window: 200000, compactAt: null, windowEstimated: true });
+  // Another answering model re-estimates while the window is still an estimate.
+  q.emit({ type: 'assistant', message: { model: 'claude-sonnet-4-6', usage, content: [] }, parent_tool_use_id: null });
+  await tick();
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 40002, window: 1000000, compactAt: null, windowEstimated: true });
+  // The result's modelUsage replaces it; without getContextUsage's answer it stands.
+  sdk.contextUsage = null;
+  q.emit({ type: 'result', subtype: 'success', total_cost_usd: 1, modelUsage: { 'claude-sonnet-4-6': { contextWindow: 200000 } } });
+  await tick();
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 40002, window: 200000, compactAt: null, windowEstimated: false });
+  // An exact window is not re-estimated by a later reply.
+  q.emit({ type: 'assistant', message: { model: 'claude-haiku-4-5', usage: { ...usage, input_tokens: 9 }, content: [] }, parent_tool_use_id: null });
+  await tick();
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 40009, window: 200000, compactAt: null, windowEstimated: false });
+  s.kill();
+});
+
+test('status: a model the catalogue does not know has no window until a turn\'s end gives one', async () => {
+  const { s, sdk, calls, events } = makeSession({ model: 'default' });
+  s.spawn(tmp('proj-'), 80, 24, {});
+  const q = calls[0];
+  q.emit({ type: 'assistant', message: { model: 'claude-unknown-9', usage: { input_tokens: 45000 }, content: [] }, parent_tool_use_id: null });
+  await tick();
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 45000, window: null, compactAt: null, windowEstimated: false });
+  sdk.contextUsage = { totalTokens: 45000, maxTokens: 500000, autoCompactThreshold: 0, isAutoCompactEnabled: false };
+  q.emit({ type: 'result', subtype: 'success', total_cost_usd: 1, modelUsage: {} });
+  await tick();
+  assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 45000, window: 500000, compactAt: null, windowEstimated: false });
   s.kill();
 });
 

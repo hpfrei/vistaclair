@@ -38,11 +38,13 @@
 //                  from (cleared by a switch), and the tab's modelMap target for its family. The
 //                  cost of a resume starts from the last one its transcript
 //                  recorded and never goes below it. `context` ({ tokens,
-//                  window, compactAt }, once a main-agent reply has counted
-//                  it): the main agent's context from each reply's usage, the
-//                  window from the turn's modelUsage, both corrected at the
-//                  end of a turn by getContextUsage (summary: no API call),
-//                  which also names the auto-compact threshold.
+//                  window, compactAt, windowEstimated }, once a main-agent
+//                  reply has counted it): the main agent's context from each
+//                  reply's usage, the window from the turn's modelUsage, both
+//                  corrected at the end of a turn by getContextUsage (summary:
+//                  no API call), which also names the auto-compact threshold.
+//                  Until a turn's end (a first turn, a model switch) the
+//                  window is the model catalogue's, windowEstimated true.
 //   files          `{ platform: { kind: 'files', todo, notes } }` when a
 //                  main-agent tool call that wrote the folder's TODO.md /
 //                  NOTES.md has returned: the panel re-reads them (sdk:todo).
@@ -125,15 +127,22 @@ function contextTokens(usage) {
 
 // The main agent's context window from a result's modelUsage (keyed by model,
 // subagents' models included): the entry of the model that answered, else
-// the only one. Without either, a chosen `[1m]` model is a million tokens
-// (the answering model's id never carries the suffix).
-function contextWindowOf(modelUsage, answered, chosen) {
+// the only one; null without either.
+function contextWindowOf(modelUsage, answered) {
   const bare = (m) => String(m || '').replace(/\[1m\]$/i, '').replace(/^claude-/, '');
   const entries = Object.entries(modelUsage || {}).filter(([, u]) => u?.contextWindow > 0);
   const hit = answered && entries.find(([k, u]) => bare(k) === bare(answered) || bare(u.canonicalModel) === bare(answered));
   if (hit) return hit[1].contextWindow;
   if (entries.length === 1) return entries[0][1].contextWindow;
-  return /\[1m\]$/i.test(String(chosen || '')) ? 1000000 : null;
+  return null;
+}
+
+// Until a turn's end tells, the window the model catalogue gives: a chosen
+// `[1m]` model is a million tokens (the answering model's id never carries
+// the suffix), else the answering model's entry, else the chosen one's.
+function estimatedWindow(answered, chosen) {
+  if (/\[1m\]$/i.test(String(chosen || ''))) return 1000000;
+  return caps.contextWindowFor(DATA_HOME, answered) || caps.contextWindowFor(DATA_HOME, chosen) || null;
 }
 
 // The session's transcript file (envelopes, one per line).
@@ -276,7 +285,7 @@ class SdkSession {
     this._costFloor = 0;      // a resume's carried-over cost: no result lowers it
     this._initModel = null;   // the model system/init reported
     this.actualModel = null;  // the model of the last main-agent reply
-    this.context = { tokens: null, window: null, compactAt: null };   // the main agent's
+    this.context = { tokens: null, window: null, compactAt: null, windowEstimated: false };   // the main agent's
     this._fileTools = new Map();   // tool_use id -> { todo, notes } it writes
     this._pending = new Map();     // the owner's turns not yet taken in: uuid -> { text, images }
     this._echoes = false;          // this spawn's CLI echoes taken-in turns
@@ -521,8 +530,8 @@ class SdkSession {
       // Cumulative for the query: the latest wins, but never below the cost a
       // resume carried over.
       if (Number.isFinite(cost)) this.costUsd = Math.max(cost, this._costFloor);
-      const window = main ? contextWindowOf(msg.modelUsage, this.actualModel, this.settings.model || this._initModel) : null;
-      if (window) this.context.window = window;
+      const window = main ? contextWindowOf(msg.modelUsage, this.actualModel) : null;
+      if (window) this.context = { ...this.context, window, windowEstimated: false };
       this._setState(msg.queued_turn_count > 0 ? 'busy' : 'idle', { force: true });
       if (main) this._refreshContext();
     } else if (msg.type === 'assistant') {
@@ -541,7 +550,11 @@ class SdkSession {
       const tokens = main ? contextTokens(msg.message?.usage) : null;
       const contextChanged = tokens != null && tokens !== this.context.tokens;
       if (contextChanged) this.context.tokens = tokens;
-      if (contextChanged && !this.context.window) this.context.window = contextWindowOf(null, null, this.settings.model || this._initModel);
+      // No exact window yet: the catalogue's, again once the answering model is known.
+      if ((contextChanged && !this.context.window) || (modelChanged && this.context.windowEstimated)) {
+        const window = estimatedWindow(this.actualModel, this.settings.model || this._initModel);
+        if (window) this.context = { ...this.context, window, windowEstimated: true };
+      }
       if (this.state === 'idle') this._setState('busy');
       else if (modelChanged || contextChanged) this._emitStatus();
     } else if (msg.type === 'system' && msg.subtype === 'compact_boundary' && main) {
@@ -711,11 +724,13 @@ class SdkSession {
     Promise.resolve().then(() => q.getContextUsage({ detail: 'summary' })).then((u) => {
       if (gen !== this._spawnGen || !u) return;
       const tokens = u.totalTokens > 0 ? u.totalTokens : this.context.tokens;
-      const window = u.rawMaxTokens > 0 ? u.rawMaxTokens : u.maxTokens > 0 ? u.maxTokens : this.context.window;
-      const compactAt = u.isAutoCompactEnabled && u.autoCompactThreshold > 0 ? u.autoCompactThreshold : null;
       const c = this.context;
-      if (tokens === c.tokens && window === c.window && compactAt === c.compactAt) return;
-      this.context = { tokens, window, compactAt };
+      const exact = u.rawMaxTokens > 0 ? u.rawMaxTokens : u.maxTokens > 0 ? u.maxTokens : null;
+      const window = exact || c.window;
+      const windowEstimated = exact ? false : c.windowEstimated;
+      const compactAt = u.isAutoCompactEnabled && u.autoCompactThreshold > 0 ? u.autoCompactThreshold : null;
+      if (tokens === c.tokens && window === c.window && compactAt === c.compactAt && windowEstimated === c.windowEstimated) return;
+      this.context = { tokens, window, compactAt, windowEstimated };
       this._emitStatus();
     }, () => {});
   }
@@ -729,8 +744,10 @@ class SdkSession {
     if (this._query) await this._query.setModel(model);
     this.settings = { ...this.settings, model };
     this.actualModel = null; // unknown until the next reply
-    // Another model may have another window; the end of its first turn tells.
-    this.context = { ...this.context, window: contextWindowOf(null, null, model), compactAt: null };
+    // Another model may have another window: the catalogue's until the end
+    // of its first turn tells.
+    const window = estimatedWindow(null, model);
+    this.context = { ...this.context, window, windowEstimated: !!window, compactAt: null };
     this.onSettingsChange?.(this);
     this._emitStatus();
     return { ok: true, model };
