@@ -193,17 +193,19 @@ const ROLE_DISALLOWED_TOOLS = {
 };
 
 // The tools a session's settings deny it: its orchestration role's list (none
-// without a role), after `base` (the engine's own), without duplicates.
-function disallowedToolsFor(settings, base = []) {
+// without a role), after `base` (the engine's own), then `extra` (its tool
+// packs', src/tool-packs.js), without duplicates.
+function disallowedToolsFor(settings, base = [], extra = []) {
   const role = settings?.orchestration?.role;
-  return [...new Set([...base, ...(ROLE_DISALLOWED_TOOLS[role] || [])])];
+  return [...new Set([...base, ...(ROLE_DISALLOWED_TOOLS[role] || []), ...extra])];
 }
 
 /**
  * Build CLI args for interactive PTY mode.
- * No -p, --output-format, or --verbose flags.
+ * No -p, --output-format, or --verbose flags. `disallowedTools`: the
+ * session's tool-pack denials, added after its role's (disallowedToolsFor).
  */
-function buildCliArgs(settings) {
+function buildCliArgs(settings, { disallowedTools = [] } = {}) {
   const args = [];
   if (!settings) return args;
   // The session's display name is also its cross-session messaging address
@@ -212,7 +214,7 @@ function buildCliArgs(settings) {
   // Session-scoped subagent definitions, e.g. an orchestration worker's
   // coder/explorer pair with their models fixed.
   if (settings.agents && typeof settings.agents === 'object') args.push('--agents', JSON.stringify(settings.agents));
-  const denied = disallowedToolsFor(settings);
+  const denied = disallowedToolsFor(settings, [], disallowedTools);
   if (denied.length) args.push('--disallowedTools', denied.join(','));
   return _appendCommonFlags(args, settings);
 }

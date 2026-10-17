@@ -72,6 +72,7 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
   };
 
   if (dashboard) {
+    const toolPacks = require('./tool-packs');
     const { broadcaster, store, cliSessionManager, openCli, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab, isOwnerRequest } = dashboard;
     // server.js resolves these itself (AUTH_TOKEN may be generated at boot
     // rather than read from env) — its values win over the raw environment.
@@ -82,6 +83,17 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       ...shared,
       broadcaster, store, cliSessionManager, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab,
       isOwnerRequest,
+      // Tool packs (src/tool-packs.js): MCP servers, disallowed tools and
+      // prompt text an add-on adds to dashboard sessions — every session of a
+      // pack's roles when `default`, else those whose settings.toolPacks names
+      // it. registerToolPack(pack) throws on a malformed pack and returns its
+      // unregister function; the add-on calls it (or unregisterToolPack(id)) in
+      // shutdown()/update(). Packs listed in the descriptor's `toolPacks` are
+      // dropped with the add-on instead. Dashboard profile only: headless
+      // spawns are not dashboard sessions.
+      registerToolPack: (pack) => toolPacks.registerToolPack(pack),
+      unregisterToolPack: (id) => toolPacks.unregisterToolPack(id),
+      listToolPacks: () => toolPacks.listToolPacks(),
       // The user-facing "new CLI" entry (src/orchestration.js): `mode` 'simple' |
       // 'orchestrator', or unset: an orchestrator for an Agent SDK session
       // (spawnOpts' resume dropped), asked for a terminal. Resolves { tabId, mode } or

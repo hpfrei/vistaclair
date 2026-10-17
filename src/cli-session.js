@@ -4,6 +4,7 @@ const path = require('path');
 const os = require('os');
 const caps = require('./capabilities');
 const { conventionNote } = require('./session-folders');
+const { toolPackContributions, mergeMcpServers } = require('./tool-packs');
 const { buildCliArgs, spawnClaudePty, killGracefully, PACKAGE_ROOT, DATA_HOME } = require('./utils');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
@@ -71,8 +72,10 @@ class CliSession {
     this._instanceId = `cli-${this.sessId}`;
     this.store.registerSession(this.instanceId, this.sessId);
 
-    const mergedSettings = { ...this.settings, appendSystemPrompt: buildAppendSystemPrompt(this.settings) };
-    const args = ['--dangerously-skip-permissions', ...buildCliArgs(mergedSettings)];
+    // Add-on tool packs (src/tool-packs.js), built once for this spawn.
+    const packs = toolPackContributions(this._mcpOpts());
+    const mergedSettings = { ...this.settings, appendSystemPrompt: buildAppendSystemPrompt(this.settings, packs) };
+    const args = ['--dangerously-skip-permissions', ...buildCliArgs(mergedSettings, { disallowedTools: packs.disallowedTools })];
     if (resumeSessionId) {
       args.push('--resume', resumeSessionId);
     } else {
@@ -81,7 +84,7 @@ class CliSession {
 
     // MCP config injection
     this._cleanupMcpConfig();
-    const mcpConfigFile = this._buildMcpConfig();
+    const mcpConfigFile = this._buildMcpConfig(packs);
     if (mcpConfigFile) args.push('--mcp-config', mcpConfigFile);
 
     this.pty = spawnClaudePty(args, {
@@ -283,8 +286,8 @@ class CliSession {
     }
   }
 
-  _buildMcpConfig() {
-    const servers = buildMcpServers(this._mcpOpts());
+  _buildMcpConfig(packs) {
+    const servers = buildMcpServers(this._mcpOpts(), packs);
     if (Object.keys(servers).length === 0) return null;
     const config = { mcpServers: servers };
 
@@ -316,22 +319,25 @@ class CliSession {
 
 // The caller's --append-system-prompt plus the dashboard's own notes: the
 // safety note, and (with a session folder) the TODO.md / NOTES.md convention
-// and the trusted pause/resume channel (session-folders.js).
-function buildAppendSystemPrompt(settings = {}) {
+// and the trusted pause/resume channel (session-folders.js); then the text of
+// the session's tool packs, if any.
+function buildAppendSystemPrompt(settings = {}, packs = null) {
   const safetyNote = `IMPORTANT: A Vistaclair control-room server is running from ${PROJECT_ROOT}. Never restart, stop, kill, or interfere with this server process or its ports. Do not run commands like "npm restart", "kill", "pkill", or "lsof ... | kill" targeting it.`;
   const notes = settings.sessionDir ? `${safetyNote}\n\n${conventionNote(settings.sessionDir)}` : safetyNote;
-  return settings.appendSystemPrompt ? settings.appendSystemPrompt + '\n\n' + notes : notes;
+  const text = settings.appendSystemPrompt ? settings.appendSystemPrompt + '\n\n' + notes : notes;
+  return packs?.appendSystemPrompt ? text + '\n\n' + packs.appendSystemPrompt : text;
 }
 
 function mcpOptsOf(session) {
-  return { settings: session.settings, instanceId: session.instanceId, dashboardPort: session._dashboardPort, authToken: session._authToken };
+  return { settings: session.settings, instanceId: session.instanceId, dashboardPort: session._dashboardPort, authToken: session._authToken, cwd: session.cwd, sessId: session.sessId };
 }
 
 // Every MCP server a session gets (--mcp-config for a CLI tab, options.mcpServers
 // for an SDK session): the integrated bridge and, for a run member, the
-// orchestrator tools.
-function buildMcpServers(opts) {
-  return { ...integratedMcpServer(opts), ...orchestratorMcpServer(opts) };
+// orchestrator tools; then its tool packs' servers (a core name wins). `packs`
+// is the spawn's toolPackContributions, built here when not passed.
+function buildMcpServers(opts, packs = toolPackContributions(opts)) {
+  return mergeMcpServers({ ...integratedMcpServer(opts), ...orchestratorMcpServer(opts) }, packs.mcpServers);
 }
 
 // The tools of an orchestration run (src/orchestration.js), only for a

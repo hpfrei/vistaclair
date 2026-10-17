@@ -16,9 +16,18 @@
 //     handleUpgrade(req, socket, head) -> bool,
 //     pinnedSessions() -> iterable of sessId,  // optional; exempt from the
 //                                              // interactions TTL sweep
+//     toolPacks: [pack, ...],  // optional; MCP servers / tool restrictions /
+//                              // prompt text for sessions (src/tool-packs.js).
+//                              // Registered with the add-on, dropped by removeAddon.
 //     shutdown(), update(),    // optional lifecycle hooks
 //     _module,                 // raw module handle (licensing/lifecycle)
 //   }
+//
+// Additive fields (toolPacks here, registerToolPack on the ctx) do not change
+// CONTRACT_VERSION: an add-on that omits them is unaffected, and one that
+// wants them feature-detects (`typeof ctx.registerToolPack === 'function'`).
+
+const toolPacks = require('./tool-packs');
 
 const CONTRACT_VERSION = 2;
 
@@ -31,12 +40,19 @@ function registerAddon(descriptor) {
     return null;
   }
   addons.push(descriptor);
+  // A malformed pack is skipped, never the add-on.
+  for (const pack of Array.isArray(descriptor.toolPacks) ? descriptor.toolPacks : []) {
+    try { toolPacks.registerToolPack(pack, { owner: descriptor.id }); } catch (e) {
+      console.error(`  Addon "${descriptor.id || '?'}" tool pack rejected:`, e.message);
+    }
+  }
   return descriptor;
 }
 
 function removeAddon(id) {
   const i = addons.findIndex(a => a.id === id);
   if (i >= 0) addons.splice(i, 1);
+  toolPacks.unregisterToolPacksOf(id);
 }
 
 // Concatenated client asset modules across all add-ons (order = registration).
