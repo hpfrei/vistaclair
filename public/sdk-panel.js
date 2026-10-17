@@ -13,6 +13,12 @@
 // chip under the feed; its bubble lands where the agent took it in. A splitter between the two moves (double-click:
 // back to the table's own height); the last position is kept for new boxes.
 // Every box opens on Live.
+// A closed or ended worker leaves the row for the shelf, a column at the
+// row's left end: one card per worker, newest closed first (foldable to a
+// tab, per run). A card opens that worker's box, dashed, first in the row,
+// one at a time; its caption's ◂ (or the card again) puts it back. Shelved
+// boxes stay alive off the page, so nothing is fetched again. One faint
+// curve joins the orchestrator to the shelf.
 //
 // Everything shown is server state: on mount and after a reconnect each box
 // asks for `sdk:history` (the session's transcript, no stream deltas),
@@ -35,6 +41,8 @@
   const VIEWS = ['live', 'notes'];
   const VIEW_STORE = 'sdkPanelViews';
   const VIEW_STORE_MAX = 200;
+  const SHELF_STORE = 'sdkShelfFolded';  // per run: the shelf folded to a tab
+  const SHELF_LINK = ':shelf';          // the shelf's curve, in place of a sessId
   const SPLIT_STORE = 'sdkTodoSplit';   // the TODO table's share of the view, %
   const SPLIT_MIN = 10;
   const SPLIT_MAX = 90;
@@ -51,6 +59,8 @@
   const fmtCost = (usd) => typeof usd === 'number' && isFinite(usd)
     ? `$${usd < 0.1 ? usd.toFixed(3) : usd.toFixed(2)}` : '';
   const fmtSecs = (ms) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : `${(ms / 1000).toFixed(1)}s`;
+  const fmtAgo = (ms) => ms < 60000 ? `${Math.max(0, Math.floor(ms / 1000))}s` : ms < 3600000 ? `${Math.floor(ms / 60000)}m`
+    : ms < 86400000 ? `${Math.floor(ms / 3600000)}h` : `${Math.floor(ms / 86400000)}d`;
   const fmtAge = (ms) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}s` : `${Math.floor(ms / 1000)}s`;
   const costOf = (c) => typeof c === 'number' ? c
     : c && typeof c === 'object' ? (c.usd ?? c.costUsd ?? c.totalUsd ?? c.total ?? null) : null;
@@ -61,8 +71,8 @@
   const envKey = (ev) => ev?.sdk?.uuid ? `u:${ev.sdk.uuid}` : JSON.stringify(ev);
   // History holds the broadcast envelopes ({sessId, runId?, ts, ev}); take the ev.
   const unwrap = (rec) => (rec && typeof rec === 'object' && rec.ev && typeof rec.ev === 'object') ? rec.ev : rec;
-  const ENDED = new Set(['exited', 'stopped', 'abandoned']);
-  const STATE_TEXT = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing' };
+  const ENDED = new Set(['exited', 'stopped', 'abandoned', 'closed']);
+  const STATE_TEXT = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing', closed: 'closed' };
   // `claude-sonnet-5-5` → `sonnet-5-5`; aliases and `[1m]` stay as they are.
   const fmtModel = (m) => String(m || '').replace(/^claude-/, '');
   const fmtTokens = (n) => n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
@@ -202,18 +212,19 @@
     }
   }
 
-  // The view each box shows, per session, across reloads (most recent last).
-  function storedView(key) {
-    try { return JSON.parse(localStorage.getItem(VIEW_STORE) || '{}')?.[key] || null; } catch { return null; }
+  // Small maps across reloads (most recent last): the view each box shows,
+  // per session; the shelf folded, per run. A null value is dropped.
+  function storedKey(store, key) {
+    try { return JSON.parse(localStorage.getItem(store) || '{}')?.[key] || null; } catch { return null; }
   }
-  function storeView(key, view) {
+  function storeKey(store, key, value) {
     try {
-      const m = JSON.parse(localStorage.getItem(VIEW_STORE) || '{}') || {};
+      const m = JSON.parse(localStorage.getItem(store) || '{}') || {};
       delete m[key];
-      m[key] = view;
+      if (value != null) m[key] = value;
       const keys = Object.keys(m);
       for (const k of keys.slice(0, Math.max(0, keys.length - VIEW_STORE_MAX))) delete m[k];
-      localStorage.setItem(VIEW_STORE, JSON.stringify(m));
+      localStorage.setItem(store, JSON.stringify(m));
     } catch {}
   }
 
@@ -231,6 +242,8 @@
       this.gotStatus = false;
       this.cost = null;
       this.lastReport = null;
+      this.closed = false;           // closed by its orchestrator (run membership)
+      this.closedAt = null;          // ms
       this.model = null;             // chosen (settings.model)
       this.actualModel = null;       // what the API answered with
       this.mappedTo = null;          // the tab's modelMap target, when it rewrites
@@ -240,7 +253,7 @@
       this.queue = [];
       this.historyPending = false;
       // A stored view this panel no longer has (the old TODO) opens Live.
-      this.view = storedView(sessId) || 'live';
+      this.view = storedKey(VIEW_STORE, sessId) || 'live';
       this._build();
       this.reset();
       this.setView(this.view, { store: false });
@@ -260,6 +273,7 @@
             <span class="sdk-area-cost"></span>
           </div>
           <div class="sdk-cap-right">
+            <button type="button" class="sdk-shelve" title="Put it back on the shelf">◂ Shelf</button>
             <span class="sdk-ctx hidden"><span class="sdk-ctx-bar"><i></i></span><span class="sdk-ctx-txt"></span></span>
             <button type="button" class="sdk-insp" title="Open this session in the Inspector: every request, tool call and result"><span class="sdk-insp-l">Inspector</span></button>
           </div>
@@ -314,6 +328,7 @@
 
       for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
       this.modelBtn.addEventListener('click', (e) => { e.stopPropagation(); openModelMenu(this, this.modelBtn); });
+      q('.sdk-shelve').addEventListener('click', () => this.panel.openShelved(null));
       q('.sdk-insp').addEventListener('click', () => {
         // Straight to this session's tab, opened (and loaded) if need be.
         if (typeof switchView === 'function') switchView('dashboard');
@@ -378,7 +393,9 @@
 
     addAliases(list) { for (const n of list) if (n) this.aliases.add(String(n)); }
     isMe(name) { return !!name && (this.aliases.has(name) || this.aliases.has(shortName(name, this.panel.run))); }
-    ended() { return ENDED.has(this.state); }
+    ended() { return this.closed || ENDED.has(this.state); }
+    // A worker on the shelf (paused ones stay in the row).
+    shelved() { return this.role === 'worker' && this.ended(); }
     shownModel() { return this.actualModel || this.model || this.initModel || ''; }
 
     // ---- view toggle ----
@@ -386,7 +403,7 @@
     setView(v, { store = true } = {}) {
       if (!VIEWS.includes(v)) v = 'live';
       this.view = v;
-      if (store) storeView(this.sessId, v);
+      if (store) storeKey(VIEW_STORE, this.sessId, v);
       this.el.dataset.view = v;
       for (const [k, b] of Object.entries(this.segBtns)) b.classList.toggle('on', k === v);
       if (v === 'live') {
@@ -412,7 +429,8 @@
       if (ENDED.has(s)) for (const id of [...this.pending.keys()]) this.cancelPending(id, 'ended');
       this.renderHeader();
       this.panel.renderToolbar();
-      this.panel.drawLinksSoon();
+      if (this.role === 'worker') this.panel.layoutWorkers();
+      else this.panel.drawLinksSoon();
     }
 
     setCost(c) {
@@ -426,10 +444,10 @@
       this.nameEl.textContent = this.label;
       this.nameEl.title = this.name;
       const s = this.state || 'idle';
-      const ended = ENDED.has(s);
-      this.stateEl.textContent = STATE_TEXT[s] || s;
+      const ended = this.ended();
+      this.stateEl.textContent = this.closed ? 'closed' : STATE_TEXT[s] || s;
       // Idle says nothing the header does not: no chip (and no gap) for it.
-      this.stateEl.className = `sdk-chip sdk-area-state sdk-state-${ended ? 'exited' : s}${s === 'idle' ? ' hidden' : ''}`;
+      this.stateEl.className = `sdk-chip sdk-area-state sdk-state-${ended ? 'exited' : s}${s === 'idle' && !ended ? ' hidden' : ''}`;
       this.awaitEl.classList.toggle('hidden', s !== 'awaiting');
       const r = this.lastReport;
       const rs = String(r?.status || '').toLowerCase().replace(/[^a-z]/g, '');
@@ -492,7 +510,7 @@
       const s = this.state || 'idle';
       let text = '';
       let cls = 'idle';
-      if (ENDED.has(s)) text = 'ended';
+      if (this.ended()) text = 'ended';
       else if (s === 'awaiting') { text = 'waiting for your answer'; cls = 'awaiting'; }
       else if (s === 'pausing') { text = 'pausing: writing its resume note'; cls = 'busy'; }
       else if (s === 'paused') text = 'paused';
@@ -1121,6 +1139,9 @@
       this.run = null;
       this.main = null;
       this.workers = new Map();  // sessId -> Area
+      this.rowList = [];         // the worker boxes in the row, in order
+      this.openId = null;        // the shelved worker whose box is open
+      this.cards = new Map();    // sessId -> its shelf card
       this.active = false;
       wrap.classList.add('sdk-wrap');
       wrap.innerHTML = `
@@ -1138,7 +1159,12 @@
           <div class="sdk-stage">
             <svg class="sdk-links" aria-hidden="true"></svg>
             <div class="sdk-main-slot"></div>
-            <div class="sdk-workers"></div>
+            <div class="sdk-workers">
+              <div class="sdk-shelf hidden">
+                <button type="button" class="sdk-shelf-tab"><span class="sdk-shelf-title"></span><span class="sdk-shelf-arrow" aria-hidden="true"></span></button>
+                <div class="sdk-shelf-list"></div>
+              </div>
+            </div>
           </div>
           <vc-composer placeholder="Message… (Enter or Ctrl+Enter, then choose the session · Shift+Enter new line · Esc interrupts)"></vc-composer>
         </div>`;
@@ -1151,6 +1177,10 @@
       this.linksEl = q('.sdk-links');
       this.mainSlot = q('.sdk-main-slot');
       this.workersEl = q('.sdk-workers');
+      this.shelfEl = q('.sdk-shelf');
+      this.shelfTab = q('.sdk-shelf-tab');
+      this.shelfTitle = q('.sdk-shelf-title');
+      this.shelfList = q('.sdk-shelf-list');
       this.interruptBtn = q('[data-act="interrupt"]');
       this.pauseBtn = q('[data-act="pause"]');
       this.refreshBtn = q('[data-act="refresh"]');
@@ -1159,6 +1189,7 @@
       this.interruptBtn.addEventListener('click', () => this.interrupt());
       this.pauseBtn.addEventListener('click', () => this.pause());
       this.refreshBtn.addEventListener('click', () => this.refresh());
+      this.shelfTab.addEventListener('click', () => this.foldShelf(!this.shelfEl.classList.contains('folded')));
       this.composer.addEventListener('send', (e) => this.openPicker('send', e.detail));
       this.composer.addEventListener('interrupt', () => this.interrupt());
       // Images dropped anywhere on the panel go to the composer.
@@ -1203,6 +1234,7 @@
       const runId = role === 'orchestrator' ? orch?.runId || null : null;
       if (runId !== this.runId) {
         this.runId = runId;
+        this.foldShelf(!!(runId && storedKey(SHELF_STORE, runId)), { store: false });
         if (runId) this.fetchRun();
       }
       this.composer.disabled = this.info.status === 'exited';
@@ -1243,11 +1275,9 @@
         a.name = w.name || w.worker || a.name;
         a.label = w.id ? `${w.id}${w.title && w.title !== w.id ? ` · ${w.title}` : ''}` : shortName(a.name, run);
         a.addAliases([w.name, w.worker, w.id, shortName(w.name || w.worker, run)]);
-        // A new report travels up the worker's line (not on the first load).
-        const rep = w.lastReport ? JSON.stringify([w.lastReport.status, w.lastReport.summary, w.lastReport.at]) : null;
-        if (rep && a._repSig !== undefined && rep !== a._repSig) this.flashLink(a.name, this.main?.name);
-        a._repSig = rep;
         a.lastReport = w.lastReport || null;
+        a.closed = !!w.closed || w.state === 'closed';
+        a.closedAt = Date.parse(w.closedAt) || null;
         if (!a.model && w.model) a.model = w.model;
         const c = costOf(w.cost ?? w.costUsd);
         if (c != null) a.cost = c;
@@ -1255,6 +1285,11 @@
           || (w.running ? (w.live?.pausing ? 'pausing' : w.live?.busy ? 'busy' : null) : w.paused ? 'paused' : 'exited');
         if (derived && (w.state || !a.gotStatus || derived === 'exited' || derived === 'paused')) a.setState(derived);
         a.workerId = w.id;
+        // A new report travels up the worker's line, or the shelf's once it
+        // closed with it (not on the first load).
+        const rep = w.lastReport ? JSON.stringify([w.lastReport.status, w.lastReport.summary, w.lastReport.at]) : null;
+        if (rep && a._repSig !== undefined && rep !== a._repSig) { this.layoutWorkers(); this.flashLink(a.name, this.main?.name); }
+        a._repSig = rep;
         a.renderHeader();
       }
       this.layoutWorkers();
@@ -1275,18 +1310,88 @@
       return a;
     }
 
-    // Workers in id order, one row. Past three boxes, ended ones narrow so
-    // the running ones keep their room.
+    // The row: the shelf (when a worker is on it), the open shelved box, then
+    // the others in id order. Past three boxes, ended ones narrow so the
+    // running ones keep their room.
     layoutWorkers() {
-      const list = this.sortedWorkers();
+      const all = this.sortedWorkers();
+      const shelved = all.filter(a => a.shelved());
+      if (this.openId && !shelved.some(a => a.sessId === this.openId)) this.openId = null;
+      const open = shelved.find(a => a.sessId === this.openId);
+      this.rowList = [open, ...all.filter(a => !a.shelved())].filter(Boolean);
+      const want = [this.shelfEl, ...this.rowList.map(a => a.el)];
       // Only a box out of place moves: putting one back into the DOM resets
-      // its scrollers to the top.
-      list.forEach((a, i) => {
+      // its scrollers to the top. Shelved boxes leave first, so the others
+      // never have to move around them.
+      for (const c of [...this.workersEl.children]) if (!want.includes(c)) c.remove();
+      want.forEach((e, i) => {
         const at = this.workersEl.children[i] || null;
-        if (at !== a.el) this.workersEl.insertBefore(a.el, at);
+        if (at !== e) this.workersEl.insertBefore(e, at);
       });
-      this.panelEl.classList.toggle('has-workers', list.length > 0);
-      this.workersEl.classList.toggle('crowded', list.length > 3);
+      for (const a of all) a.el.classList.toggle('sdk-area-opened', a === open);
+      this.renderShelf(shelved);
+      this.panelEl.classList.toggle('has-workers', all.length > 0);
+      this.workersEl.classList.toggle('crowded', this.rowList.length > 3);
+      this.drawLinksSoon();
+    }
+
+    // ---- the shelf ----
+
+    // Newest closed first: closedAt, else the last report's time, else the
+    // higher id.
+    renderShelf(shelved) {
+      const n = (a) => parseInt(String(a.workerId || '').replace(/\D/g, ''), 10) || 0;
+      const t = (a) => a.closedAt || Date.parse(a.lastReport?.at) || 0;
+      const list = shelved.sort((a, b) => t(b) - t(a) || n(b) - n(a));
+      this.shelfEl.classList.toggle('hidden', !list.length);
+      this.shelfTitle.textContent = `Closed · ${list.length}`;
+      const keep = new Set(list.map(a => a.sessId));
+      for (const [id, c] of this.cards) if (!keep.has(id)) { c.el.remove(); this.cards.delete(id); }
+      list.forEach((a, i) => {
+        let c = this.cards.get(a.sessId);
+        if (!c) {
+          const b = el('button', 'sdk-shelf-card');
+          b.type = 'button';
+          c = { el: b, name: el('span', 'sdk-shelf-name'), rep: el('span'), ago: el('span', 'sdk-shelf-ago'), cost: el('span', 'sdk-shelf-cost') };
+          const meta = el('span', 'sdk-shelf-meta');
+          meta.append(c.rep, c.ago, c.cost);
+          b.append(c.name, meta);
+          b.addEventListener('click', () => this.openShelved(this.openId === a.sessId ? null : a.sessId));
+          this.cards.set(a.sessId, c);
+        }
+        const at = this.shelfList.children[i] || null;
+        if (at !== c.el) this.shelfList.insertBefore(c.el, at);
+        const r = a.lastReport;
+        const rs = String(r?.status || '').toLowerCase().replace(/[^a-z]/g, '');
+        c.name.textContent = a.label;
+        c.rep.textContent = r ? r.status || 'report' : 'none';
+        c.rep.className = r ? `sdk-chip sdk-shelf-rep sdk-report-${rs}` : 'sdk-chip';
+        c.cost.textContent = fmtCost(a.cost);
+        c.el.title = `${a.label}\n${r ? `${r.status || 'report'}: ${r.summary || ''}` : 'No report.'}`;
+        c.el.classList.toggle('open', a.sessId === this.openId);
+        c.el.setAttribute('aria-pressed', String(a.sessId === this.openId));
+        c.at = t(a);
+      });
+      this.renderShelfAges();
+    }
+
+    renderShelfAges() {
+      const now = Date.now();
+      for (const c of this.cards.values()) c.ago.textContent = c.at ? fmtAgo(now - c.at) : '';
+    }
+
+    // One shelved box open at a time (null: none).
+    openShelved(sessId) {
+      this.openId = sessId;
+      this.layoutWorkers();
+    }
+
+    foldShelf(folded, { store = true } = {}) {
+      this.shelfEl.classList.toggle('folded', folded);
+      this.shelfTab.setAttribute('aria-expanded', String(!folded));
+      this.shelfTab.title = folded ? 'Show the closed workers' : 'Fold the shelf';
+      this.shelfTab.querySelector('.sdk-shelf-arrow').textContent = folded ? '›' : '‹';
+      if (store && this.runId) storeKey(SHELF_STORE, this.runId, folded ? true : null);
       this.drawLinksSoon();
     }
 
@@ -1297,13 +1402,15 @@
       this._linkRaf = requestAnimationFrame(() => { this._linkRaf = null; this.drawLinks(); });
     }
 
-    // One curve per worker, from the orchestrator's bottom edge down onto the
-    // worker's name tag (the caption on its top border). Redrawn on every
-    // resize of the stage.
+    // One curve per box in the row, from the orchestrator's bottom edge down
+    // onto the worker's name tag (the caption on its top border), and one to
+    // the shelf's head for all the shelved. Redrawn on every resize of the
+    // stage.
     // Paths are updated in place, so a redraw never cuts a flash short.
     drawLinks() {
       const svg = this.linksEl;
-      const list = this.sortedWorkers();
+      const shelf = this.shelfEl.classList.contains('hidden') ? [] : [{ sessId: SHELF_LINK, el: this.shelfEl, cap: this.shelfTab }];
+      const list = [...shelf, ...this.rowList];
       const keep = new Set();
       if (this.main && list.length && this.stage.offsetParent) {
         const NS = 'http://www.w3.org/2000/svg';
@@ -1314,12 +1421,12 @@
         const y1 = m.bottom - s.top;
         svg.setAttribute('viewBox', `0 0 ${s.width} ${s.height}`);
         list.forEach((a, i) => {
-          const r = a.el.querySelector('.sdk-cap').getBoundingClientRect();
+          const r = (a.cap || a.el.querySelector('.sdk-cap')).getBoundingClientRect();
           const x1 = m.left - s.left + m.width / 2 + (n > 1 ? (i / (n - 1) - 0.5) * spread : 0);
           const x2 = r.left - s.left + r.width / 2;
           const y2 = r.top - s.top;
           const my = (y1 + y2) / 2;
-          const st = a.ended() ? 'ended' : a.state === 'busy' ? 'busy' : a.state === 'awaiting' ? 'awaiting' : 'idle';
+          const st = a.sessId === SHELF_LINK ? 'shelf' : a.ended() ? 'ended' : a.state === 'busy' ? 'busy' : a.state === 'awaiting' ? 'awaiting' : 'idle';
           let g = svg.querySelector(`g[data-sess="${CSS.escape(a.sessId)}"]`);
           if (!g) {
             g = document.createElementNS(NS, 'g');
@@ -1346,7 +1453,12 @@
       if (a && a.role === 'worker') hit.push([a, 'up']);
       if (b && b.role === 'worker') hit.push([b, 'down']);
       for (const [w, dir] of hit) {
-        const path = this.linksEl.querySelector(`g[data-sess="${CSS.escape(w.sessId)}"] path`);
+        // A shelved worker (its box not open) has the shelf's curve.
+        const key = this.rowList.includes(w) ? w.sessId : SHELF_LINK;
+        const sel = `g[data-sess="${CSS.escape(key)}"] path`;
+        // A curve not drawn yet (the shelf's first worker): draw now.
+        let path = this.linksEl.querySelector(sel);
+        if (!path) { this.drawLinks(); path = this.linksEl.querySelector(sel); }
         if (!path) continue;
         path.classList.remove('flash-up', 'flash-down');
         void path.getBoundingClientRect();
@@ -1578,6 +1690,7 @@
 
     tick() {
       for (const a of this.allAreas()) if (a.nowTool?.startedAt && a.state === 'busy') a.renderNow();
+      if (this.cards.size) this.renderShelfAges();
     }
 
     setActive(v) {
