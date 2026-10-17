@@ -61,6 +61,7 @@ const path = require('path');
 const caps = require('./capabilities');
 const { buildClaudeEnv, trackInstance, disallowedToolsFor, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
+const { toolPackContributions } = require('./tool-packs');
 const { modelFamily } = require('./proxy');
 const { notifyAuthFailed } = require('./ws/claude-auth-handler');
 
@@ -424,7 +425,10 @@ class SdkSession {
     delete env.ANTHROPIC_AUTH_TOKEN;
     if (credential === 'api-key') delete env.CLAUDE_CODE_OAUTH_TOKEN;
 
-    const append = buildAppendSystemPrompt(s);
+    // Add-on tool packs (src/tool-packs.js), built once for this spawn.
+    const mcpOpts = { settings: s, instanceId: this.instanceId, dashboardPort: this._dashboardPort, authToken: this._authToken, cwd: this.cwd, sessId: this.sessId };
+    const packs = toolPackContributions(mcpOpts);
+    const append = buildAppendSystemPrompt(s, packs);
     const options = {
       cwd: this.cwd,
       systemPrompt: s.systemPrompt
@@ -433,7 +437,7 @@ class SdkSession {
       settingSources: [...SETTING_SOURCES],
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
-      disallowedTools: disallowedToolsFor(s, DISALLOWED_TOOLS),
+      disallowedTools: disallowedToolsFor(s, DISALLOWED_TOOLS, packs.disallowedTools),
       includePartialMessages: true,
       // Subagents' text and thinking too, not only their tool calls.
       forwardSubagentText: true,
@@ -451,7 +455,7 @@ class SdkSession {
       extraArgs: { 'replay-user-messages': null },
     };
     if (s.settingsFile) options.settings = s.settingsFile;
-    const mcpServers = buildMcpServers({ settings: s, instanceId: this.instanceId, dashboardPort: this._dashboardPort, authToken: this._authToken });
+    const mcpServers = buildMcpServers(mcpOpts, packs);
     if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
     if (s.agents && typeof s.agents === 'object') options.agents = s.agents;
     if (s.model) options.model = s.model;
