@@ -143,7 +143,7 @@ function orchestratorCard(run) {
   const dir = orchestratorDir(run);
   const todo = path.join(dir, 'TODO.md');
   const isolation = run.isolation === 'worktree'
-    ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. When a worker is done, merge its branch (git via Bash), or launch a worker to merge and resolve conflicts; then call `end_run` to remove merged worktrees.'
+    ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. When a worker is done, merge its branch (git via Bash), or launch a worker to merge and resolve conflicts; then call `end_run` to finish the run: it removes merged worktrees and branches, and keeps every worker\'s record, folder and conversation. A worker stays resumable after end_run (resume_worker adds its worktree back at the same path, on its branch or a new one from HEAD), and launch_cli or resume_worker reopens an ended run.'
     : 'Workers share one working directory. Give them disjoint files and say so in each brief; never let two running workers touch the same file. Project-wide finishing steps the instructions above this card ask for (a check that rewrites shared files, a docs update) go to one final worker once the others are done.';
   return [
     `# Role: orchestrator — orchestration run ${run.runId}`,
@@ -162,7 +162,7 @@ function orchestratorCard(run) {
     '9. Where the instructions above this card tell the session to edit files, run project checks or update docs, that is workers\' work: put it in a brief, never do it yourself.',
     '10. To see how a worker is doing, read its TODO.md and NOTES.md (`list_workers` gives the paths, its current item and recent actions). Never message a worker just to ask for its status.',
     '11. A paused worker is resumed with `resume_worker` ("continue" keeps its own context; "fresh" starts a clean session from its brief and notes). Never relaunch a paused worker\'s task with launch_cli.',
-    '12. Unrelated new work goes to a new worker. Close a finished worker you will not reuse with `close_worker` (it stays listed and resumable with resume_worker); reuse a worker by SendMessage only for a follow-up in the area it just worked on.',
+    '12. Unrelated new work goes to a new worker. Close a finished worker you will not reuse with `close_worker` (it stays listed and resumable with resume_worker, also after end_run); reuse a worker by SendMessage only for a follow-up in the area it just worked on.',
     '13. A worker going the wrong way: `stop_worker` ends its current turn and leaves it idle; then SendMessage it new instructions, or close_worker it.',
   ].join('\n');
 }
@@ -641,7 +641,6 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   function launchWorker(instanceId, { title, task, cwd, isolation, model } = {}) {
     const { run } = callerRun(instanceId, 'orchestrator');
-    if (run.closed) throw new Error('this run has been ended');
     if (run.pausing) throw new Error('this run is being paused: launch nothing new');
     if (!task || !String(task).trim()) throw new Error('task is required');
     if (model && !WORKER_MODELS.includes(model)) throw new Error(`model must be one of ${WORKER_MODELS.join(', ')}`);
@@ -676,6 +675,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
 
     run.workers.push(worker);
+    run.closed = false;    // an ended run is reopened by new work
     saveRun(run);
     const tabId = spawnWorker(run, worker, worker.task);
     return { worker: name, tabId, cwd: worker.cwd, branch: worker.branch, folder: worker.sessionDir, model: mgr.sessions.get(tabId)?.getSettings().model || null };
@@ -817,6 +817,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
   }
 
+  // end_run: finish the run. Merged worktrees and branches go; every worker
+  // keeps its record, folder and saved session, so resume_worker can still
+  // bring it back (restoreWorktree adds its worktree again), and new work
+  // (launch_cli, resume_worker) reopens the run.
   function endRun(instanceId) {
     const { run } = callerRun(instanceId, 'orchestrator');
     const removed = [];
@@ -831,6 +835,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         git(w.worktree.repo, ['worktree', 'remove', w.worktree.path]);
         try { git(w.worktree.repo, ['branch', '-d', w.branch]); } catch {}
         removed.push(w.name);
+        w.removedWorktree = w.worktree;
         w.worktree = null;
       } catch (e) {
         kept.push({ worker: w.name, reason: e.message.split('\n')[0] });
@@ -1124,12 +1129,39 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return { runId, fresh: false, ...resumed };
   }
 
+  // A worker whose worktree is gone (end_run, deleted by hand) gets it back at
+  // the same path before it runs again: its transcript is keyed by its cwd. On
+  // its own branch if that still exists, else a new one from HEAD. Throws, and
+  // changes nothing, when that fails; a worker without a branch is untouched.
+  function restoreWorktree(run, w) {
+    if (!w.branch || fs.existsSync(w.cwd)) return;
+    const was = w.worktree || w.removedWorktree || {};
+    const wt = was.path || path.join(dataHome, 'data', 'worktrees', run.runId, w.id);
+    const repo = was.repo || gitToplevel(run.root);
+    try {
+      if (!repo) throw new Error(`${run.root} is not in a git repository`);
+      try { git(repo, ['worktree', 'prune']); } catch {}
+      let exists = false;
+      try { exists = git(repo, ['branch', '--list', w.branch]).length > 0; } catch {}
+      fs.mkdirSync(path.dirname(wt), { recursive: true });
+      git(repo, exists ? ['worktree', 'add', wt, w.branch] : ['worktree', 'add', '-b', w.branch, wt, 'HEAD']);
+      fs.mkdirSync(w.cwd, { recursive: true });
+    } catch (e) {
+      throw new Error(`${w.name}'s worktree ${wt} is gone and could not be recreated: ${String(e.message).split('\n')[0]}`);
+    }
+    w.worktree = { path: wt, repo };
+    delete w.removedWorktree;
+    saveRun(run);
+  }
+
   // Bring a worker back: its own transcript (continue), or a fresh session with
   // the same address, card and folder, seeded with its brief (fresh). A
   // continue whose transcript is gone becomes a fresh start (`fellBack`).
+  // A run ended with end_run is reopened.
   function bringBack(run, w, { mode = 'continue', message = '' } = {}) {
     if (workerSession(run, w.id)?.session.running) throw new Error(`${w.name} is already running: send it a message instead`);
     assertCapacity(run);
+    restoreWorktree(run, w);
     const from = message ? `From your orchestrator \`${run.orchestrator}\`: ${message}` : '';
     const old = savedMember(run, st => st.role === 'worker' && st.workerId === w.id);
     const lost = mode !== 'fresh' && !control?.canContinue(old);
@@ -1154,6 +1186,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     delete fw.closedAt;
     fw.resumedAt = new Date().toISOString();
     if (!fresh.workers.some(x => x.paused)) fresh.paused = null;
+    fresh.closed = false;
     saveRun(fresh);
     const v = vol(w.name);
     v.agents = 0; v.reported = false; v.nudged = false; v.stopping = false;
@@ -1284,17 +1317,46 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return { deleted: entries.length, keptBranches, dirty };
   }
 
-  // A worker deleted on its own from the "+" menu stays in run.json, marked.
-  function noteMemberDeleted(entry) {
+  // The run record of a saved worker session, and the worker in it.
+  function memberOf(entry) {
     const st = entry?.settings?.orchestration;
-    if (st?.role !== 'worker') return;
+    if (st?.role !== 'worker') return {};
     const run = loadRun(st.runDir);
-    const w = run?.workers.find(x => x.id === st.workerId);
-    if (!w) return;
+    return { run, w: run?.workers.find(x => x.id === st.workerId) };
+  }
+
+  // The worktree of a saved worker with uncommitted changes, as deleteRun
+  // lists them: [{ worker, path }] or [].
+  function memberDirty(entry) {
+    const { w } = memberOf(entry);
+    if (!w?.worktree) return [];
+    let changes = '';
+    try { changes = git(w.worktree.path, ['status', '--porcelain']); } catch {}
+    return changes ? [{ worker: w.name, path: w.worktree.path }] : [];
+  }
+
+  // A worker deleted on its own from the "+" menu stays in run.json, marked.
+  // Its worktree goes as in deleteRun: uncommitted changes refuse it unless
+  // `force` (nothing changed), an unmerged branch is kept.
+  function noteMemberDeleted(entry, { force = false } = {}) {
+    const { run, w } = memberOf(entry);
+    if (!w) return null;
+    const dirty = memberDirty(entry);
+    if (dirty.length && !force) return { refused: true, dirty };
+    const keptBranches = [];
+    if (w.worktree && !workerSession(run, w.id)?.session.running) {
+      try { git(w.worktree.repo, ['worktree', 'remove', '--force', w.worktree.path]); } catch {}
+      let merged = false;
+      try { merged = git(w.worktree.repo, ['branch', '--merged', 'HEAD', '--list', w.branch]).length > 0; } catch {}
+      if (merged) { try { git(w.worktree.repo, ['branch', '-d', w.branch]); } catch {} } else keptBranches.push(w.branch);
+      w.removedWorktree = w.worktree;
+      w.worktree = null;
+    }
     w.deleted = true;
     w.paused = false;
     if (!run.workers.some(x => x.paused)) run.paused = null;
     saveRun(run);
+    return { keptBranches, dirty };
   }
 
   // A running worker the orchestrator may close (close_worker): idle, and its
@@ -1764,7 +1826,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   return {
     router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report, sendMessage, listAgents,
     handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
-    pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted,
+    pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
