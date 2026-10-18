@@ -215,15 +215,21 @@ function handleMessage(ws, msg, bc) {
           send({ type: 'cli:actionResult', action: 'delete', error: 'An orchestrator is deleted with its whole run (Delete run).' });
           break;
         }
+        // A worker's worktree goes with it; uncommitted changes there are
+        // confirmed like an unfinished worker (one confirm covers both).
         if (st?.role === 'worker' && !msg.force) {
           const group = mgr.getSavedSessions().find(s => s.id === msg.sessionId)?.group;
-          if (group && !group.completed && !group.runMissing) {
-            send({ type: 'cli:deleteRefused', sessionId: msg.sessionId, canForce: true, reason: 'This worker has not finished its work. Deleting it abandons it: its orchestrator will not resume it.' });
+          const dirty = bc.orchestration?.memberDirty(entry) || [];
+          const reasons = [];
+          if (group && !group.completed && !group.runMissing) reasons.push('This worker has not finished its work. Deleting it abandons it: its orchestrator will not resume it.');
+          if (dirty.length) reasons.push(`Its worktree has uncommitted changes, lost if it is deleted: ${dirty.map(d => d.path).join(', ')}`);
+          if (reasons.length) {
+            send({ type: 'cli:deleteRefused', sessionId: msg.sessionId, canForce: true, reason: reasons.join('\n\n') });
             break;
           }
         }
         mgr.deleteSavedSession(msg.sessionId);
-        if (st?.role === 'worker') bc.orchestration?.noteMemberDeleted(entry);
+        if (st?.role === 'worker') bc.orchestration?.noteMemberDeleted(entry, { force: msg.force === true });
         send(mgr.savedSessionsMessage());
       }
       break;

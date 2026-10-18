@@ -943,6 +943,134 @@ test('an orchestrator SendMessage to a worker is kept as a follow-up: in its rec
   assert.match(seed, /THE ORIGINAL BRIEF[\s\S]*Follow-ups you sent it[\s\S]*do the exporter/);
 });
 
+// --- end_run keeps workers resumable; a worker's worktree comes back ---
+
+function gitRepo() {
+  const repo = tmpDir('vistaclair-orch-repo-');
+  const g = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'pipe' }).toString();
+  g('init', '-q'); g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init');
+  return { repo, g };
+}
+const commitIn = (dir, file) => {
+  fs.writeFileSync(path.join(dir, file), file);
+  execFileSync('git', ['-C', dir, 'add', '.']);
+  execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', file]);
+};
+
+test('resume after end_run: the worktree comes back at the same path, its branch from HEAD, and the worker continues', async (t) => {
+  const { repo, g } = gitRepo();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { cwd: repo });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const s1 = mgr.sessions.get(w.tabId);
+  commitIn(w.cwd, 'a.txt');
+  g('merge', '-q', '--ff-only', w.branch);
+  commitIn(repo, 'b.txt');
+  orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
+  orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
+
+  const res = orch.endRun(orchSession.instanceId);
+  assert.deepStrictEqual(res.removed, [w.worker]);
+  assert.strictEqual(res.closed, true);
+  assert.ok(!fs.existsSync(w.cwd));
+  assert.strictEqual(g('branch', '--list', w.branch).trim(), '', 'the merged branch is deleted');
+  assert.strictEqual(run().workers.length, 1, 'its record is kept');
+  assert.ok(fs.existsSync(path.join(w.folder, 'TODO.md')), 'its folder is kept');
+  assert.ok(mgr.findSaved(s1.sessId), 'its saved session is kept');
+
+  const c = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue', message: 'one more thing' });
+  assert.strictEqual(c.mode, 'continue');
+  assert.ok(!c.fellBack);
+  const s2 = mgr.sessions.get(c.tabId);
+  assert.strictEqual(s2.sessId, s1.sessId, 'its own transcript');
+  assert.strictEqual(s2.cwd, w.cwd, 'in the same directory');
+  assert.ok(fs.existsSync(path.join(w.cwd, 'b.txt')), 'a new branch from HEAD');
+  assert.strictEqual(g('rev-parse', w.branch).trim(), g('rev-parse', 'HEAD').trim());
+  const rw = run().workers[0];
+  assert.deepStrictEqual(rw.worktree, { path: w.cwd, repo }, 'recorded again');
+  assert.strictEqual(rw.closed, undefined);
+  assert.strictEqual(run().closed, false, 'the run is reopened');
+});
+
+test('resume with its branch still there: the worktree is recreated on it', async (t) => {
+  const { repo, g } = gitRepo();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { cwd: repo });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  commitIn(w.cwd, 'c.txt');
+  mgr.sessions.get(w.tabId).running = false;
+  g('worktree', 'remove', '--force', w.cwd);
+  assert.ok(g('branch', '--list', w.branch).trim());
+
+  const f = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'fresh' });
+  assert.strictEqual(f.mode, 'fresh');
+  assert.strictEqual(mgr.sessions.get(f.tabId).cwd, w.cwd);
+  assert.ok(fs.existsSync(path.join(w.cwd, 'c.txt')), 'its own branch, with its commit');
+  assert.strictEqual(run().workers[0].worktree.path, w.cwd);
+});
+
+test('launch_cli after end_run reopens the run', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  mgr.sessions.get(w.tabId).running = false;
+  assert.strictEqual(orch.endRun(orchSession.instanceId).closed, true);
+  assert.strictEqual(orch.describeRun(run()).closed, true);
+  const w2 = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'more' });
+  assert.ok(mgr.sessions.get(w2.tabId).running);
+  assert.strictEqual(run().closed, false);
+});
+
+test('a resume whose worktree cannot be recreated throws and leaves the worker as it was', async (t) => {
+  const { repo, g } = gitRepo();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { cwd: repo });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const s1 = mgr.sessions.get(w.tabId);
+  orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
+  orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
+  g('worktree', 'remove', '--force', w.cwd);
+  g('checkout', '-q', w.branch);    // checked out elsewhere: git refuses a second worktree on it
+  const before = run().workers[0];
+  assert.strictEqual(before.closed, true);
+  const launches = mgr.launches.length;
+
+  for (const mode of ['continue', 'fresh']) {
+    assert.throws(() => orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode }), /worktree .* is gone and could not be recreated/);
+  }
+  assert.throws(() => orch.resumeSavedWorker(s1.sessId), /could not be recreated/);
+  assert.deepStrictEqual(run().workers[0], before, 'closed, closedAt and exitedAt unchanged');
+  assert.strictEqual(mgr.launches.length, launches);
+  assert.ok(!fs.existsSync(w.cwd));
+});
+
+test('deleting a single worker removes its worktree, keeps an unmerged branch, refuses a dirty one unless forced', async (t) => {
+  const { repo, g } = gitRepo();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { cwd: repo });
+  const [w1, w2, w3] = ['a', 'b', 'c'].map(title => orch.launchWorker(orchSession.instanceId, { title, task: 'x' }));
+  commitIn(w1.cwd, 'unmerged.txt');
+  fs.writeFileSync(path.join(w3.cwd, 'wip.txt'), 'x');
+  const entry = (w) => { const s = mgr.sessions.get(w.tabId); s.running = false; return mgr.findSaved(s.sessId); };
+
+  const r1 = orch.noteMemberDeleted(entry(w1));
+  assert.deepStrictEqual(r1.keptBranches, [w1.branch]);
+  assert.ok(!fs.existsSync(w1.cwd));
+  assert.ok(g('branch', '--list', w1.branch).trim(), 'the unmerged branch is kept');
+  const r2 = orch.noteMemberDeleted(entry(w2));
+  assert.deepStrictEqual(r2.keptBranches, []);
+  assert.ok(!fs.existsSync(w2.cwd));
+  assert.strictEqual(g('branch', '--list', w2.branch).trim(), '', 'a merged branch is deleted');
+
+  const e3 = entry(w3);
+  assert.deepStrictEqual(orch.memberDirty(e3), [{ worker: w3.worker, path: w3.cwd }]);
+  const refused = orch.noteMemberDeleted(e3);
+  assert.strictEqual(refused.refused, true);
+  assert.strictEqual(refused.dirty[0].worker, w3.worker);
+  assert.ok(fs.existsSync(path.join(w3.cwd, 'wip.txt')));
+  assert.ok(!run().workers[2].deleted, 'nothing changed');
+  orch.noteMemberDeleted(e3, { force: true });
+  assert.ok(!fs.existsSync(w3.cwd));
+
+  const ws = run().workers;
+  assert.deepStrictEqual(ws.map(w => [!!w.deleted, w.worktree]), [[true, null], [true, null], [true, null]]);
+});
+
 test('deleting a run: refused over uncommitted worktree changes, keeps unmerged branches', async (t) => {
   const repo = tmpDir('vistaclair-orch-repo-');
   const g = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'pipe' }).toString();
