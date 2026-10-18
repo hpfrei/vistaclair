@@ -25,8 +25,9 @@
 // replays it, then continues from the live `sdk:event` broadcasts. TODO.md
 // and NOTES.md come from `sdk:todo`, re-asked on the session's own edits to
 // them (`platform.files`), run membership from GET /api/orchestration/run.
-// The composer has no remembered target: every message is sent through a
-// pick-the-session, then confirm dialog.
+// The composer has no remembered target: every message is sent through one
+// dialog that shows the session map with the orchestrator selected; Tab or a
+// number moves the selection, a fresh Enter sends.
 // cli.js owns the tab; this file owns what is inside its wrap.
 (function () {
   const D = window.dashboard;
@@ -1115,7 +1116,7 @@
     _menu = { el: box, area, onDown, onKey };
   }
 
-  // ---- pick a session, then confirm (one dialog at a time) -----------------
+  // ---- pick a session and send (one dialog at a time) ----------------------
 
   let _pick = null;
   function closePicker() {
@@ -1166,7 +1167,7 @@
               </div>
             </div>
           </div>
-          <vc-composer placeholder="Message… (Enter or Ctrl+Enter, then choose the session · Shift+Enter new line · Esc interrupts)"></vc-composer>
+          <vc-composer placeholder="Message… (Enter or Ctrl+Enter, then Enter sends to the orchestrator, Tab picks another · Shift+Enter new line · Esc interrupts)"></vc-composer>
         </div>`;
       const q = (s) => wrap.querySelector(s);
       this.panelEl = q('.sdk-panel');
@@ -1470,10 +1471,11 @@
 
     // ---- sending ----
 
-    // Submit → pick the session → confirm. There is no remembered target:
-    // every message names its session, and the confirmation says which one.
-    // `mode` 'interrupt' picks a busy session and stops it, without a
-    // confirmation step.
+    // Submit → one dialog: the session map, the message, a Send button. There
+    // is no remembered target: every message names its session. The
+    // orchestrator (the first box) is selected; Tab / Shift+Tab or a number
+    // moves the selection, Enter or the button sends. `mode` 'interrupt'
+    // picks a busy session and stops it, without a confirmation step.
     openPicker(mode, payload = {}) {
       closePicker();
       closeModelMenu();
@@ -1492,17 +1494,26 @@
       backdrop.appendChild(modal);
       document.body.appendChild(backdrop);
       backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) closePicker(); });
-      const pick = _pick = { panel: this, backdrop, modal, mode, payload, list, pickable, step: 'pick', armed: false, target: null };
+      const sel = list.findIndex(pickable);
+      const pick = _pick = { panel: this, backdrop, modal, mode, payload, list, pickable, sel, armed: false };
       pick.onKeyUp = () => { pick.armed = true; };
       pick.onKey = (e) => {
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePicker(); return; }
-        if (pick.step === 'pick') {
-          const i = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : -1;
-          if (i >= 0 && list[i] && pickable(list[i])) { e.preventDefault(); this._picked(list[i], { byKey: true }); }
-          return;
-        }
-        if (e.key === 'Enter') {
-          // The Enter that submitted (or one held down) never confirms: it
+        const i = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : -1;
+        if (i >= 0 && list[i] && pickable(list[i])) { e.preventDefault(); this._picked(list[i]); return; }
+        if (mode !== 'send') return;
+        if (e.key === 'Tab') {
+          // Focus stays in the dialog: Tab only walks the selection, wrapping
+          // round and skipping the boxes that cannot take a message.
+          e.preventDefault();
+          e.stopPropagation();
+          const step = e.shiftKey ? -1 : 1;
+          for (let k = 1; k <= list.length; k++) {
+            const j = ((pick.sel + step * k) % list.length + list.length) % list.length;
+            if (pickable(list[j])) { this._picked(list[j]); break; }
+          }
+        } else if (e.key === 'Enter') {
+          // The Enter that submitted (or one held down) never sends: it
           // takes a fresh key press.
           e.preventDefault();
           e.stopPropagation();
@@ -1511,23 +1522,23 @@
       };
       document.addEventListener('keydown', pick.onKey, true);
       document.addEventListener('keyup', pick.onKeyUp, true);
-      // Only one box to choose from (a plain tab): straight to the confirmation.
-      if (mode === 'send' && list.length === 1 && pickable(list[0])) this._picked(list[0], { byKey: true });
-      else this._renderPick();
+      this._renderPick();
     }
 
     _nodeMeta(a) {
       return [fmtModel(a.shownModel()), STATE_TEXT[a.state || 'idle'] || a.state].filter(Boolean).join(' · ');
     }
 
+    // Drawn again on every change of selection.
     _renderPick() {
       const pick = _pick;
-      const { modal, list, pickable, mode } = pick;
-      pick.step = 'pick';
+      const { modal, list, pickable, mode, payload } = pick;
+      const target = mode === 'send' ? list[pick.sel] : null;
       const node = (a, i) => {
-        const b = el('button', `sdk-pick-node sdk-pick-${a.role}${pickable(a) ? '' : ' off'}`);
+        const b = el('button', `sdk-pick-node sdk-pick-${a.role}${pickable(a) ? '' : ' off'}${a === target ? ' sel' : ''}`);
         b.type = 'button';
         b.disabled = !pickable(a);
+        if (mode === 'send') b.setAttribute('aria-pressed', String(a === target));
         b.appendChild(el('span', 'sdk-pick-key', String(i + 1)));
         b.appendChild(el('span', 'sdk-pick-name', a.label));
         b.appendChild(el('span', 'sdk-pick-meta', this._nodeMeta(a)));
@@ -1546,21 +1557,38 @@
         map.appendChild(row);
       }
       modal.appendChild(map);
+      if (mode === 'send') {
+        const text = String(payload.text || '');
+        const lines = text.split('\n');
+        const preview = lines.slice(0, 3).join('\n') + (lines.length > 3 ? '\n…' : '');
+        const nImg = (payload.images || []).length;
+        if (target && (target.state === 'busy' || target.state === 'awaiting')) {
+          modal.appendChild(el('div', 'sdk-pick-note', `${target.label} is busy: it reads this after its current tool calls.`));
+        }
+        if (text) modal.appendChild(el('pre', 'sdk-pick-preview', clip(preview, 600)));
+        if (nImg) modal.appendChild(el('div', 'sdk-pick-imgs', `+ ${nImg} image${nImg === 1 ? '' : 's'}`));
+      }
       modal.appendChild(el('div', 'sdk-pick-hint', mode === 'send'
-        ? 'Click a box or press its number. Ended sessions cannot take messages.'
+        ? 'Tab or a number picks the box, Enter sends. Ended sessions cannot take messages.'
         : 'Click a busy box or press its number.'));
       const actions = el('div', 'sdk-pick-actions');
       const cancel = el('button', 'sdk-tb-btn', 'Cancel');
       cancel.type = 'button';
       cancel.addEventListener('click', closePicker);
       actions.appendChild(cancel);
+      if (mode === 'send') {
+        const send = el('button', 'alert-modal-ok sdk-pick-send', target ? `Send to ${clip(target.label, 32)}` : 'Send');
+        send.type = 'button';
+        send.disabled = !target;
+        send.addEventListener('click', () => this._confirmSend());
+        actions.appendChild(send);
+      }
       modal.appendChild(actions);
       modal.focus();
     }
 
-    // `byKey`: a key is still down (the submitting Enter, a number), so the
-    // confirmation waits for its release. A click leaves no key down.
-    _picked(a, { byKey = false } = {}) {
+    // Sending: a box (click or number) is selected, not sent to.
+    _picked(a) {
       const pick = _pick;
       if (!pick || !pick.pickable(a)) return;
       if (pick.mode === 'interrupt') {
@@ -1568,47 +1596,15 @@
         closePicker();
         return;
       }
-      pick.target = a;
-      pick.step = 'confirm';
-      pick.armed = !byKey;
-      const { modal, payload, list } = pick;
-      const text = String(payload.text || '');
-      const lines = text.split('\n');
-      const preview = lines.slice(0, 3).join('\n') + (lines.length > 3 ? '\n…' : '');
-      const nImg = (payload.images || []).length;
-      modal.innerHTML = '';
-      const title = el('div', 'sdk-pick-title');
-      title.append('Send to ', el('b', null, a.label), '?');
-      modal.appendChild(title);
-      modal.appendChild(el('div', 'sdk-pick-meta-line', this._nodeMeta(a)));
-      if (a.state === 'busy' || a.state === 'awaiting') {
-        modal.appendChild(el('div', 'sdk-pick-note', 'It is busy: it reads this after its current tool calls.'));
-      }
-      if (text) modal.appendChild(el('pre', 'sdk-pick-preview', clip(preview, 600)));
-      if (nImg) modal.appendChild(el('div', 'sdk-pick-imgs', `+ ${nImg} image${nImg === 1 ? '' : 's'}`));
-      const actions = el('div', 'sdk-pick-actions');
-      if (list.length > 1) {
-        const back = el('button', 'sdk-tb-btn', '← Back');
-        back.type = 'button';
-        back.addEventListener('click', () => this._renderPick());
-        actions.appendChild(back);
-      }
-      const cancel = el('button', 'sdk-tb-btn', 'Cancel');
-      cancel.type = 'button';
-      cancel.addEventListener('click', closePicker);
-      const send = el('button', 'alert-modal-ok sdk-pick-send', `Send to ${clip(a.label, 32)}`);
-      send.type = 'button';
-      send.addEventListener('click', () => this._confirmSend());
-      actions.append(cancel, send);
-      modal.appendChild(actions);
-      send.focus();
+      pick.sel = pick.list.indexOf(a);
+      this._renderPick();
     }
 
     _confirmSend() {
       const pick = _pick;
-      if (!pick || pick.step !== 'confirm' || !pick.target) return;
-      const { target, payload } = pick;
-      sendWs({ type: 'sdk:send', sessId: target.sessId, text: payload.text, images: payload.images || [] });
+      const target = pick?.mode === 'send' ? pick.list[pick.sel] : null;
+      if (!target || !pick.pickable(target)) return;
+      sendWs({ type: 'sdk:send', sessId: target.sessId, text: pick.payload.text, images: pick.payload.images || [] });
       // The draft stays in the composer until a message is really sent.
       this.composer.clear();
       closePicker();
