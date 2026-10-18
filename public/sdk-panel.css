@@ -698,6 +698,8 @@
 }
 .sdk-pick-node:hover:not(:disabled), .sdk-pick-node:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg)); outline: none; }
 .sdk-pick-node.off { opacity: .45; cursor: not-allowed; }
+.sdk-pick-node.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--bg)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+.sdk-pick-node.sel .sdk-pick-key { border-color: var(--accent); background: var(--accent); color: var(--bg); }
 .sdk-pick-key {
   position: absolute;
   left: 10px;
