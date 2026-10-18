@@ -26,8 +26,8 @@
 // and NOTES.md come from `sdk:todo`, re-asked on the session's own edits to
 // them (`platform.files`), run membership from GET /api/orchestration/run.
 // The composer has no remembered target: every message is sent through one
-// dialog that shows the session map with the orchestrator selected; Tab or a
-// number moves the selection, a fresh Enter sends.
+// dialog that shows the session map with the orchestrator selected; Tab moves
+// the selection, a fresh Enter sends.
 // cli.js owns the tab; this file owns what is inside its wrap.
 (function () {
   const D = window.dashboard;
@@ -1473,8 +1473,8 @@
 
     // Submit → one dialog: the session map, the message, a Send button. There
     // is no remembered target: every message names its session. The
-    // orchestrator (the first box) is selected; Tab / Shift+Tab or a number
-    // moves the selection, Enter or the button sends. `mode` 'interrupt'
+    // orchestrator (the first box) is selected; Tab / Shift+Tab moves the
+    // selection, Enter or the button sends. `mode` 'interrupt'
     // picks a busy session and stops it, without a confirmation step.
     openPicker(mode, payload = {}) {
       closePicker();
@@ -1499,8 +1499,6 @@
       pick.onKeyUp = () => { pick.armed = true; };
       pick.onKey = (e) => {
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePicker(); return; }
-        const i = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : -1;
-        if (i >= 0 && list[i] && pickable(list[i])) { e.preventDefault(); this._picked(list[i]); return; }
         if (mode !== 'send') return;
         if (e.key === 'Tab') {
           // Focus stays in the dialog: Tab only walks the selection, wrapping
@@ -1534,12 +1532,12 @@
       const pick = _pick;
       const { modal, list, pickable, mode, payload } = pick;
       const target = mode === 'send' ? list[pick.sel] : null;
-      const node = (a, i) => {
+      const node = (a) => {
         const b = el('button', `sdk-pick-node sdk-pick-${a.role}${pickable(a) ? '' : ' off'}${a === target ? ' sel' : ''}`);
         b.type = 'button';
         b.disabled = !pickable(a);
         if (mode === 'send') b.setAttribute('aria-pressed', String(a === target));
-        b.appendChild(el('span', 'sdk-pick-key', String(i + 1)));
+        b.title = a.label;
         b.appendChild(el('span', 'sdk-pick-name', a.label));
         b.appendChild(el('span', 'sdk-pick-meta', this._nodeMeta(a)));
         b.addEventListener('click', () => this._picked(a));
@@ -1549,11 +1547,11 @@
       modal.appendChild(el('div', 'sdk-pick-title', mode === 'send' ? 'Send to which session?' : 'Interrupt which session?'));
       const map = el('div', 'sdk-pick-map');
       const [first, ...rest] = list;
-      map.appendChild(node(first, 0));
+      map.appendChild(node(first));
       if (rest.length) {
         const row = el('div', 'sdk-pick-row');
         row.style.setProperty('--n', rest.length);
-        rest.forEach((a, i) => row.appendChild(node(a, i + 1)));
+        rest.forEach(a => row.appendChild(node(a)));
         map.appendChild(row);
       }
       modal.appendChild(map);
@@ -1569,8 +1567,8 @@
         if (nImg) modal.appendChild(el('div', 'sdk-pick-imgs', `+ ${nImg} image${nImg === 1 ? '' : 's'}`));
       }
       modal.appendChild(el('div', 'sdk-pick-hint', mode === 'send'
-        ? 'Tab or a number picks the box, Enter sends. Ended sessions cannot take messages.'
-        : 'Click a busy box or press its number.'));
+        ? 'Tab picks the box, Enter sends. Ended sessions cannot take messages.'
+        : 'Click a busy box.'));
       const actions = el('div', 'sdk-pick-actions');
       const cancel = el('button', 'sdk-tb-btn', 'Cancel');
       cancel.type = 'button';
@@ -1587,7 +1585,7 @@
       modal.focus();
     }
 
-    // Sending: a box (click or number) is selected, not sent to.
+    // Sending: a box (click or Tab) is selected, not sent to.
     _picked(a) {
       const pick = _pick;
       if (!pick || !pick.pickable(a)) return;
