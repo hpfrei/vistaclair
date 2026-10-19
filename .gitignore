@@ -43,3 +43,4 @@ spend-ledger/*.json
 
 # Change requests between apps and the platform — runtime state
 change-requests.json
+app-deps.json
