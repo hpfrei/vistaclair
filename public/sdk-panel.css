@@ -2,8 +2,9 @@
    AGENT SDK PANEL (sdk-panel.js) and <vc-composer> (vc-composer.js)
    An SDK tab's wrap holds one panel: toolbar, a stage with the
    orchestrator's box across the top and the worker boxes in one row below,
-   joined by SVG curves drawn behind them (the closed workers on a shelf at
-   the row's left end), and the composer docked at the bottom. Each box shows one view (TODO / Notes / Live) and scrolls it.
+   joined by SVG curves drawn behind them (the closed workers on a shelf in
+   the top-left corner, left of the orchestrator's box; a row with no box
+   takes no room), and the composer docked at the bottom. Each box shows one view (TODO / Notes / Live) and scrolls it.
    ============================================================ */
 
 /* Tab strip: the "SDK" badge after the label. */
@@ -106,22 +107,19 @@
 .sdk-link-busy circle { fill: var(--busy); }
 .sdk-link-awaiting path { stroke: var(--orange); }
 .sdk-link-ended path { stroke-dasharray: 3 4; opacity: .6; }
-.sdk-link-shelf path { stroke-dasharray: 2 5; opacity: .4; }
-.sdk-link-shelf circle { opacity: .4; }
 .sdk-link path.flash-down, .sdk-link path.flash-up { stroke: var(--magenta); stroke-width: 2.4; stroke-dasharray: 7 6; }
 .sdk-link path.flash-down { animation: sdk-dash-down .45s linear infinite; }
 .sdk-link path.flash-up { animation: sdk-dash-up .45s linear infinite; }
 @keyframes sdk-dash-down { from { stroke-dashoffset: 26; } to { stroke-dashoffset: 0; } }
 @keyframes sdk-dash-up { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 26; } }
 
-.sdk-main-slot { position: relative; z-index: 1; display: flex; flex: 1; min-height: 0; }
-.sdk-panel.has-workers .sdk-main-slot { flex: 0 0 44%; }
+/* The top: the shelf, then the orchestrator's box; alone, it fills the stage. */
+.sdk-head { position: relative; z-index: 1; display: flex; gap: 14px; flex: 1; min-height: 0; }
+.sdk-panel.has-workers .sdk-head { flex: 0 0 44%; }
+.sdk-main-slot { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .sdk-workers { position: relative; z-index: 1; display: flex; justify-content: center; gap: 18px; flex: 1; min-height: 0; }
 .sdk-panel:not(.has-workers) .sdk-workers { display: none; }
 .sdk-workers > .sdk-area { flex: 1 1 0; min-width: 0; max-width: 50%; }
-/* The boxes centre in the room the shelf leaves. */
-.sdk-workers > .sdk-area:first-of-type { margin-left: auto; }
-.sdk-workers > .sdk-area:last-of-type { margin-right: auto; }
 .sdk-workers.crowded { gap: 10px; }
 .sdk-workers.crowded > .sdk-area { max-width: none; }
 .sdk-workers.crowded > .sdk-area-ended { flex-grow: .5; }
@@ -162,7 +160,7 @@
 }
 .sdk-area-opened .sdk-shelve:hover { color: var(--accent); border-color: var(--accent); }
 
-/* --- the shelf: one card per closed worker, at the row's left end --- */
+/* --- the shelf: one card per closed worker, left of the orchestrator --- */
 .sdk-shelf {
   flex: 0 0 176px;
   min-width: 0;
@@ -796,10 +794,12 @@
 @media (max-width: 640px) {
   .sdk-stage { overflow-y: auto; gap: 18px; padding: 14px 6px 6px; }
   .sdk-links { display: none; }
+  .sdk-head { flex-direction: column; gap: 10px; }
+  .sdk-panel.has-workers .sdk-head { flex: 0 0 auto; }
   .sdk-panel.has-workers .sdk-main-slot { flex: 0 0 auto; height: 62vh; }
   .sdk-workers { flex-direction: column; flex: 0 0 auto; }
   .sdk-workers > .sdk-area { max-width: none; height: 55vh; flex: 0 0 auto; margin: 0; }
-  /* The shelf: a strip of chips above the column. */
+  /* The shelf: a strip of chips above the orchestrator's box. */
   .sdk-shelf { flex: 0 0 auto; flex-direction: row; align-items: center; }
   .sdk-shelf-tab { border-bottom: none; border-right: 1px solid var(--border); align-self: stretch; }
   .sdk-shelf-list { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding: 5px; }

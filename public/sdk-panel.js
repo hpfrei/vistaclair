@@ -13,12 +13,13 @@
 // chip under the feed; its bubble lands where the agent took it in. A splitter between the two moves (double-click:
 // back to the table's own height); the last position is kept for new boxes.
 // Every box opens on Live.
-// A closed or ended worker leaves the row for the shelf, a column at the
-// row's left end: one card per worker, newest closed first (foldable to a
-// tab, per run). A card opens that worker's box, dashed, first in the row,
-// one at a time; its caption's ◂ (or the card again) puts it back. Shelved
-// boxes stay alive off the page, so nothing is fetched again. One faint
-// curve joins the orchestrator to the shelf.
+// A closed or ended worker leaves the row for the shelf, a column in the
+// stage's top-left corner, left of the orchestrator's box: one card per
+// worker, newest closed first (foldable to a tab, per run). A card opens that
+// worker's box, dashed, first in the row, one at a time; its caption's ◂ (or
+// the card again) puts it back. Shelved boxes stay alive off the page, so
+// nothing is fetched again. A row with no box takes no room: the
+// orchestrator's box and the shelf fill the stage.
 //
 // Everything shown is server state: on mount and after a reconnect each box
 // asks for `sdk:history` (the session's transcript, no stream deltas),
@@ -43,7 +44,6 @@
   const VIEW_STORE = 'sdkPanelViews';
   const VIEW_STORE_MAX = 200;
   const SHELF_STORE = 'sdkShelfFolded';  // per run: the shelf folded to a tab
-  const SHELF_LINK = ':shelf';          // the shelf's curve, in place of a sessId
   const SPLIT_STORE = 'sdkTodoSplit';   // the TODO table's share of the view, %
   const SPLIT_MIN = 10;
   const SPLIT_MAX = 90;
@@ -1159,13 +1159,14 @@
           </div>
           <div class="sdk-stage">
             <svg class="sdk-links" aria-hidden="true"></svg>
-            <div class="sdk-main-slot"></div>
-            <div class="sdk-workers">
+            <div class="sdk-head">
               <div class="sdk-shelf hidden">
                 <button type="button" class="sdk-shelf-tab"><span class="sdk-shelf-title"></span><span class="sdk-shelf-arrow" aria-hidden="true"></span></button>
                 <div class="sdk-shelf-list"></div>
               </div>
+              <div class="sdk-main-slot"></div>
             </div>
+            <div class="sdk-workers"></div>
           </div>
           <vc-composer placeholder="Message… (Enter or Ctrl+Enter, then Enter sends to the orchestrator, Tab picks another · Shift+Enter new line · Esc interrupts)"></vc-composer>
         </div>`;
@@ -1286,8 +1287,8 @@
           || (w.running ? (w.live?.pausing ? 'pausing' : w.live?.busy ? 'busy' : null) : w.paused ? 'paused' : 'exited');
         if (derived && (w.state || !a.gotStatus || derived === 'exited' || derived === 'paused')) a.setState(derived);
         a.workerId = w.id;
-        // A new report travels up the worker's line, or the shelf's once it
-        // closed with it (not on the first load).
+        // A new report travels up the worker's line (not on the first load;
+        // a shelved worker's box not open has none).
         const rep = w.lastReport ? JSON.stringify([w.lastReport.status, w.lastReport.summary, w.lastReport.at]) : null;
         if (rep && a._repSig !== undefined && rep !== a._repSig) { this.layoutWorkers(); this.flashLink(a.name, this.main?.name); }
         a._repSig = rep;
@@ -1311,16 +1312,16 @@
       return a;
     }
 
-    // The row: the shelf (when a worker is on it), the open shelved box, then
-    // the others in id order. Past three boxes, ended ones narrow so the
-    // running ones keep their room.
+    // The row: the open shelved box, then the others in id order; with none
+    // it is hidden. Past three boxes, ended ones narrow so the running ones
+    // keep their room.
     layoutWorkers() {
       const all = this.sortedWorkers();
       const shelved = all.filter(a => a.shelved());
       if (this.openId && !shelved.some(a => a.sessId === this.openId)) this.openId = null;
       const open = shelved.find(a => a.sessId === this.openId);
       this.rowList = [open, ...all.filter(a => !a.shelved())].filter(Boolean);
-      const want = [this.shelfEl, ...this.rowList.map(a => a.el)];
+      const want = this.rowList.map(a => a.el);
       // Only a box out of place moves: putting one back into the DOM resets
       // its scrollers to the top. Shelved boxes leave first, so the others
       // never have to move around them.
@@ -1331,7 +1332,7 @@
       });
       for (const a of all) a.el.classList.toggle('sdk-area-opened', a === open);
       this.renderShelf(shelved);
-      this.panelEl.classList.toggle('has-workers', all.length > 0);
+      this.panelEl.classList.toggle('has-workers', this.rowList.length > 0);
       this.workersEl.classList.toggle('crowded', this.rowList.length > 3);
       this.drawLinksSoon();
     }
@@ -1404,14 +1405,12 @@
     }
 
     // One curve per box in the row, from the orchestrator's bottom edge down
-    // onto the worker's name tag (the caption on its top border), and one to
-    // the shelf's head for all the shelved. Redrawn on every resize of the
-    // stage.
+    // onto the worker's name tag (the caption on its top border); the shelf,
+    // beside the orchestrator, has none. Redrawn on every resize of the stage.
     // Paths are updated in place, so a redraw never cuts a flash short.
     drawLinks() {
       const svg = this.linksEl;
-      const shelf = this.shelfEl.classList.contains('hidden') ? [] : [{ sessId: SHELF_LINK, el: this.shelfEl, cap: this.shelfTab }];
-      const list = [...shelf, ...this.rowList];
+      const list = this.rowList;
       const keep = new Set();
       if (this.main && list.length && this.stage.offsetParent) {
         const NS = 'http://www.w3.org/2000/svg';
@@ -1422,12 +1421,12 @@
         const y1 = m.bottom - s.top;
         svg.setAttribute('viewBox', `0 0 ${s.width} ${s.height}`);
         list.forEach((a, i) => {
-          const r = (a.cap || a.el.querySelector('.sdk-cap')).getBoundingClientRect();
+          const r = a.el.querySelector('.sdk-cap').getBoundingClientRect();
           const x1 = m.left - s.left + m.width / 2 + (n > 1 ? (i / (n - 1) - 0.5) * spread : 0);
           const x2 = r.left - s.left + r.width / 2;
           const y2 = r.top - s.top;
           const my = (y1 + y2) / 2;
-          const st = a.sessId === SHELF_LINK ? 'shelf' : a.ended() ? 'ended' : a.state === 'busy' ? 'busy' : a.state === 'awaiting' ? 'awaiting' : 'idle';
+          const st = a.ended() ? 'ended' : a.state === 'busy' ? 'busy' : a.state === 'awaiting' ? 'awaiting' : 'idle';
           let g = svg.querySelector(`g[data-sess="${CSS.escape(a.sessId)}"]`);
           if (!g) {
             g = document.createElementNS(NS, 'g');
@@ -1454,10 +1453,10 @@
       if (a && a.role === 'worker') hit.push([a, 'up']);
       if (b && b.role === 'worker') hit.push([b, 'down']);
       for (const [w, dir] of hit) {
-        // A shelved worker (its box not open) has the shelf's curve.
-        const key = this.rowList.includes(w) ? w.sessId : SHELF_LINK;
-        const sel = `g[data-sess="${CSS.escape(key)}"] path`;
-        // A curve not drawn yet (the shelf's first worker): draw now.
+        // A shelved worker whose box is not open has no curve.
+        if (!this.rowList.includes(w)) continue;
+        const sel = `g[data-sess="${CSS.escape(w.sessId)}"] path`;
+        // A curve not drawn yet (a box just added): draw now.
         let path = this.linksEl.querySelector(sel);
         if (!path) { this.drawLinks(); path = this.linksEl.querySelector(sel); }
         if (!path) continue;
