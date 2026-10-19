@@ -1436,7 +1436,13 @@ window.dashboard = {
   _viewCallbacks: {},
   registerView: null,
 };
-dashboard.registerModule = (prefix, handler) => { dashboard._pluginHandlers.push({ prefix, handler }); };
+// Messages no handler claimed (an add-on's module may load after the socket
+// connects) wait here and are replayed to the handler that registers for them.
+const pendingMessages = createPendingQueue();
+dashboard.registerModule = (prefix, handler) => {
+  dashboard._pluginHandlers.push({ prefix, handler });
+  for (const msg of pendingMessages.take(prefix, Date.now())) handler(msg);
+};
 dashboard.registerView = (viewId, renderFn) => { dashboard._viewCallbacks[viewId] = renderFn; };
 
 // --- WebSocket ---
@@ -1585,8 +1591,12 @@ function handleMessage(msg) {
 
     // MCP
     default:
-      if (msg.type === 'mcp:list') state.mcpServers = msg.servers || [];
-      if (window.mcpModule?.handleMessage) window.mcpModule.handleMessage(msg);
+      if (msg.type.startsWith('mcp:')) {
+        if (msg.type === 'mcp:list') state.mcpServers = msg.servers || [];
+        if (window.mcpModule?.handleMessage) window.mcpModule.handleMessage(msg);
+      } else {
+        pendingMessages.push(msg, Date.now());
+      }
       break;
   }
 }
