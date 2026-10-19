@@ -61,7 +61,7 @@ const path = require('path');
 const caps = require('./capabilities');
 const { buildClaudeEnv, trackInstance, disallowedToolsFor, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
-const { toolPackContributions } = require('./tool-packs');
+const { toolPackContributions, releaseToolPacks } = require('./tool-packs');
 const { modelFamily } = require('./proxy');
 const { notifyAuthFailed } = require('./ws/claude-auth-handler');
 
@@ -336,7 +336,8 @@ class SdkSession {
     const mod = this._sdk || sdk;
     if (!mod || typeof mod.query !== 'function') throw new Error(`${SDK_PACKAGE} is not loaded`);
     this._spawnGen++;
-    if (this.running) this.kill();
+    if (this.running) this.kill('respawn');
+    this._releasePacks('respawn');
 
     this.cwd = cwd;
     this.autoMemory = autoMemory === true;
@@ -344,7 +345,15 @@ class SdkSession {
     this._instanceId = `cli-${this.sessId}`;
     // Built before anything is registered: a missing API key or binary fails
     // the launch instead of leaving a dead session behind.
-    const options = this._buildOptions({ resumeSessionId });
+    let options;
+    try {
+      options = this._buildOptions({ resumeSessionId });
+    } finally {
+      // The spawn's tool packs: released by its end (kill, exit), or now if refused.
+      this._packs = this._builtPacks || null;
+      this._builtPacks = null;
+      if (!options) this._releasePacks('refused');
+    }
 
     this.status = 'running';
     this._exitState = null;
@@ -428,6 +437,7 @@ class SdkSession {
     // Add-on tool packs (src/tool-packs.js), built once for this spawn.
     const mcpOpts = { settings: s, instanceId: this.instanceId, dashboardPort: this._dashboardPort, authToken: this._authToken, cwd: this.cwd, sessId: this.sessId };
     const packs = toolPackContributions(mcpOpts);
+    this._builtPacks = packs;   // spawn takes it over
     const append = buildAppendSystemPrompt(s, packs);
     const options = {
       cwd: this.cwd,
@@ -490,6 +500,7 @@ class SdkSession {
       }
     }
     if (gen !== this._spawnGen) return;
+    this._releasePacks('exit');
     this._dropPending('ended');
     this._input?.close();
     this._query = null;
@@ -887,7 +898,8 @@ class SdkSession {
     return '';
   }
 
-  kill() {
+  // `reason` reaches the tool packs' release (src/tool-packs.js).
+  kill(reason = 'kill') {
     const q = this._query;
     this._query = null;
     this._dropPending('ended');
@@ -897,6 +909,14 @@ class SdkSession {
       try { q?.close?.(); } catch {}
     }
     this.status = 'idle';
+    this._releasePacks(reason);
+  }
+
+  // The current spawn's tool packs end (once; a later call is a no-op).
+  _releasePacks(reason) {
+    const packs = this._packs;
+    this._packs = null;
+    if (packs) releaseToolPacks(packs, reason);
   }
 
   // Replay for the panel (sdk:history).

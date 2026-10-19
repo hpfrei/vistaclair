@@ -324,7 +324,7 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
     });
     live.delete(session.instanceId);
     if (!interrupted) session.notePaused?.();
-    if (tabId) mgr.closeQuiet(tabId);
+    if (tabId) mgr.closeQuiet(tabId, 'pause');
     broadcaster?.broadcast({ type: 'cli:paused', sessId: session.sessId, title: session.title, interrupted: !!interrupted });
     for (const fn of finalizedListeners) {
       try { fn(session, p, { interrupted: !!interrupted }); } catch (e) { console.error('[session-control] finalize listener:', e.message); }
@@ -345,9 +345,11 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
   // When the transcript is gone, a fresh session with the same settings and
   // folder takes its place (`fresh: true`), told to continue from its notes
   // (`freshMessage` overrides that text); `fallback: false` throws instead.
-  function resumeSaved(sessId, { message, freshMessage, fallback = true, cols = 120, rows = 32 } = {}) {
-    const entry = mgr.findSaved(sessId);
-    if (!entry) throw new Error('no saved session with that id');
+  // `settings` replaces the saved settings for this launch (a worker's grants).
+  function resumeSaved(sessId, { message, freshMessage, fallback = true, cols = 120, rows = 32, settings } = {}) {
+    const saved = mgr.findSaved(sessId);
+    if (!saved) throw new Error('no saved session with that id');
+    const entry = settings ? { ...saved, settings } : saved;
     for (const s of mgr.sessions.values()) {
       if (s.sessId === sessId && s.running) throw new Error('that session is already running');
     }

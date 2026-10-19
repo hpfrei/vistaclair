@@ -91,7 +91,8 @@ function fakeMgr() {
     deleteSavedSession(id) { history = history.filter(h => h.id !== id); },
     lost: new Set(),        // sessIds whose transcript was deleted
     transcriptExists: (cwd, id) => !mgr.lost.has(id),
-    closeQuiet(tabId) { const s = sessions.get(tabId); sessions.delete(tabId); if (s) { s.running = false; closed.push(tabId); } },
+    closeReasons: [],
+    closeQuiet(tabId, reason) { const s = sessions.get(tabId); sessions.delete(tabId); if (s) { s.running = false; closed.push(tabId); mgr.closeReasons.push(reason); } },
     broadcastTabs() {},
     noteSessionState() {},
   };
@@ -612,6 +613,7 @@ test('pausing a run: the orchestrator relays, workers write notes and close, the
   assert.ok(!mgr.sessions.has(s1.tabId));
   assert.ok(run().workers[0].paused);
   assert.ok(mgr.findSaved(s1.sessId).paused);
+  assert.deepStrictEqual(mgr.closeReasons, ['pause'], 'closed for a pause (a tool pack\'s release reason)');
   assert.ok(run().pausing, 'still pausing: w2 runs');
 
   hook(orch, s2, { hook_event_name: 'UserPromptSubmit' });
@@ -1391,4 +1393,201 @@ test('the orchestrator MCP server offers SendMessage / ListAgents to SDK session
   const { MAX_WORKERS } = require('../src/orchestration');
   assert.doesNotMatch(src, /At most 3|3-worker/);
   assert.match(src, new RegExp(`MAX_WORKERS run(ning)? at once \\(${MAX_WORKERS}\\)`));
+});
+
+// --- Tool grants (src/tool-packs.js consumes / validate) ---
+
+const toolPacks = require('../src/tool-packs');
+function clearPacks() { for (const p of toolPacks.listToolPacks()) toolPacks.unregisterToolPack(p.id); }
+
+test('tool grants without a consuming pack: no tools parameter, a tools value is refused, nothing changes', async (t) => {
+  clearPacks();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  assert.deepStrictEqual(orch.toolParams(), { params: {} });
+  toolPacks.registerToolPack({ id: 'plain-pack', build: () => ({}) });
+  assert.deepStrictEqual(orch.toolParams(), { params: {} }, 'a pack that consumes nothing');
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x', tools: ['a__b'] }), /no tool pack of this worker handles tools/);
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x', tools: [] }), /no tool pack/);
+  assert.strictEqual(run().workers.length, 0);
+  assert.strictEqual(run().workerSeq, 0);
+  assert.strictEqual(mgr.launches.length, 1, 'only the orchestrator');
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  assert.ok(!('grants' in mgr.sessions.get(w.tabId).settings));
+  assert.ok(!('grants' in run().workers[0]));
+  assert.ok(!('grants' in orch.describeRun(run()).workers[0]));
+  assert.throws(() => orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue', tools: [] }), /already running/);
+  clearPacks();
+});
+
+test('tool grants: launch_cli tools persist on the worker, resume keeps, replaces or clears them', async (t) => {
+  clearPacks();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  // A worker-only pack: the parameter shows as soon as any pack consumes tools.
+  toolPacks.registerToolPack({ id: 'apps', roles: ['worker'], default: true, consumes: ['tools'], build: () => ({}) });
+  const params = orch.toolParams().params;
+  assert.deepStrictEqual(Object.keys(params), ['launch_cli', 'resume_worker']);
+  assert.strictEqual(params.launch_cli.tools.type, 'array');
+  assert.deepStrictEqual(params.resume_worker.tools.items, { type: 'string' });
+  assert.match(params.resume_worker.tools.description, /empty array clears/);
+
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x', tools: 'a__b' }), /tools must be an array/);
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x', tools: ['a__b', ''] }), /tools must be an array/);
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x', tools: ['crm__find', 'crm__add', 'crm__find'] });
+  const grants = { tools: ['crm__find', 'crm__add'] };
+  const s1 = mgr.sessions.get(w.tabId);
+  assert.deepStrictEqual(s1.settings.grants, grants, 'on the session settings');
+  assert.deepStrictEqual(run().workers[0].grants, grants, 'on the run record');
+  assert.deepStrictEqual(mgr.findSaved(s1.sessId).settings.grants, grants, 'in its saved entry');
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId).workers[0].grants, grants);
+
+  const close = () => {
+    const live = [...mgr.sessions.values()].find(x => x.settings.orchestration?.workerId === 'w1');
+    orch.report(live.instanceId, { status: 'done', summary: 'ok' });
+    orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
+    return live;
+  };
+  close();
+  assert.strictEqual(mgr.closeReasons.at(-1), 'close_worker');
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId).workers[0].grants, grants, 'a compact entry shows them too');
+
+  // Continue without tools: kept.
+  let r = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue' });
+  assert.strictEqual(mgr.sessions.get(r.tabId).sessId, s1.sessId);
+  assert.deepStrictEqual(mgr.sessions.get(r.tabId).settings.grants, grants);
+  close();
+  // Continue with tools: replaced, on the resumed session and the record.
+  r = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue', tools: ['crm__export'] });
+  assert.deepStrictEqual(mgr.sessions.get(r.tabId).settings.grants, { tools: ['crm__export'] });
+  assert.deepStrictEqual(run().workers[0].grants, { tools: ['crm__export'] });
+  close();
+  // Fresh with an empty array: cleared everywhere.
+  r = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'fresh', tools: [] });
+  assert.strictEqual(r.mode, 'fresh');
+  assert.ok(!('grants' in mgr.sessions.get(r.tabId).settings));
+  assert.ok(!('grants' in run().workers[0]));
+  assert.ok(!('grants' in orch.listWorkers(orchSession.instanceId).workers[0]));
+  close();
+  // Continue after a clear: the saved session had none, none come back.
+  r = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue', tools: ['crm__find'] });
+  assert.deepStrictEqual(mgr.sessions.get(r.tabId).settings.grants, { tools: ['crm__find'] });
+  close();
+  r = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue', tools: [] });
+  assert.ok(!('grants' in mgr.sessions.get(r.tabId).settings), 'cleared on a continue too');
+  clearPacks();
+});
+
+test('tool grants: a pack\'s validate refuses a launch or a resume with its message, launching nothing', async (t) => {
+  clearPacks();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const asked = [];
+  toolPacks.registerToolPack({
+    id: 'apps', roles: ['worker'], default: true, consumes: ['tools'], build: () => ({}),
+    validate: ({ settings, role }) => {
+      asked.push({ role, grants: settings.grants || null, worker: settings.orchestration.workerId });
+      const bad = (settings.grants?.tools || []).filter(n => !n.startsWith('crm__'));
+      if (bad.length) throw new Error(`unknown tool ${bad.join(', ')}`);
+    },
+  });
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x', tools: ['crm__find', 'evil__rm'] }), /^Error: unknown tool evil__rm$/);
+  assert.strictEqual(run().workers.length, 0, 'no worker recorded');
+  assert.strictEqual(mgr.launches.length, 1, 'nothing launched');
+  assert.deepStrictEqual(asked, [{ role: 'worker', grants: { tools: ['crm__find', 'evil__rm'] }, worker: 'w1' }]);
+
+  // validate runs without tools too (every worker launch).
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x', tools: ['crm__find'] });
+  assert.strictEqual(asked.length, 2);
+  const s1 = mgr.sessions.get(w.tabId);
+  orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
+  orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
+  const launches = mgr.launches.length;
+  assert.throws(() => orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'fresh', tools: ['evil__rm'] }), /unknown tool evil__rm/);
+  assert.strictEqual(mgr.launches.length, launches);
+  assert.strictEqual(run().workers[0].closed, true, 'still closed');
+  assert.deepStrictEqual(run().workers[0].grants, { tools: ['crm__find'] }, 'grants unchanged');
+  // The "+" menu resume is checked too.
+  toolPacks.registerToolPack({ id: 'gate', roles: ['worker'], default: true, build: () => ({}), validate: () => { throw new Error('apps are offline'); } });
+  assert.throws(() => orch.resumeSavedWorker(s1.sessId), /apps are offline/);
+  clearPacks();
+});
+
+test('sendToSession: an add-on message reaches a run session by its address, like SendMessage', async (t) => {
+  const { orch, orchSession, mgr, r } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const ws = mgr.sessions.get(w.tabId);
+  const before = mgr.submits.length;
+  assert.deepStrictEqual(orch.sendToSession(w.worker, 'job 7 finished', { from: 'apps' }), { delivered: true, how: 'submitted' });
+  assert.deepStrictEqual(mgr.submits.slice(before), [{ tabId: w.tabId, data: '[message from apps] job 7 finished', opts: { from: 'apps' } }]);
+  // A busy terminal reads it at its next hook.
+  ws.busy = true;
+  assert.deepStrictEqual(orch.sendToSession(w.worker, 'job 8 finished', { from: 'apps' }), { delivered: true, how: 'queued' });
+  const out = hook(orch, ws, { hook_event_name: 'PostToolUse', tool_name: 'Read' });
+  assert.match(out.stdout, /\[message from apps\] job 8 finished/);
+  // The orchestrator by its address.
+  assert.strictEqual(orch.sendToSession(orchSession.settings.name, 'hello', { from: 'apps' }).delivered, true);
+  assert.deepStrictEqual(orch.sendToSession('orch-nope-w9', 'x', { from: 'apps' }), { delivered: false, how: 'no session with that address' });
+  assert.throws(() => orch.sendToSession(w.worker, '  ', { from: 'apps' }), /text is required/);
+  assert.ok(r.tabId);
+});
+
+// The real MCP server against a fake dashboard: launch_cli / resume_worker
+// list `tools` only when the dashboard's tool-params names it. Needs the MCP
+// SDK under mcp-servers/integrated (installed with the app).
+const MCP_SDK = path.join(CORE, 'mcp-servers', 'integrated', 'node_modules', '@modelcontextprotocol', 'sdk');
+test('the orchestrator MCP lists the tools parameter only when the dashboard offers it', { skip: !fs.existsSync(MCP_SDK) && 'MCP SDK not installed' }, async () => {
+  const http = require('http');
+  const { spawn } = require('child_process');
+  let params = {};
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(req.url === '/api/orchestration/tool-params' ? { params } : { error: 'unexpected' }));
+    });
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const list = (port) => new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [path.join(CORE, 'lib', 'orchestrator-mcp.js')], {
+      env: { ...process.env, VISTACLAIR_DASHBOARD_PORT: String(port), VISTACLAIR_ORCH_ROLE: 'orchestrator', VISTACLAIR_INSTANCE_ID: 'cli-x' },
+      stdio: ['pipe', 'pipe', 'inherit'],
+    });
+    let out = '';
+    const timer = setTimeout(() => { p.kill(); reject(new Error('no tools/list answer')); }, 10000);
+    p.stdout.on('data', (d) => {
+      out += d;
+      for (const line of out.split('\n')) {
+        let m; try { m = JSON.parse(line); } catch { continue; }
+        if (m.id === 2) { clearTimeout(timer); p.kill(); resolve(m.result.tools); }
+      }
+    });
+    const send = (m) => p.stdin.write(JSON.stringify(m) + '\n');
+    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't', version: '1' } } });
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+  });
+  try {
+    const port = server.address().port;
+    const plain = await list(port);
+    const props = (tools, name) => Object.keys(tools.find(t => t.name === name).inputSchema.properties);
+    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'model']);
+    assert.deepStrictEqual(props(plain, 'resume_worker'), ['worker', 'mode', 'message']);
+    // No dashboard at all: the same schemas.
+    const closed = http.createServer();
+    await new Promise(r => closed.listen(0, '127.0.0.1', r));
+    const deadPort = closed.address().port;
+    await new Promise(r => closed.close(r));
+    assert.deepStrictEqual(await list(deadPort), plain);
+
+    clearPacks();
+    toolPacks.registerToolPack({ id: 'apps', roles: ['worker'], default: true, consumes: ['tools'], build: () => ({}) });
+    params = setup().orch.toolParams().params;
+    clearPacks();
+    const granted = await list(port);
+    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'model', 'tools']);
+    assert.deepStrictEqual(props(granted, 'resume_worker'), ['worker', 'mode', 'message', 'tools']);
+    assert.deepStrictEqual(granted.find(t => t.name === 'launch_cli').inputSchema.required, ['title', 'task']);
+    assert.deepStrictEqual(granted.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)), plain.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)));
+  } finally {
+    server.close();
+  }
 });

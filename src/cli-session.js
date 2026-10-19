@@ -4,7 +4,7 @@ const path = require('path');
 const os = require('os');
 const caps = require('./capabilities');
 const { conventionNote } = require('./session-folders');
-const { toolPackContributions, mergeMcpServers } = require('./tool-packs');
+const { toolPackContributions, releaseToolPacks, mergeMcpServers } = require('./tool-packs');
 const { buildCliArgs, spawnClaudePty, killGracefully, PACKAGE_ROOT, DATA_HOME } = require('./utils');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
@@ -57,7 +57,7 @@ class CliSession {
 
   spawn(cwd, cols, rows, { resumeSessionId, autoMemory } = {}) {
     this._spawnGen++;
-    if (this.running) this.kill();
+    if (this.running) this.kill('respawn');
 
     this.cwd = cwd;
     this.kind = 'cli';
@@ -73,7 +73,9 @@ class CliSession {
     this.store.registerSession(this.instanceId, this.sessId);
 
     // Add-on tool packs (src/tool-packs.js), built once for this spawn.
+    this._releasePacks('respawn');
     const packs = toolPackContributions(this._mcpOpts());
+    this._packs = packs;
     const mergedSettings = { ...this.settings, appendSystemPrompt: buildAppendSystemPrompt(this.settings, packs) };
     const args = ['--dangerously-skip-permissions', ...buildCliArgs(mergedSettings, { disallowedTools: packs.disallowedTools })];
     if (resumeSessionId) {
@@ -117,6 +119,7 @@ class CliSession {
     this.pty.onExit(({ exitCode }) => {
       if (gen !== this._spawnGen) return;
       this._cleanupMcpConfig();
+      this._releasePacks('exit');
       this.store.unregisterSession(this.instanceId);
       this.status = 'exited';
       this.pty = null;
@@ -257,7 +260,8 @@ class CliSession {
     return !!this.owner && this.owner.readyState === 1; // WebSocket.OPEN
   }
 
-  kill() {
+  // `reason` reaches the tool packs' release (src/tool-packs.js).
+  kill(reason = 'kill') {
     if (this.pty) {
       const pid = this.pty.pid;
       this.pty = null;
@@ -265,6 +269,14 @@ class CliSession {
     }
     this.status = 'idle';
     this._cleanupMcpConfig();
+    this._releasePacks(reason);
+  }
+
+  // The current spawn's tool packs end (once; a later call is a no-op).
+  _releasePacks(reason) {
+    const packs = this._packs;
+    this._packs = null;
+    if (packs) releaseToolPacks(packs, reason);
   }
 
   getScrollback() {
