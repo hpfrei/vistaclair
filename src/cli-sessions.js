@@ -166,7 +166,7 @@ class CliSessionManager {
     const engine = session.getSettings().engine === 'sdk' ? 'sdk' : 'cli';
     if ((session instanceof SdkSession) === (engine === 'sdk')) return session;
     session._spawnGen++;
-    if (session.running) session.kill();
+    if (session.running) session.kill('respawn');
     const next = this._createSession(tabId, engine);
     next.title = session.title;
     next.hidden = session.hidden;
@@ -680,7 +680,7 @@ class CliSessionManager {
         this.store.deleteSessionData(session.sessId);
         tryRm(path.join(PACKAGE_ROOT, 'uploads', session.sessId));
       }
-      session.kill();
+      session.kill('tab_close');
       // The pty's own exit arrives after the session is gone from the map, so a
       // closed tab is reported here.
       this._notifyExit(tabId, session);
@@ -692,13 +692,13 @@ class CliSessionManager {
   // Close a tab that is being paused: it is already saved (with its flags), so
   // no history write, no inspector-data delete and no exit callbacks or
   // listeners — to its owner (an app's exit check, an orchestrator) a paused
-  // session has not ended.
-  closeQuiet(tabId) {
+  // session has not ended. `reason` reaches the tool packs' release.
+  closeQuiet(tabId, reason = 'closed') {
     const session = this.sessions.get(tabId);
     if (!session) return;
     this._exitCallbacks.delete(tabId);
     this.sessions.delete(tabId);
-    session.kill();
+    session.kill(reason);
     this._persistOpenTabs();
     this.broadcastTabs();
   }
@@ -709,7 +709,7 @@ class CliSessionManager {
   killAll() {
     this._shuttingDown = true;
     for (const session of this.sessions.values()) {
-      session.kill();
+      session.kill('shutdown');
     }
   }
 

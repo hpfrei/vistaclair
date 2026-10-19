@@ -2,7 +2,8 @@
 // configured exactly as before (MCP servers, CLI args, SDK options); a default
 // pack attaches to its roles only, an opt-in pack only through
 // settings.toolPacks; a throwing build is skipped; core MCP names win.
-// Add-on registration through the descriptor and the ctx.
+// Add-on registration through the descriptor and the ctx. consumes / validate
+// / release: build per spawn, release once per ended spawn with its reason.
 //
 //   node --test test/
 
@@ -27,8 +28,9 @@ fs.writeFileSync(path.join(metaDir, 'meta.json'), JSON.stringify({ tools: [{ nam
 const utils = require('../src/utils');
 const ptySpawns = [];
 utils.spawnClaudePty = (args, o) => {
-  ptySpawns.push({ args, o });
-  return { pid: 0, onData() {}, onExit() {}, write() {}, resize() {} };
+  const pty = { pid: 0, onData() {}, onExit(cb) { pty.exit = cb; }, write() {}, resize() {} };
+  ptySpawns.push({ args, o, pty });
+  return pty;
 };
 const claudeAuth = require('../src/claude-auth');
 const SIGNED_OUT = JSON.stringify({ loggedIn: false, authMethod: 'none' });
@@ -257,4 +259,125 @@ test('add-ons: descriptor toolPacks register with the add-on and go with removeA
   off();
   assert.deepStrictEqual(ctx.listToolPacks(), []);
   assert.strictEqual(createAddonCtx({ dataHome: HOME }).registerToolPack, undefined, 'headless profile has none');
+});
+
+// --- consumes / validate / release ---
+
+test('registerToolPack checks consumes, validate and release; consumedGrants follows the registered packs', () => {
+  clearPacks();
+  const build = () => ({});
+  assert.throws(() => toolPacks.registerToolPack({ id: 'x', build, consumes: 'tools' }), /consumes/);
+  assert.throws(() => toolPacks.registerToolPack({ id: 'x', build, consumes: ['apps'] }), /consumes/);
+  assert.throws(() => toolPacks.registerToolPack({ id: 'x', build, validate: true }), /validate must be a function/);
+  assert.throws(() => toolPacks.registerToolPack({ id: 'x', build, release: 'later' }), /release must be a function/);
+  assert.deepStrictEqual(toolPacks.consumedGrants(), []);
+  const off = toolPacks.registerToolPack({ id: 'apps', roles: ['worker'], default: true, consumes: ['tools'], build });
+  toolPacks.registerToolPack({ id: 'other', build, consumes: [] });
+  assert.deepStrictEqual(toolPacks.consumedGrants(), ['tools']);
+  assert.strictEqual(toolPacks.grantConsumed(WORKER, 'tools'), true);
+  assert.strictEqual(toolPacks.grantConsumed(PLAIN, 'tools'), false, 'not a pack of that role');
+  assert.deepStrictEqual(toolPacks.listToolPacks().map(p => Object.keys(p)), [['id', 'description', 'roles', 'default'], ['id', 'description', 'roles', 'default']], 'listing unchanged');
+  off();
+  assert.deepStrictEqual(toolPacks.consumedGrants(), []);
+  assert.deepStrictEqual(toolPacks.TOOL_PACK_FEATURES, ['consumes', 'validate', 'release']);
+  assert.ok(Object.isFrozen(toolPacks.TOOL_PACK_FEATURES));
+});
+
+test('validate: each applying pack may refuse, synchronously; others are not asked', () => {
+  clearPacks();
+  const seen = [];
+  toolPacks.registerToolPack({ id: 'ok', roles: ['worker'], default: true, build: () => ({}), validate: (c) => { seen.push(c); } });
+  toolPacks.registerToolPack({ id: 'plain-only', roles: ['plain'], default: true, build: () => ({}), validate: () => { throw new Error('never asked'); } });
+  assert.doesNotThrow(() => toolPacks.validateToolPacks({ settings: { ...WORKER, grants: { tools: ['a__b'] } } }));
+  assert.deepStrictEqual(seen, [{ settings: { ...WORKER, grants: { tools: ['a__b'] } }, role: 'worker' }]);
+  toolPacks.registerToolPack({ id: 'no', roles: ['worker'], default: true, build: () => ({}), validate: ({ settings }) => { if (settings.grants) throw new Error('unknown tool a__b'); } });
+  assert.throws(() => toolPacks.validateToolPacks({ settings: { ...WORKER, grants: { tools: ['a__b'] } } }), /^Error: unknown tool a__b$/);
+  assert.doesNotThrow(() => toolPacks.validateToolPacks({ settings: WORKER }));
+  toolPacks.registerToolPack({ id: 'async', roles: ['worker'], default: true, build: () => ({}), validate: async () => {} });
+  assert.throws(() => toolPacks.validateToolPacks({ settings: WORKER }), /validate returned a promise/);
+  clearPacks();
+});
+
+test('a CLI session: build on every spawn, release once per spawn with its reason', () => {
+  clearPacks();
+  const builds = [];
+  const releases = [];
+  toolPacks.registerToolPack({
+    id: 'minted', roles: ['worker'], default: true,
+    build: (c) => { builds.push(c.sessId); return { appendSystemPrompt: `TOKEN ${builds.length}` }; },
+    release: (c) => releases.push(c),
+  });
+  toolPacks.registerToolPack({ id: 'broken', roles: ['worker'], default: true, build: () => { throw new Error('x'); }, release: () => releases.push('broken') });
+  const cli = new CliSession(9999, { broadcast() {} }, store, { authToken: 'tok', dashboardPort: 4321 });
+  cli.updateSettings({ ...WORKER, grants: { tools: ['a__b'] } });
+  quietly(() => cli.spawn(HOME, 80, 24, {}));
+  const first = cli.sessId;
+  // A resume of the same session: built again, the previous spawn released.
+  quietly(() => cli.spawn(HOME, 80, 24, { resumeSessionId: first }));
+  assert.deepStrictEqual(builds, [first, first]);
+  assert.deepStrictEqual(releases.map(r => r.reason), ['respawn']);
+  assert.deepStrictEqual(releases[0], { settings: cli.getSettings(), instanceId: `cli-${first}`, role: 'worker', sessId: first, reason: 'respawn' });
+  assert.match(ptySpawns.at(-1).args.join(' '), /TOKEN 2/);
+  // Closed (a pause): released once; the pty's own exit afterwards adds nothing.
+  const pty = ptySpawns.at(-1).pty;
+  cli.kill('pause');
+  pty.exit({ exitCode: 0 });
+  cli.kill();
+  assert.deepStrictEqual(releases.map(r => r.reason), ['respawn', 'pause']);
+  // A process that ends by itself: 'exit'.
+  quietly(() => cli.spawn(HOME, 80, 24, {}));
+  ptySpawns.at(-1).pty.exit({ exitCode: 0 });
+  cli.kill();
+  assert.deepStrictEqual(releases.map(r => r.reason), ['respawn', 'pause', 'exit']);
+  assert.ok(!releases.includes('broken'), 'a pack whose build failed is not released');
+  clearPacks();
+});
+
+test('release errors are logged, never thrown, a rejected promise too', async () => {
+  clearPacks();
+  toolPacks.registerToolPack({ id: 'boom', roles: ['plain'], default: true, build: () => ({}), release: () => { throw new Error('gone'); } });
+  toolPacks.registerToolPack({ id: 'async', roles: ['plain'], default: true, build: () => ({}), release: async () => { throw new Error('later'); } });
+  const c = toolPacks.toolPackContributions({ settings: PLAIN, instanceId: 'cli-1', sessId: 's1' });
+  const logged = [];
+  const orig = console.error;
+  console.error = (...a) => logged.push(a.join(' '));
+  try {
+    toolPacks.releaseToolPacks(c, 'tab_close');
+    await new Promise(r => setTimeout(r, 5));
+  } finally { console.error = orig; }
+  assert.ok(logged.some(l => l.includes('"boom"') && l.includes('gone')));
+  assert.ok(logged.some(l => l.includes('"async"') && l.includes('later')));
+  assert.doesNotThrow(() => toolPacks.releaseToolPacks(c, 'again'));
+  assert.doesNotThrow(() => toolPacks.releaseToolPacks(null, 'x'));
+  clearPacks();
+});
+
+test('the manager: an SDK session is released with the reason of its end', async () => {
+  clearPacks();
+  const releases = [];
+  toolPacks.registerToolPack({ id: 'r', default: true, build: () => ({}), release: (c) => releases.push(c.reason) });
+  const CliSessionManager = require('../src/cli-sessions');
+  const sdk = { query: () => ({ [Symbol.asyncIterator]() { return this; }, next: () => new Promise(() => {}), return: async () => ({ done: true }), close() {} }) };
+  const mgr = new CliSessionManager(9999, { broadcast() {} }, store, { sdk, claudeBin: '/opt/claude' });
+  const open = () => { const tabId = mgr.nextTabId(); mgr.launchSession(tabId, { cwd: HOME, settings: { engine: 'sdk' } }); return tabId; };
+  mgr.closeQuiet(open(), 'close_worker');
+  mgr.remove(open());
+  mgr.kill(open());
+  await new Promise(r => setTimeout(r, 20));
+  assert.deepStrictEqual(releases, ['close_worker', 'tab_close', 'kill']);
+  clearPacks();
+});
+
+test('the add-on ctx: toolPackFeatures and sendToSession in the dashboard profile only', () => {
+  const { createAddonCtx } = require('../src/addon-host');
+  const sent = [];
+  const ctx = createAddonCtx({ dataHome: HOME, dashboard: { broadcaster: { broadcast() {} }, store, cliSessionManager: {}, sendToSession: (...a) => { sent.push(a); return { delivered: true, how: 'submitted' }; } } });
+  assert.deepStrictEqual(ctx.toolPackFeatures, ['consumes', 'validate', 'release']);
+  assert.ok(Object.isFrozen(ctx.toolPackFeatures));
+  assert.deepStrictEqual(ctx.sendToSession('orch-x-w1', 'job done', { from: 'apps' }), { delivered: true, how: 'submitted' });
+  assert.deepStrictEqual(sent, [['orch-x-w1', 'job done', { from: 'apps' }]]);
+  const headless = createAddonCtx({ dataHome: HOME });
+  assert.strictEqual(headless.toolPackFeatures, undefined);
+  assert.strictEqual(headless.sendToSession, undefined);
+  assert.strictEqual(ctx.contractVersion, 2);
 });

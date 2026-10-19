@@ -470,6 +470,7 @@ const addonCtx = createAddonCtx({
     authToken: AUTH_TOKEN, dashboardPort: DASHBOARD_PORT, proxyPort: PROXY_PORT,
     broadcaster, store, cliSessionManager,
     openCli: orchestration.openCli,
+    sendToSession: orchestration.sendToSession,
     scheduleRestart: () => scheduleRestart(),
     pendingQuestions,
     clearPendingQuestionsForTab: createProxyRouter.clearPendingQuestionsForTab,

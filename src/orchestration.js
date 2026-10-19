@@ -61,6 +61,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const folders = require('./session-folders');
+const toolPacks = require('./tool-packs');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
 
 const MAX_WORKERS = 5;
@@ -639,7 +640,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
   }
 
-  function launchWorker(instanceId, { title, task, cwd, isolation, model } = {}) {
+  function launchWorker(instanceId, { title, task, cwd, isolation, model, tools } = {}) {
     const { run } = callerRun(instanceId, 'orchestrator');
     if (run.pausing) throw new Error('this run is being paused: launch nothing new');
     if (!task || !String(task).trim()) throw new Error('task is required');
@@ -660,6 +661,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       launchedAt: new Date().toISOString(), exitedAt: null, lastReport: null,
       ...(model ? { model } : {}),
     };
+    const grants = grantsOf(tools);
+    if (grants) worker.grants = grants;
+    checkPacks(run, worker, { toolsGiven: tools !== undefined });
 
     const mode = isolation || run.isolation;
     if (mode === 'worktree') {
@@ -682,8 +686,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // A worker's launch settings — the same for its first launch and a fresh
-  // restart, so the restart keeps its address, role card and folder.
-  function workerSettings(run, worker) {
+  // restart, so the restart keeps its address, role card and folder. `write`
+  // false: nothing written (a check before the launch).
+  function workerSettings(run, worker, { write = true } = {}) {
     const card = workerCard(run, worker);
     return {
       ...run.base.stamps,
@@ -693,10 +698,47 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       ...(worker.sessionDir ? { sessionDir: worker.sessionDir } : {}),
       orchestration: { runId: run.runId, role: 'worker', workerId: worker.id, orchestrator: run.orchestrator, runDir: run.runDir },
       appendSystemPrompt: run.base.appendSystemPrompt ? `${run.base.appendSystemPrompt}\n\n${card}` : card,
-      settingsFile: writeSessionSettings(run, worker.name, run.base.settingsFile),
+      settingsFile: write ? writeSessionSettings(run, worker.name, run.base.settingsFile) : path.join(run.runDir, 'sessions', `${worker.name}.json`),
       agents: WORKER_AGENTS,
       ...(worker.model ? { model: worker.model } : {}),
       ...(run.maxBudgetUsd ? { maxBudgetUsd: run.maxBudgetUsd } : {}),
+      ...(worker.grants ? { grants: worker.grants } : {}),
+    };
+  }
+
+  // launch_cli / resume_worker `tools`: the add-on tools a worker is granted
+  // (opaque names, src/tool-packs.js). Undefined: not given; null: none.
+  function grantsOf(tools) {
+    if (tools === undefined) return undefined;
+    if (!Array.isArray(tools) || tools.some(t => typeof t !== 'string' || !t.trim())) {
+      throw new Error('tools must be an array of tool names');
+    }
+    const list = [...new Set(tools.map(t => t.trim()))];
+    return list.length ? { tools: list } : null;
+  }
+
+  // Before a worker is spawned: `tools` needs a tool pack of the worker that
+  // consumes it, and each of its packs' validate may refuse the launch.
+  // Throws, having changed nothing.
+  function checkPacks(run, worker, { toolsGiven = false } = {}) {
+    const settings = workerSettings(run, worker, { write: false });
+    if (toolsGiven && !toolPacks.grantConsumed(settings, 'tools')) {
+      throw new Error('tools: no tool pack of this worker handles tools');
+    }
+    toolPacks.validateToolPacks({ settings });
+  }
+
+  // The orchestrator MCP's extra parameters (lib/orchestrator-mcp.js asks at
+  // tools/list), by tool: `tools` while a registered pack consumes it, else
+  // none, so the schemas read as without packs.
+  function toolParams() {
+    if (!toolPacks.consumedGrants().includes('tools')) return { params: {} };
+    const items = { type: 'string' };
+    return {
+      params: {
+        launch_cli: { tools: { type: 'array', items, description: 'Add-on tools this worker may use, by name (e.g. app__tool). Fixed for the worker: kept across pause, resume and restart. Omit for none.' } },
+        resume_worker: { tools: { type: 'array', items, description: 'Replaces the worker\'s add-on tools (an empty array clears them). Omitted: it keeps the ones it has.' } },
+      },
     };
   }
 
@@ -726,6 +768,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       worker: w.worker, name: w.name, id: w.id, title: w.title, state: w.state, closedAt: w.closedAt,
       lastReport: w.lastReport ? { status: w.lastReport.status, summary: clip(w.lastReport.summary, 160) } : null,
       branch: w.branch, todo: w.todo, notes: w.notes,
+      ...(w.grants ? { grants: w.grants } : {}),
     };
   }
 
@@ -807,6 +850,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
           ...(w.turnStopped ? { turnStopped: w.turnStopped } : {}),
           brief: clip(w.task, 300),
+          ...(w.grants ? { grants: w.grants } : {}),
           ...(run.engine === 'sdk' ? { context: live?.session.running ? contextOf(live.session) : null } : {}),
           todo: w.sessionDir ? path.join(w.sessionDir, 'TODO.md') : null,
           notes: w.sessionDir ? path.join(w.sessionDir, 'NOTES.md') : null,
@@ -1157,11 +1201,17 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // Bring a worker back: its own transcript (continue), or a fresh session with
   // the same address, card and folder, seeded with its brief (fresh). A
   // continue whose transcript is gone becomes a fresh start (`fellBack`).
-  // A run ended with end_run is reopened.
-  function bringBack(run, w, { mode = 'continue', message = '' } = {}) {
+  // A run ended with end_run is reopened. `tools` (resume_worker) replaces
+  // its grants; omitted, it keeps them.
+  function bringBack(run, w, { mode = 'continue', message = '', tools } = {}) {
     if (workerSession(run, w.id)?.session.running) throw new Error(`${w.name} is already running: send it a message instead`);
     assertCapacity(run);
+    const grants = tools === undefined ? w.grants || null : grantsOf(tools);
+    const { grants: _g, ...rest } = w;
+    checkPacks(run, grants ? { ...rest, grants } : rest, { toolsGiven: tools !== undefined });
     restoreWorktree(run, w);
+    if (grants) w.grants = grants;
+    else delete w.grants;
     const from = message ? `From your orchestrator \`${run.orchestrator}\`: ${message}` : '';
     const old = savedMember(run, st => st.role === 'worker' && st.workerId === w.id);
     const lost = mode !== 'fresh' && !control?.canContinue(old);
@@ -1175,11 +1225,19 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       if (old && typeof mgr.forgetSaved === 'function') mgr.forgetSaved(old.id);
     } else {
       const text = `${resumeText(w.sessionDir || '(your session folder)', { interrupted: !!old.interrupted })}${from ? `\n${from}` : ''}`;
-      ({ tabId } = control.resumeSaved(old.id, { message: text, fallback: false }));
+      // Its saved settings, with the run's grants (replaced or cleared).
+      let settings;
+      if (grants || old.settings?.grants) {
+        const { grants: _sg, ...kept } = old.settings || {};
+        settings = grants ? { ...kept, grants } : kept;
+      }
+      ({ tabId } = control.resumeSaved(old.id, { message: text, fallback: false, ...(settings ? { settings } : {}) }));
       seedResumedCost(tabId, w.costUsd);
     }
     const fresh = loadRun(run.runDir);
     const fw = fresh.workers.find(x => x.id === w.id);
+    if (grants) fw.grants = grants;
+    else delete fw.grants;
     fw.paused = false;
     fw.exitedAt = null;
     delete fw.closed;
@@ -1194,12 +1252,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // resume_worker (orchestrator tool). Counts against the worker cap.
-  function resumeWorker(instanceId, { worker, mode = 'continue', message = '' } = {}) {
+  function resumeWorker(instanceId, { worker, mode = 'continue', message = '', tools } = {}) {
     const { run } = callerRun(instanceId, 'orchestrator');
     if (run.pausing) throw new Error('this run is being paused');
     const w = run.workers.find(x => x.name === worker || x.id === worker);
     if (!w) throw new Error(`no worker ${worker} in this run`);
-    const out = bringBack(run, w, { mode, message });
+    const out = bringBack(run, w, { mode, message, tools });
     if (message) addFollowUp(loadRun(run.runDir), w.id, message);
     return out;
   }
@@ -1223,7 +1281,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
     const s = live.session;
     if (s.sessId && s.cwd) mgr.saveToHistory({ sessId: s.sessId, cwd: s.cwd, title: s.title, settings: s.getSettings(), autoMemory: s.autoMemory });
-    mgr.closeQuiet(live.tabId);
+    mgr.closeQuiet(live.tabId, 'close_worker');
     const now = new Date().toISOString();
     w.closed = true;
     w.closedAt = now;
@@ -1503,18 +1561,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         ? `${target.name} is not running${target.worker.paused ? ' (paused)' : ''}${stamp.role === 'orchestrator' ? ': bring it back with resume_worker, passing this as its message' : ''}`
         : `the orchestrator ${target.name} is not running`);
     }
-    const body = `[message from ${from}] ${text}`;
-    let delivery = 'submitted';
-    if (ts.kind === 'sdk') {
-      ts.submit(body, { priority: 'next', from });
-    } else if (!ts.busy) {
-      ts.submit(body, { from });
-    } else {
-      const q = inbox.get(target.name) || [];
-      q.push(body);
-      inbox.set(target.name, q);
-      delivery = 'queued';
-    }
+    const delivery = deliver(ts, target.name, `[message from ${from}] ${text}`, from);
     if (stamp.role === 'orchestrator' && target.role === 'worker') {
       delete target.worker.turnStopped;   // its new instructions: no longer a stopped worker
       addFollowUp(run, target.id, text);
@@ -1523,6 +1570,39 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     emitTo(session, run, ev);
     emitTo(ts, run, ev);
     return { ok: true, to: target.name, delivery };
+  }
+
+  // Into a running member: an SDK session takes it as a next-priority turn, an
+  // idle CLI has it typed, a busy CLI gets it through its next hook (inbox).
+  function deliver(ts, name, body, from) {
+    if (ts.kind === 'sdk') {
+      ts.submit(body, { priority: 'next', from });
+    } else if (!ts.busy) {
+      ts.submit(body, { from });
+    } else {
+      const q = inbox.get(name) || [];
+      q.push(body);
+      inbox.set(name, q);
+      return 'queued';
+    }
+    return 'submitted';
+  }
+
+  // ctx.sendToSession (src/addon-host.js): a message from outside the run (an
+  // add-on, e.g. 'apps' when a long tool job finished) into a run session by
+  // its address, delivered like SendMessage. { delivered, how }.
+  function sendToSession(address, text, { from } = {}) {
+    const body = String(text ?? '').trim();
+    if (!body) throw new Error('text is required');
+    const sender = String(from || '').trim() || 'vistaclair';
+    const want = String(address || '').trim();
+    const named = findByStamp(() => true).filter(m => m.session.getSettings().name === want);
+    const hit = named.find(m => m.session.running) || named[0];
+    if (!hit) return { delivered: false, how: 'no session with that address' };
+    if (!hit.session.running) return { delivered: false, how: 'not running' };
+    const how = deliver(hit.session, want, `[message from ${sender}] ${body}`, sender);
+    emitTo(hit.session, { runId: hit.stamp.runId }, { platform: { kind: 'message', from: sender, to: want, text: body } });
+    return { delivered: true, how };
   }
 
   // ListAgents: the caller's run, every member with its state.
@@ -1810,6 +1890,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     r.post('/stop-worker', call(b => stopWorker(b.instanceId, b)));
     r.post('/send-message', call(b => sendMessage(b.instanceId, b)));
     r.post('/list-agents', call(b => listAgents(b.instanceId)));
+    r.post('/tool-params', call(() => toolParams()));
     // The run board (GUI).
     r.post('/pause', call(b => pauseRun(String(b.runId || ''))));
     r.post('/refresh', call(b => refreshOrchestrator(String(b.runId || ''))));
@@ -1824,7 +1905,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   return {
-    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report, sendMessage, listAgents,
+    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged,

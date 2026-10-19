@@ -73,7 +73,7 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
 
   if (dashboard) {
     const toolPacks = require('./tool-packs');
-    const { broadcaster, store, cliSessionManager, openCli, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab, isOwnerRequest } = dashboard;
+    const { broadcaster, store, cliSessionManager, openCli, sendToSession, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab, isOwnerRequest } = dashboard;
     // server.js resolves these itself (AUTH_TOKEN may be generated at boot
     // rather than read from env) — its values win over the raw environment.
     if (dashboard.authToken) shared.authToken = dashboard.authToken;
@@ -91,9 +91,22 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // shutdown()/update(). Packs listed in the descriptor's `toolPacks` are
       // dropped with the add-on instead. Dashboard profile only: headless
       // spawns are not dashboard sessions.
+      // A pack may also declare `consumes` (['tools']: it handles a worker's
+      // settings.grants.tools, the launch_cli / resume_worker `tools`),
+      // `validate` (throws to refuse a worker launch) and `release` (once per
+      // ended session it built for). toolPackFeatures names the optional pack
+      // fields this core honours, for feature probing.
       registerToolPack: (pack) => toolPacks.registerToolPack(pack),
       unregisterToolPack: (id) => toolPacks.unregisterToolPack(id),
       listToolPacks: () => toolPacks.listToolPacks(),
+      toolPackFeatures: toolPacks.TOOL_PACK_FEATURES,
+      // sendToSession(address, text, { from }) delivers a message into a running
+      // orchestration-run session by its messaging address, as SendMessage does,
+      // shown as "[message from <from>] …" (e.g. from 'apps' when a long tool
+      // job finished). Returns { delivered, how }: how is 'submitted' or
+      // 'queued' (a busy terminal reads it at its next hook), or why not.
+      // Dashboard profile only.
+      sendToSession: typeof sendToSession === 'function' ? sendToSession : () => ({ delivered: false, how: 'unavailable' }),
       // The user-facing "new CLI" entry (src/orchestration.js): `mode` 'simple' |
       // 'orchestrator', or unset: an orchestrator for an Agent SDK session
       // (spawnOpts' resume dropped), asked for a terminal. Resolves { tabId, mode } or
