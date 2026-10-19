@@ -2081,18 +2081,6 @@ footer {
 }
 .cli-pause-btn.pausing { color: var(--orange, #e0a040); }
 .view-tab.cli-tab-pausing .cli-tab-label { font-style: italic; opacity: 0.75; }
-.cli-run-board-controls { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-.cli-run-board-action {
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 4px;
-  border: 1px solid var(--border, rgba(255,255,255,0.18));
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-.cli-run-board-action:disabled { opacity: 0.45; cursor: default; }
-.cli-run-board-hint { font-size: 12px; color: var(--orange, #e0a040); }
 
 /* CLI tab × menu */
 .cli-close-menu { min-width: 0; padding: 4px 0; }

@@ -465,19 +465,6 @@
       });
       btn.appendChild(settingsBtn);
 
-      const runId = tab.settings?.orchestration?.runId;
-      if (runId) {
-        const boardBtn = document.createElement('span');
-        boardBtn.className = 'cli-model-override-btn cli-run-board-btn';
-        boardBtn.textContent = '☰';
-        boardBtn.title = `Orchestration run ${runId} — workers and TODO`;
-        boardBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          openRunBoard(runId);
-        });
-        btn.appendChild(boardBtn);
-      }
-
       // Pause: a plain tab pauses itself, an orchestrator its whole run; a
       // worker only through its orchestrator. While pausing, it offers
       // "Interrupt now" — a pause has no timeout.
@@ -519,6 +506,8 @@
       btn.addEventListener('click', () => switchTab(tabId));
       tabStrip.insertBefore(btn, tabNewBtn);
     }
+    // The new buttons take the busy dots before the next paint.
+    updateStreamingState();
   }
 
   function removeTab(tabId) {
@@ -532,6 +521,7 @@
       }
       _disposeTabView(tabId, tab);
       tabs.delete(tabId);
+      updateStreamingState();
     }
     if (activeTabId === tabId) {
       const remaining = Array.from(tabs.keys());
@@ -992,17 +982,6 @@
       if (mapped) parts.push(`${family}→${mapped}`);
     }
     return parts.join(', ');
-  }
-
-  function formatAge(ts) {
-    const diff = Date.now() - ts;
-    const mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    const days = Math.floor(hrs / 24);
-    return `${days}d ago`;
   }
 
   function formatDateTime(ts) {
@@ -1664,12 +1643,17 @@
     window.inspectorModule?.renderInspectorTabStrip?.();
   }
 
+  // Called with the Inspector's streaming instances; with none (an SDK state
+  // change, a tab strip render) it re-applies the last set.
+  let _streamingInstances = new Set();
   function updateStreamingState(streamingInstances) {
+    if (streamingInstances) _streamingInstances = streamingInstances;
     if (!tabStrip) return;
     let anyStreaming = false;
     for (const [tabId, tab] of tabs) {
       const instanceId = tab.instanceId;
-      const streaming = instanceId ? streamingInstances.has(instanceId) : false;
+      const streaming = (instanceId ? _streamingInstances.has(instanceId) : false)
+        || (isSdk(tab) && !!window.sdkPanel?.isBusy(tabId));
       if (streaming) anyStreaming = true;
       const tabBtn = tabStrip.querySelector(`[data-tab-id="${tabId}"]`);
       if (tabBtn) tabBtn.classList.toggle('instance-running', streaming);
@@ -1918,107 +1902,7 @@
   }
 
 
-  // --- Orchestration run board ---
-  // Workers, their last reports, recent events and the TODO of one run. All of
-  // it is server state (run.json, TODO.md), so the board is the same after a
-  // reload; it refreshes on the server's orchestration:run broadcasts.
-  let _runBoard = null; // { runId, backdrop, body }
-
-  async function renderRunBoard() {
-    if (!_runBoard) return;
-    const { runId, body } = _runBoard;
-    let run;
-    try {
-      const res = await fetch(`/api/orchestration/run?runId=${encodeURIComponent(runId)}`, { credentials: 'same-origin' });
-      run = await res.json();
-      if (!res.ok) throw new Error(run.error || res.statusText);
-    } catch (err) {
-      body.innerHTML = `<div class="alert-modal-message">Run ${escHtml(runId)}: ${escHtml(err.message)}</div>`;
-      return;
-    }
-    if (!_runBoard || _runBoard.runId !== runId) return;
-    const rows = run.workers.map(w => {
-      const r = w.lastReport;
-      const state = w.running ? (w.live?.pausing ? 'pausing…' : w.live?.busy ? 'working' : 'idle')
-        : w.paused ? 'paused' : w.abandoned ? 'abandoned' : (w.exitedAt ? 'exited' : 'stopped');
-      const p = w.progress;
-      const progress = p ? [
-        p.total ? `${p.done}/${p.total}` : '',
-        p.doing ? `doing ${p.doing.id}: ${p.doing.description || ''}` : '',
-        p.todoUpdatedAt ? `TODO ${formatAge(Date.parse(p.todoUpdatedAt))}` : '',
-        p.hasResumeNote ? 'resume note' : '',
-      ].filter(Boolean).join(' · ') : '';
-      const recent = w.live?.recent?.length ? `<br><small title="${escHtml(w.live.recent.join('\n'))}">${escHtml(w.live.recent.at(-1))}${w.live.subagents ? ` · ${w.live.subagents} subagent(s)` : ''}</small>` : '';
-      return `<tr>
-        <td title="${escHtml(w.cwd || '')}">${escHtml(w.worker)}<br><small>${escHtml(w.title || '')}</small></td>
-        <td>${escHtml(state)}${recent}</td>
-        <td title="${escHtml(w.todo || '')}">${escHtml(progress) || '—'}</td>
-        <td>${r ? `<b>${escHtml(r.status)}</b> ${escHtml(r.summary || '')}` : '<i>no report yet</i>'}</td>
-        <td>${escHtml(w.branch || '—')}</td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="5"><i>No workers launched yet</i></td></tr>';
-    const runState = run.pausing ? 'pausing…' : run.paused ? 'paused' : run.closed ? 'closed' : 'open';
-    const canPause = run.orchestratorRunning && !run.pausing;
-    const controls = `
-      <div class="cli-run-board-controls">
-        <button class="cli-run-board-action" data-run-action="pause" ${canPause ? '' : 'disabled'} title="Workers stop non-critical work, write their resume notes and close; then the orchestrator. Resume from the Sessions tab.">Pause run</button>
-        <button class="cli-run-board-action" data-run-action="refresh" ${canPause ? '' : 'disabled'} title="The orchestrator writes its notes and is replaced by a fresh session with a clean context, seeded from the run. Workers keep running.">Refresh orchestrator</button>
-        ${run.refreshSuggested ? `<span class="cli-run-board-hint">Refresh suggested: the orchestrator has compacted ${run.compactions} times.</span>` : ''}
-      </div>`;
-    const events = (run.events || []).slice(-10).reverse()
-      .map(e => `<li><small>${escHtml(new Date(e.at).toLocaleTimeString())}</small> [${escHtml(e.kind)}] ${escHtml(e.text)}</li>`).join('');
-    body.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">
-        <b>Run ${escHtml(run.runId)} · ${escHtml(run.orchestrator)}</b>
-        <small>${escHtml(run.isolation)} · ${escHtml(runState)} · ${run.pendingEvents} undelivered event(s)</small>
-      </div>
-      ${controls}
-      <table style="width:100%;margin:10px 0;border-collapse:collapse;font-size:12px;text-align:left">
-        <thead><tr><th>Worker</th><th>State</th><th>TODO</th><th>Last report</th><th>Branch</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-      ${events ? `<div style="font-size:12px"><b>Recent events</b><ul style="margin:4px 0 10px 16px;padding:0">${events}</ul></div>` : ''}
-      <div style="font-size:12px"><b>TODO</b> <small>${escHtml(run.todo)}</small></div>
-      <pre style="max-height:40vh;overflow:auto;white-space:pre-wrap;font-size:12px;margin:4px 0 0">${escHtml(run.todoText || '')}</pre>`;
-    body.querySelectorAll('[data-run-action]').forEach(b => b.addEventListener('click', () => {
-      const action = b.dataset.runAction;
-      if (action === 'pause' && !confirm('Pause this run? Each worker finishes its step, writes its resume note and closes; the orchestrator closes last. It may take a while.')) return;
-      if (action === 'refresh' && !confirm('Refresh the orchestrator? It writes its notes, then a fresh orchestrator continues the run from them. Workers keep running.')) return;
-      b.disabled = true;
-      sendWs({ type: action === 'pause' ? 'cli:pauseRun' : 'cli:refreshOrchestrator', runId });
-    }));
-  }
-
-  function openRunBoard(runId) {
-    closeRunBoard();
-    const backdrop = document.createElement('div');
-    backdrop.className = 'alert-modal-backdrop';
-    const modal = document.createElement('div');
-    modal.className = 'alert-modal';
-    modal.style.cssText = 'width:min(900px,94vw);max-width:none;text-align:left';
-    const body = document.createElement('div');
-    body.textContent = 'Loading…';
-    const close = document.createElement('button');
-    close.className = 'alert-modal-ok';
-    close.textContent = 'Close';
-    close.addEventListener('click', closeRunBoard);
-    modal.append(body, close);
-    backdrop.appendChild(modal);
-    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeRunBoard(); });
-    backdrop.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeRunBoard(); });
-    document.body.appendChild(backdrop);
-    close.focus();
-    _runBoard = { runId, backdrop, body };
-    renderRunBoard();
-  }
-
-  function closeRunBoard() {
-    _runBoard?.backdrop.remove();
-    _runBoard = null;
-  }
-
   window.dashboard.registerModule?.('orchestration:', (msg) => {
-    if (msg.type === 'orchestration:run' && _runBoard && msg.runId === _runBoard.runId) renderRunBoard();
     if (msg.type === 'orchestration:run') window.sdkPanel?.onRunUpdate(msg);
     if (msg.type === 'orchestration:run') requestSavedSessions(1000);
   });
@@ -2029,5 +1913,5 @@
   _mobileBar?.onTabChange(null);
 
   // Expose module
-  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, openRunBoard, modelPickerOptions };
+  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, modelPickerOptions };
 })();

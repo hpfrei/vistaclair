@@ -432,6 +432,7 @@
       this.panel.renderToolbar();
       if (this.role === 'worker') this.panel.layoutWorkers();
       else this.panel.drawLinksSoon();
+      window.cliModule?.updateStreamingState?.();
     }
 
     setCost(c) {
@@ -1207,6 +1208,9 @@
       return [...this.workers.values()].sort((a, b) => n(a) - n(b));
     }
     areaByName(name) { return this.allAreas().find(a => a.isMe(name)) || null; }
+    // Working: the session itself or (an orchestrator's tab) any of its workers,
+    // which have no tab of their own.
+    busy() { return this.allAreas().some(a => !a.ended() && (a.state === 'busy' || a.state === 'pausing')); }
 
     // The tab as cli.js knows it: {sessId, title, cwd, settings, status, pausing}.
     update(info) {
@@ -1297,6 +1301,8 @@
       this.layoutWorkers();
       this.renderToolbar();
       for (const a of this.allAreas()) a.renderHeader();
+      // A worker closed without a state change.
+      window.cliModule?.updateStreamingState?.();
     }
 
     addWorker(sessId, name) {
@@ -1728,6 +1734,7 @@
     p.destroy();
     panels.delete(tabId);
   }
+  function isBusy(tabId) { return !!panels.get(tabId)?.busy(); }
   function setActive(tabId) {
     for (const [id, p] of panels) p.setActive(id === tabId);
   }
@@ -1799,5 +1806,5 @@
     if (document.visibilityState === 'visible') for (const p of panels.values()) p.pollTodos();
   });
 
-  window.sdkPanel = { mount, update, unmount, setActive, onTabs, onRunUpdate, handleMessage, _panels: panels, _areas: areas };
+  window.sdkPanel = { mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, _panels: panels, _areas: areas };
 })();
