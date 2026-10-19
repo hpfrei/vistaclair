@@ -87,8 +87,10 @@
 }
 .sdk-tb-btn:hover:not(:disabled) { background: var(--bg-hover); }
 .sdk-tb-btn:disabled { opacity: .45; cursor: default; }
-.sdk-tb-btn[data-act="interrupt"] { color: var(--red); }
 .sdk-tb-btn.suggested { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 60%, var(--border)); }
+/* "orchestrator compacted N× · start fresh?" beside the run's meta. */
+.sdk-fresh-chip { border-radius: 999px; font-size: 10px; padding: 0 8px; line-height: 17px; }
+.sdk-tb-more { padding: 2px 7px; line-height: 1; letter-spacing: .05em; }
 
 /* --- stage: the diagram --- */
 .sdk-stage {
@@ -274,6 +276,19 @@
 }
 .sdk-model:hover:not(:disabled) { border-color: color-mix(in srgb, var(--purple) 50%, var(--border)); background: var(--bg-hover); }
 .sdk-model:disabled { color: var(--text-dim); cursor: default; }
+/* ■ on a busy box: stop its current turn. */
+.sdk-stop {
+  border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border));
+  background: var(--bg);
+  color: var(--red);
+  font: inherit;
+  font-size: 9px;
+  line-height: 15px;
+  padding: 0 5px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.sdk-stop:hover { background: color-mix(in srgb, var(--red) 15%, var(--bg)); border-color: var(--red); }
 .sdk-area-cost { font-family: var(--vc-mono, ui-monospace, monospace); font-size: 11px; color: var(--green); flex-shrink: 0; }
 .sdk-cap-right { margin-left: auto; flex: none; display: flex; align-items: center; gap: 6px; }
 /* Context: a thin bar and the % of the window; the tooltip has the numbers. */
@@ -663,7 +678,8 @@
   border-radius: 6px;
   cursor: pointer;
 }
-.sdk-model-opt:hover { background: var(--bg-hover); }
+.sdk-model-opt:hover:not(:disabled) { background: var(--bg-hover); }
+.sdk-model-opt:disabled { opacity: .45; cursor: default; }
 .sdk-model-opt.on { color: var(--accent); font-weight: 600; }
 .sdk-model-opt.on::before { content: '✓ '; }
 .sdk-model-opt-label { flex: 1; }
