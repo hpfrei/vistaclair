@@ -30,6 +30,13 @@
       this._detachers = [];
     }
 
+    static get observedAttributes() { return ['placeholder']; }
+
+    // The panel words its hint once it knows the tab's role.
+    attributeChangedCallback(name, _old, value) {
+      if (name === 'placeholder' && this._input && value) this._input.placeholder = value;
+    }
+
     connectedCallback() {
       if (this._built) return;
       this._built = true;

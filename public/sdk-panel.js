@@ -3,7 +3,8 @@
 // worker sits in a row below it (workers are hidden sessions with no tab of
 // their own), and an SVG behind the boxes joins them. A plain SDK tab has a
 // single box. Each box shows one view at a time — Live or Notes — under a
-// caption on its top border: name, model (click to switch), state, cost; at
+// caption on its top border: name, model (click to switch), state (with a ■
+// that stops the session's current turn while it works), cost; at
 // its right end the main agent's context use, then the Inspector button. Live
 // is split: the TODO table on top, below it the agent's text and the
 // `description` of its tool calls, and the same of its subagents, chipped by
@@ -270,6 +271,7 @@
             <span class="sdk-area-name"></span>
             <button type="button" class="sdk-model" title="Change this session's model"></button>
             <span class="sdk-chip sdk-area-state"></span>
+            <button type="button" class="sdk-stop hidden" title="Stop what this session is doing now. It stays open and waits for your next message.">■</button>
             <span class="sdk-chip sdk-area-report hidden"></span>
             <span class="sdk-area-cost"></span>
           </div>
@@ -310,6 +312,7 @@
       this.nameEl = q('.sdk-area-name');
       this.modelBtn = q('.sdk-model');
       this.stateEl = q('.sdk-area-state');
+      this.stopBtn = q('.sdk-stop');
       this.reportEl = q('.sdk-area-report');
       this.costEl = q('.sdk-area-cost');
       this.ctxEl = q('.sdk-ctx');
@@ -329,6 +332,7 @@
 
       for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
       this.modelBtn.addEventListener('click', (e) => { e.stopPropagation(); openModelMenu(this, this.modelBtn); });
+      this.stopBtn.addEventListener('click', () => this.stop());
       q('.sdk-shelve').addEventListener('click', () => this.panel.openShelved(null));
       q('.sdk-insp').addEventListener('click', () => {
         // Straight to this session's tab, opened (and loaded) if need be.
@@ -395,6 +399,10 @@
     addAliases(list) { for (const n of list) if (n) this.aliases.add(String(n)); }
     isMe(name) { return !!name && (this.aliases.has(name) || this.aliases.has(shortName(name, this.panel.run))); }
     ended() { return this.closed || ENDED.has(this.state); }
+    // Working, waiting on a question or pausing: there is something to stop.
+    stoppable() { return !this.ended() && (this.state === 'busy' || this.state === 'awaiting' || this.state === 'pausing'); }
+    // The session drops its current turn and waits for the next message.
+    stop() { if (this.stoppable()) sendWs({ type: 'sdk:interrupt', sessId: this.sessId }); }
     // A worker on the shelf (paused ones stay in the row).
     shelved() { return this.role === 'worker' && this.ended(); }
     shownModel() { return this.actualModel || this.model || this.initModel || ''; }
@@ -450,6 +458,7 @@
       this.stateEl.textContent = this.closed ? 'closed' : STATE_TEXT[s] || s;
       // Idle says nothing the header does not: no chip (and no gap) for it.
       this.stateEl.className = `sdk-chip sdk-area-state sdk-state-${ended ? 'exited' : s}${s === 'idle' && !ended ? ' hidden' : ''}`;
+      this.stopBtn.classList.toggle('hidden', !this.stoppable());
       this.awaitEl.classList.toggle('hidden', s !== 'awaiting');
       const r = this.lastReport;
       const rs = String(r?.status || '').toLowerCase().replace(/[^a-z]/g, '');
@@ -1062,10 +1071,10 @@
     }
   }
 
-  // ---- the model menu (one open at a time) ---------------------------------
+  // ---- menus (one open at a time): a box's model, the toolbar's ⋯ ----------
 
   let _menu = null;
-  function closeModelMenu() {
+  function closeMenu() {
     if (!_menu) return;
     _menu.el.remove();
     document.removeEventListener('mousedown', _menu.onDown, true);
@@ -1077,8 +1086,8 @@
   // keeps the conversation and its cost; the next turn caches the whole
   // context again at the new model's rate, so the menu says so.
   function openModelMenu(area, anchor) {
-    const reopen = _menu?.area === area;
-    closeModelMenu();
+    const reopen = _menu?.owner === area;
+    closeMenu();
     if (reopen || area.ended()) return;
     const listed = window.cliModule?.modelPickerOptions?.() || [];
     const opts = listed.length ? listed : FALLBACK_MODELS.map(v => ({ value: v, label: v, group: 'Aliases', price: '' }));
@@ -1093,7 +1102,7 @@
       b.appendChild(el('span', 'sdk-model-opt-label', o.label || o.value));
       if (o.price) b.appendChild(el('span', 'sdk-model-opt-price', o.price));
       b.addEventListener('click', () => {
-        closeModelMenu();
+        closeMenu();
         if (o.value === cur) return;
         area._modelBefore = area.model;
         area._actualBefore = area.actualModel;
@@ -1104,17 +1113,23 @@
       });
       box.appendChild(b);
     }
+    showMenu(box, anchor, area);
+  }
+
+  // Below the anchor, or above it when there is no room; a click outside or
+  // Esc closes it.
+  function showMenu(box, anchor, owner) {
     document.body.appendChild(box);
     const r = anchor.getBoundingClientRect();
     const h = Math.min(box.scrollHeight, window.innerHeight * 0.6);
     const below = window.innerHeight - r.bottom > h + 12;
     box.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - box.offsetWidth - 8))}px`;
     box.style.top = `${below ? r.bottom + 4 : Math.max(8, r.top - h - 4)}px`;
-    const onDown = (e) => { if (!box.contains(e.target) && e.target !== anchor) closeModelMenu(); };
-    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); closeModelMenu(); } };
+    const onDown = (e) => { if (!box.contains(e.target) && e.target !== anchor) closeMenu(); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); closeMenu(); } };
     document.addEventListener('mousedown', onDown, true);
     document.addEventListener('keydown', onKey, true);
-    _menu = { el: box, area, onDown, onKey };
+    _menu = { el: box, owner, onDown, onKey };
   }
 
   // ---- pick a session and send (one dialog at a time) ----------------------
@@ -1131,6 +1146,9 @@
   }
 
   // ---- Panel: one SDK tab --------------------------------------------------
+
+  const FRESH_TEXT = 'Swap the orchestrator for a new one with a clean memory. It continues from its notes. Workers aren\'t touched.';
+  const composerHint = (role) => `Message… (Enter or Ctrl+Enter, then Enter sends to the ${role === 'orchestrator' ? 'orchestrator' : 'session'}, Tab picks another · Shift+Enter new line · Esc stops the ${role === 'orchestrator' ? 'orchestrator' : 'session'})`;
 
   class Panel {
     constructor(tabId, wrap) {
@@ -1152,11 +1170,11 @@
             <span class="sdk-toolbar-badge">SDK</span>
             <span class="sdk-toolbar-title"></span>
             <span class="sdk-toolbar-meta"></span>
+            <button type="button" class="sdk-tb-btn sdk-fresh-chip suggested hidden" data-act="fresh"></button>
             <span class="sdk-toolbar-cost"></span>
             <span class="sdk-spacer"></span>
-            <button type="button" class="sdk-tb-btn" data-act="interrupt">Interrupt</button>
-            <button type="button" class="sdk-tb-btn" data-act="pause">Pause</button>
-            <button type="button" class="sdk-tb-btn hidden" data-act="refresh">Refresh orchestrator</button>
+            <button type="button" class="sdk-tb-btn" data-act="pause">Pause &amp; save</button>
+            <button type="button" class="sdk-tb-btn sdk-tb-more hidden" data-act="more" title="More">⋯</button>
           </div>
           <div class="sdk-stage">
             <svg class="sdk-links" aria-hidden="true"></svg>
@@ -1169,7 +1187,7 @@
             </div>
             <div class="sdk-workers"></div>
           </div>
-          <vc-composer placeholder="Message… (Enter or Ctrl+Enter, then Enter sends to the orchestrator, Tab picks another · Shift+Enter new line · Esc interrupts)"></vc-composer>
+          <vc-composer placeholder="${composerHint('orchestrator')}"></vc-composer>
         </div>`;
       const q = (s) => wrap.querySelector(s);
       this.panelEl = q('.sdk-panel');
@@ -1184,17 +1202,19 @@
       this.shelfTab = q('.sdk-shelf-tab');
       this.shelfTitle = q('.sdk-shelf-title');
       this.shelfList = q('.sdk-shelf-list');
-      this.interruptBtn = q('[data-act="interrupt"]');
       this.pauseBtn = q('[data-act="pause"]');
-      this.refreshBtn = q('[data-act="refresh"]');
+      this.freshChip = q('[data-act="fresh"]');
+      this.moreBtn = q('[data-act="more"]');
       this.composer = q('vc-composer');
 
-      this.interruptBtn.addEventListener('click', () => this.interrupt());
       this.pauseBtn.addEventListener('click', () => this.pause());
-      this.refreshBtn.addEventListener('click', () => this.refresh());
+      this.freshChip.addEventListener('click', () => this.refresh());
+      this.moreBtn.addEventListener('click', (e) => { e.stopPropagation(); this.openMore(); });
       this.shelfTab.addEventListener('click', () => this.foldShelf(!this.shelfEl.classList.contains('folded')));
-      this.composer.addEventListener('send', (e) => this.openPicker('send', e.detail));
-      this.composer.addEventListener('interrupt', () => this.interrupt());
+      this.composer.addEventListener('send', (e) => this.openPicker(e.detail));
+      // Esc stops the top box (the orchestrator, or a plain tab's session);
+      // a worker is stopped from its own box.
+      this.composer.addEventListener('interrupt', () => this.main?.stop());
       // Images dropped anywhere on the panel go to the composer.
       customElements.whenDefined('vc-composer').then(() => this.composer.attachDropTarget?.(this.panelEl));
       this._ro = new ResizeObserver(() => this.drawLinksSoon());
@@ -1244,6 +1264,7 @@
         if (runId) this.fetchRun();
       }
       this.composer.disabled = this.info.status === 'exited';
+      if (this.composer.getAttribute('placeholder') !== composerHint(role)) this.composer.setAttribute('placeholder', composerHint(role));
       this.renderToolbar();
     }
 
@@ -1479,18 +1500,13 @@
     // Submit → one dialog: the session map, the message, a Send button. There
     // is no remembered target: every message names its session. The
     // orchestrator (the first box) is selected; Tab / Shift+Tab moves the
-    // selection, Enter or the button sends. `mode` 'interrupt'
-    // picks a busy session and stops it, without a confirmation step.
-    openPicker(mode, payload = {}) {
+    // selection, Enter or the button sends.
+    openPicker(payload = {}) {
       closePicker();
-      closeModelMenu();
+      closeMenu();
       const list = this.allAreas();
       if (!list.length) return;
-      const pickable = (a) => mode === 'send' ? !a.ended() : (a.state === 'busy' || a.state === 'awaiting' || a.state === 'pausing');
-      if (mode === 'interrupt' && list.length === 1) {
-        if (pickable(list[0])) sendWs({ type: 'sdk:interrupt', sessId: list[0].sessId });
-        return;
-      }
+      const pickable = (a) => !a.ended();
       const backdrop = el('div', 'alert-modal-backdrop sdk-pick-backdrop');
       const modal = el('div', 'alert-modal sdk-pick');
       modal.setAttribute('role', 'dialog');
@@ -1500,11 +1516,10 @@
       document.body.appendChild(backdrop);
       backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) closePicker(); });
       const sel = list.findIndex(pickable);
-      const pick = _pick = { panel: this, backdrop, modal, mode, payload, list, pickable, sel, armed: false };
+      const pick = _pick = { panel: this, backdrop, modal, payload, list, pickable, sel, armed: false };
       pick.onKeyUp = () => { pick.armed = true; };
       pick.onKey = (e) => {
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePicker(); return; }
-        if (mode !== 'send') return;
         if (e.key === 'Tab') {
           // Focus stays in the dialog: Tab only walks the selection, wrapping
           // round and skipping the boxes that cannot take a message.
@@ -1535,13 +1550,13 @@
     // Drawn again on every change of selection.
     _renderPick() {
       const pick = _pick;
-      const { modal, list, pickable, mode, payload } = pick;
-      const target = mode === 'send' ? list[pick.sel] : null;
+      const { modal, list, pickable, payload } = pick;
+      const target = list[pick.sel];
       const node = (a) => {
         const b = el('button', `sdk-pick-node sdk-pick-${a.role}${pickable(a) ? '' : ' off'}${a === target ? ' sel' : ''}`);
         b.type = 'button';
         b.disabled = !pickable(a);
-        if (mode === 'send') b.setAttribute('aria-pressed', String(a === target));
+        b.setAttribute('aria-pressed', String(a === target));
         b.title = a.label;
         b.appendChild(el('span', 'sdk-pick-name', a.label));
         b.appendChild(el('span', 'sdk-pick-meta', this._nodeMeta(a)));
@@ -1549,7 +1564,7 @@
         return b;
       };
       modal.innerHTML = '';
-      modal.appendChild(el('div', 'sdk-pick-title', mode === 'send' ? 'Send to which session?' : 'Interrupt which session?'));
+      modal.appendChild(el('div', 'sdk-pick-title', 'Send to which session?'));
       const map = el('div', 'sdk-pick-map');
       const [first, ...rest] = list;
       map.appendChild(node(first));
@@ -1560,32 +1575,26 @@
         map.appendChild(row);
       }
       modal.appendChild(map);
-      if (mode === 'send') {
-        const text = String(payload.text || '');
-        const lines = text.split('\n');
-        const preview = lines.slice(0, 3).join('\n') + (lines.length > 3 ? '\n…' : '');
-        const nImg = (payload.images || []).length;
-        if (target && (target.state === 'busy' || target.state === 'awaiting')) {
-          modal.appendChild(el('div', 'sdk-pick-note', `${target.label} is busy: it reads this after its current tool calls.`));
-        }
-        if (text) modal.appendChild(el('pre', 'sdk-pick-preview', clip(preview, 600)));
-        if (nImg) modal.appendChild(el('div', 'sdk-pick-imgs', `+ ${nImg} image${nImg === 1 ? '' : 's'}`));
+      const text = String(payload.text || '');
+      const lines = text.split('\n');
+      const preview = lines.slice(0, 3).join('\n') + (lines.length > 3 ? '\n…' : '');
+      const nImg = (payload.images || []).length;
+      if (target && (target.state === 'busy' || target.state === 'awaiting')) {
+        modal.appendChild(el('div', 'sdk-pick-note', `${target.label} is busy: it reads this after its current tool calls.`));
       }
-      modal.appendChild(el('div', 'sdk-pick-hint', mode === 'send'
-        ? 'Tab picks the box, Enter sends. Ended sessions cannot take messages.'
-        : 'Click a busy box.'));
+      if (text) modal.appendChild(el('pre', 'sdk-pick-preview', clip(preview, 600)));
+      if (nImg) modal.appendChild(el('div', 'sdk-pick-imgs', `+ ${nImg} image${nImg === 1 ? '' : 's'}`));
+      modal.appendChild(el('div', 'sdk-pick-hint', 'Tab picks the box, Enter sends. Ended sessions cannot take messages.'));
       const actions = el('div', 'sdk-pick-actions');
       const cancel = el('button', 'sdk-tb-btn', 'Cancel');
       cancel.type = 'button';
       cancel.addEventListener('click', closePicker);
       actions.appendChild(cancel);
-      if (mode === 'send') {
-        const send = el('button', 'alert-modal-ok sdk-pick-send', target ? `Send to ${clip(target.label, 32)}` : 'Send');
-        send.type = 'button';
-        send.disabled = !target;
-        send.addEventListener('click', () => this._confirmSend());
-        actions.appendChild(send);
-      }
+      const send = el('button', 'alert-modal-ok sdk-pick-send', target ? `Send to ${clip(target.label, 32)}` : 'Send');
+      send.type = 'button';
+      send.disabled = !target;
+      send.addEventListener('click', () => this._confirmSend());
+      actions.appendChild(send);
       modal.appendChild(actions);
       modal.focus();
     }
@@ -1594,18 +1603,13 @@
     _picked(a) {
       const pick = _pick;
       if (!pick || !pick.pickable(a)) return;
-      if (pick.mode === 'interrupt') {
-        sendWs({ type: 'sdk:interrupt', sessId: a.sessId });
-        closePicker();
-        return;
-      }
       pick.sel = pick.list.indexOf(a);
       this._renderPick();
     }
 
     _confirmSend() {
       const pick = _pick;
-      const target = pick?.mode === 'send' ? pick.list[pick.sel] : null;
+      const target = pick?.list[pick.sel];
       if (!target || !pick.pickable(target)) return;
       sendWs({ type: 'sdk:send', sessId: target.sessId, text: pick.payload.text, images: pick.payload.images || [] });
       // The draft stays in the composer until a message is really sent.
@@ -1613,20 +1617,18 @@
       closePicker();
     }
 
-    interrupt() { this.openPicker('interrupt'); }
-
     // The same pause flow as the tab strip: an orchestrator pauses its run,
-    // a plain tab itself; while pausing it offers "interrupt now".
+    // a plain tab itself; while pausing it offers "Force stop".
     pause() {
       const info = this.info;
       if (info.pausing) {
-        if (confirm('Interrupt now? The session stops mid-step and is saved as interrupted; its resume note may be missing.')) {
+        if (confirm('Force stop? It stops right away, in the middle of its step. It is still saved, but the resume note may be missing.')) {
           sendWs({ type: 'cli:interrupt', tabId: this.tabId });
         }
         return;
       }
       if (this.runId) {
-        if (!confirm('Pause this run? Each worker finishes its step, writes its resume note and closes; the orchestrator closes last. It may take a while.')) return;
+        if (!confirm('Pause & save this run? Every session saves its progress and closes; the orchestrator goes last. This can take a minute. Resume later from the + menu. Nothing is lost.')) return;
         sendWs({ type: 'cli:pauseRun', runId: this.runId });
       } else {
         sendWs({ type: 'cli:pause', tabId: this.tabId });
@@ -1645,34 +1647,47 @@
       this.metaEl.textContent = meta.join(' · ');
       const costs = this.allAreas().map(a => a.cost).filter(c => typeof c === 'number');
       this.costEl.textContent = costs.length ? `${fmtCost(costs.reduce((s, c) => s + c, 0))}${this.workers.size ? ' total' : ''}` : '';
-      const busy = this.allAreas().filter(a => a.state === 'busy' || a.state === 'awaiting' || a.state === 'pausing');
-      this.interruptBtn.title = this.areaCount() > 1 ? 'Interrupt a session: you choose which (Esc in the composer)' : 'Interrupt the session (Esc in the composer)';
-      this.interruptBtn.disabled = !busy.length;
       const running = info.status === 'running';
       const isWorkerTab = info.settings?.orchestration?.role === 'worker';
       this.pauseBtn.classList.toggle('hidden', isWorkerTab);
       this.pauseBtn.disabled = !running;
-      this.pauseBtn.textContent = info.pausing ? 'Interrupt now' : this.runId ? 'Pause run' : 'Pause';
+      this.pauseBtn.textContent = info.pausing ? 'Force stop' : 'Pause & save';
       this.pauseBtn.title = info.pausing
-        ? 'Pausing… (writing the resume note). Click to interrupt now.'
-        : this.runId ? 'Workers write their notes and close, then the orchestrator. Resume from the "+" menu.'
-          : 'The session finishes its step, writes its resume note and closes. Resume from the "+" menu.';
-      // A run's orchestrator can hand over to a fresh one; suggested once it
-      // has compacted a few times.
+        ? 'Saving… Click to stop immediately (the resume note may be missing).'
+        : this.runId ? 'Every session saves its progress and closes. Resume later from the + menu. Nothing is lost.'
+          : 'The session saves its progress and closes. Resume later from the + menu. Nothing is lost.';
+      // A run's orchestrator can hand over to a fresh one: from the ⋯ menu,
+      // or the chip once it has compacted a few times.
       const run = this.run;
-      this.refreshBtn.classList.toggle('hidden', !this.runId || isWorkerTab);
-      this.refreshBtn.disabled = !(run?.orchestratorRunning && !run.pausing && !info.pausing);
-      this.refreshBtn.classList.toggle('suggested', !!run?.refreshSuggested && !this.refreshBtn.disabled);
-      this.refreshBtn.title = [
-        'The orchestrator writes its notes and is replaced by a fresh session with a clean context, seeded from the run. Workers keep running.',
-        run?.refreshSuggested ? `Suggested: the orchestrator has compacted ${run.compactions} times.` : null,
-      ].filter(Boolean).join('\n');
+      const isRun = !!this.runId && !isWorkerTab;
+      this.canRefresh = isRun && !!(run?.orchestratorRunning && !run.pausing && !info.pausing);
+      this.moreBtn.classList.toggle('hidden', !isRun);
+      this.freshChip.classList.toggle('hidden', !(this.canRefresh && run.refreshSuggested));
+      this.freshChip.disabled = false;
+      this.freshChip.textContent = `orchestrator compacted ${run?.compactions || 0}× · start fresh?`;
+      this.freshChip.title = FRESH_TEXT;
+    }
+
+    // The ⋯ menu: what the toolbar does not show all the time.
+    openMore() {
+      const reopen = _menu?.owner === this;
+      closeMenu();
+      if (reopen) return;
+      const box = el('div', 'sdk-model-menu sdk-more-menu');
+      const b = el('button', 'sdk-model-opt');
+      b.type = 'button';
+      b.appendChild(el('span', 'sdk-model-opt-label', 'Fresh orchestrator'));
+      b.disabled = !this.canRefresh;
+      b.title = this.canRefresh ? FRESH_TEXT : `${FRESH_TEXT}\nNot now: the orchestrator is not running, or the run is pausing.`;
+      b.addEventListener('click', () => { closeMenu(); this.refresh(); });
+      box.appendChild(b);
+      showMenu(box, this.moreBtn, this);
     }
 
     refresh() {
-      if (!this.runId) return;
-      if (!confirm('Refresh the orchestrator? It writes its notes, then a fresh orchestrator continues the run from them. Workers keep running.')) return;
-      this.refreshBtn.disabled = true;
+      if (!this.runId || !this.canRefresh) return;
+      if (!confirm(`Fresh orchestrator?\n\n${FRESH_TEXT}`)) return;
+      this.freshChip.disabled = true;
       sendWs({ type: 'cli:refreshOrchestrator', runId: this.runId });
     }
 
@@ -1711,7 +1726,7 @@
       clearInterval(this._tick);
       this._ro.disconnect();
       if (_pick?.panel === this) closePicker();
-      if (_menu && this.allAreas().includes(_menu.area)) closeModelMenu();
+      if (_menu && (_menu.owner === this || this.allAreas().includes(_menu.owner))) closeMenu();
       for (const a of this.allAreas()) a.destroy();
       this.workers.clear();
       this.main = null;
