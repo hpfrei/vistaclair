@@ -22,6 +22,7 @@ const addons = require('./src/addons');
 const { createAddonCtx } = require('./src/addon-host');
 const { createOrchestration } = require('./src/orchestration');
 const { createSessionControl } = require('./src/session-control');
+const { createCliIsolation } = require('./src/cli-isolation');
 const { createAuth } = require('./src/auth');
 let proModule = null;   // the loaded ./vistaclair-pro module (for licensing/update)
 let proAddon = null;    // its registered descriptor (null until init succeeds)
@@ -415,6 +416,14 @@ const orchestration = createOrchestration({
   control: sessionControl,
 });
 cliSessionManager.addExitListener(orchestration.onSessionExit);
+// A plain session's own git worktree: landing and teardown (src/cli-isolation.js).
+const cliIsolation = createCliIsolation({
+  mgr: cliSessionManager,
+  broadcaster: { broadcast: (...args) => broadcaster.broadcast(...args) },
+  dataHome: DATA_HOME,
+});
+cliSessionManager.isolation = cliIsolation;
+cliSessionManager.addExitListener(cliIsolation.onSessionExit);
 
 // Ask `claude auth status` now, so hasClaudeSubscription()'s first caller
 // gets a cached answer instead of waiting on the command.
@@ -496,6 +505,8 @@ ruleHandler.init({ broadcaster, store, proxyPort: PROXY_PORT, dashboardPort: DAS
 
 // Orchestration runs: hook decisions, worker launch/report tools, the run board.
 dashboardApp.use('/api/orchestration', orchestration.router());
+// Landing an isolated plain session (POST /land, GET /status).
+dashboardApp.use('/api/cli-isolation', cliIsolation.router());
 
 // Images pasted into Agent SDK sessions (the panel's replay).
 dashboardApp.get('/api/sdk/upload', SdkSession.uploadRoute(cliSessionManager));
@@ -671,6 +682,8 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
     // The CLI tabs the previous process left open go to the saved sessions (the
     // "+" menu), marked interrupted when they were mid-turn. Nothing reopens by
     // itself unless the owner opted into reopening plain tabs.
+    // An isolated session's landing cut off by the restart: aborted, recorded.
+    cliIsolation.recover();
     const boot = cliSessionManager.bootOpenTabs();
     if (boot.restored || boot.dropped || boot.archived) {
       console.log(`  CLI tabs: ${boot.archived || 0} saved for resume${boot.restored ? `, restoring ${boot.restored}` : ''}${boot.dropped ? `, dropped ${boot.dropped}` : ''}`);
