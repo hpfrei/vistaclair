@@ -44,7 +44,7 @@ Verdict legend: **keep** (guards a real external failure mode), **dedupe** (corr
 | `src/cli-session.js:234-254` | `writeWhenReady` polls scrollback for `❯` prompt | keep — no programmatic ready event from CLI |
 | `src/capabilities.js:280-299` | Stale hook-reporter entry cleanup | keep for now — path embeds install location; revisit with stable marker |
 | `server.js:429-434` | Double-close counter + 2s fallback in scheduleRestart | keep |
-| `server.js:443-461` | `killStalePortProcesses` via lsof at startup | keep — install model has no supervisor |
+| `src/port-cleanup.js` | `killStalePortListeners` at startup (local mode) | keep — `node server.js` runs unsupervised; listeners only (never clients such as ngrok), never self/parent/ngrok |
 | `server.js:253-263` | `/api/ask` close-event cleanup | keep — prevents Promise/Map leak |
 
 ## vistaclair-pro
