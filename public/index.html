@@ -995,6 +995,20 @@ jq -r '.tool_input.command' |
             <span class="dir-picker-option-help">Allow Claude to read and write CLAUDE.md project memory files</span>
           </span>
         </label>
+        <label class="dir-picker-option">
+          <input type="checkbox" id="dirPickerWorktree">
+          <span class="dir-picker-option-text">
+            <span class="dir-picker-option-label">Own git worktree</span>
+            <span class="dir-picker-option-help">A simple CLI works on its own branch; ⤵ on its tab lands it (rebase, check, merge)</span>
+          </span>
+        </label>
+        <label class="dir-picker-option">
+          <input type="checkbox" id="dirPickerLandOnClose">
+          <span class="dir-picker-option-text">
+            <span class="dir-picker-option-label">Land on close</span>
+            <span class="dir-picker-option-help">With its own worktree: land the branch when the session closes</span>
+          </span>
+        </label>
       </div>
       <div class="cap-modal-footer">
         <button class="dir-picker-new-btn" id="dirPickerNewBtn">+ New Folder</button>

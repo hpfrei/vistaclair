@@ -491,6 +491,20 @@
       }
       if (tab.pausing) btn.classList.add('cli-tab-pausing');
 
+      // Land: an isolated plain session's branch into its base, by the server.
+      const wt = tab.settings?.worktree;
+      if (wt && !wt.removed && !orchRole) {
+        const landBtn = document.createElement('span');
+        landBtn.className = 'cli-model-override-btn cli-land-btn';
+        landBtn.textContent = '⤵';
+        landBtn.title = `Land ${wt.branch} into ${wt.base} (rebase, check, merge --no-ff)` + (wt.lastLanding ? `\nLast: ${wt.lastLanding.text}` : '');
+        landBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          sendWs({ type: 'cli:land', tabId });
+        });
+        btn.appendChild(landBtn);
+      }
+
       const close = document.createElement('span');
       close.className = 'tab-close';
       close.textContent = '×';
@@ -612,6 +626,8 @@
       reqId: `open-${++_reqSeq}`,
       cwd: picked.dir,
       autoMemory: picked.autoMemory === true,
+      // A simple CLI in its own git worktree (an orchestrator's run isolates its workers).
+      ...(picked.worktree ? { isolation: 'worktree', landOnClose: picked.landOnClose === true } : {}),
       cols,
       rows,
     });
@@ -1056,7 +1072,7 @@
         pick.innerHTML = `<span class="dir-picker-recent-icon">📁</span><span class="dir-picker-recent-name">${escHtml(name)}</span><span class="dir-picker-recent-path">${escHtml(d.path)}</span>`;
         pick.addEventListener('click', () => {
           cleanup();
-          resolve({ dir: d.path, autoMemory: autoMemoryCheckbox.checked });
+          resolve({ dir: d.path, ...pickedOptions() });
         });
         row.appendChild(pick);
 
@@ -1182,8 +1198,17 @@
       newNameInput.removeEventListener('keydown', onNewKey);
     }
     const autoMemoryCheckbox = document.getElementById('dirPickerAutoMemory');
+    const worktreeCheckbox = document.getElementById('dirPickerWorktree');
+    const landOnCloseCheckbox = document.getElementById('dirPickerLandOnClose');
+    function pickedOptions() {
+      return {
+        autoMemory: autoMemoryCheckbox.checked,
+        worktree: !!worktreeCheckbox?.checked,
+        landOnClose: !!worktreeCheckbox?.checked && !!landOnCloseCheckbox?.checked,
+      };
+    }
     function onClose() { cleanup(); resolve(null); }
-    function onSelect() { cleanup(); resolve({ dir: currentDir, autoMemory: autoMemoryCheckbox.checked }); }
+    function onSelect() { cleanup(); resolve({ dir: currentDir, ...pickedOptions() }); }
 
     closeBtn.addEventListener('click', onClose);
     cancelBtn.addEventListener('click', onClose);
@@ -1548,6 +1573,29 @@
       }
       case 'cli:deleteRefused': {
         if (confirm(`${msg.reason}\n\nDelete it anyway?`)) sendWs({ type: 'cli:deleteSavedSession', sessionId: msg.sessionId, force: true });
+        break;
+      }
+      case 'cli:landing': {
+        const where = msg.title ? `${msg.title}: ` : '';
+        const files = msg.files?.length ? `\n${msg.files.slice(0, 8).join('\n')}` : '';
+        const output = msg.outcome === 'check-failed' && msg.output ? `\n${String(msg.output).slice(-600)}` : '';
+        window.dashboard.showToast?.({
+          sender: 'CLI',
+          title: msg.outcome === 'landed' ? 'Landed' : msg.outcome === 'nothing' ? 'Nothing to land' : 'Not landed',
+          message: where + (msg.text || msg.outcome) + files + output,
+          level: msg.outcome === 'landed' ? 'success' : msg.outcome === 'nothing' ? 'info' : 'warning',
+        });
+        break;
+      }
+      case 'cli:worktree': {
+        if (!msg.removed) {
+          window.dashboard.showToast?.({
+            sender: 'CLI',
+            title: 'Worktree kept',
+            message: `${msg.title || msg.branch}: ${msg.path} kept — ${msg.kept}${msg.files?.length ? `\n${msg.files.slice(0, 8).join('\n')}` : ''}`,
+            level: 'info',
+          });
+        }
         break;
       }
       case 'cli:paused': {

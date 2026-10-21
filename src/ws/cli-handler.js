@@ -65,6 +65,8 @@ function handleMessage(ws, msg, bc) {
         cwd: msg.cwd, cols, rows, autoMemory: msg.autoMemory === true,
         ...(msg.engine === 'cli' || msg.engine === 'sdk' ? { engine: msg.engine } : {}),
         ...(msg.mode === 'simple' || msg.mode === 'orchestrator' ? { mode: msg.mode } : {}),
+        // A simple session in its own git worktree (src/cli-isolation.js).
+        ...(msg.isolation === 'worktree' ? { isolation: 'worktree', landOnClose: msg.landOnClose === true } : {}),
         // The requesting viewer sized the PTY, so it starts as the owner.
         beforeLaunch: (tabId) => mgr.getOrCreate(tabId).resizeFrom(ws, cols, rows),
       }).then(reply, (err) => reply({ error: err.message }));
@@ -88,6 +90,16 @@ function handleMessage(ws, msg, bc) {
         mgr.remove(msg.tabId);
         if (forgetId) mgr.deleteSavedSession(forgetId);
         mgr.broadcastTabs();
+      }
+      break;
+    case 'cli:land':
+      // An isolated session's branch into its base; every client hears the
+      // outcome as cli:landing.
+      if ((msg.tabId || msg.sessId) && mgr.isolation) {
+        mgr.isolation.land({ tabId: msg.tabId, sessId: msg.sessId }).then((r) => {
+          // Stopped before it started (not isolated, already landing): only the requester hears it.
+          if (!r.at && ws.readyState === WebSocket.OPEN) send({ type: 'cli:landing', tabId: msg.tabId || null, sessId: msg.sessId || null, ...r });
+        }, (e) => console.error('[cli-isolation] land:', e.message));
       }
       break;
     case 'cli:spawn':

@@ -662,6 +662,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       cwd: opts.cwd, cols: opts.cols, rows: opts.rows, title: opts.title,
       settings: { ...callerSettings, engine, ...(auth ? { auth } : {}) }, hidden: opts.hidden, autoMemory: opts.autoMemory,
       prompt: opts.prompt, autoSubmit: opts.autoSubmit, spawnOpts: opts.spawnOpts,
+      // A simple session's own git worktree (src/cli-isolation.js); an
+      // orchestrator's isolation is its run's (prepareRun).
+      ...(mode !== 'orchestrator' && opts.isolation === 'worktree' ? { isolation: 'worktree', landOnClose: opts.landOnClose === true } : {}),
     };
     if (mode === 'orchestrator') {
       launch.settings = prepareRun({

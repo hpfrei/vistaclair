@@ -136,6 +136,8 @@ class CliSessionManager {
     this.droppedTabs = [];
     this._restoring = false;
     this._shuttingDown = false;
+    // Git isolation of plain sessions (src/cli-isolation.js), set by the server.
+    this.isolation = null;
   }
 
   // engine 'sdk' (settings.engine) makes an Agent SDK session, anything else a
@@ -267,6 +269,19 @@ class CliSessionManager {
   // member: the fresh session replacing it carries the state forward).
   forgetSaved(id) {
     writeJSON(HISTORY_FILE, this._loadHistory().filter(h => h.id !== id));
+  }
+
+  // Change a session's saved settings in place — its history entry and its
+  // open-tab manifest entry, flags kept (cli-isolation records a closed
+  // session's worktree there). True when either was found.
+  patchSavedSettings(sessId, fn) {
+    const history = this._loadHistory();
+    const h = history.find(x => x.id === sessId);
+    if (h) { h.settings = fn(h.settings || {}); writeJSON(HISTORY_FILE, history); }
+    const entries = readJSON(OPEN_TABS_FILE, []);
+    const e = Array.isArray(entries) ? entries.find(x => x?.sessId === sessId) : null;
+    if (e) { e.settings = fn(e.settings || {}); writeJSON(OPEN_TABS_FILE, entries); }
+    return !!(h || e);
   }
 
   // --- Open-tab manifest ---
@@ -623,6 +638,12 @@ class CliSessionManager {
       session.updateSettings({ sessionDir });
     }
     try { folders.ensureFolder(sessionDir, session.title); } catch (e) { console.error(`  session folder ${sessionDir}: ${e.message}`); }
+    // An isolated session resumed after its worktree went: it comes back first.
+    const wt = session.getSettings().worktree;
+    if (wt && this.isolation && !session.getSettings().orchestration) {
+      const back = this.isolation.restore(wt);
+      if (back) session.updateSettings({ worktree: back });
+    }
     try {
       session.spawn(cwd, cols, rows, { resumeSessionId, autoMemory });
     } catch (e) {
@@ -769,7 +790,9 @@ class CliSessionManager {
       }
     }
 
-    const base = path.basename((cwd || '').replace(/\/+$/, '')) || cwd || 'cli';
+    // An isolated session is named after the directory it was asked for.
+    const named = session.getSettings().worktree?.cwd || cwd;
+    const base = path.basename((named || '').replace(/\/+$/, '')) || named || 'cli';
     let candidate = base;
     let n = 1;
     while (taken.has(candidate)) candidate = `${base}-${++n}`;
@@ -827,7 +850,13 @@ class CliSessionManager {
     return this.findSaved(sessId)?.settings?.sessionDir || null;
   }
 
+  // opts.isolation 'worktree' (a new session; opts.landOnClose): it runs in its
+  // own git worktree (src/cli-isolation.js).
   launchSession(tabId, opts = {}) {
+    if (opts.isolation === 'worktree') {
+      if (!this.isolation) throw new Error('isolation "worktree" is not available');
+      opts = this.isolation.prepare(opts);
+    }
     const session = this.getOrCreate(tabId);
     if (opts.title !== undefined) session.title = opts.title;
     if (opts.settings) session.updateSettings(opts.settings);
