@@ -24,6 +24,7 @@ const { createOrchestration } = require('./src/orchestration');
 const { createSessionControl } = require('./src/session-control');
 const { createCliIsolation } = require('./src/cli-isolation');
 const { createAuth } = require('./src/auth');
+const { killStalePortListeners } = require('./src/port-cleanup');
 let proModule = null;   // the loaded ./vistaclair-pro module (for licensing/update)
 let proAddon = null;    // its registered descriptor (null until init succeeds)
 let proLicenseValid = false;
@@ -637,28 +638,16 @@ dashboardApp.post('/api/restart', (req, res) => {
   scheduleRestart();
 });
 
-// Kill stale processes on our ports before binding (handles unclean restarts)
-function killStalePortProcesses() {
+// Kill a stale server still listening on our ports (unclean restarts). Only
+// listeners — never clients such as ngrok's upstream connection; never this
+// process, its supervisor or ngrok (src/port-cleanup.js).
+// Server mode: pm2 owns process lifecycle — never kill by port; fail fast instead.
+if (!SERVER_MODE) {
   try {
-    const { execSync } = require('child_process');
-    const myPid = process.pid;
-    // The supervisor's health pings show it on the dashboard port too.
-    const supervisorPid = SUPERVISED ? process.ppid : null;
-    for (const port of [PROXY_PORT, DASHBOARD_PORT]) {
-      try {
-        const out = execSync(`lsof -ti :${port} 2>/dev/null`, { encoding: 'utf-8' }).trim();
-        for (const pidStr of out.split('\n').filter(Boolean)) {
-          const pid = parseInt(pidStr);
-          if (pid && pid !== myPid && pid !== supervisorPid) {
-            try { process.kill(pid, 'SIGKILL'); } catch {}
-          }
-        }
-      } catch {}
-    }
+    const killed = killStalePortListeners([PROXY_PORT, DASHBOARD_PORT]);
+    if (killed.length) console.log(`  Ports: killed stale listener(s) ${killed.join(', ')}`);
   } catch {}
 }
-// Server mode: pm2 owns process lifecycle — never kill by port; fail fast instead.
-if (!SERVER_MODE) killStalePortProcesses();
 
 for (const srv of [proxyServer, dashboardServer]) {
   srv.on('error', (err) => {
