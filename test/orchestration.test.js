@@ -968,7 +968,7 @@ test('resume after end_run: the worktree comes back at the same path, its branch
   g('merge', '-q', '--ff-only', w.branch);
   commitIn(repo, 'b.txt');
   orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
-  orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
+  s1.running = false;
 
   const res = orch.endRun(orchSession.instanceId);
   assert.deepStrictEqual(res.removed, [w.worker]);
@@ -1026,9 +1026,8 @@ test('a resume whose worktree cannot be recreated throws and leaves the worker a
   const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
   const s1 = mgr.sessions.get(w.tabId);
   orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
-  orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
-  g('worktree', 'remove', '--force', w.cwd);
-  g('checkout', '-q', w.branch);    // checked out elsewhere: git refuses a second worktree on it
+  assert.strictEqual(orch.closeWorker(orchSession.instanceId, { worker: 'w1' }).worktree, 'removed', 'nothing to land, clean: it goes at close');
+  g('checkout', '-q', '-b', w.branch);    // checked out elsewhere: git refuses a second worktree on it
   const before = run().workers[0];
   assert.strictEqual(before.closed, true);
   const launches = mgr.launches.length;
@@ -1590,4 +1589,242 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
   } finally {
     server.close();
   }
+});
+
+// --- Landing by code (src/worktree-landing.js), in throwaway repos ---
+
+// A repo on `main` with a declared dependency link (.data, gitignored, its
+// content in the main checkout) and an optional check.
+function landingRepo({ check = null } = {}) {
+  const repo = tmpDir('vistaclair-land-repo-');
+  const g = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'pipe' }).toString().trim();
+  g('init', '-q', '-b', 'main');
+  g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.data/\n');
+  fs.writeFileSync(path.join(repo, 'f.txt'), 'one\ntwo\nthree\n');
+  fs.writeFileSync(path.join(repo, '.vistaclair-worktree.json'), JSON.stringify({ links: ['.data', 'missing'], ...(check ? { check } : {}) }));
+  g('add', '.'); g('commit', '-qm', 'init');
+  fs.mkdirSync(path.join(repo, '.data'));
+  fs.writeFileSync(path.join(repo, '.data', 'db.txt'), 'keep me');
+  return { repo, g };
+}
+const commitAll = (dir, files, msg = 'work') => {
+  for (const [f, c] of Object.entries(files)) fs.writeFileSync(path.join(dir, f), c);
+  execFileSync('git', ['-C', dir, 'add', '-A']);
+  execFileSync('git', ['-C', dir, 'commit', '-qm', msg]);
+};
+async function landingRun(t, opts) {
+  const { repo, g } = landingRepo(opts);
+  const ctx = await openOrchestrator(t, { cwd: repo });
+  const launch = (title = 'a') => {
+    const w = ctx.orch.launchWorker(ctx.orchSession.instanceId, { title, task: 'x' });
+    return { ...w, session: ctx.mgr.sessions.get(w.tabId) };
+  };
+  const done = async (w, summary = 'did it') => {
+    const r = ctx.orch.report(w.session.instanceId, { status: 'done', summary });
+    await ctx.orch.landingOf(w.worker);
+    return r;
+  };
+  const events = (kind) => ctx.run().events.filter(e => e.kind === kind).map(e => e.text);
+  const toWorker = (w) => ctx.mgr.submits.filter(x => x.tabId === w.tabId).map(x => x.data).join('\n');
+  return { ...ctx, repo, g, launch, done, events, toWorker };
+}
+
+test('landing: links made and recorded at launch; a done report rebases, checks and merges --no-ff; repeated done lands what is new', async (t) => {
+  const { orch, repo, g, launch, done, events, run } = await landingRun(t, { check: 'test -f a.txt && echo checked > .data-check-ran' });
+  const w = launch();
+  const link = path.join(w.cwd, '.data');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.strictEqual(fs.readlinkSync(link), path.join(repo, '.data'));
+  assert.deepStrictEqual(run().workers[0].worktree.links, [{ path: link, target: path.join(repo, '.data') }], 'only what exists is linked');
+  assert.strictEqual(run().workers[0].base, 'main');
+
+  commitAll(w.cwd, { 'a.txt': 'a' });
+  commitAll(repo, { 'b.txt': 'b' }, 'owner moved main');
+  fs.writeFileSync(path.join(repo, 'unrelated.txt'), 'owner wip');     // a dirty file the landing does not touch
+  const before = g('rev-parse', 'main');
+  const r = await done(w, 'added a\nmore lines');
+  assert.match(r.landing, /being landed/);
+
+  const merge = g('rev-parse', 'main');
+  assert.strictEqual(g('rev-parse', 'main^1'), before, 'merged onto the base as it was');
+  assert.strictEqual(g('rev-parse', 'main^2'), g('rev-parse', w.branch), 'its branch, rebased');
+  assert.strictEqual(g('log', '-1', '--format=%s', 'main'), `Merge ${w.branch}: added a`);
+  assert.ok(fs.existsSync(path.join(repo, 'a.txt')), 'the main checkout has it');
+  assert.ok(fs.existsSync(path.join(w.cwd, '.data-check-ran')), 'the check ran in the worktree');
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'unrelated.txt'), 'utf8'), 'owner wip');
+  const rec = run().landings[0];
+  assert.deepStrictEqual([rec.worker, rec.preLandSha, rec.mergeSha, rec.base], [w.worker, before, merge, 'main']);
+  assert.ok(rec.at);
+  assert.deepStrictEqual(events('landed'), [`landed ${merge} — ${w.worker}'s ${w.branch} merged into main`]);
+  assert.ok(!run().workers[0].landing, 'nothing in flight');
+
+  fs.rmSync(path.join(w.cwd, '.data-check-ran'));
+  assert.strictEqual((await done(w)).landing, undefined, 'nothing new: no landing');
+  assert.strictEqual(run().landings.length, 1);
+  commitAll(w.cwd, { 'a2.txt': 'a2' });
+  await done(w, 'second');
+  assert.strictEqual(run().landings.length, 2);
+  assert.strictEqual(g('rev-list', '--count', `${merge}..main`), '2', 'the new commit and its merge');
+  assert.strictEqual(g('ls-tree', '--name-only', 'main', '.data'), '', 'the link was never committed');
+});
+
+test('landing: a conflict is aborted, the base untouched, the same worker told; a gone worker sends the orchestrator a merge session', async (t) => {
+  const { repo, g, launch, done, events, toWorker } = await landingRun(t);
+  const w = launch();
+  commitAll(w.cwd, { 'f.txt': 'one\nTWO-worker\nthree\n' });
+  commitAll(repo, { 'f.txt': 'one\nTWO-owner\nthree\n' });
+  const base = g('rev-parse', 'main');
+  const head = g('rev-parse', w.branch);
+  await done(w);
+  assert.strictEqual(g('rev-parse', 'main'), base, 'base untouched');
+  assert.strictEqual(g('rev-parse', w.branch), head, 'the rebase was aborted');
+  assert.strictEqual(execFileSync('git', ['-C', w.cwd, 'status', '--porcelain']).toString(), '');
+  assert.match(toWorker(w), /\[vistaclair landing\] Your branch was not landed: it conflicts with main in f\.txt/);
+  assert.match(events('not landed')[0], /conflicts with main in f\.txt; main untouched\. Sent back to/);
+
+  w.session.running = false;
+  await done(w);
+  assert.match(events('not landed')[1], /is not running: resume_worker it with this, or launch a worker to merge .* into its own branch/);
+});
+
+test('landing: a failing check goes back to the worker with its output; nothing merged', async (t) => {
+  const { g, launch, done, events, toWorker } = await landingRun(t, { check: 'echo boom-output; exit 3' });
+  const w = launch();
+  commitAll(w.cwd, { 'a.txt': 'a' });
+  const base = g('rev-parse', 'main');
+  await done(w);
+  assert.strictEqual(g('rev-parse', 'main'), base);
+  assert.match(toWorker(w), /the repo's check failed[\s\S]*boom-output/);
+  assert.match(events('not landed')[0], /the check failed .*boom-output/);
+});
+
+test('landing: real uncommitted changes stop it in the report\'s answer; the links do not count', async (t) => {
+  const { repo, g, launch, done, events, run } = await landingRun(t);
+  const w = launch();
+  commitAll(w.cwd, { 'a.txt': 'a' });
+  fs.writeFileSync(path.join(w.cwd, 'f.txt'), 'edited');
+  fs.mkdirSync(path.join(w.cwd, 'newdir'));
+  fs.writeFileSync(path.join(w.cwd, 'newdir', 'x'), 'x');
+  const base = g('rev-parse', 'main');
+  const r = await done(w);
+  assert.match(r.landing, /uncommitted changes \(M f\.txt, \?\? newdir\/\)\. Commit them/);
+  assert.strictEqual(g('rev-parse', 'main'), base);
+  assert.match(events('not landed')[0], /uncommitted changes in its worktree/);
+  assert.ok(!/\.data/.test(r.landing), 'the link is not a change');
+
+  // Without its info/exclude line git lists the link; the check still skips it.
+  const exclude = path.join(repo, '.git', 'info', 'exclude');
+  fs.writeFileSync(exclude, fs.readFileSync(exclude, 'utf8').replace('/.data\n', ''));
+  assert.match(execFileSync('git', ['-C', w.cwd, 'status', '--porcelain']).toString(), /\?\? \.data\n/);
+  const { changes } = require('../src/worktree-landing');
+  assert.deepStrictEqual(changes(w.cwd, run().workers[0].worktree.links).map(c => c.path), ['f.txt', 'newdir/']);
+});
+
+test('landing: the owner\'s uncommitted changes to a landed file block it, changing nothing', async (t) => {
+  const { repo, g, launch, done, events } = await landingRun(t);
+  const w = launch();
+  commitAll(w.cwd, { 'f.txt': 'worker\n' });
+  fs.writeFileSync(path.join(repo, 'f.txt'), 'owner wip\n');
+  const base = g('rev-parse', 'main');
+  await done(w);
+  assert.strictEqual(g('rev-parse', 'main'), base);
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'f.txt'), 'utf8'), 'owner wip\n');
+  assert.match(events('not landed')[0], /the owner has uncommitted changes in .* to files this landing changes \(f\.txt\)\. Nothing changed/);
+});
+
+test('landing: the base recorded at launch is respected when the main checkout moved to another branch', async (t) => {
+  const { orch, orchSession, repo, g, launch, done, run } = await landingRun(t);
+  const w = launch();
+  g('checkout', '-q', '-b', 'other');
+  commitAll(w.cwd, { 'a.txt': 'a' });
+  const other = g('rev-parse', 'other');
+  await done(w);
+  assert.strictEqual(g('rev-parse', 'other'), other, 'the checked-out branch is untouched');
+  assert.ok(!fs.existsSync(path.join(repo, 'a.txt')), 'so is the owner\'s working tree');
+  assert.strictEqual(g('rev-parse', 'main^2'), g('rev-parse', w.branch), 'main got the merge');
+  assert.strictEqual(run().landings[0].mergeSha, g('rev-parse', 'main'));
+  const undo = await orch.undoLanding(orchSession.instanceId, { worker: 'w1' });
+  assert.strictEqual(g('rev-parse', 'main'), undo.revertSha, 'reverted on main, not checked out anywhere');
+  assert.strictEqual(g('rev-parse', 'other'), other);
+  assert.strictEqual(g('worktree', 'list').split('\n').filter(l => /vistaclair-undo-/.test(l)).length, 0, 'its scratch worktree is gone');
+  w.session.running = false;
+  assert.deepStrictEqual(orch.endRun(orchSession.instanceId).removed, [w.worker]);
+  assert.strictEqual(g('branch', '--list', w.branch), '', 'merged into main: deleted though HEAD is other');
+});
+
+test('teardown: a running worker keeps it; at close the worktree and its links go, the link target stays', async (t) => {
+  const { orch, orchSession, repo, g, launch, done } = await landingRun(t);
+  const w = launch();
+  commitAll(w.cwd, { 'a.txt': 'a' });
+  await done(w);
+  const res = orch.endRun(orchSession.instanceId);
+  assert.deepStrictEqual(res.kept, [{ worker: w.worker, reason: 'still running' }]);
+  assert.strictEqual(res.closed, false);
+  assert.ok(fs.existsSync(w.cwd));
+
+  assert.strictEqual(orch.closeWorker(orchSession.instanceId, { worker: 'w1' }).worktree, 'removed');
+  assert.ok(!fs.existsSync(w.cwd));
+  assert.strictEqual(g('branch', '--list', w.branch), '');
+  assert.strictEqual(fs.readFileSync(path.join(repo, '.data', 'db.txt'), 'utf8'), 'keep me', 'the link target is intact');
+  assert.deepStrictEqual(orch.endRun(orchSession.instanceId), { removed: [], kept: [], closed: true });
+});
+
+test('teardown: an untracked file or directory keeps the worktree, at exit and end_run', async (t) => {
+  const { orch, orchSession, mgr, launch, done, run } = await landingRun(t);
+  const w = launch();
+  commitAll(w.cwd, { 'a.txt': 'a' });
+  await done(w);
+  fs.mkdirSync(path.join(w.cwd, 'junk', 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(w.cwd, 'junk', 'deep', 'x'), 'x');
+  fs.writeFileSync(path.join(w.cwd, 'stray.txt'), 'x');
+  mgr.sessions.delete(w.tabId);
+  w.session.running = false;
+  orch.onSessionExit(w.tabId, w.session);
+  assert.deepStrictEqual(run().workers[0].worktreeKept.files, ['?? junk/', '?? stray.txt'], 'a directory is one entry');
+  const res = orch.endRun(orchSession.instanceId);
+  assert.deepStrictEqual(res.kept, [{ worker: w.worker, reason: 'uncommitted changes', files: ['?? junk/', '?? stray.txt'] }]);
+  assert.ok(fs.existsSync(path.join(w.cwd, 'junk', 'deep', 'x')));
+  assert.ok(fs.lstatSync(path.join(w.cwd, '.data')).isSymbolicLink(), 'the link is still there');
+  fs.rmSync(path.join(w.cwd, 'junk'), { recursive: true });
+  fs.rmSync(path.join(w.cwd, 'stray.txt'));
+  assert.deepStrictEqual(orch.endRun(orchSession.instanceId).removed, [w.worker]);
+});
+
+test('undo_landing: a revert commit on the base, refused over the owner\'s changes to its files', async (t) => {
+  const { orch, orchSession, repo, g, launch, done, run } = await landingRun(t);
+  const w = launch();
+  commitAll(w.cwd, { 'f.txt': 'worker\n', 'a.txt': 'a' });
+  await done(w);
+  const merge = run().landings[0].mergeSha;
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'owner edit');
+  await assert.rejects(orch.undoLanding(orchSession.instanceId, { worker: 'w1' }), /uncommitted changes .* \(a\.txt\); nothing changed/);
+  assert.strictEqual(g('rev-parse', 'main'), merge);
+  g('checkout', '--', 'a.txt');
+
+  const r = await orch.undoLanding(orchSession.instanceId, { landing: merge.slice(0, 10) });
+  assert.strictEqual(r.undone, merge);
+  assert.strictEqual(g('rev-parse', 'main'), r.revertSha);
+  assert.strictEqual(g('rev-parse', 'main^'), merge, 'a new commit on top');
+  assert.ok(!fs.existsSync(path.join(repo, 'a.txt')));
+  assert.strictEqual(fs.readFileSync(path.join(repo, 'f.txt'), 'utf8'), 'one\ntwo\nthree\n');
+  assert.strictEqual(run().landings[0].undone.revertSha, r.revertSha);
+  await assert.rejects(orch.undoLanding(orchSession.instanceId, { landing: merge }), /already undone/);
+});
+
+test('landing: one cut off by a restart has its rebase aborted and is reported not landed', async (t) => {
+  const { orch, repo, g, launch, events, run } = await landingRun(t);
+  const w = launch();
+  commitAll(w.cwd, { 'f.txt': 'worker\n' });
+  commitAll(repo, { 'f.txt': 'owner\n' });
+  assert.throws(() => execFileSync('git', ['-C', w.cwd, 'rebase', 'main'], { stdio: 'pipe' }));
+  const file = path.join(run().runDir, 'run.json');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  saved.workers[0].landing = { at: new Date().toISOString(), branch: w.branch, base: 'main' };
+  fs.writeFileSync(file, JSON.stringify(saved));
+
+  assert.ok(!orch.getRun(run().runId).workers[0].landing);
+  assert.strictEqual(execFileSync('git', ['-C', w.cwd, 'status', '--porcelain']).toString(), '', 'the rebase is aborted');
+  assert.strictEqual(g('rev-parse', `${w.branch}^`), g('rev-parse', 'main^'), 'the branch as it was');
+  assert.match(events('not landed')[0], /cut off by a restart \(rebase aborted\); main is as before/);
 });
