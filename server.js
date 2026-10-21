@@ -111,6 +111,9 @@ const DASHBOARD_PORT = parseInt(PORT_ARG || process.env.DASHBOARD_PORT || '3457'
 const TARGET_URL = process.env.ANTHROPIC_TARGET_URL || 'https://api.anthropic.com';
 const MAX_HISTORY = parseInt(process.env.MAX_HISTORY || '200');
 const SERVER_MODE = process.env.VISTACLAIR_SERVER === '1';
+// Run by bin/supervisor.js (npm start, `vistaclair`): it owns restarts and
+// serves the rescue page when this process fails.
+const SUPERVISED = !SERVER_MODE && process.env.VISTACLAIR_SUPERVISED === '1';
 // Server mode: a generated token would rotate on every pm2 restart, breaking
 // internal callers (MCP tools, app-runners) that hold the old value.
 if (SERVER_MODE && !process.env.AUTH_TOKEN) {
@@ -528,7 +531,9 @@ function scheduleRestart() {
 
     // Server mode: pm2 supervises us — a detached child would race the pm2
     // respawn for the ports. Just exit cleanly and let pm2 restart.
-    const spawnNew = SERVER_MODE ? () => process.exit(0) : () => {
+    // Supervised: the dedicated exit code asks the supervisor for a fresh
+    // process (and its rescue page if that one fails to boot).
+    const spawnNew = SERVER_MODE ? () => process.exit(0) : SUPERVISED ? () => process.exit(75) : () => {
       const child = spawn(process.argv[0], process.argv.slice(1), {
         detached: true, stdio: 'inherit', cwd: process.cwd(),
         env: { ...process.env, AUTH_TOKEN, NO_OPEN: '1' },
@@ -637,12 +642,14 @@ function killStalePortProcesses() {
   try {
     const { execSync } = require('child_process');
     const myPid = process.pid;
+    // The supervisor's health pings show it on the dashboard port too.
+    const supervisorPid = SUPERVISED ? process.ppid : null;
     for (const port of [PROXY_PORT, DASHBOARD_PORT]) {
       try {
         const out = execSync(`lsof -ti :${port} 2>/dev/null`, { encoding: 'utf-8' }).trim();
         for (const pidStr of out.split('\n').filter(Boolean)) {
           const pid = parseInt(pidStr);
-          if (pid && pid !== myPid) {
+          if (pid && pid !== myPid && pid !== supervisorPid) {
             try { process.kill(pid, 'SIGKILL'); } catch {}
           }
         }

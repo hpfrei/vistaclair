@@ -716,13 +716,14 @@ function showRestartingOverlay() {
 
 function pollForRestart() {
   if (!state.serverRestarting) return;
-  if (Date.now() - (state.restartStartedAt || 0) > 30000) {
+  // The supervisor gives a booting server up to 120s before its rescue page.
+  if (Date.now() - (state.restartStartedAt || 0) > 150000) {
     state.serverRestarting = false;
     const overlay = document.querySelector('.restart-overlay');
     if (overlay) {
       overlay.querySelector('.restart-spinner')?.remove();
       const text = overlay.querySelector('.restart-overlay-text');
-      if (text) text.textContent = 'Restart timed out.';
+      if (text) text.textContent = 'Restart is taking too long — reload to see the server status.';
       const btn = document.createElement('button');
       btn.textContent = 'Reload Page';
       btn.className = 'restart-reload-btn';
@@ -732,8 +733,12 @@ function pollForRestart() {
     return;
   }
   fetch('/api/ping').then(function(r) {
-    if (!r.ok) return setTimeout(pollForRestart, 1500);
-    location.reload();
+    if (r.ok) return location.reload();
+    // 503 + rescue: the new server failed and the supervisor's rescue page is up.
+    return r.json().then(function(j) {
+      if (j && j.rescue) return location.reload();
+      setTimeout(pollForRestart, 1500);
+    });
   }).catch(function() {
     setTimeout(pollForRestart, 1500);
   });

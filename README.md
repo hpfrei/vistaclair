@@ -70,6 +70,14 @@ Open **http://localhost:3457** and log in with the auth token printed to the con
 > [!WARNING]
 > The dashboard binds to `0.0.0.0` for remote access. It is protected by the auth token, but do not expose it to untrusted networks without TLS/VPN.
 
+### Supervisor and rescue page
+
+`npm start`, `npm run dev` and `vistaclair` run `bin/supervisor.js`, which starts `server.js` as a child process (`node server.js` still runs unwrapped; server mode, `VISTACLAIR_SERVER=1`, is never wrapped). The supervisor keeps one auth token for every restart, so the header's **Restart** button gives you a fresh server process under the same login. Server output is echoed to the terminal and appended to `data/logs/server.log` under the data home.
+
+If the server cannot come back — it exits during startup, does not answer `/api/ping` within `VISTACLAIR_BOOT_TIMEOUT_MS` (default 120 s), crashes 3 times within a minute, or stops answering pings while running for `VISTACLAIR_HANG_TIMEOUT_MS` (default 180 s) — the supervisor stops it and serves a **rescue page** on the dashboard port itself: the reason, the log tail, a shell in the browser (your login shell in the install directory; one-command-at-a-time if `node-pty` is unavailable) and a **Retry start** button. Fix the problem in the shell (e.g. `git revert`, `npm install`) and press Retry; the page switches to the dashboard once it answers.
+
+The rescue page asks for the same credentials as the dashboard: a Telegram session already in your browser, or the auth token — the token only from the host itself once Telegram login is configured. Ctrl-C stops the supervisor and the server.
+
 ### Claude subscription and terms
 
 vistaclair runs on your own machine with your own Claude credential: each user signs in to Claude Code with their own Claude account, or adds their own Anthropic API key. Usage is under Anthropic's terms — see [Use the Claude Agent SDK with your Claude plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) and [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance). vistaclair never reads or stores your Claude login: sign-in runs Claude Code's own `claude auth login`, and Claude Code's requests pass through the local inspector proxy to Anthropic without vistaclair touching their credentials (the inspector redacts `Authorization` / `x-api-key` and does not write request headers to the saved interactions).

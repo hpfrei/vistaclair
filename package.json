@@ -55,8 +55,8 @@
     "mcp-servers/integrated/tools/"
   ],
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js dev",
+    "start": "node bin/supervisor.js",
+    "dev": "node bin/supervisor.js dev",
     "test": "node --test \"test/*.test.js\"",
     "test:e2e:pause": "node test/e2e/pause-resume.e2e.js"
   },
