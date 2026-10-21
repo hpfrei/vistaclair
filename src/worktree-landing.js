@@ -13,6 +13,7 @@
 //   changes()            the one cleanliness check: `git status --porcelain -z`.
 //                        A recorded link is not a change; anything else is (an
 //                        untracked directory is one entry, never recursed).
+//   changedFiles()       what a branch changes against its base, committed or not.
 //   land()               in the worktree `git rebase <base>`, the check, then
 //                        `git merge --no-ff` into the base. One landing per repo
 //                        at a time. Never --force, never reset.
@@ -179,6 +180,20 @@ function changes(dir, links = []) {
     list.push({ code, path: file, ...(from ? { from } : {}) });
   }
   return list;
+}
+
+// The files a worktree's branch changes against its base, committed or not:
+// `git diff --name-only <base>...<branch>` and the cleanliness check's
+// entries (links excluded; an untracked directory as `dir/`).
+function changedFiles({ repo, worktree, branch, base, links = [] }) {
+  const files = new Set();
+  if (branchExists(repo, base) && branchExists(repo, branch)) {
+    try {
+      for (const f of gitRaw(repo, ['diff', '--name-only', '-z', `refs/heads/${base}...refs/heads/${branch}`]).split('\0')) if (f) files.add(f);
+    } catch {}
+  }
+  try { for (const c of changes(worktree, links)) files.add(c.path); } catch {}
+  return [...files];
 }
 
 const fmt = (c) => `${c.code.trim() || c.code} ${c.path}`;
@@ -444,6 +459,6 @@ function abortInterrupted({ repo, worktree, branch, base }) {
 }
 
 module.exports = {
-  CONFIG_FILE, readConfig, createLinks, unlinkLinks, changes, currentBranch, branchExists,
+  CONFIG_FILE, readConfig, createLinks, unlinkLinks, changes, changedFiles, currentBranch, branchExists,
   hasNew, precheck, land, teardown, undo, abortInterrupted, withRepoLock,
 };
