@@ -29,4 +29,6 @@ if (process.argv[2] === 'login-link') {
   return;
 }
 
-require('../server.js');
+// Local mode runs under the supervisor (restarts, rescue page); it hands
+// server mode (VISTACLAIR_SERVER=1) straight to server.js.
+require('./supervisor.js');
