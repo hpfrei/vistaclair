@@ -36,13 +36,17 @@
 //                        is busy, or by typing a one-line notice into its tab when
 //                        it is idle (which starts a turn).
 //   tools                lib/orchestrator-mcp.js: launch_cli, resume_worker,
-//                        close_worker, stop_worker, list_workers, end_run
-//                        (orchestrator); report (workers);
+//                        close_worker, stop_worker, list_workers, end_run,
+//                        undo_landing (orchestrator); report (workers);
 //                        SendMessage, ListAgents (both, SDK runs: Claude Code's
 //                        own cross-session messaging is a CLI feature). A message
 //                        is submitted into its target with priority 'next' (an
 //                        SDK target reads it within its running turn); a busy
 //                        CLI target gets it through its next hook instead.
+//   landing              a worktree worker's "done" report lands its branch on
+//                        the base recorded at launch (rebase, check, merge
+//                        --no-ff); its worktree is torn down at close, exit and
+//                        end_run once merged and clean (src/worktree-landing.js).
 //   session folders      every member keeps TODO.md / NOTES.md in
 //                        <sessionsRoot>/<name>/ (session-folders.js); the
 //                        orchestrator reads its workers' folders (list_workers
@@ -62,6 +66,7 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const folders = require('./session-folders');
 const toolPacks = require('./tool-packs');
+const landing = require('./worktree-landing');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
 
 const MAX_WORKERS = 5;
@@ -117,6 +122,13 @@ function gitToplevel(dir) {
   try { return git(dir, ['rev-parse', '--show-toplevel']); } catch { return null; }
 }
 
+// A new worktree's dependency links (src/worktree-landing.js), as its run.json
+// record: { links } when there are any.
+function linksOf(repo, worktree, dir) {
+  const links = landing.createLinks({ repo, worktree, dir });
+  return links.length ? { links } : {};
+}
+
 function writeJsonAtomic(file, data) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
@@ -144,7 +156,7 @@ function orchestratorCard(run) {
   const dir = orchestratorDir(run);
   const todo = path.join(dir, 'TODO.md');
   const isolation = run.isolation === 'worktree'
-    ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. When a worker is done, merge its branch (git via Bash), or launch a worker to merge and resolve conflicts; then call `end_run` to finish the run: it removes merged worktrees and branches, and keeps every worker\'s record, folder and conversation. A worker stays resumable after end_run (resume_worker adds its worktree back at the same path, on its branch or a new one from HEAD), and launch_cli or resume_worker reopens an ended run.'
+    ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. A worker\'s "done" report lands its branch, by code: rebased onto its base branch, the repo\'s check run, merged with --no-ff. You get a "landed <sha>" or a "not landed" event with the reason; what the worker can fix goes back to it by itself. Never merge, rebase or reset branches yourself. A conflict of a worker that is no longer running: resume_worker it, or launch a worker to merge its branch into its own and resolve the conflicts. `undo_landing` reverts a landing with a new commit. A closed or exited worker\'s worktree goes once landed and clean; call `end_run` to finish the run: it removes what can go, says what is kept and why, and keeps every worker\'s record, folder and conversation. A worker stays resumable after end_run (resume_worker adds its worktree back at the same path, on its branch or a new one from its base), and launch_cli or resume_worker reopens an ended run.'
     : 'Workers share one working directory. Give them disjoint files and say so in each brief; never let two running workers touch the same file. Project-wide finishing steps the instructions above this card ask for (a check that rewrites shared files, a docs update) go to one final worker once the others are done.';
   return [
     `# Role: orchestrator — orchestration run ${run.runId}`,
@@ -170,7 +182,7 @@ function orchestratorCard(run) {
 
 function workerCard(run, worker) {
   const where = worker.branch
-    ? `You work in a git worktree at ${worker.cwd} on branch \`${worker.branch}\`. Commit your work on this branch when it is done; the orchestrator merges it.`
+    ? `You work in a git worktree at ${worker.cwd} on branch \`${worker.branch}\`. Commit your work on this branch before you report "done" (links the server made to the main checkout's dependencies are not yours to commit); your done report lands it: the server rebases it onto \`${worker.base || 'its base'}\`, runs the repo's check and merges it. If something stops the landing, a "[vistaclair landing]" message (or the report's answer) says what to fix: fix it, commit, and report done again.`
     : `Your working directory is ${worker.cwd}. Other workers share it: touch only the files your brief names.`;
   return [
     `# Role: worker \`${worker.name}\` — orchestration run ${run.runId}`,
@@ -386,6 +398,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function loadRun(runDir) {
     const run = readJsonOr(runFile(runDir), null);
     if (run) runDirs.set(run.runId, runDir);
+    if (run?.workers?.some(w => w.landing)) recoverLandings(run);
     return run;
   }
 
@@ -674,7 +687,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       fs.mkdirSync(path.dirname(wt), { recursive: true });
       git(top, ['worktree', 'add', '-b', branch, wt, 'HEAD']);
       worker.branch = branch;
-      worker.worktree = { path: wt, repo: top };
+      // The branch its landings merge into: the main checkout's at launch.
+      worker.base = landing.currentBranch(top);
+      worker.worktree = { path: wt, repo: top, ...linksOf(top, wt, target) };
       worker.cwd = path.join(wt, path.relative(top, target));
     }
 
@@ -861,33 +876,235 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
   }
 
-  // end_run: finish the run. Merged worktrees and branches go; every worker
-  // keeps its record, folder and saved session, so resume_worker can still
-  // bring it back (restoreWorktree adds its worktree again), and new work
-  // (launch_cli, resume_worker) reopens the run.
+  // end_run: finish the run. Worktrees go as at a worker's exit (teardown);
+  // every worker keeps its record, folder and saved session, so resume_worker
+  // can still bring it back (restoreWorktree adds its worktree again), and new
+  // work (launch_cli, resume_worker) reopens the run.
   function endRun(instanceId) {
     const { run } = callerRun(instanceId, 'orchestrator');
     const removed = [];
     const kept = [];
     for (const w of run.workers) {
       if (!w.worktree) continue;
-      if (workerSession(run, w.id)?.session.running) { kept.push({ worker: w.name, reason: 'still running' }); continue; }
-      let merged = false;
-      try { merged = git(w.worktree.repo, ['branch', '--merged', 'HEAD', '--list', w.branch]).length > 0; } catch {}
-      if (!merged) { kept.push({ worker: w.name, reason: `branch ${w.branch} not merged into HEAD` }); continue; }
-      try {
-        git(w.worktree.repo, ['worktree', 'remove', w.worktree.path]);
-        try { git(w.worktree.repo, ['branch', '-d', w.branch]); } catch {}
-        removed.push(w.name);
-        w.removedWorktree = w.worktree;
-        w.worktree = null;
-      } catch (e) {
-        kept.push({ worker: w.name, reason: e.message.split('\n')[0] });
-      }
+      const r = teardownWorker(run, w);
+      if (r.removed) removed.push(w.name);
+      else kept.push({ worker: w.name, reason: r.kept, ...(r.files?.length ? { files: r.files } : {}) });
     }
     if (kept.length === 0) run.closed = true;
     saveRun(run);
     return { removed, kept, closed: run.closed };
+  }
+
+  // --- Landing (src/worktree-landing.js) ---
+  //
+  // A worker's "done" report lands its branch: code, not the orchestrator,
+  // rebases it onto the base recorded at launch, runs the repo's check and
+  // merges it --no-ff. What stops it goes back to the worker (and the
+  // orchestrator hears it as an event); a landing is recorded in run.landings.
+  // w.landing marks one in flight in run.json: a restart finds it there,
+  // aborts its rebase and reports it not landed (recoverLandings).
+
+  const landingJobs = new Map();   // `${runId}/${workerId}` -> promise of the landing in flight
+
+  const jobKey = (run, w) => `${run.runId}/${w.id}`;
+
+  // The real changes in a worker's worktree, as the one cleanliness check
+  // sees them (recorded links are not changes): ['?? file', …], [] when none
+  // or unreadable.
+  function worktreeChanges(w) {
+    if (!w?.worktree || !fs.existsSync(w.worktree.path)) return [];
+    try { return landing.changes(w.worktree.path, w.worktree.links).map(c => `${c.code.trim()} ${c.path}`); } catch { return []; }
+  }
+
+  // Remove a worker's worktree once its branch is merged into its base and
+  // nothing real is left: links unlinked, `git worktree remove`, `git branch
+  // -d`. Else kept, with the reason (w.worktreeKept). { removed } | { kept, files }.
+  function teardownWorker(run, w) {
+    if (!w.worktree) return { removed: false, kept: 'no worktree', files: [] };
+    if (workerSession(run, w.id)?.session.running) return { kept: 'still running', files: [] };
+    if (landingJobs.has(jobKey(run, w))) return { kept: 'landing in progress', files: [] };
+    const { repo, path: wt, links = [] } = w.worktree;
+    const r = landing.teardown({ repo, worktree: wt, branch: w.branch, base: w.base || 'HEAD', links });
+    if (r.removed) {
+      w.removedWorktree = w.worktree;
+      w.worktree = null;
+      delete w.worktreeKept;
+    } else {
+      w.worktreeKept = { reason: r.kept, ...(r.files.length ? { files: r.files } : {}), at: new Date().toISOString() };
+    }
+    return r;
+  }
+
+  // Into a running worker: a landing that needs its hand. False when it is
+  // not running.
+  function tellWorker(run, w, text) {
+    const live = workerSession(run, w.id);
+    if (!live?.session.running) return false;
+    const body = `[vistaclair landing] ${text}`;
+    deliver(live.session, w.name, body, 'vistaclair');
+    emitTo(live.session, run, { platform: { kind: 'message', from: 'vistaclair', to: w.name, text: body } });
+    return true;
+  }
+
+  // A landing's outcome, other than landed: what the worker is told (null:
+  // nothing it can do) and the orchestrator's event.
+  function notLanded(w, r) {
+    const list = (files) => files.slice(0, 30).join(', ') + (files.length > 30 ? `, … (${files.length} in all)` : '');
+    switch (r.outcome) {
+      case 'dirty': return {
+        worker: `Your branch was not landed: your worktree has uncommitted changes (${list(r.files)}). Commit them on ${w.branch} or discard them, then report done again.`,
+        event: `uncommitted changes in its worktree (${list(r.files)})`,
+      };
+      case 'link-committed': return {
+        worker: `Your branch was not landed: it commits dependency links (${list(r.files)}), which are code's, not yours. Remove them from your commits (git rm --cached, then commit), then report done again.`,
+        event: `its branch commits dependency links (${list(r.files)})`,
+      };
+      case 'conflict': return {
+        worker: `Your branch was not landed: it conflicts with ${w.base} in ${list(r.files)}. ${w.base} is untouched. In your worktree run \`git rebase ${w.base}\`, resolve the conflicts, finish the rebase, re-run your check and report done again.`,
+        event: `its branch conflicts with ${w.base} in ${list(r.files)}; ${w.base} untouched`,
+        gone: `resume_worker it with this, or launch a worker to merge ${w.branch} into its own branch and resolve the conflicts (its landing brings ${w.name}'s work in)`,
+      };
+      case 'check-failed': return {
+        worker: `Your branch was not landed: the repo's check failed after rebasing onto ${w.base}. Fix it, commit, and report done again. Output (tail):\n${clip(r.output, 2500)}`,
+        event: `the check failed after rebasing onto ${w.base}: ${clip(String(r.output || '').trim().split('\n').slice(-3).join(' / '), 300)}`,
+      };
+      case 'owner-dirty': return {
+        worker: null,
+        event: r.files.length
+          ? `the owner has uncommitted changes in ${r.checkout} to files this landing changes (${list(r.files)}). Nothing changed: once they are committed or stashed, have ${w.name} report done again`
+          : `${r.message}. Nothing changed: once it is finished, have ${w.name} report done again`,
+      };
+      default: return { worker: null, event: r.message || r.outcome };
+    }
+  }
+
+  // Record what a landing came to: run.landings and an event; a stop goes
+  // back to the worker when it can act on it.
+  function settleLanding(runDir, workerId, r, summary, key, job) {
+    const run = loadRun(runDir);
+    // Loaded while the job is still listed: loadRun must not take it for one
+    // a restart cut off.
+    if (landingJobs.get(key) === job) landingJobs.delete(key);
+    const w = run?.workers.find(x => x.id === workerId);
+    if (!w) return;
+    delete w.landing;
+    if (r.outcome === 'nothing') { saveRun(run); return; }
+    if (r.outcome === 'landed') {
+      run.landings = [...(run.landings || []), {
+        worker: w.name, branch: w.branch, base: w.base, preLandSha: r.preLandSha, mergeSha: r.mergeSha, head: r.head,
+        summary: clip(summary, 300), at: new Date().toISOString(),
+      }];
+      addEvent(run, { worker: w.name, kind: 'landed', text: `landed ${r.mergeSha} — ${w.name}'s ${w.branch} merged into ${w.base}` });
+      // Already gone (closed, exited): its worktree goes now.
+      if (!workerSession(run, w.id)?.session.running) { teardownWorker(run, w); saveRun(run); }
+      return;
+    }
+    const n = notLanded(w, r);
+    let told = '';
+    if (n.worker) told = tellWorker(run, w, n.worker) ? ` Sent back to ${w.name}.` : ` ${w.name} is not running: ${n.gone || 'resume_worker it with this'}.`;
+    addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: ${n.event}.${told}` });
+  }
+
+  // A done report of a worktree worker: land its branch. The quick stops are
+  // decided here (the report's answer says them); the rest runs in the
+  // background, one landing per repo at a time. Returns the report's note, or
+  // null.
+  function startLanding(run, w) {
+    if (!w.worktree || !w.branch) return null;
+    if (!w.base) {
+      addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: no base branch was recorded at launch (a detached HEAD, or a worker from before landing); merge ${w.branch} by hand` });
+      return 'not landed: no base branch was recorded at launch; the orchestrator is told';
+    }
+    const { repo, path: wt, links = [] } = w.worktree;
+    const key = jobKey(run, w);
+    // One of its landings still in flight: this one queues behind it.
+    const pre = landingJobs.has(key) ? null : landing.precheck({ repo, worktree: wt, branch: w.branch, base: w.base, links });
+    if (pre?.outcome === 'nothing') return null;
+    if (pre) {
+      const n = notLanded(w, pre);
+      addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: ${n.event}.${n.worker ? ` ${w.name} is told in its report's answer.` : ''}` });
+      return n.worker || `not landed: ${n.event}`;
+    }
+    const summary = w.lastReport?.summary || '';
+    const cfg = landing.readConfig(repo, path.join(repo, path.relative(wt, w.cwd)));
+    const job = (landingJobs.get(key) || Promise.resolve()).then(async () => {
+      const fresh = loadRun(run.runDir);
+      const fw = fresh?.workers.find(x => x.id === w.id);
+      if (!fw?.worktree) return;
+      fw.landing = { at: new Date().toISOString(), branch: fw.branch, base: fw.base };
+      saveRun(fresh);
+      let r;
+      try {
+        r = await landing.land({
+          repo, worktree: wt, branch: fw.branch, base: fw.base, links,
+          message: `Merge ${fw.branch}: ${clip(String(summary).split('\n')[0], 120)}`,
+          check: cfg?.check || null,
+          checkDir: cfg ? path.join(wt, path.relative(repo, cfg.dir)) : null,
+        });
+      } catch (e) {
+        r = { outcome: 'error', message: String(e.message || e).split('\n')[0] };
+      }
+      settleLanding(run.runDir, w.id, r, summary, key, job);
+      return r;
+    }).catch((e) => {
+      if (landingJobs.get(key) === job) landingJobs.delete(key);
+      console.error('[orchestration] landing error:', e.message);
+    });
+    landingJobs.set(key, job);
+    return 'your branch is being landed: you will hear back only if something stops it';
+  }
+
+  // The landing in flight for a worker (by address), or null. For tests and
+  // callers that wait for it.
+  function landingOf(name) {
+    for (const [key, job] of landingJobs) {
+      const [runId, workerId] = key.split('/');
+      const run = getRun(runId);
+      if (run?.workers.some(w => w.id === workerId && w.name === name)) return job;
+    }
+    return null;
+  }
+
+  // Landings a restart cut off (w.landing set, no job in this process): abort
+  // their rebase (and merge), report them not landed. Called by loadRun.
+  function recoverLandings(run) {
+    for (const w of run.workers) {
+      if (!w.landing || landingJobs.has(jobKey(run, w))) continue;
+      let aborted = [];
+      if (w.worktree) {
+        try { aborted = landing.abortInterrupted({ repo: w.worktree.repo, worktree: w.worktree.path, branch: w.branch, base: w.base }); } catch {}
+      }
+      delete w.landing;
+      addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: the landing was cut off by a restart${aborted.length ? ` (${aborted.join(' and ')} aborted)` : ''}; ${w.base || 'the base'} is as before. Have ${w.name} report done again` });
+    }
+  }
+
+  // undo_landing (orchestrator tool): revert a landing's merge on its base, a
+  // new commit. `landing` is its merge sha (a prefix will do), else the newest
+  // landing of `worker` not undone yet.
+  async function undoLanding(instanceId, { landing: sha, worker } = {}) {
+    const { run } = callerRun(instanceId, 'orchestrator');
+    const want = String(sha || '').trim();
+    const list = run.landings || [];
+    const rec = want
+      ? list.find(l => l.mergeSha.startsWith(want))
+      : [...list].reverse().find(l => !l.undone && (l.worker === worker || run.workers.find(w => w.id === worker)?.name === l.worker));
+    if (!rec) throw new Error(want ? `no landing ${want} in this run` : `no landing of ${worker || '(no worker given)'} to undo`);
+    if (rec.undone) throw new Error(`landing ${rec.mergeSha} was already undone by ${rec.undone.revertSha}`);
+    const w = run.workers.find(x => x.name === rec.worker);
+    const repo = w?.worktree?.repo || w?.removedWorktree?.repo || gitToplevel(run.root);
+    const r = await landing.undo({ repo, base: rec.base, mergeSha: rec.mergeSha });
+    if (r.outcome !== 'reverted') {
+      const why = r.outcome === 'owner-dirty' && r.files.length
+        ? `uncommitted changes in ${r.checkout} to files the revert changes (${r.files.join(', ')}); nothing changed`
+        : `${r.message}; nothing changed`;
+      throw new Error(`cannot undo ${rec.mergeSha}: ${why}`);
+    }
+    const fresh = loadRun(run.runDir);
+    const fr = (fresh.landings || []).find(l => l.mergeSha === rec.mergeSha);
+    fr.undone = { at: new Date().toISOString(), revertSha: r.revertSha };
+    addEvent(fresh, { worker: rec.worker, kind: 'undone', text: `landing ${rec.mergeSha} of ${rec.worker} reverted by ${r.revertSha} on ${rec.base}`, delivered: true });
+    return { undone: rec.mergeSha, revertSha: r.revertSha, base: rec.base, worker: rec.worker };
   }
 
   // --- Pause, refresh, resume ---
@@ -1173,10 +1390,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return { runId, fresh: false, ...resumed };
   }
 
-  // A worker whose worktree is gone (end_run, deleted by hand) gets it back at
+  // A worker whose worktree is gone (teardown, deleted by hand) gets it back at
   // the same path before it runs again: its transcript is keyed by its cwd. On
-  // its own branch if that still exists, else a new one from HEAD. Throws, and
-  // changes nothing, when that fails; a worker without a branch is untouched.
+  // its own branch if that still exists, else a new one from its base (HEAD
+  // without one), with its dependency links. Throws, and changes nothing, when
+  // that fails; a worker without a branch is untouched.
   function restoreWorktree(run, w) {
     if (!w.branch || fs.existsSync(w.cwd)) return;
     const was = w.worktree || w.removedWorktree || {};
@@ -1188,12 +1406,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       let exists = false;
       try { exists = git(repo, ['branch', '--list', w.branch]).length > 0; } catch {}
       fs.mkdirSync(path.dirname(wt), { recursive: true });
-      git(repo, exists ? ['worktree', 'add', wt, w.branch] : ['worktree', 'add', '-b', w.branch, wt, 'HEAD']);
+      const from = landing.branchExists(repo, w.base) ? w.base : 'HEAD';
+      git(repo, exists ? ['worktree', 'add', wt, w.branch] : ['worktree', 'add', '-b', w.branch, wt, from]);
       fs.mkdirSync(w.cwd, { recursive: true });
     } catch (e) {
       throw new Error(`${w.name}'s worktree ${wt} is gone and could not be recreated: ${String(e.message).split('\n')[0]}`);
     }
-    w.worktree = { path: wt, repo };
+    w.worktree = { path: wt, repo, ...linksOf(repo, wt, path.join(repo, path.relative(wt, w.cwd))) };
+    delete w.worktreeKept;
     delete w.removedWorktree;
     saveRun(run);
   }
@@ -1265,8 +1485,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // close_worker (orchestrator tool): close a finished worker the orchestrator
   // will not reuse, freeing its slot. Saved like a pause (history entry kept,
   // inspector data and transcript untouched) and closed quietly — no exit
-  // event: the orchestrator closed it itself. It stays listed, marked closed,
-  // and resume_worker brings it back.
+  // event: the orchestrator closed it itself. Its worktree goes when merged and
+  // clean (teardownWorker). It stays listed, marked closed, and resume_worker
+  // brings it back.
   function closeWorker(instanceId, { worker } = {}) {
     const { run } = callerRun(instanceId, 'orchestrator');
     if (run.pausing) throw new Error('this run is being paused');
@@ -1290,12 +1511,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (typeof s.costUsd === 'number') w.costUsd = s.costUsd;
     volatile.delete(w.name);
     inbox.delete(w.name);
+    const td = w.worktree ? teardownWorker(run, w) : null;
     saveRun(run);
     const p = folderSummary(w.sessionDir);
     const open = p ? p.total - p.done : 0;
     return {
       worker: w.name, closed: true, closedAt: now, lastReport: status,
       ...(open > 0 ? { note: `closed with ${open} open TODO row(s): its last report was ${status}` } : {}),
+      ...(td ? { worktree: td.removed ? 'removed' : `kept: ${td.kept}${td.files?.length ? ` (${td.files.join(', ')})` : ''}` } : {}),
       resume: 'it stays in list_workers; resume_worker (continue or fresh) brings it back',
     };
   }
@@ -1351,18 +1574,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const dirty = [];
     const keptBranches = [];
     for (const w of run?.workers || []) {
-      if (!w.worktree) continue;
-      let changes = '';
-      try { changes = git(w.worktree.path, ['status', '--porcelain']); } catch {}
-      if (changes) dirty.push({ worker: w.name, path: w.worktree.path });
+      if (worktreeChanges(w).length) dirty.push({ worker: w.name, path: w.worktree.path });
     }
     if (dirty.length && !force) return { refused: true, dirty };
     for (const w of run?.workers || []) {
-      if (!w.worktree) continue;
-      try { git(w.worktree.repo, ['worktree', 'remove', '--force', w.worktree.path]); } catch {}
-      let merged = false;
-      try { merged = git(w.worktree.repo, ['branch', '--merged', 'HEAD', '--list', w.branch]).length > 0; } catch {}
-      if (merged) { try { git(w.worktree.repo, ['branch', '-d', w.branch]); } catch {} } else keptBranches.push(w.branch);
+      if (w.worktree && !removeWorktree(w)) keptBranches.push(w.branch);
     }
     for (const e of entries) mgr.deleteSavedSession(e.id);
     const dirs = [run?.orchestratorDir, ...(run?.workers || []).map(w => w.sessionDir)];
@@ -1387,10 +1603,18 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // lists them: [{ worker, path }] or [].
   function memberDirty(entry) {
     const { w } = memberOf(entry);
-    if (!w?.worktree) return [];
-    let changes = '';
-    try { changes = git(w.worktree.path, ['status', '--porcelain']); } catch {}
-    return changes ? [{ worker: w.name, path: w.worktree.path }] : [];
+    return worktreeChanges(w).length ? [{ worker: w.name, path: w.worktree.path }] : [];
+  }
+
+  // A deleted worker's worktree goes whatever its branch: links unlinked
+  // first, --force only over real changes the owner chose to drop. Its branch
+  // is deleted when merged into its base. Returns whether it was (or is gone).
+  function removeWorktree(w) {
+    const { repo, path: wt, links = [] } = w.worktree;
+    const dirty = worktreeChanges(w).length > 0;
+    landing.unlinkLinks(links);
+    try { git(repo, ['worktree', 'remove', ...(dirty ? ['--force'] : []), wt]); } catch {}
+    return landing.teardown({ repo, worktree: wt, branch: w.branch, base: w.base || 'HEAD' }).removed === true;
   }
 
   // A worker deleted on its own from the "+" menu stays in run.json, marked.
@@ -1403,10 +1627,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (dirty.length && !force) return { refused: true, dirty };
     const keptBranches = [];
     if (w.worktree && !workerSession(run, w.id)?.session.running) {
-      try { git(w.worktree.repo, ['worktree', 'remove', '--force', w.worktree.path]); } catch {}
-      let merged = false;
-      try { merged = git(w.worktree.repo, ['branch', '--merged', 'HEAD', '--list', w.branch]).length > 0; } catch {}
-      if (merged) { try { git(w.worktree.repo, ['branch', '-d', w.branch]); } catch {} } else keptBranches.push(w.branch);
+      if (!removeWorktree(w)) keptBranches.push(w.branch);
       w.removedWorktree = w.worktree;
       w.worktree = null;
     }
@@ -1478,7 +1699,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (open) parts.push(`open: ${clip(open, 300)}`);
     addEvent(run, { worker: w.name, kind: 'report', text: parts.join(' — ') });
     vol(session.getSettings().name).reported = true;
-    return { ok: true };
+    const note = w.lastReport.status === 'done' ? startLanding(run, w) : null;
+    return { ok: true, ...(note ? { landing: note } : {}) };
   }
 
   // --- Messages between run members (SendMessage / ListAgents) ---
@@ -1663,7 +1885,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }, pushDebounceMs));
   }
 
-  // Core's exit listener: a worker exit becomes an event; an orchestrator exit
+  // Core's exit listener: a worker exit becomes an event (and tears its
+  // worktree down when it can); an orchestrator exit
   // clears its busy flag so the next event after a restart is pushed again.
   function onSessionExit(tabId, session) {
     const stamp = stampOf(session);
@@ -1681,6 +1904,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     w.exitedAt = new Date().toISOString();
     if (typeof session.costUsd === 'number') w.costUsd = session.costUsd;
     addEvent(run, { worker: w.name, kind: 'exited', text: `${w.name} exited${w.lastReport ? ` (last report: ${w.lastReport.status})` : ' without reporting'}` });
+    // Its worktree goes when merged and clean — not at a server shutdown,
+    // which exits every session that is restored at the next boot.
+    if (w.worktree && !mgr._shuttingDown) { teardownWorker(run, w); saveRun(run); }
   }
 
   // --- Hooks ---
@@ -1872,8 +2098,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function router() {
     const express = require('express');
     const r = express.Router();
-    const call = (fn) => (req, res) => {
-      try { res.json(fn(req.body || {}) || {}); } catch (e) { res.json({ error: e.message }); }
+    const call = (fn) => async (req, res) => {
+      try { res.json((await fn(req.body || {})) || {}); } catch (e) { res.json({ error: e.message }); }
     };
     r.post('/hook', (req, res) => {
       try { res.json(handleHook(req.body?.instanceId, req.body?.input)); } catch (e) {
@@ -1884,6 +2110,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     r.post('/launch', call(b => launchWorker(b.instanceId, b)));
     r.post('/workers', call(b => listWorkers(b.instanceId)));
     r.post('/end', call(b => endRun(b.instanceId)));
+    r.post('/undo-landing', call(b => undoLanding(b.instanceId, b)));
     r.post('/report', call(b => report(b.instanceId, b)));
     r.post('/resume-worker', call(b => resumeWorker(b.instanceId, b)));
     r.post('/close-worker', call(b => closeWorker(b.instanceId, b)));
@@ -1905,7 +2132,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   return {
-    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, report, sendMessage, listAgents, sendToSession, toolParams,
+    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, report, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged,
