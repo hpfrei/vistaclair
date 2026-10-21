@@ -47,6 +47,9 @@
 //                        the base recorded at launch (rebase, check, merge
 //                        --no-ff); its worktree is torn down at close, exit and
 //                        end_run once merged and clean (src/worktree-landing.js).
+//   areas                launch_cli `area`: overlaps with running workers' areas
+//                        are named in its result; checkOverlaps (a timer) tells
+//                        the orchestrator of a file changed in two live worktrees.
 //   session folders      every member keeps TODO.md / NOTES.md in
 //                        <sessionsRoot>/<name>/ (session-folders.js); the
 //                        orchestrator reads its workers' folders (list_workers
@@ -75,7 +78,8 @@ const MAX_WORKERS = 5;
 const WORKER_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
 const MAX_SUBAGENTS = 3;
 const PUSH_DEBOUNCE_MS = 2000;
-const RELAY_FALLBACK_MS = 120000;    // a worker the orchestrator has not told to pause by then hears it from the server
+const RELAY_FALLBACK_MS = 120000;
+const OVERLAP_CHECK_MS = 180000;     // how often files changed in two live worktrees of a repo are looked for    // a worker the orchestrator has not told to pause by then hears it from the server
 const REFRESH_SUGGESTED_AFTER = 3;   // orchestrator compactions
 const CONTEXT_LIMIT = 9000;          // hook additionalContext is capped at 10k chars
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -129,6 +133,55 @@ function linksOf(repo, worktree, dir) {
   return links.length ? { links } : {};
 }
 
+// --- Worker areas (launch_cli `area`) ---
+
+// A repo-relative path or glob, normalized: no leading ./, no trailing /;
+// '' is the whole repo. An area covers its path and everything under it.
+function normArea(p) {
+  const s = String(p).trim().replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/\/+$/, '');
+  return s === '.' ? '' : s;
+}
+
+const GLOB = /[*?]/;
+
+// May two path segments name the same entry? * and ? stay within it; two
+// globs meet when their literal starts and ends are compatible.
+function segmentsMeet(a, b) {
+  const ga = GLOB.test(a);
+  const gb = GLOB.test(b);
+  if (!ga && !gb) return a === b;
+  const re = (g) => new RegExp('^' + g.split('').map(c => (c === '*' ? '[^/]*' : c === '?' ? '[^/]' : c.replace(/[.+^${}()|[\]\\]/g, '\\$&'))).join('') + '$');
+  if (!ga) return re(b).test(a);
+  if (!gb) return re(a).test(b);
+  const head = (g) => g.slice(0, g.search(GLOB));
+  const tail = (g) => g.slice(Math.max(g.lastIndexOf('*'), g.lastIndexOf('?')) + 1);
+  const meet = (x, y, f) => x[f](y) || y[f](x);
+  return meet(head(a), head(b), 'startsWith') && meet(tail(a), tail(b), 'endsWith');
+}
+
+// May two areas hold the same file? An area covers its path and everything
+// under it; ** may be anything from there on (conservative).
+function areasOverlap(a, b) {
+  if (a === '' || b === '') return true;
+  const sa = a.split('/');
+  const sb = b.split('/');
+  for (let i = 0; i < Math.min(sa.length, sb.length); i++) {
+    if (sa[i].includes('**') || sb[i].includes('**')) return true;
+    if (!segmentsMeet(sa[i], sb[i])) return false;
+  }
+  return true;
+}
+
+// launch_cli `area`: a path, or a list of them. Undefined when not given.
+function areaOf(area) {
+  if (area === undefined || area === null) return undefined;
+  const list = (Array.isArray(area) ? area : [area]);
+  if (list.some(p => typeof p !== 'string' || !p.trim())) throw new Error('area must be a list of repo-relative paths or globs');
+  const out = [...new Set(list.map(normArea))];
+  if (out.some(p => p.startsWith('/') || p.split('/').includes('..'))) throw new Error('area paths must be relative to the repo root, without ..');
+  return out.length ? out : undefined;
+}
+
 function writeJsonAtomic(file, data) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
@@ -156,7 +209,7 @@ function orchestratorCard(run) {
   const dir = orchestratorDir(run);
   const todo = path.join(dir, 'TODO.md');
   const isolation = run.isolation === 'worktree'
-    ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. A worker\'s "done" report lands its branch, by code: rebased onto its base branch, the repo\'s check run, merged with --no-ff. You get a "landed <sha>" or a "not landed" event with the reason; what the worker can fix goes back to it by itself. Never merge, rebase or reset branches yourself. A conflict of a worker that is no longer running: resume_worker it, or launch a worker to merge its branch into its own and resolve the conflicts. `undo_landing` reverts a landing with a new commit. A closed or exited worker\'s worktree goes once landed and clean; call `end_run` to finish the run: it removes what can go, says what is kept and why, and keeps every worker\'s record, folder and conversation. A worker stays resumable after end_run (resume_worker adds its worktree back at the same path, on its branch or a new one from its base), and launch_cli or resume_worker reopens an ended run.'
+    ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. A worker\'s "done" report lands its branch, by code: rebased onto its base branch, the repo\'s check run, merged with --no-ff. You get a "landed <sha>" or a "not landed" event with the reason; what the worker can fix goes back to it by itself. Never merge, rebase or reset branches yourself. Plan disjoint areas and pass each worker\'s files or directories as `area` in launch_cli; an overlap named in its result, or an "overlap" event (a file changed in two worktrees), means: serialize those workers, or expect a conflict at landing. A conflict of a worker that is no longer running: resume_worker it, or launch a worker to merge its branch into its own and resolve the conflicts. `undo_landing` reverts a landing with a new commit. A closed or exited worker\'s worktree goes once landed and clean; call `end_run` to finish the run: it removes what can go, says what is kept and why, and keeps every worker\'s record, folder and conversation. A worker stays resumable after end_run (resume_worker adds its worktree back at the same path, on its branch or a new one from its base), and launch_cli or resume_worker reopens an ended run.'
     : 'Workers share one working directory. Give them disjoint files and say so in each brief; never let two running workers touch the same file. Project-wide finishing steps the instructions above this card ask for (a check that rewrites shared files, a docs update) go to one final worker once the others are done.';
   return [
     `# Role: orchestrator — orchestration run ${run.runId}`,
@@ -199,7 +252,7 @@ function workerCard(run, worker) {
   ].join('\n');
 }
 
-function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS }) {
+function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS, overlapCheckMs = OVERLAP_CHECK_MS }) {
   // Which Claude credentials exist: { apiKey, subscription }. Read per ask.
   const claudeCredentials = credentials || (() => require('./capabilities').claudeCredentials(dataHome));
   // The engine of a new session nobody named one for: 'sdk' | 'terminal'
@@ -653,7 +706,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
   }
 
-  function launchWorker(instanceId, { title, task, cwd, isolation, model, tools } = {}) {
+  function launchWorker(instanceId, { title, task, cwd, isolation, model, tools, area } = {}) {
     const { run } = callerRun(instanceId, 'orchestrator');
     if (run.pausing) throw new Error('this run is being paused: launch nothing new');
     if (!task || !String(task).trim()) throw new Error('task is required');
@@ -676,6 +729,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
     const grants = grantsOf(tools);
     if (grants) worker.grants = grants;
+    const areas = areaOf(area);
+    if (areas) worker.area = areas;
     checkPacks(run, worker, { toolsGiven: tools !== undefined });
 
     const mode = isolation || run.isolation;
@@ -693,11 +748,41 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       worker.cwd = path.join(wt, path.relative(top, target));
     }
 
+    const overlaps = areaOverlaps(run, worker);
     run.workers.push(worker);
     run.closed = false;    // an ended run is reopened by new work
     saveRun(run);
     const tabId = spawnWorker(run, worker, worker.task);
-    return { worker: name, tabId, cwd: worker.cwd, branch: worker.branch, folder: worker.sessionDir, model: mgr.sessions.get(tabId)?.getSettings().model || null };
+    return {
+      worker: name, tabId, cwd: worker.cwd, branch: worker.branch, folder: worker.sessionDir, model: mgr.sessions.get(tabId)?.getSettings().model || null,
+      ...(overlaps.length ? {
+        overlaps,
+        note: `its area overlaps running workers' areas (${overlaps.map(o => `${o.worker}: ${o.paths.join(', ')}`).join('; ')}). It was launched: serialize them, or expect a conflict when the later one lands.`,
+      } : {}),
+    };
+  }
+
+  // The repo a worker works in (its worktree's main checkout), for comparing
+  // areas and changes.
+  function repoOf(w) {
+    return w.worktree?.repo || w.removedWorktree?.repo || gitToplevel(w.cwd) || w.cwd;
+  }
+
+  // The running workers of the run, in the same repo, whose areas overlap a
+  // new worker's: [{ worker, paths: ['mine ~ theirs'] }].
+  function areaOverlaps(run, worker) {
+    if (!worker.area) return [];
+    const repo = repoOf(worker);
+    const out = [];
+    for (const w of runningWorkers(run)) {
+      if (!w.area || w.closed || repoOf(w) !== repo) continue;
+      const paths = [];
+      for (const mine of worker.area) {
+        for (const theirs of w.area) if (areasOverlap(mine, theirs)) paths.push(mine === theirs ? mine || '.' : `${mine || '.'} ~ ${theirs || '.'}`);
+      }
+      if (paths.length) out.push({ worker: w.name, paths });
+    }
+    return out;
   }
 
   // A worker's launch settings — the same for its first launch and a fresh
@@ -1078,6 +1163,55 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: the landing was cut off by a restart${aborted.length ? ` (${aborted.join(' and ')} aborted)` : ''}; ${w.base || 'the base'} is as before. Have ${w.name} report done again` });
     }
   }
+
+  // --- Overlap warnings ---
+
+  // Files changed in two live worktrees of the same repo: committed on their
+  // branches (against their base) or not (the cleanliness check, links
+  // excluded). Only runs with two or more live worktree workers in one repo
+  // cost anything. A new (file, worker pair) becomes one orchestrator event
+  // per check; run.overlapsWarned keeps the pairs so none is told twice.
+  function checkOverlaps() {
+    const dirs = new Set(findByStamp(st => st.role === 'worker').filter(m => m.session.running).map(m => m.stamp.runDir));
+    for (const dir of dirs) {
+      const run = loadRun(dir);
+      if (!run || run.pausing) continue;
+      const byRepo = new Map();
+      for (const w of run.workers) {
+        if (!w.worktree || !w.branch || landingJobs.has(jobKey(run, w)) || !workerSession(run, w.id)?.session.running) continue;
+        if (!byRepo.has(w.worktree.repo)) byRepo.set(w.worktree.repo, []);
+        byRepo.get(w.worktree.repo).push(w);
+      }
+      const warned = new Set(run.overlapsWarned || []);
+      const found = [];
+      for (const [repo, ws] of byRepo) {
+        if (ws.length < 2) continue;
+        const touched = new Map();   // file -> worker names
+        for (const w of ws) {
+          const files = landing.changedFiles({ repo, worktree: w.worktree.path, branch: w.branch, base: w.base, links: w.worktree.links });
+          for (const f of files) touched.set(f, [...(touched.get(f) || []), w.name]);
+        }
+        for (const [file, names] of touched) {
+          let fresh = false;
+          for (let i = 0; i < names.length; i++) {
+            for (let j = i + 1; j < names.length; j++) {
+              const key = [file, ...[names[i], names[j]].sort()].join('\0');
+              if (!warned.has(key)) { warned.add(key); fresh = true; }
+            }
+          }
+          if (fresh) found.push(`${file} (${names.join(', ')})`);
+        }
+      }
+      if (!found.length) continue;
+      run.overlapsWarned = [...warned].slice(-1000);
+      addEvent(run, { worker: null, kind: 'overlap', text: `files changed in more than one worktree: ${clip(found.join('; '), 1500)}. Serialize those workers, or expect a conflict when the later one lands` });
+    }
+  }
+
+  const overlapTimer = overlapCheckMs > 0 ? setInterval(() => {
+    try { checkOverlaps(); } catch (e) { console.error('[orchestration] overlap check error:', e.message); }
+  }, overlapCheckMs) : null;
+  overlapTimer?.unref?.();
 
   // undo_landing (orchestrator tool): revert a landing's merge on its base, a
   // new commit. `landing` is its merge sha (a prefix will do), else the newest
@@ -2132,7 +2266,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   return {
-    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, report, sendMessage, listAgents, sendToSession, toolParams,
+    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged,

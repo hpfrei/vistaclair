@@ -1828,3 +1828,49 @@ test('landing: one cut off by a restart has its rebase aborted and is reported n
   assert.strictEqual(g('rev-parse', `${w.branch}^`), g('rev-parse', 'main^'), 'the branch as it was');
   assert.match(events('not landed')[0], /cut off by a restart \(rebase aborted\); main is as before/);
 });
+
+// --- Worker areas and overlap warnings ---
+
+test('launch_cli area: an overlap with a running worker in the same repo is named in the result; none, no mention', async (t) => {
+  const { orch, orchSession, mgr, run } = await landingRun(t);
+  const launch = (title, area) => orch.launchWorker(orchSession.instanceId, { title, task: 'x', area });
+  const a = launch('a', ['src/**', 'README.md']);
+  assert.deepStrictEqual(run().workers[0].area, ['src/**', 'README.md'], 'recorded');
+  assert.strictEqual(a.overlaps, undefined);
+  const b = launch('b', ['./src/lib/x.js', 'docs/']);
+  assert.deepStrictEqual(b.overlaps, [{ worker: a.worker, paths: ['src/lib/x.js ~ src/**'] }]);
+  assert.match(b.note, /overlaps running workers' areas .* It was launched: serialize them, or expect a conflict/);
+  assert.ok(mgr.sessions.get(b.tabId).running, 'launched all the same');
+  const c = launch('c', ['docs/guide.md', 'tests/*.js']);
+  assert.deepStrictEqual(c.overlaps.map(o => [o.worker, o.paths]), [[b.worker, ['docs/guide.md ~ docs']]]);
+  const d = launch('d', ['lib', '*.txt']);
+  assert.strictEqual(d.overlaps, undefined);
+  assert.strictEqual(d.note, undefined);
+  mgr.sessions.get(a.tabId).running = false;
+  assert.strictEqual(launch('e', ['src/main.js']).overlaps, undefined, 'a worker no longer running does not count');
+  assert.throws(() => launch('f', ['../elsewhere']), /relative to the repo root/);
+});
+
+test('overlap check: a file changed in two live worktrees is one event, not repeated; isolation none and single workers ignored', async (t) => {
+  const { orch, orchSession, repo, events } = await landingRun(t);
+  const launch = (title, isolation) => orch.launchWorker(orchSession.instanceId, { title, task: 'x', ...(isolation ? { isolation } : {}) });
+  const a = launch('a');
+  const n = launch('n', 'none');
+  commitAll(a.cwd, { 'shared.txt': 'a', 'only-a.txt': 'a' });
+  fs.writeFileSync(path.join(repo, 'shared.txt'), 'n');   // the isolation-none worker, in the main checkout
+  orch.checkOverlaps();
+  assert.deepStrictEqual(events('overlap'), [], 'one live worktree worker: nothing to compare');
+
+  const b = launch('b');
+  fs.writeFileSync(path.join(b.cwd, 'shared.txt'), 'b');   // uncommitted counts too
+  fs.writeFileSync(path.join(b.cwd, 'f.txt'), 'b');
+  orch.checkOverlaps();
+  assert.deepStrictEqual(events('overlap'), [`files changed in more than one worktree: shared.txt (${a.worker}, ${b.worker}). Serialize those workers, or expect a conflict when the later one lands`]);
+  orch.checkOverlaps();
+  assert.strictEqual(events('overlap').length, 1, 'the same file and pair is not told again');
+
+  commitAll(a.cwd, { 'f.txt': 'a' });
+  orch.checkOverlaps();
+  assert.match(events('overlap')[1], new RegExp(`^files changed in more than one worktree: f\\.txt \\(${a.worker}, ${b.worker}\\)`));
+  assert.ok(!events('overlap').some(e => e.includes(n.worker) || e.includes('.data') || e.includes('only-a')));
+});
