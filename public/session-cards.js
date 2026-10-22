@@ -63,6 +63,26 @@
     return String(cwd || '').replace(/\/+$/, '').split('/').pop() || cwd || '';
   }
 
+  // Card names: the project (the cwd's basename), numbered when several
+  // cards share it, by start time: `p`, `p 2`, `p 3`. entries: [{ key, cwd,
+  // startedAt }] (runs and sessions alike); returns a Map key -> name. An
+  // entry without a cwd gets no entry in the map, the caller keeps its own name.
+  function projectNames(entries) {
+    const byProject = new Map();
+    entries.forEach((e, i) => {
+      const project = e.cwd ? dirName(e.cwd) : '';
+      if (!project) return;
+      if (!byProject.has(project)) byProject.set(project, []);
+      byProject.get(project).push({ key: e.key, at: e.startedAt || 0, i });
+    });
+    const names = new Map();
+    for (const [project, list] of byProject) {
+      list.sort((a, b) => a.at - b.at || a.i - b.i);
+      list.forEach((e, n) => names.set(e.key, n ? `${project} ${n + 1}` : project));
+    }
+    return names;
+  }
+
   function dirHtml(cwd) {
     if (!cwd) return '';
     return `<span class="sc-dir" title="${esc(cwd)}">${esc(dirName(cwd))}</span>`;
@@ -125,5 +145,7 @@
     return `<div class="sc-workers">${heading ? `<div class="sc-section-head">${esc(heading)}</div>` : ''}<ul>${rows}</ul></div>`;
   }
 
-  window.sessionCards = { relTime, timeHtml, toneOf, accentOf, pill, dot, head, dirName, dirHtml, tokens, todoKind, todoList, workerList };
+  const api = { relTime, timeHtml, toneOf, accentOf, pill, dot, head, dirName, projectNames, dirHtml, tokens, todoKind, todoList, workerList };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else window.sessionCards = api;
 })();
