@@ -734,9 +734,10 @@
 
   const DELETE_HINT = 'Removes the conversation history and TODO/NOTES. Your code, commits and merged work are not touched.';
 
-  function runCardHtml(r, bySess) {
+  function runCardHtml(r, bySess, cardName) {
     const tabId = runTabId(r, bySess);
-    const name = r.title || r.orchestrator || `Run ${r.runId}`;
+    const oldName = r.title || r.orchestrator || `Run ${r.runId}`;
+    const name = cardName || oldName;
     const w = r.workers;
     const meta = [
       SC.timeHtml(r.lastActivityAt),
@@ -767,7 +768,8 @@
     return `<article class="vc-card sc-card sc-run ${SC.accentOf(r.status)}">`
       + SC.head({
         icon: '\u{1F9ED}', iconTitle: `Orchestration run ${r.runId}`, name, status: r.status,
-        sub: `run ${escHtml(r.runId)}${r.cwd ? ` · ${escHtml(r.cwd)}` : ''}`, subTitle: r.cwd || '',
+        sub: [cardName && oldName !== cardName ? escHtml(oldName) : '', `run ${escHtml(r.runId)}`, r.cwd ? escHtml(r.cwd) : ''].filter(Boolean).join(' · '),
+        subTitle: r.cwd || '',
       })
       + `<div class="sc-meta">${meta}</div>`
       + SC.todoList(r.todo)
@@ -776,7 +778,7 @@
       + '</article>';
   }
 
-  function plainCardHtml(s, bySess) {
+  function plainCardHtml(s, bySess, cardName) {
     const tabId = bySess.get(s.id) || null;
     const status = tabId || s.isRunning ? 'running' : s.paused ? 'paused' : s.interrupted ? 'interrupted' : 'saved';
     const lastAt = s.lastInteractionAt || s.savedAt;
@@ -805,7 +807,8 @@
     if (!s.isRunning) actions.push(action('Delete permanently', `data-act="delete-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-danger', DELETE_HINT));
     return `<article class="vc-card sc-card ${SC.accentOf(status)}">`
       + SC.head({
-        icon: s.kind === 'sdk' ? '✨' : '⌨️', name: savedTitle(s), sub: escHtml(s.cwd || ''), subTitle: s.cwd || '',
+        icon: s.kind === 'sdk' ? '✨' : '⌨️', name: cardName || savedTitle(s),
+        sub: [cardName && savedTitle(s) !== SC.dirName(s.cwd) ? escHtml(savedTitle(s)) : '', escHtml(s.cwd || '')].filter(Boolean).join(' · '), subTitle: s.cwd || '',
         status, label: status === 'running' && !tabId ? 'running' : status === 'running' ? 'open' : status,
       })
       + `<div class="sc-meta">${meta}</div>`
@@ -826,9 +829,14 @@
       const bySess = openTabsBySess();
       const { sessions, runs } = _savedData;
       const plain = sessions.filter(s => !s.group?.runId);
+      // Named by project, numbered by start time across runs and sessions.
+      const names = SC.projectNames([
+        ...runs.map(r => ({ key: `run:${r.runId}`, cwd: r.cwd, startedAt: r.startedAt })),
+        ...plain.map(s => ({ key: `sess:${s.id}`, cwd: s.cwd, startedAt: s.startedAt || s.savedAt })),
+      ]);
       const cards = [
-        ...runs.map(r => ({ at: r.lastActivityAt || 0, html: runCardHtml(r, bySess) })),
-        ...plain.map(s => ({ at: s.lastInteractionAt || s.savedAt || 0, html: plainCardHtml(s, bySess) })),
+        ...runs.map(r => ({ at: r.lastActivityAt || 0, html: runCardHtml(r, bySess, names.get(`run:${r.runId}`)) })),
+        ...plain.map(s => ({ at: s.lastInteractionAt || s.savedAt || 0, html: plainCardHtml(s, bySess, names.get(`sess:${s.id}`)) })),
       ].sort((a, b) => b.at - a.at);
       const count = [
         runs.length ? `${runs.length} run${runs.length !== 1 ? 's' : ''}` : '',
