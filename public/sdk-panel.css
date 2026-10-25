@@ -91,6 +91,22 @@
 /* "orchestrator compacted N× · start fresh?" beside the run's meta. */
 .sdk-fresh-chip { border-radius: 999px; font-size: 10px; padding: 0 8px; line-height: 17px; }
 .sdk-tb-more { padding: 2px 7px; line-height: 1; letter-spacing: .05em; }
+/* An add-on's badge (dashboard.setTabBadge), on the toolbar and the tab strip. */
+.sdk-toolbar-ext:empty { display: none; }
+.tab-ext-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 15px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.sdk-toolbar-ext .tab-ext-badge { margin-left: 0; }
+.tab-ext-badge.clickable { cursor: pointer; }
+.tab-ext-badge.clickable:hover { color: var(--text); background: var(--bg-hover); }
 
 /* --- stage: the diagram --- */
 .sdk-stage {

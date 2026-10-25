@@ -8,10 +8,10 @@
 // secret store) is a pure function of DATA_HOME and the environment and is
 // built once for both. The dashboard profile adds the in-process services
 // (store, cliSessionManager, live broadcaster, pending questions, restart,
-// the owner check). The headless profile reaches the dashboard's broadcaster
-// best-effort over loopback and stubs what only exists in the dashboard
-// process: the runner keeps serving when core is down, it just loses live
-// dashboard events and inspector timelines.
+// the owner check, orchestration runs). The headless profile reaches the
+// dashboard's broadcaster best-effort over loopback and stubs what only exists
+// in the dashboard process: the runner keeps serving when core is down, it
+// just loses live dashboard events and inspector timelines.
 //
 // Every field here is contract (Pro spreads the whole object). Add fields
 // additively; removing or reshaping one is a CONTRACT_VERSION bump. The table
@@ -73,7 +73,7 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
 
   if (dashboard) {
     const toolPacks = require('./tool-packs');
-    const { broadcaster, store, cliSessionManager, openCli, sendToSession, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab, isOwnerRequest } = dashboard;
+    const { broadcaster, store, cliSessionManager, openCli, sendToSession, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab, isOwnerRequest, orchestration } = dashboard;
     // server.js resolves these itself (AUTH_TOKEN may be generated at boot
     // rather than read from env) — its values win over the raw environment.
     if (dashboard.authToken) shared.authToken = dashboard.authToken;
@@ -112,6 +112,25 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // (spawnOpts' resume dropped), asked for a terminal. Resolves { tabId, mode } or
       // { cancelled: true }. launchSession stays the never-asking primitive.
       openCli,
+      // Orchestration runs (src/orchestration.js), frozen. listRuns() → every
+      // run a live or saved session is stamped with: { runId, name ('orch-<runId>',
+      // the orchestrator's address), title, cwd, engine ('cli' | 'sdk'), state,
+      // busy, paused, pausing, orchestratorTabId (null while it has no tab),
+      // orchestratorSessId, workerCount, updatedAt }, newest first.
+      // describeRun(runId) → the run board's description, null for an unknown
+      // run. pauseRun(runId), resumeRun(runId, { fresh }) and
+      // refreshOrchestrator(runId) are the run board's own actions (WS
+      // cli:pauseRun / cli:resumeRun / cli:refreshOrchestrator): same results,
+      // and they throw what the board shows as an error. Dashboard profile only.
+      ...(orchestration ? {
+        orchestration: Object.freeze({
+          listRuns: () => orchestration.listRuns(),
+          describeRun: (runId) => orchestration.describeRunById(runId),
+          pauseRun: (runId) => orchestration.pauseRun(String(runId || '')),
+          resumeRun: (runId, { fresh = false } = {}) => orchestration.resumeRun(String(runId || ''), { fresh: fresh === true }),
+          refreshOrchestrator: (runId) => orchestration.refreshOrchestrator(String(runId || '')),
+        }),
+      } : {}),
       // Whether external (Telegram) login is configured — one of the signals
       // Pro's deployment-mode detection reads (spend policies differ by mode).
       tgLoginConfigured: typeof dashboard.tgLoginConfigured === 'function' ? dashboard.tgLoginConfigured : () => false,

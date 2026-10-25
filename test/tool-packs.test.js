@@ -381,3 +381,28 @@ test('the add-on ctx: toolPackFeatures and sendToSession in the dashboard profil
   assert.strictEqual(headless.sendToSession, undefined);
   assert.strictEqual(ctx.contractVersion, 2);
 });
+
+test('the add-on ctx: orchestration in the dashboard profile only, frozen, delegating to core', () => {
+  const { createAddonCtx } = require('../src/addon-host');
+  const calls = [];
+  const orchestration = {
+    listRuns: () => [{ runId: 'abc123' }],
+    describeRunById: (id) => (id === 'abc123' ? { runId: id } : null),
+    pauseRun: (id) => { calls.push(['pause', id]); return { workers: [] }; },
+    resumeRun: (id, opts) => { calls.push(['resume', id, opts]); return { runId: id }; },
+    refreshOrchestrator: (id) => { calls.push(['refresh', id]); return { refreshing: true }; },
+  };
+  const ctx = createAddonCtx({ dataHome: HOME, dashboard: { broadcaster: { broadcast() {} }, store, cliSessionManager: {}, orchestration } });
+  assert.ok(Object.isFrozen(ctx.orchestration));
+  assert.deepStrictEqual(Object.keys(ctx.orchestration), ['listRuns', 'describeRun', 'pauseRun', 'resumeRun', 'refreshOrchestrator']);
+  assert.deepStrictEqual(ctx.orchestration.listRuns(), [{ runId: 'abc123' }]);
+  assert.deepStrictEqual(ctx.orchestration.describeRun('abc123'), { runId: 'abc123' });
+  assert.strictEqual(ctx.orchestration.describeRun('nope'), null);
+  ctx.orchestration.pauseRun('abc123');
+  ctx.orchestration.resumeRun('abc123');
+  ctx.orchestration.resumeRun('abc123', { fresh: true });
+  ctx.orchestration.refreshOrchestrator('abc123');
+  assert.deepStrictEqual(calls, [['pause', 'abc123'], ['resume', 'abc123', { fresh: false }], ['resume', 'abc123', { fresh: true }], ['refresh', 'abc123']]);
+  assert.strictEqual(createAddonCtx({ dataHome: HOME }).orchestration, undefined, 'headless profile has none');
+  assert.ok(!('orchestration' in createAddonCtx({ dataHome: HOME })));
+});

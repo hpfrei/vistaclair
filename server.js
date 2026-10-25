@@ -484,6 +484,7 @@ const addonCtx = createAddonCtx({
     broadcaster, store, cliSessionManager,
     openCli: orchestration.openCli,
     sendToSession: orchestration.sendToSession,
+    orchestration,
     scheduleRestart: () => scheduleRestart(),
     pendingQuestions,
     clearPendingQuestionsForTab: createProxyRouter.clearPendingQuestionsForTab,

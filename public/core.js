@@ -1450,6 +1450,30 @@ dashboard.registerModule = (prefix, handler) => {
 };
 dashboard.registerView = (viewId, renderFn) => { dashboard._viewCallbacks[viewId] = renderFn; };
 
+// Tab actions and badges from add-on modules (public/tab-hooks.js); cli.js and
+// sdk-panel.js draw them at every render and re-render on a change.
+const tabHooks = createTabHooks();
+dashboard._tabHooks = tabHooks;
+dashboard.registerTabAction = tabHooks.registerTabAction;
+dashboard.unregisterTabAction = tabHooks.unregisterTabAction;
+dashboard.setTabBadge = tabHooks.setTabBadge;
+// The chip for a session name's badge, or null: `cls` adds the view's class.
+dashboard._tabBadgeEl = (name, cls) => {
+  const badge = tabHooks.badgeFor(name);
+  if (!badge) return null;
+  const chip = document.createElement('span');
+  chip.className = 'tab-ext-badge' + (cls ? ' ' + cls : '') + (badge.onClick ? ' clickable' : '');
+  chip.textContent = badge.text;
+  if (badge.title) chip.title = badge.title;
+  if (badge.onClick) {
+    chip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      try { badge.onClick(name); } catch (err) { console.error('[tab-hooks] badge click failed:', err); }
+    });
+  }
+  return chip;
+};
+
 // --- WebSocket ---
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

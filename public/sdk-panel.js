@@ -1170,6 +1170,7 @@
             <span class="sdk-toolbar-badge">SDK</span>
             <span class="sdk-toolbar-title"></span>
             <span class="sdk-toolbar-meta"></span>
+            <span class="sdk-toolbar-ext"></span>
             <button type="button" class="sdk-tb-btn sdk-fresh-chip suggested hidden" data-act="fresh"></button>
             <span class="sdk-toolbar-cost"></span>
             <span class="sdk-spacer"></span>
@@ -1193,6 +1194,7 @@
       this.panelEl = q('.sdk-panel');
       this.titleEl = q('.sdk-toolbar-title');
       this.metaEl = q('.sdk-toolbar-meta');
+      this.extBadgeEl = q('.sdk-toolbar-ext');
       this.costEl = q('.sdk-toolbar-cost');
       this.stage = q('.sdk-stage');
       this.linksEl = q('.sdk-links');
@@ -1661,7 +1663,10 @@
       const run = this.run;
       const isRun = !!this.runId && !isWorkerTab;
       this.canRefresh = isRun && !!(run?.orchestratorRunning && !run.pausing && !info.pausing);
-      this.moreBtn.classList.toggle('hidden', !isRun);
+      this.moreBtn.classList.toggle('hidden', !isRun && !this.tabActions().length);
+      // An add-on's badge for this session (dashboard.setTabBadge).
+      const extBadge = window.dashboard._tabBadgeEl(info.settings?.name, 'sdk-toolbar-ext-badge');
+      this.extBadgeEl.replaceChildren(...(extBadge ? [extBadge] : []));
       this.freshChip.classList.toggle('hidden', !(this.canRefresh && run.refreshSuggested));
       this.freshChip.disabled = false;
       this.freshChip.textContent = `orchestrator compacted ${run?.compactions || 0}× · start fresh?`;
@@ -1674,15 +1679,31 @@
       closeMenu();
       if (reopen) return;
       const box = el('div', 'sdk-model-menu sdk-more-menu');
-      const b = el('button', 'sdk-model-opt');
-      b.type = 'button';
-      b.appendChild(el('span', 'sdk-model-opt-label', 'Fresh orchestrator'));
-      b.disabled = !this.canRefresh;
-      b.title = this.canRefresh ? FRESH_TEXT : `${FRESH_TEXT}\nNot now: the orchestrator is not running, or the run is pausing.`;
-      b.addEventListener('click', () => { closeMenu(); this.refresh(); });
-      box.appendChild(b);
+      if (this.runId) {
+        const b = el('button', 'sdk-model-opt');
+        b.type = 'button';
+        b.appendChild(el('span', 'sdk-model-opt-label', 'Fresh orchestrator'));
+        b.disabled = !this.canRefresh;
+        b.title = this.canRefresh ? FRESH_TEXT : `${FRESH_TEXT}\nNot now: the orchestrator is not running, or the run is pausing.`;
+        b.addEventListener('click', () => { closeMenu(); this.refresh(); });
+        box.appendChild(b);
+      }
+      // An add-on's actions for this tab (dashboard.registerTabAction).
+      const info = this.tabInfo();
+      for (const action of this.tabActions(info)) {
+        const b = el('button', 'sdk-model-opt');
+        b.type = 'button';
+        b.appendChild(el('span', 'sdk-model-opt-label', action.label));
+        if (action.title) b.title = action.title;
+        b.addEventListener('click', () => { closeMenu(); window.dashboard._tabHooks.runAction(action, info); });
+        box.appendChild(b);
+      }
       showMenu(box, this.moreBtn, this);
     }
+
+    // This tab as add-on tab actions see it (public/tab-hooks.js).
+    tabInfo() { return window.tabHookInfo(this.tabId, { kind: 'sdk', settings: this.info.settings }); }
+    tabActions(info = this.tabInfo()) { return window.dashboard._tabHooks.actionsFor(info); }
 
     refresh() {
       if (!this.runId || !this.canRefresh) return;
@@ -1743,6 +1764,8 @@
     return p;
   }
   function update(tabId, info) { panels.get(tabId)?.update(info); }
+  // Tab actions and badges registered or dropped: redraw every toolbar.
+  window.dashboard._tabHooks.onChange(() => { for (const p of panels.values()) p.renderToolbar(); });
   function unmount(tabId) {
     const p = panels.get(tabId);
     if (!p) return;
