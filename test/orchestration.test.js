@@ -1080,13 +1080,13 @@ test('deleting a run: refused over uncommitted worktree changes, keeps unmerged 
   const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
   const runId = run().runId;
   const runDir = run().runDir;
-  assert.throws(() => orch.deleteRun(runId), /still running/);
-  for (const s of mgr.sessions.values()) s.running = false;
 
   fs.writeFileSync(path.join(w1.cwd, 'wip.txt'), 'x');
   const refused = orch.deleteRun(runId);
   assert.strictEqual(refused.refused, true);
+  assert.deepStrictEqual(refused.busy, []);
   assert.strictEqual(refused.dirty[0].worker, w1.worker);
+  assert.strictEqual(mgr.sessions.size, 2, 'a refusal closes nothing');
   execFileSync('git', ['-C', w1.cwd, 'add', '.']);
   execFileSync('git', ['-C', w1.cwd, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'wip']);
 
@@ -1098,6 +1098,69 @@ test('deleting a run: refused over uncommitted worktree changes, keeps unmerged 
   assert.ok(!fs.existsSync(w1.folder));
   assert.ok(!fs.existsSync(orchSession.settings.sessionDir));
   assert.strictEqual(mgr.history.length, 0, 'every member leaves the resume list');
+});
+
+test('deleting a run closes its idle open members; a busy one refuses it unless forced', async (t) => {
+  const { repo } = gitRepo();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { cwd: repo });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const runId = run().runId;
+  const runDir = run().runDir;
+  const ws = mgr.sessions.get(w1.tabId);
+  let interrupts = 0;
+  ws.interrupt = () => { interrupts++; };
+
+  ws.busy = true;
+  const refused = orch.deleteRun(runId);
+  assert.strictEqual(refused.refused, true);
+  assert.deepStrictEqual(refused.busy, [{ worker: w1.worker, title: ws.title, tabId: w1.tabId }]);
+  assert.deepStrictEqual(refused.dirty, []);
+  assert.strictEqual(mgr.sessions.size, 2, 'nothing closed');
+  assert.ok(fs.existsSync(runDir) && fs.existsSync(w1.cwd), 'nothing deleted');
+  assert.strictEqual(interrupts, 0);
+
+  const res = orch.deleteRun(runId, { force: true });
+  assert.strictEqual(interrupts, 1, 'the busy member is interrupted');
+  assert.deepStrictEqual(res.busy.map(b => b.worker), [w1.worker]);
+  assert.strictEqual(mgr.sessions.size, 0, 'every member tab is closed');
+  assert.deepStrictEqual(mgr.closeReasons, ['delete_run', 'delete_run']);
+  assert.ok(!fs.existsSync(runDir));
+  assert.ok(!fs.existsSync(w1.cwd));
+  assert.strictEqual(mgr.history.length, 0);
+});
+
+test('deleting a run with idle open members closes them without asking', async (t) => {
+  const { repo } = gitRepo();
+  const { orch, orchSession, mgr, run, broadcasts } = await openOrchestrator(t, { cwd: repo });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const runId = run().runId;
+  const runDir = run().runDir;
+  assert.ok([...mgr.sessions.values()].every(s => s.running && !s.busy), 'open and idle');
+
+  const res = orch.deleteRun(runId);
+  assert.ok(!res.refused);
+  assert.deepStrictEqual(mgr.closed.sort(), [orchSession.tabId, w1.tabId].sort());
+  assert.strictEqual(mgr.sessions.size, 0);
+  assert.ok(!fs.existsSync(runDir));
+  assert.ok(!fs.existsSync(w1.folder));
+  assert.strictEqual(mgr.history.length, 0, 'every member leaves the resume list');
+  assert.ok(broadcasts.some(m => m.type === 'orchestration:run' && m.runId === runId && m.deleted));
+});
+
+test('deleting a run: a busy member and a dirty worktree give one combined refusal', async (t) => {
+  const { repo } = gitRepo();
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { cwd: repo });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const w2 = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'x' });
+  mgr.sessions.get(w1.tabId).busy = true;
+  fs.writeFileSync(path.join(w2.cwd, 'wip.txt'), 'x');
+
+  const refused = orch.deleteRun(run().runId);
+  assert.strictEqual(refused.refused, true);
+  assert.deepStrictEqual(refused.busy.map(b => b.worker), [w1.worker]);
+  assert.deepStrictEqual(refused.dirty, [{ worker: w2.worker, path: w2.cwd }]);
+  assert.strictEqual(mgr.sessions.size, 3, 'nothing closed');
+  assert.ok(fs.existsSync(path.join(w2.cwd, 'wip.txt')));
 });
 
 test('buildCliArgs passes the session name and subagent definitions', () => {
