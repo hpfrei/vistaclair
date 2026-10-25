@@ -433,6 +433,9 @@
         sdkBadge.title = `Agent SDK session (${tab.settings?.auth === 'subscription' ? 'Claude subscription' : 'API key'} billing)`;
         label.appendChild(sdkBadge);
       }
+      // An add-on's badge for this session (dashboard.setTabBadge).
+      const extBadge = window.dashboard._tabBadgeEl(tab.settings?.name, 'cli-tab-ext-badge');
+      if (extBadge) label.appendChild(extBadge);
       let clickTimer = null;
       label.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -547,6 +550,9 @@
     }
   }
 
+  // Tab actions and badges registered or dropped: draw the strip again.
+  window.dashboard._tabHooks.onChange(() => renderTabStrip());
+
   // --- Tab × menu: close, or close and drop the session from the resume list ---
   let _closeMenuTimer = null;
 
@@ -576,6 +582,26 @@
     };
     addItem('Close', false);
     addItem('Close and remove interaction', true);
+    // An add-on's actions for this tab (dashboard.registerTabAction).
+    const info = window.tabHookInfo(tabId, tabs.get(tabId));
+    const extActions = window.dashboard._tabHooks.actionsFor(info);
+    if (extActions.length) {
+      const divider = document.createElement('div');
+      divider.className = 'cli-new-menu-divider';
+      menu.appendChild(divider);
+    }
+    for (const action of extActions) {
+      const item = document.createElement('div');
+      item.className = 'cli-new-menu-item';
+      item.textContent = action.label;
+      if (action.title) item.title = action.title;
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeCloseMenu();
+        window.dashboard._tabHooks.runAction(action, info);
+      });
+      menu.appendChild(item);
+    }
 
     menu.addEventListener('mouseenter', () => clearTimeout(_closeMenuTimer));
     menu.addEventListener('mouseleave', scheduleCloseMenuClose);
