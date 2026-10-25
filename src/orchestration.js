@@ -964,6 +964,48 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
   }
 
+  // describeRun by id, null for an unknown run (the add-on ctx).
+  function describeRunById(runId) {
+    const run = getRun(String(runId || ''));
+    return run ? describeRun(run) : null;
+  }
+
+  // Every run a live or saved session is stamped with — running, paused or
+  // ended — one summary each, the most recently changed first (the add-on ctx:
+  // no other list of runs exists). A run whose run.json is gone is left out.
+  function listRuns() {
+    const saved = savedEntries();
+    const ids = new Set();
+    for (const m of findByStamp(st => !!st.runId)) ids.add(m.stamp.runId);
+    for (const e of saved) if (e.settings?.orchestration?.runId) ids.add(e.settings.orchestration.runId);
+    const out = [];
+    for (const runId of ids) {
+      const run = getRun(runId);
+      if (!run) continue;
+      const orch = orchestratorSession(run);
+      const entry = saved.find(e => e.settings?.orchestration?.runId === runId && e.settings.orchestration.role === 'orchestrator') || null;
+      const running = !!orch?.session.running;
+      let updatedAt = null;
+      try { updatedAt = fs.statSync(runFile(run.runDir)).mtime.toISOString(); } catch { /* none */ }
+      out.push({
+        runId,
+        name: run.orchestrator,
+        title: (orch ? orch.session.title : entry?.title) || null,
+        cwd: (orch ? orch.session.cwd : entry?.cwd) || run.root,
+        engine: run.engine || 'cli',
+        state: running ? memberState(orch.session, null) : run.pausing ? 'pausing' : run.paused ? 'paused' : run.closed ? 'closed' : 'exited',
+        busy: running && orch.session.busy === true,
+        paused: !!run.paused,
+        pausing: !!run.pausing,
+        orchestratorTabId: orch?.tabId || null,
+        orchestratorSessId: orch?.session.sessId || entry?.id || null,
+        workerCount: run.workers.length,
+        updatedAt,
+      });
+    }
+    return out.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+  }
+
   // end_run: finish the run. Worktrees go as at a worker's exit (teardown);
   // every worker keeps its record, folder and saved session, so resume_worker
   // can still bring it back (restoreWorktree adds its worktree again), and new
@@ -2284,7 +2326,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   return {
     router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, sendMessage, listAgents, sendToSession, toolParams,
-    handleHook, onSessionExit, getRun, describeRun, findByStamp, writeSessionSettings,
+    handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,

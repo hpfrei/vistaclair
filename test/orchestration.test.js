@@ -678,6 +678,49 @@ test('resuming a run: the orchestrator warms up its paused workers with resume_w
   assert.ok(control.liveOf(c1));
 });
 
+test('listRuns: a live run and a paused one, each once; describeRun by id, null for an unknown run', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const runId = run().runId;
+  let [r] = orch.listRuns();
+  assert.strictEqual(orch.listRuns().length, 1, 'one entry per run, not per member');
+  assert.deepStrictEqual(Object.keys(r), ['runId', 'name', 'title', 'cwd', 'engine', 'state', 'busy', 'paused', 'pausing', 'orchestratorTabId', 'orchestratorSessId', 'workerCount', 'updatedAt']);
+  assert.strictEqual(r.runId, runId);
+  assert.strictEqual(r.name, `orch-${runId}`);
+  assert.strictEqual(r.engine, 'cli');
+  assert.strictEqual(r.state, 'idle');
+  assert.strictEqual(r.busy, false);
+  assert.strictEqual(r.paused, false);
+  assert.strictEqual(r.orchestratorTabId, orchSession.tabId);
+  assert.strictEqual(r.orchestratorSessId, orchSession.sessId);
+  assert.strictEqual(r.cwd, orchSession.cwd);
+  assert.strictEqual(r.workerCount, 1);
+  assert.ok(!Number.isNaN(Date.parse(r.updatedAt)));
+  assert.deepStrictEqual(orch.describeRunById(runId), orch.describeRun(run()));
+  assert.strictEqual(orch.describeRunById('nope'), null);
+  assert.strictEqual(orch.describeRunById(undefined), null);
+
+  orch.pauseRun(runId);
+  assert.strictEqual(orch.listRuns()[0].pausing, true);
+  await wait(15);
+  const s1 = mgr.sessions.get(w1.tabId);
+  writeResume(s1);
+  hook(orch, s1, { hook_event_name: 'Stop' });
+  await wait(20);
+  writeResume(orchSession);
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  await wait(20);
+  assert.strictEqual(mgr.sessions.size, 0, 'nothing of the run is live');
+  [r] = orch.listRuns();
+  assert.strictEqual(r.runId, runId, 'a paused run is known by its saved sessions');
+  assert.strictEqual(r.state, 'paused');
+  assert.strictEqual(r.paused, true);
+  assert.strictEqual(r.pausing, false);
+  assert.strictEqual(r.orchestratorTabId, null);
+  assert.strictEqual(r.orchestratorSessId, orchSession.sessId);
+  assert.strictEqual(orch.describeRunById(runId).paused.workers[0], w1.worker);
+});
+
 test('a lost transcript: resuming the run and its worker falls back to fresh sessions from the notes', async (t) => {
   const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
   hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: 'Build the importer' });
