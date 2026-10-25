@@ -1699,21 +1699,35 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return bringBack(run, w, { mode: 'continue' });
   }
 
-  // Delete a whole run from the "+" menu: every member's saved session, the
-  // session folders, the run directory and the worktrees. A worktree with
-  // uncommitted changes stops it unless `force`; an unmerged branch is kept.
+  // Delete a whole run from the "+" menu: its open member tabs (closed
+  // quietly, like close_worker), every member's saved session, the session
+  // folders, the run directory and the worktrees. A member mid-turn or a
+  // worktree with uncommitted changes stops it unless `force` (one refusal
+  // naming both: { refused, busy, dirty }); forced, a busy member is
+  // interrupted, then closed. An unmerged branch is kept.
   function deleteRun(runId, { force = false } = {}) {
     const run = getRun(runId);
     const entries = savedEntries().filter(e => e.settings?.orchestration?.runId === runId);
-    for (const s of mgr.sessions.values()) {
-      if (s.getSettings?.().orchestration?.runId === runId && s.running) throw new Error('a member of this run is still running');
-    }
+    const live = findByStamp(st => st.runId === runId);
+    const nameOf = (st) => st.role === 'worker' ? run?.workers.find(w => w.id === st.workerId)?.name || st.workerId : run?.orchestrator || 'orchestrator';
+    const busy = live.filter(m => m.session.busy)
+      .map(m => ({ worker: nameOf(m.stamp), title: m.session.title || nameOf(m.stamp), tabId: m.tabId }));
     const dirty = [];
     const keptBranches = [];
     for (const w of run?.workers || []) {
       if (worktreeChanges(w).length) dirty.push({ worker: w.name, path: w.worktree.path });
     }
-    if (dirty.length && !force) return { refused: true, dirty };
+    if ((busy.length || dirty.length) && !force) return { refused: true, busy, dirty };
+    for (const { tabId, session: s, stamp } of live) {
+      if (s.busy) {
+        if (typeof s.interrupt === 'function') Promise.resolve(s.interrupt()).catch(() => {});
+        else s.write?.('\x1b');
+      }
+      mgr.closeQuiet(tabId, 'delete_run');
+      if (s.sessId && !entries.some(e => e.id === s.sessId)) entries.push({ id: s.sessId });
+      volatile.delete(nameOf(stamp));
+      inbox.delete(nameOf(stamp));
+    }
     for (const w of run?.workers || []) {
       if (w.worktree && !removeWorktree(w)) keptBranches.push(w.branch);
     }
@@ -1725,7 +1739,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (run?.runDir && path.basename(run.runDir) === run.runId) fs.rmSync(run.runDir, { recursive: true, force: true });
     runDirs.delete(runId);
     broadcaster.broadcast({ type: 'orchestration:run', runId, deleted: true });
-    return { deleted: entries.length, keptBranches, dirty };
+    return { deleted: entries.length, keptBranches, busy, dirty };
   }
 
   // The run record of a saved worker session, and the worker in it.

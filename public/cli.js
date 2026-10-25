@@ -1552,8 +1552,15 @@
       // --- Pause / resume ---
       case 'cli:actionResult': {
         if (msg.action === 'deleteRun' && msg.refused) {
+          // One dialog for both: members mid-turn and dirty worktrees.
+          const busy = (msg.busy || []).map(b => `- ${b.title}`).join('\n');
           const dirty = (msg.dirty || []).map(d => `- ${d.worker}: ${d.path}`).join('\n');
-          if (confirm(`These worktrees have uncommitted changes:\n${dirty}\n\nDelete the run anyway? The changes are lost.`)) {
+          const parts = [];
+          if (busy) parts.push(`These members are still working:\n${busy}`);
+          if (dirty) parts.push(`These worktrees have uncommitted changes:\n${dirty}`);
+          const ask = busy && dirty ? 'Stop them and delete the run anyway? The changes are lost.'
+            : busy ? 'Stop them and delete the run?' : 'Delete the run anyway? The changes are lost.';
+          if (confirm(`${parts.join('\n\n')}\n\n${ask}`)) {
             sendWs({ type: 'cli:deleteRun', runId: msg.runId, force: true });
           }
           break;
