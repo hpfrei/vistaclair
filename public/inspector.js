@@ -4981,11 +4981,16 @@
     let hasCost = false;
     _statsTab = activeInstanceTab;
     const sess = _activeSessionTotals();
-    const counts = sess || _countTurns(source);
+    // Without the server's figures, the turns held here add up to the
+    // session's only when they are all of them (no older page, not loading);
+    // else the footer waits rather than show a capped sum.
+    const tab = _openTabs.get(activeInstanceTab);
+    const waiting = !sess && !!tab && (tab.loading || tab.hasMore);
+    const counts = sess || (waiting ? { turns: 0, apiCalls: 0, hookEvents: 0 } : _countTurns(source));
     if (sess) {
       ({ toolCalls: toolCallCount, inputTokens, outputTokens, cacheRead, cacheCreate, hasCost } = sess);
       totalCost = sess.cost;
-    } else {
+    } else if (!waiting) {
       for (const i of source) {
         if (i.usage) {
           inputTokens += i.usage.input_tokens || 0;
@@ -5002,15 +5007,17 @@
     const approx = sess && !sess.complete ? '\u2248 ' : '';
     const scanNote = sess && !sess.complete
       ? `Whole session, still counting: ${sess.scanned.toLocaleString()} of ${sess.toScan.toLocaleString()} turn files read`
-      : (sess ? 'Whole session, every turn on disk' : '');
+      : sess ? 'Whole session, every turn on disk'
+      : waiting ? 'Waiting for the whole session\'s totals' : '';
 
     // Footer stats section. A session that never reported a prompt (no
     // hooks reached the server) can only be counted in model calls.
     const byCalls = counts.turns === 0 && counts.apiCalls > 0;
     const n = byCalls ? counts.apiCalls : counts.turns;
     const unit = byCalls ? 'API call' : 'turn';
-    statsEl.textContent = `${approx}${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''} \u00b7 ${toolCallCount.toLocaleString()} tool call${toolCallCount !== 1 ? 's' : ''}`;
-    statsEl.title = [
+    statsEl.textContent = waiting ? '\u2026 turns'
+      : `${approx}${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''} \u00b7 ${toolCallCount.toLocaleString()} tool call${toolCallCount !== 1 ? 's' : ''}`;
+    statsEl.title = waiting ? scanNote : [
       scanNote,
       `${counts.turns.toLocaleString()} prompt${counts.turns !== 1 ? 's' : ''} sent`,
       `${counts.apiCalls.toLocaleString()} API call${counts.apiCalls !== 1 ? 's' : ''}`,
@@ -5059,7 +5066,7 @@
       // A CLI tab shows its whole session here too.
       visibleCost = sess.cost; hasVisibleCost = sess.hasCost;
       visibleTime = sess.duration; hasVisibleTime = sess.duration > 0;
-    } else {
+    } else if (!waiting) {
       for (const i of source) {
         if (!isVisibleInTimeline(i)) continue;
         const c = computeCost(i.usage, i.pricing);
