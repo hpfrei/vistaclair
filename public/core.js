@@ -518,6 +518,85 @@ function highlightJSON(obj) {
 }
 
 // --- Collapsible JSON tree renderer ---
+//
+// Small values render eagerly: the whole tree plus an escaped pretty-printed
+// copy in a <script type="application/json"> for the Copy button. Large ones
+// (whole conversations, MBs) would hold two full copies in the DOM, so they
+// get neither: a container node whose subtree is large is emitted collapsed
+// with an empty .jt-children and a data-jt-path, and its children are
+// rendered the first time it opens; Copy stringifies the value on demand.
+//
+// jsonBlock returns a string, so a large value is parked in _jtRegistry under
+// the root's data-jt-ref until the root turns up in the DOM; it is then moved
+// onto the element (root._jtValue) and dies with it. Entries whose element
+// never appeared are dropped after JT_REGISTRY_TTL.
+
+const JT_INLINE_LIMIT = 32 * 1024;   // chars: under this a block renders as before
+const JT_EAGER_SUBTREE = 2048;       // chars: subtrees of a large value under this render eagerly,
+                                     // up to JT_INLINE_LIMIT in total per render/open
+const JT_REGISTRY_TTL = 60000;
+const JT_SWEEP_INTERVAL = 15000;
+const _jtRegistry = new Map();       // data-jt-ref -> { value, at }
+let _jtSeq = 0;
+let _jtSweepTimer = null;
+
+// Rough pretty-printed size of `val` in chars; stops counting once over
+// `limit`, so the cost is bounded by the limit, not the value.
+function _jtSize(val, limit) {
+  let n = 0;
+  const walk = (v, d) => {
+    if (v === null || typeof v !== 'object') {
+      n += d * 2 + 2 + (typeof v === 'string' ? v.length + 2 : typeof v === 'number' ? 8 : 5);
+      return;
+    }
+    n += d * 2 + 4;
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length && n <= limit; i++) walk(v[i], d + 1);
+    } else {
+      for (const k in v) {
+        if (n > limit) return;
+        if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+        n += k.length + 4;
+        walk(v[k], d + 1);
+      }
+    }
+  };
+  walk(val, 0);
+  return n;
+}
+
+// Line count of JSON.stringify(val, null, 2), stopping once over `max`
+// (the result is then some number > max). Same answer as splitting the
+// string for anything JSON.stringify accepts.
+function _jtLines(val, max) {
+  let n = 0;
+  const norm = (v) => (v !== null && (typeof v === 'object' || typeof v === 'bigint') && typeof v.toJSON === 'function') ? v.toJSON() : v;
+  const skipped = (v) => v === undefined || typeof v === 'function' || typeof v === 'symbol';
+  const walk = (v) => {
+    if (v === null || typeof v !== 'object') { n++; return; }
+    if (Array.isArray(v)) {
+      if (v.length === 0) { n++; return; }
+      n += 2;
+      for (let i = 0; i < v.length && n <= max; i++) {
+        const c = norm(v[i]);
+        if (skipped(c)) n++; else walk(c);
+      }
+      return;
+    }
+    let any = false;
+    for (const k in v) {
+      if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+      const c = norm(v[k]);
+      if (skipped(c)) continue;
+      if (!any) { any = true; n += 2; }
+      walk(c);
+      if (n > max) return;
+    }
+    if (!any) n++;
+  };
+  walk(norm(val));
+  return n;
+}
 
 function preview(val, budget) {
   if (budget <= 0) return '…';
@@ -536,15 +615,15 @@ function preview(val, budget) {
     return `${inner}${more} <span class="jt-count">// ${val.length}</span>`;
   }
   if (typeof val === 'object') {
-    const keys = Object.keys(val);
-    if (keys.length === 0) return '<span class="jt-bracket">{}</span>';
     const parts = [];
     let len = 0;
-    for (const k of keys) {
+    for (const k in val) {
+      if (!Object.prototype.hasOwnProperty.call(val, k)) continue;
       if (len + k.length + 2 > budget && parts.length > 0) { parts.push('…'); break; }
       parts.push(escHtml(k));
       len += k.length + 2;
     }
+    if (parts.length === 0) return '<span class="jt-bracket">{}</span>';
     return parts.join('<span class="jt-comma">, </span>');
   }
   return escHtml(String(val));
@@ -554,6 +633,41 @@ function renderJSON(obj) {
   if (obj === undefined) return '';
   if (obj === null) return '<span class="json-null">null</span>';
   return renderValue(obj, null);
+}
+
+// The .jt-line rows of a non-empty container; child(v, key, seg) renders one
+// child, `key` being null for array items and `seg` its index/key.
+function _jtChildLines(val, child) {
+  if (Array.isArray(val)) {
+    return val.map((v, i) =>
+      `<div class="jt-line">${child(v, null, i)}${i < val.length - 1 ? '<span class="jt-comma">,</span>' : ''}</div>`
+    ).join('');
+  }
+  const keys = Object.keys(val);
+  return keys.map((k, i) =>
+    `<div class="jt-line">${child(val[k], k, k)}${i < keys.length - 1 ? '<span class="jt-comma">,</span>' : ''}</div>`
+  ).join('');
+}
+
+// A non-empty container node; `attrs` goes on the <details> (data-jt-path).
+function _jtContainer(val, keyHtml, children, open, attrs) {
+  const openAttr = open ? ' open' : '';
+  if (Array.isArray(val)) {
+    const pv = preview(val[0], 60);
+    const more = val.length > 1 ? '<span class="jt-comma">, </span>…' : '';
+    const count = ` <span class="jt-count">// ${val.length}</span>`;
+    const summary = `${pv}${more} <span class="jt-bracket">]</span>${count}`;
+    return `${keyHtml}<details class="jt-node"${attrs}${openAttr}><summary><span class="jt-bracket">[</span><span class="jt-summary">${summary}</span><span class="jt-expand-btn"></span></summary><div class="jt-children">${children}</div><span class="jt-bracket jt-close">]</span></details>`;
+  }
+  const pv = preview(val, 60);
+  const summary = `${pv} <span class="jt-bracket">}</span>`;
+  return `${keyHtml}<details class="jt-node"${attrs}${openAttr}><summary><span class="jt-bracket">{</span><span class="jt-summary">${summary}</span><span class="jt-expand-btn"></span></summary><div class="jt-children">${children}</div><span class="jt-bracket jt-close">}</span></details>`;
+}
+
+function _jtIsEmpty(val) {
+  if (Array.isArray(val)) return val.length === 0;
+  for (const k in val) if (Object.prototype.hasOwnProperty.call(val, k)) return false;
+  return true;
 }
 
 function renderValue(val, key) {
@@ -566,44 +680,120 @@ function renderValue(val, key) {
   }
   if (typeof val === 'number') return keyHtml + `<span class="json-number">${val}</span>`;
   if (typeof val === 'boolean') return keyHtml + `<span class="json-bool">${val}</span>`;
-  if (Array.isArray(val)) {
-    if (val.length === 0) return keyHtml + '<span class="jt-bracket">[]</span>';
-    const children = val.map((v, i) =>
-      `<div class="jt-line">${renderValue(v, null)}${i < val.length - 1 ? '<span class="jt-comma">,</span>' : ''}</div>`
-    ).join('');
-    const pv = preview(val[0], 60);
-    const more = val.length > 1 ? '<span class="jt-comma">, </span>…' : '';
-    const count = ` <span class="jt-count">// ${val.length}</span>`;
-    const summary = `${pv}${more} <span class="jt-bracket">]</span>${count}`;
-    const openAttr = JSON.stringify(val, null, 2).split('\n').length <= 6 ? ' open' : '';
-    return `${keyHtml}<details class="jt-node"${openAttr}><summary><span class="jt-bracket">[</span><span class="jt-summary">${summary}</span><span class="jt-expand-btn"></span></summary><div class="jt-children">${children}</div><span class="jt-bracket jt-close">]</span></details>`;
-  }
   if (typeof val === 'object') {
-    const keys = Object.keys(val);
-    if (keys.length === 0) return keyHtml + '<span class="jt-bracket">{}</span>';
-    const children = keys.map((k, i) =>
-      `<div class="jt-line">${renderValue(val[k], k)}${i < keys.length - 1 ? '<span class="jt-comma">,</span>' : ''}</div>`
-    ).join('');
-    const pv = preview(val, 60);
-    const summary = `${pv} <span class="jt-bracket">}</span>`;
-    const openAttr = JSON.stringify(val, null, 2).split('\n').length <= 6 ? ' open' : '';
-    return `${keyHtml}<details class="jt-node"${openAttr}><summary><span class="jt-bracket">{</span><span class="jt-summary">${summary}</span><span class="jt-expand-btn"></span></summary><div class="jt-children">${children}</div><span class="jt-bracket jt-close">}</span></details>`;
+    if (_jtIsEmpty(val)) return keyHtml + (Array.isArray(val) ? '<span class="jt-bracket">[]</span>' : '<span class="jt-bracket">{}</span>');
+    const children = _jtChildLines(val, (v, k) => renderValue(v, k));
+    return _jtContainer(val, keyHtml, children, _jtLines(val, 6) <= 6, '');
   }
   return keyHtml + escHtml(String(val));
 }
 
-function jsonBlock(obj) {
-  const raw = JSON.stringify(obj, null, 2);
-  return `<div class="json-block jt-root"><button class="jt-copy" title="Copy JSON">Copy</button><script type="application/json">${escHtml(raw)}<\/script>${renderJSON(obj)}</div>`;
+// Node of a large value at `path` (array of indexes/keys from the root):
+// leaves and small subtrees render eagerly while `budget.left` (chars,
+// shared by one render/materialize pass) lasts; any other container renders
+// its summary only and is filled in by _jtMaterialize on first open.
+function _jtRenderLazy(val, key, path, budget) {
+  if (val === null || typeof val !== 'object' || _jtIsEmpty(val)) return renderValue(val, key);
+  const cap = Math.min(JT_EAGER_SUBTREE, budget.left);
+  const size = _jtSize(val, cap);
+  if (size <= cap) { budget.left -= size; return renderValue(val, key); }
+  const keyHtml = key !== null
+    ? `<span class="json-key">"${escHtml(key)}"</span>: ` : '';
+  const open = _jtLines(val, 6) <= 6;
+  const children = open ? _jtLazyChildren(val, path, budget) : '';
+  const attrs = open ? '' : ` data-jt-path="${escHtml(JSON.stringify(path))}"`;
+  return _jtContainer(val, keyHtml, children, open, attrs);
 }
+
+function _jtLazyChildren(val, path, budget) {
+  return _jtChildLines(val, (v, k, seg) => _jtRenderLazy(v, k, path.concat(seg), budget));
+}
+
+// Move a root's registry entry onto the element. True when the root's value
+// is available (root._jtValue).
+function _jtAdopt(root) {
+  if (!root) return false;
+  if ('_jtValue' in root) return true;
+  const ref = root.getAttribute('data-jt-ref');
+  const entry = ref && _jtRegistry.get(ref);
+  if (!entry) return false;
+  root._jtValue = entry.value;
+  _jtRegistry.delete(ref);
+  return true;
+}
+
+function _jtScheduleSweep(ms) {
+  if (_jtSweepTimer === null) _jtSweepTimer = setTimeout(_jtSweep, ms);
+}
+
+function _jtSweep() {
+  _jtSweepTimer = null;
+  const now = Date.now();
+  for (const [ref, entry] of _jtRegistry) {
+    const root = document.querySelector(`.jt-root[data-jt-ref="${ref}"]`);
+    if (root) _jtAdopt(root);
+    else if (now - entry.at > JT_REGISTRY_TTL) _jtRegistry.delete(ref);
+  }
+  if (_jtRegistry.size) _jtScheduleSweep(JT_SWEEP_INTERVAL);
+}
+
+// Render the children of a lazy node. False when its value can't be found.
+function _jtMaterialize(node) {
+  const pathAttr = node.getAttribute('data-jt-path');
+  if (pathAttr === null) return true;
+  const root = node.closest('.jt-root');
+  if (!_jtAdopt(root)) return false;
+  let path;
+  try { path = JSON.parse(pathAttr); } catch { return false; }
+  let v = root._jtValue;
+  for (const seg of path) {
+    if (v === null || typeof v !== 'object') return false;
+    v = v[seg];
+  }
+  if (v === null || typeof v !== 'object') return false;
+  node.removeAttribute('data-jt-path');
+  const box = node.querySelector(':scope > .jt-children');
+  if (box) box.innerHTML = _jtLazyChildren(v, path, { left: JT_INLINE_LIMIT });
+  return true;
+}
+
+function _jtNewlines(s) {
+  let n = 1;
+  for (let i = s.indexOf('\n'); i !== -1; i = s.indexOf('\n', i + 1)) n++;
+  return n;
+}
+
+// Root attributes: data-jt-lines (pretty-printed line count, small values
+// only) or data-jt-ref (registry key, large values).
+function jsonBlock(obj) {
+  if (_jtSize(obj, JT_INLINE_LIMIT) <= JT_INLINE_LIMIT) {
+    const raw = JSON.stringify(obj, null, 2);
+    const lines = typeof raw === 'string' ? ` data-jt-lines="${_jtNewlines(raw)}"` : '';
+    return `<div class="json-block jt-root"${lines}><button class="jt-copy" title="Copy JSON">Copy</button><script type="application/json">${escHtml(raw)}<\/script>${renderJSON(obj)}</div>`;
+  }
+  const ref = 'jt' + (++_jtSeq);
+  _jtRegistry.set(ref, { value: obj, at: Date.now() });
+  _jtScheduleSweep(1000);
+  return `<div class="json-block jt-root" data-jt-ref="${ref}"><button class="jt-copy" title="Copy JSON">Copy</button>${_jtRenderLazy(obj, null, [], { left: JT_INLINE_LIMIT })}</div>`;
+}
+
+// Lazy nodes fill in on first open. `toggle` does not bubble, hence capture.
+document.addEventListener('toggle', (e) => {
+  const node = e.target;
+  if (node.open && node.matches?.('details.jt-node[data-jt-path]')) _jtMaterialize(node);
+}, true);
 
 // Copy button handler (delegated)
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.jt-copy');
   if (!btn) return;
-  const script = btn.parentElement.querySelector('script[type="application/json"]');
-  if (!script) return;
-  navigator.clipboard.writeText(script.textContent).then(() => {
+  const root = btn.parentElement;
+  const script = root.querySelector(':scope > script[type="application/json"]');
+  let text;
+  if (script) text = script.textContent;
+  else if (_jtAdopt(root)) text = JSON.stringify(root._jtValue, null, 2);
+  else return;
+  navigator.clipboard.writeText(text).then(() => {
     btn.textContent = 'Copied!';
     setTimeout(() => btn.textContent = 'Copy', 1200);
   });
@@ -617,11 +807,22 @@ document.addEventListener('click', (e) => {
   e.stopPropagation();
   const node = btn.closest('.jt-node');
   if (!node) return;
-  const descendants = node.querySelectorAll('details.jt-node');
-  const allOpen = node.open && [...descendants].every(d => d.open);
+  const LAZY = 'details.jt-node[data-jt-path]';
+  const hasLazy = () => node.matches(LAZY) || !!node.querySelector(LAZY);
+  const allOpen = node.open && !hasLazy() && [...node.querySelectorAll('details.jt-node')].every(d => d.open);
   const target = !allOpen;
+  if (target) {
+    // An explicit request for the whole subtree: render what is still lazy.
+    if (node.matches(LAZY)) _jtMaterialize(node);
+    let pending;
+    while ((pending = node.querySelectorAll(LAZY)).length) {
+      let progressed = false;
+      for (const d of pending) if (_jtMaterialize(d)) progressed = true;
+      if (!progressed) break;
+    }
+  }
   node.open = target;
-  descendants.forEach(d => d.open = target);
+  node.querySelectorAll('details.jt-node').forEach(d => d.open = target);
 });
 
 function formatDuration(ms) {
@@ -1538,6 +1739,7 @@ function handleMessage(msg) {
     case 'inspector:sessions':
     case 'inspector:sessionsRemoved':
     case 'inspector:snapshot':
+    case 'inspector:earlier':
     case 'inspector:turnsDeleted':
     case 'inspector:sessionTotals':
       window.inspectorModule?.handleMessage(msg);

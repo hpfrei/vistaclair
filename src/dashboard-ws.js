@@ -7,6 +7,58 @@ const { InspectorSessions } = require('./inspector-sessions');
 
 const PROJECT_ROOT = DATA_HOME;
 
+// Large strings in what a summary keeps (tool results, the response body) are
+// cut to this many characters; the full value comes with interaction:getDetail.
+const SUMMARY_STRING_MAX = 2000;
+// A response body under this size (serialized) is kept whole in a summary.
+const SUMMARY_BODY_MAX = 64 * 1024;
+// The first user message's text, kept for matching subagent turns to the
+// Agent call that spawned them (wide-layout.js matches a 200-char probe).
+const SUMMARY_FIRST_TEXT_MAX = 8000;
+// What a freshly opened tab gets at most; older turns come page by page
+// (inspector:getEarlier).
+const SNAPSHOT_LIMIT = 500;
+const EARLIER_PAGE_MAX = 500;
+
+// A copy of `value` with every string longer than `max` cut, and whether
+// anything was cut. Unchanged subtrees are shared, not copied.
+function truncateStrings(value, max, depth = 0) {
+  if (typeof value === 'string') {
+    return value.length > max ? { value: value.slice(0, max), cut: true } : { value, cut: false };
+  }
+  if (!value || typeof value !== 'object' || depth > 32) return { value, cut: false };
+  let cut = false;
+  if (Array.isArray(value)) {
+    const out = value.map(v => {
+      const r = truncateStrings(v, max, depth + 1);
+      if (r.cut) cut = true;
+      return r.value;
+    });
+    return cut ? { value: out, cut } : { value, cut };
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    const r = truncateStrings(v, max, depth + 1);
+    if (r.cut) cut = true;
+    out[k] = r.value;
+  }
+  return cut ? { value: out, cut } : { value, cut };
+}
+
+function firstUserText(msgs) {
+  const first = msgs.find(m => m.role === 'user');
+  if (!first) return null;
+  const text = typeof first.content === 'string' ? first.content
+    : (Array.isArray(first.content) ? first.content.filter(b => b.type === 'text' && b.text).map(b => b.text).join('\n') : '');
+  return text.replace(/\s+/g, ' ').trim().slice(0, SUMMARY_FIRST_TEXT_MAX);
+}
+
+// The summary shape every turn reaches a browser in (snapshots, live
+// interaction:* messages, paged history): no messages, tools, system or
+// translated copy — the conversation so far, which every turn of a long
+// session carries again — but the counts and sizes the timeline and the
+// detail chips show, and what the timeline needs to link tool calls to
+// their results. public/inspector.js fetches the rest on select.
 function summarizeForInit(interaction) {
   const s = { ...interaction };
   if (s.request) {
@@ -22,11 +74,24 @@ function summarizeForInit(interaction) {
         }
       }
       s.request._messageCount = msgs.length;
+      s.request._messagesChars = JSON.stringify(msgs).length;
       s.request._lastMessage = last ? { role: last.role, hasText } : null;
+      // Tool results only ever arrive in the newest user message; the tool
+      // detail shows them (cut, until the turn's detail is fetched).
+      if (last?.role === 'user' && Array.isArray(last.content)) {
+        const results = last.content.filter(b => b?.type === 'tool_result');
+        if (results.length) {
+          const r = truncateStrings(results, SUMMARY_STRING_MAX);
+          s.request._toolResults = r.cut ? r.value.map(b => ({ ...b, _truncated: true })) : r.value;
+        }
+      }
+      const text = firstUserText(msgs);
+      if (text) s.request._firstUserText = text;
       delete s.request.messages;
     }
     if (s.request.tools) {
       s.request._toolCount = s.request.tools.length;
+      s.request._toolsChars = JSON.stringify(s.request.tools).length;
       delete s.request.tools;
     }
     if (s.request.system) {
@@ -52,20 +117,39 @@ function summarizeForInit(interaction) {
       if (s.response) s.response = { ...s.response, body: undefined };
     }
   }
+  // A large response body (a long answer, a big tool input) keeps its shape
+  // with its strings cut: the timeline reads tool names and summaries from it.
+  if (s.response?.body && typeof s.response.body === 'object') {
+    const chars = JSON.stringify(s.response.body).length;
+    if (chars > SUMMARY_BODY_MAX) {
+      const r = truncateStrings(s.response.body, SUMMARY_STRING_MAX);
+      s.response = { ...s.response, body: r.value, _bodyChars: chars, _bodyTruncated: r.cut || undefined };
+    }
+  } else if (typeof s.response?.body === 'string' && s.response.body.length > SUMMARY_BODY_MAX) {
+    s.response = { ...s.response, body: s.response.body.slice(0, SUMMARY_STRING_MAX),
+                   _bodyChars: s.response.body.length, _bodyTruncated: true };
+  }
   // A provider-translated turn carries its own copy of the whole request.
   delete s.translatedBody;
   s._summary = true;
   return s;
 }
 
-// Browsers already hold each stream event (sent one by one as sse_event) and
-// keep their own copy when an interaction updates, so the finished list is
-// dead weight on the wire. In-process listeners still get the full message.
+const LIVE_TYPES = new Set(['interaction:start', 'interaction:update', 'interaction:complete']);
+const isLive = i => i.status === 'pending' || i.status === 'streaming';
+
+// What browsers get of a live interaction:* message: the summary shape. The
+// stream is left off updates and completions too — browsers get each event
+// one by one as sse_event — but not off a start, whose events so far (a
+// rule's dummy response, say) may have gone out before the turn did.
+// In-process listeners still get the full message.
 function forClients(message) {
-  if ((message.type !== 'interaction:complete' && message.type !== 'interaction:update')
-      || !message.interaction?.response?.sseEvents) return message;
-  const { interaction } = message;
-  return { ...message, interaction: { ...interaction, response: { ...interaction.response, sseEvents: undefined } } };
+  if (!LIVE_TYPES.has(message.type) || !message.interaction) return message;
+  const s = summarizeForInit(message.interaction);
+  if (s.response && message.type !== 'interaction:start') {
+    s.response = { ...s.response, sseEvents: undefined };
+  }
+  return { ...message, interaction: s };
 }
 
 // Messages that belong to one session's content: a browser gets them only for
@@ -75,16 +159,29 @@ const SESSION_SCOPED = new Set([
   'interaction:enriched', 'sse_event', 'inspector:turnsDeleted', 'inspector:sessionTotals',
 ]);
 
-// A turn as a freshly opened tab gets it: the summary shape (src/inspector.js
+// A turn as a freshly opened tab gets it: the summary shape (public/inspector.js
 // refetches detail on select), except a turn still streaming keeps the events
 // so far, since the rest arrive one by one as sse_event.
 function forSnapshot(interaction, instanceId) {
   const s = sanitizeForDashboard(interaction);
   if (!s) return null;
   s.instanceId = instanceId;
-  const live = s.status === 'pending' || s.status === 'streaming';
-  if (s.response && !live) s.response = { ...s.response, sseEvents: undefined };
-  return live ? s : summarizeForInit(s);
+  if (s.response && !isLive(s)) s.response = { ...s.response, sseEvents: undefined };
+  return summarizeForInit(s);
+}
+
+// One page of a session's history in summary form: the `limit` turns just
+// before `beforeId` (or before the timestamp `before` when that turn is gone),
+// oldest first, and whether still older ones exist.
+function earlierPage(list, { beforeId, before, limit }) {
+  let end = beforeId ? list.findIndex(i => i.id === beforeId) : -1;
+  if (end < 0) {
+    end = typeof before === 'number' ? list.findIndex(i => (i.timestamp || 0) >= before) : list.length;
+    if (end < 0) end = list.length;
+  }
+  const n = Math.max(1, Math.min(EARLIER_PAGE_MAX, Number(limit) || 200));
+  const start = Math.max(0, end - n);
+  return { items: list.slice(start, end), hasMore: start > 0 };
 }
 
 
@@ -193,6 +290,8 @@ class DashboardBroadcaster {
             if (msg.instanceId) killInstance(msg.instanceId);
           } else if (msg.type === 'inspector:subscribe') {
             if (typeof msg.instanceId === 'string' && msg.instanceId) this.subscribe(ws, msg.instanceId);
+          } else if (msg.type === 'inspector:getEarlier') {
+            if (typeof msg.instanceId === 'string' && msg.instanceId) this.sendEarlier(ws, msg);
           } else if (msg.type === 'inspector:unsubscribe') {
             ws.inspectorSubs.delete(msg.instanceId);
           } else if (msg.type === 'inspector:clearKind') {
@@ -284,12 +383,30 @@ class DashboardBroadcaster {
   // neither lost nor doubled (the browser also dedupes by id).
   subscribe(ws, instanceId) {
     ws.inspectorSubs.add(instanceId);
+    const all = this._sessionInteractions(instanceId);
+    const interactions = all.slice(-SNAPSHOT_LIMIT)
+      .map(i => forSnapshot(i, instanceId)).filter(Boolean);
+    ws.send(JSON.stringify({
+      type: 'inspector:snapshot', instanceId, interactions, hasMore: all.length > SNAPSHOT_LIMIT,
+    }));
+  }
+
+  _sessionInteractions(instanceId) {
     const sessId = this.store.sessionMap.get(instanceId)
       || this.sessions.sessions.get(instanceId)?.sessId
       || (/^cli-([0-9a-f-]{36})$/i.exec(instanceId) || [])[1];
-    const interactions = this.store.sessionInteractions(instanceId, sessId)
-      .map(i => forSnapshot(i, instanceId)).filter(Boolean);
-    ws.send(JSON.stringify({ type: 'inspector:snapshot', instanceId, interactions }));
+    return this.store.sessionInteractions(instanceId, sessId);
+  }
+
+  // "Load earlier" in an inspector tab: the page of summaries before the
+  // oldest turn the browser holds.
+  sendEarlier(ws, msg) {
+    const instanceId = msg.instanceId;
+    const { items, hasMore } = earlierPage(this._sessionInteractions(instanceId), msg);
+    ws.send(JSON.stringify({
+      type: 'inspector:earlier', instanceId, beforeId: msg.beforeId || null,
+      interactions: items.map(i => forSnapshot(i, instanceId)).filter(Boolean), hasMore,
+    }));
   }
 
   // The instance a session-scoped message belongs to. External clients carry
@@ -327,3 +444,6 @@ class DashboardBroadcaster {
 }
 
 module.exports = DashboardBroadcaster;
+module.exports.summarizeForInit = summarizeForInit;
+module.exports.earlierPage = earlierPage;
+module.exports.SNAPSHOT_LIMIT = SNAPSHOT_LIMIT;
