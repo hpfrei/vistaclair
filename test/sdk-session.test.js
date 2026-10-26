@@ -528,29 +528,97 @@ test('a resume carries its cost on: seeded from the transcript, never lowered, r
   s.spawn(tmp('proj-'), 80, 24, { resumeSessionId: id });
   near(statuses(events)[0].costUsd, 11.13, 'the first status already shows it');
   near(statuses(events)[0].baseUsd, 9.9, 'and names the base');
+  // run.json's total (orchestration seeds it before the first turn): only a higher one counts.
+  s.seedCost(11);
+  near(s.costUsd, 11.13);
+  s.seedCost(11.5);
+  near(s.costUsd, 11.5);
+  near(statuses(events).at(-1).costUsd, 11.5);
+  // A query that started again from 0 (0.5 is below its last recorded 0.9):
+  // all it spends adds on.
   calls[0].emit({ type: 'result', total_cost_usd: 0.5, queued_turn_count: 0 });
   await tick();
-  near(s.costUsd, 11.13);
+  near(s.costUsd, 12);
   calls[0].emit({ type: 'result', total_cost_usd: 2.0, queued_turn_count: 0 });
   await tick();
-  near(s.costUsd, 11.9);
-  s.seedCost(11.5);
-  near(s.costUsd, 11.9);
-  s.seedCost(13);
-  near(s.costUsd, 13);
-  near(statuses(events).at(-1).costUsd, 13);
+  near(s.costUsd, 13.5);
+  near(statuses(events).at(-1).costUsd, 13.5);
   s.kill();
 
   // A new conversation in the folder starts at the folder's total.
   const b = makeSession({ sessionDir: s.settings.sessionDir });
   b.s.spawn(tmp('proj-'), 80, 24, {});
-  near(b.s.costUsd, 13);
+  near(b.s.costUsd, 13.5);
   b.s.kill();
   // A new folder starts at zero.
   const c = makeSession();
   c.s.spawn(tmp('proj-'), 80, 24, {});
   assert.strictEqual(c.s.costUsd, 0);
   c.s.kill();
+});
+
+// Claude Code 2.1.308, resumed, carries its session's earlier total on in
+// total_cost_usd (measured: 0.001625 then 0.001996 after a one-word turn,
+// in the same project or not, after an abort too). A CLI that started again
+// from 0 must not lose it either.
+test('a continue resume counts what each spawn spent: a carried-on total once, a restarted one in full', async () => {
+  const id = '66666666-2222-3333-4444-555555555555';
+  const seed = (dir) => fs.writeFileSync(path.join(dir, 'transcript.jsonl'), [
+    { sessId: id, ts: 1, ev: { sdk: { type: 'result', total_cost_usd: 1 } } },
+    { sessId: id, ts: 2, ev: { platform: { kind: 'status', state: 'exited', costUsd: 1 } } },
+  ].map(e => JSON.stringify(e)).join('\n') + '\n');
+  const pricing = { inputCostPerMTok: 1e5 };   // 0.1 per input token
+  const turn = async (r, priced, total) => {
+    r.calls.at(-1).emit({ type: 'assistant', message: { model: 'claude-haiku-5-5', content: [] }, parent_tool_use_id: null });
+    await tick();
+    if (priced) r.s.addRequestCost({ input_tokens: priced * 10 }, pricing);
+    r.calls.at(-1).emit({ type: 'result', total_cost_usd: total, queued_turn_count: 0 });
+    await tick();
+  };
+  const resumed = () => {
+    const r = makeSession();
+    seed(r.s.settings.sessionDir);
+    r.s.spawn(tmp('proj-'), 80, 24, { resumeSessionId: id });
+    near(r.s.costUsd, 1);
+    return r;
+  };
+
+  // Carried on, its requests priced: 1 + 0.4.
+  let r = resumed();
+  await turn(r, 0.4, 1.4);
+  near(r.s.costUsd, 1.4, 'carried on, priced');
+  await turn(r, 0.2, 1.6);
+  near(r.s.costUsd, 1.6);
+  r.s.kill();
+  near(SdkSession.transcriptTotals(r.s.settings.sessionDir).costUsd, 1.6, 'once in the folder too');
+  // Restarted from 0, priced: 1 + 0.4.
+  r = resumed();
+  await turn(r, 0.4, 0.4);
+  near(r.s.costUsd, 1.4, 'restarted, priced');
+  // Even when its first turn costs more than everything before it.
+  r = resumed();
+  await turn(r, 1.5, 1.5);
+  near(r.s.costUsd, 2.5, 'restarted, a turn above the earlier total');
+  // Nothing priced (no proxy pricing): the first result against the last recorded one.
+  r = resumed();
+  await turn(r, 0, 1.3);
+  near(r.s.costUsd, 1.3, 'carried on, unpriced');
+  r = resumed();
+  await turn(r, 0, 0.3);
+  near(r.s.costUsd, 1.3, 'restarted, unpriced');
+  r.s.kill();
+  // A resume of a resume: each spawn adds its own part.
+  const dir = r.s.settings.sessionDir;
+  const again = makeSession({ sessionDir: dir });
+  again.s.spawn(tmp('proj-'), 80, 24, { resumeSessionId: id });
+  near(again.s.costUsd, 1.3);
+  await turn(again, 0.1, 0.4);     // carried on from the last result, 0.3
+  near(again.s.costUsd, 1.4);
+  again.s.kill();
+
+  assert.strictEqual(SdkSession.costStart(5, 0, 0), 0, 'nothing recorded: from 0');
+  assert.strictEqual(SdkSession.costStart(1.4, 0.4, 1), 1);
+  assert.strictEqual(SdkSession.costStart(0.4, 0.4, 1), 0);
 });
 
 test('a fresh restart carries every earlier session\'s cost, counted once', async () => {

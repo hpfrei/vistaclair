@@ -221,7 +221,9 @@ test('totals: the whole transcript\'s cost and compactions when the newest page 
   near(recordedCost(dir, OLD), 4);
   assert.strictEqual(recordedCost(dir, '99999999-2222-3333-4444-555555555555'), 0);
   // No transcript: zeros.
-  assert.deepStrictEqual({ ...transcriptTotals(tmpDir()), own: null }, { costUsd: 0, compactions: 0, own: null });
+  const none = transcriptTotals(tmpDir());
+  assert.deepStrictEqual([none.costUsd, none.compactions, none.own(SESS), none.lastResult(SESS)], [0, 0, 0, 0]);
+  near(t.lastResult(SESS), 1.25, 'the last result, for a resume\'s start');
 });
 
 test('totals: cached, and only the bytes appended since are read', () => {
