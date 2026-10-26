@@ -84,7 +84,9 @@ const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGES_BYTES = 18 * 1024 * 1024;
 const PRIORITIES = new Set(['now', 'next', 'later']);
-const HISTORY_LIMIT = 5000;            // envelopes replayed by sdk:history
+const HISTORY_PAGE = 500;              // envelopes per sdk:history page, by default
+const HISTORY_MAX = 5000;              // the most one page may ask for
+const PAGE_CHUNK = 64 * 1024;          // a page is read backwards in chunks of this size
 const STDERR_TAIL = 4096;
 const TAIL_BYTES = 256 * 1024;         // transcript tail read for a resume's cost and stale input
 const MODEL_RE = /^[A-Za-z0-9._-]+(\[1m\])?$/;
@@ -152,23 +154,69 @@ function transcriptFile(dir) {
   return path.join(dir, 'transcript.jsonl');
 }
 
-// Read a transcript for replay: the last `limit` envelopes. A folder outlives a
-// session id (a fresh restart keeps the folder), so image URLs are re-keyed to
-// the session asking.
-function readTranscript(dir, { sessId, limit = HISTORY_LIMIT } = {}) {
-  let raw;
-  try { raw = fs.readFileSync(transcriptFile(dir), 'utf8'); } catch { return []; }
-  const lines = raw.split('\n').filter(Boolean);
-  const out = [];
-  for (const line of lines.slice(-limit)) {
-    let env;
-    try { env = JSON.parse(line); } catch { continue; }
-    if (sessId && env.ev?.user?.images?.length) {
-      env.ev.user.images = env.ev.user.images.map(i => ({ ...i, url: uploadUrl(sessId, i.name) }));
+// One page of a transcript for replay, read backwards from its end in chunks
+// (never the whole file): the newest `limit` envelopes whose line starts
+// before the byte offset `before` (none: the end), oldest first. The file is
+// only ever appended to, so an offset names the same line for good: the
+// page's `before` (the start of its oldest line) asks for the next older one,
+// and `hasMore` says whether there is one. Bytes after the last newline are a
+// line still being written and wait for the next read. Each envelope carries
+// its line's offset as `off` (not on disk). A folder outlives a session id (a
+// fresh restart keeps the folder), so image URLs are re-keyed to the session
+// asking.
+function readTranscriptPage(dir, { sessId, limit = HISTORY_PAGE, before = null } = {}) {
+  limit = Math.min(HISTORY_MAX, Math.max(1, Math.floor(Number(limit)) || HISTORY_PAGE));
+  const out = [];   // newest first
+  let fd;
+  let oldest = null;
+  try {
+    fd = fs.openSync(transcriptFile(dir), 'r');
+    const size = fs.fstatSync(fd).size;
+    let pos = before == null ? size : Math.min(size, Math.max(0, Math.floor(Number(before)) || 0));
+    let pieces = [];        // the current line's bytes, from later reads
+    let unfinished = true;  // the bytes after the last newline below the bound
+    const take = (start, bufs) => {
+      if (unfinished) { unfinished = false; return; }
+      const line = bufs.length === 1 ? bufs[0] : Buffer.concat(bufs);
+      if (!line.length) return;
+      let env;
+      try { env = JSON.parse(line.toString('utf8')); } catch { return; }
+      if (!env || typeof env !== 'object') return;
+      env.off = start;
+      out.push(env);
+      oldest = start;
+    };
+    while (pos > 0 && out.length < limit) {
+      const lo = Math.max(0, pos - PAGE_CHUNK);
+      const buf = Buffer.alloc(pos - lo);
+      fs.readSync(fd, buf, 0, buf.length, lo);
+      let end = buf.length;
+      for (let i = buf.length - 1; i >= 0 && out.length < limit; i--) {
+        if (buf[i] !== 0x0a) continue;
+        take(lo + i + 1, [buf.subarray(i + 1, end), ...pieces]);
+        pieces = [];
+        end = i;
+      }
+      if (out.length >= limit) break;
+      pieces.unshift(buf.subarray(0, end));
+      pos = lo;
     }
-    out.push(env);
+    if (pos === 0 && out.length < limit) take(0, pieces);
+  } catch {
+    // no transcript (yet): an empty page
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+  out.reverse();
+  if (sessId) {
+    for (const env of out) {
+      if (env.ev?.user?.images?.length) env.ev.user.images = env.ev.user.images.map(i => ({ ...i, url: uploadUrl(sessId, i.name) }));
+    }
   }
-  return out;
+  return { events: out, hasMore: oldest != null && oldest > 0, before: oldest };
+}
+
+// The last `limit` envelopes of a transcript (readTranscriptPage's events).
+function readTranscript(dir, opts = {}) {
+  return readTranscriptPage(dir, opts).events;
 }
 
 // The transcript's last bytes, whole lines only ('' when there is none).
@@ -647,14 +695,24 @@ class SdkSession {
   }
 
   // Broadcast one envelope and keep it in the transcript (deltas and the
-  // live-only `files` signal excepted).
+  // live-only `files` signal excepted). The broadcast names the byte offset
+  // its line will start at (`off`, as sdk:history pages do), so the panel can
+  // ask for what came before it.
   emitEvent(ev) {
     if (!this.sessId) return;
     const env = { sessId: this.sessId, ...(this.runId ? { runId: this.runId } : {}), ts: Date.now(), ev };
-    this.broadcaster.broadcast({ type: 'sdk:event', ...env });
-    if (ev.sdk?.type === 'stream_event' || ev.platform?.kind === 'files') return;
+    const kept = ev.sdk?.type !== 'stream_event' && ev.platform?.kind !== 'files';
+    const off = kept && !this._seeding ? this._transcriptSize() : null;
+    this.broadcaster.broadcast({ type: 'sdk:event', ...env, ...(off != null ? { off } : {}) });
+    if (!kept) return;
     if (this._seeding) { this._seeding.push(env); return; }
     this._append([env]);
+  }
+
+  _transcriptSize() {
+    const dir = this.sessionDir();
+    if (!dir) return null;
+    try { return fs.statSync(transcriptFile(dir)).size; } catch { return 0; }
   }
 
   _append(envs) {
@@ -919,10 +977,14 @@ class SdkSession {
     if (packs) releaseToolPacks(packs, reason);
   }
 
-  // Replay for the panel (sdk:history).
-  history({ limit } = {}) {
+  // Replay for the panel (sdk:history): one page, see readTranscriptPage.
+  historyPage({ limit, before } = {}) {
     const dir = this.sessionDir();
-    return dir ? readTranscript(dir, { sessId: this.sessId, limit }) : [];
+    return dir ? readTranscriptPage(dir, { sessId: this.sessId, limit, before }) : { events: [], hasMore: false, before: null };
+  }
+
+  history(opts) {
+    return this.historyPage(opts).events;
   }
 
   updateSettings(newSettings) {
@@ -963,6 +1025,8 @@ module.exports = SdkSession;
 module.exports.uploadRoute = uploadRoute;
 module.exports.ready = ready;
 module.exports.readTranscript = readTranscript;
+module.exports.readTranscriptPage = readTranscriptPage;
+module.exports.HISTORY_PAGE = HISTORY_PAGE;
 module.exports.transcriptFile = transcriptFile;
 module.exports.recordedCost = recordedCost;
 module.exports.resolveClaudeBinary = resolveClaudeBinary;

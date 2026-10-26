@@ -18,13 +18,17 @@
 // stage's top-left corner, left of the orchestrator's box: one card per
 // worker, newest closed first (foldable to a tab, per run). A card opens that
 // worker's box, dashed, first in the row, one at a time; its caption's ◂ (or
-// the card again) puts it back. Shelved boxes stay alive off the page, so
-// nothing is fetched again. A row with no box takes no room: the
+// the card again) puts it back. A row with no box takes no room: the
 // orchestrator's box and the shelf fill the stage.
 //
-// Everything shown is server state: on mount and after a reconnect each box
-// asks for `sdk:history` (the session's transcript, no stream deltas),
-// replays it, then continues from the live `sdk:event` broadcasts. TODO.md
+// Everything shown is server state: when a box is first shown and after a
+// reconnect it asks for `sdk:history` (the newest page of the session's
+// transcript, no stream deltas), replays it, then continues from the live
+// `sdk:event` broadcasts. The feed is a window: it keeps its newest FEED_MAX
+// entries while following, and "Load earlier" at its top puts the page
+// before them back. A box hidden for RELEASE_MS (its tab not active, or a
+// worker on the shelf) drops its feed and only keeps its caption up to
+// date; shown again, it asks for the newest page. TODO.md
 // and NOTES.md come from `sdk:todo`, re-asked on the session's own edits to
 // them (`platform.files`), run membership from GET /api/orchestration/run.
 // The composer has no remembered target: every message is sent through one
@@ -38,6 +42,12 @@
   const POLL_MS = 15000;           // backstop: TODO/NOTES edits normally arrive as platform.files
   const TICK_MS = 1000;            // the "now:" line's elapsed time
   const HISTORY_WAIT_MS = 10000;
+  const PAGE = 500;                // envelopes per sdk:history page
+  const FEED_MAX = 500;            // feed entries a box keeps while following
+  const FEED_HARD_MAX = 3000;      // ... and while the reader is scrolled back
+  const SEEN_MAX = 2000;           // recent message uuids kept to skip repeats
+  const MAP_MAX = 2000;            // backstop for the per-message and per-tool maps
+  const RELEASE_MS = 60000;        // hidden this long, a box drops its feed
   const FOLLOW_SLACK_PX = 48;
   const USER_SCROLL_MS = 800;      // a scroll this soon after the reader's input is theirs
   const LINK_FLASH_MS = 1600;
@@ -117,6 +127,32 @@
     if (orch && name.startsWith(orch + '-')) return name.slice(orch.length + 1);
     return name.replace(/^orch-[^-]+-/, '').replace(/^orch-[^-]+$/, 'orch');
   }
+  // ---- the feed window (pure; test/sdk-feed-window.test.js) ----
+
+  // How many of a feed's `count` oldest entries go: down to `max` while the
+  // reader follows the live end; scrolled back, only past `hardMax`, so what
+  // they are reading stays.
+  function feedExcess(count, following, max = FEED_MAX, hardMax = FEED_HARD_MAX) {
+    if (count > hardMax) return count - (following ? max : hardMax);
+    return following && count > max ? count - max : 0;
+  }
+  // The page above the entries kept, from their transcript offsets (oldest
+  // first; null for one drawn from no stored line, e.g. a stream delta's
+  // block): everything before the oldest stored one. None known: `cur`.
+  function cursorAbove(offs, cur) {
+    for (const off of offs) if (typeof off === 'number') return { before: off, hasMore: off > 0 };
+    return cur;
+  }
+  // A Map or Set past `max`: its oldest entries go (insertion order), those
+  // `droppable` lets go.
+  function capOldest(coll, max, droppable = () => true) {
+    if (coll.size <= max) return;
+    for (const [k, v] of coll.entries()) {
+      if (coll.size <= max) break;
+      if (droppable(v)) coll.delete(k);
+    }
+  }
+
   // Scroll `node` (inside the scroller `box`) to a third of the box's height.
   function scrollToNode(box, node) {
     const top = node.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
@@ -196,6 +232,12 @@
       else this.top = b.scrollTop;   // the browser kept the reader's rows in view
     }
 
+    // Rows were put above the reader's: held where they now are.
+    hold(top) {
+      this._set(false);
+      this.top = top;
+    }
+
     // The chip: to the bottom, following again.
     pin() {
       this._set(true);
@@ -254,6 +296,9 @@
       this.context = null;           // { tokens, window, compactAt, windowEstimated } from the status
       this.queue = [];
       this.historyPending = false;
+      this.shown = false;            // see setShown
+      this.stale = true;             // no feed loaded: it loads when shown
+      this.compactions = 0;
       // A stored view this panel no longer has (the old TODO) opens Live.
       this.view = storedKey(VIEW_STORE, sessId) || 'live';
       this._build();
@@ -300,7 +345,7 @@
             <div class="sdk-todo-split" title="Drag to resize · double-click to reset"></div>
             <div class="sdk-todo-lite">
               <div class="sdk-feed-wrap">
-                <div class="sdk-feed lite"></div>
+                <div class="sdk-feed lite"><button type="button" class="sdk-feed-more hidden">Load earlier</button></div>
                 <button type="button" class="sdk-live-pill hidden">↓ Go to bottom</button>
               </div>
               <div class="sdk-pending hidden"></div>
@@ -327,6 +372,8 @@
       this.todoEl = q('.sdk-todo-wrap');
       this.notesEl = q('.sdk-view-notes');
       this.feed = q('.sdk-feed');
+      this.moreEl = q('.sdk-feed-more');
+      this.moreEl.addEventListener('click', () => this.loadEarlier());
       this.pendingEl = q('.sdk-pending');
       this.segBtns = Object.fromEntries([...root.querySelectorAll('.sdk-seg button')].map(b => [b.dataset.v, b]));
 
@@ -392,6 +439,8 @@
       this.feedFollow.destroy();
       this.todoFollow.destroy();
       clearTimeout(this._historyTimer);
+      clearTimeout(this._olderTimer);
+      clearTimeout(this._releaseTimer);
       if (areas.get(this.sessId) === this) areas.delete(this.sessId);
       this.el.remove();
     }
@@ -530,7 +579,7 @@
         const t = this.nowTool;
         if (t) {
           const age = t.startedAt ? ` · ${fmtAge(Date.now() - t.startedAt)}` : '';
-          text = `now: ${prettyTool(t.name)} ${oneLine(toolSummary(t.name, t.input))}`.trim() + age;
+          text = `now: ${prettyTool(t.name)} ${t.input?.gist || ''}`.trim() + age;
         } else {
           text = 'now: thinking…';
         }
@@ -593,21 +642,25 @@
     // ---- feed: history, then live ----
 
     reset() {
-      this.feed.innerHTML = '';
+      this.feed.replaceChildren(this.moreEl);
       this.msgs = new Map();      // message.id -> {id, pk, blocks}
       this.streams = new Map();   // parent_tool_use_id|'' -> {rec, byIndex}
       this.tools = new Map();     // tool_use_id -> {id, name, input, done, startedAt}
       this.subs = new Map();      // Agent tool_use_id -> {label, color, description}
       this.subCounts = new Map(); // subagent type -> runs so far
-      this.compactions = 0;
+      this.subRuns = 0;
       this.nowTool = null;
-      this.seen = new Set();
+      this.seen = new Set();      // the newest SEEN_MAX message uuids
       this.pending = new Map();   // user turn id -> its "waiting" chip
       this.pendingEl.innerHTML = '';
       this.pendingEl.classList.add('hidden');
+      clearTimeout(this._olderTimer);
+      this._olderFrom = undefined;
+      this.setTop({ before: null, hasMore: false });
     }
 
     requestHistory() {
+      this.stale = false;
       this.historyPending = true;
       this.queue = [];
       clearTimeout(this._historyTimer);
@@ -617,37 +670,213 @@
         if (!this.historyPending) return;
         this.onHistory([], 'history did not arrive');
       }, HISTORY_WAIT_MS);
-      sendWs({ type: 'sdk:history', sessId: this.sessId });
+      sendWs({ type: 'sdk:history', sessId: this.sessId, limit: PAGE });
     }
 
-    onHistory(events, error) {
+    // An sdk:history reply: the newest page (`from` null) or an older one.
+    onPage(page) {
+      const events = Array.isArray(page.events) ? page.events : [];
+      if (page.from != null) this.onOlder(page, events);
+      else if (this.historyPending) this.onHistory(events, page.error, page);
+    }
+
+    onHistory(events, error, page = {}) {
       clearTimeout(this._historyTimer);
+      // Counted again from the page; never fewer than this box has seen.
+      const compactions = this.compactions;
       this.reset();
+      this.compactions = 0;
       const keys = new Set();
       this._replaying = true;
       for (const rec of events) {
         const ev = unwrap(rec);
         keys.add(envKey(ev));
+        this._off = ev !== rec && typeof rec.off === 'number' ? rec.off : null;
         try { this.apply(ev, false, ev !== rec ? rec.ts : null); } catch (e) { console.warn('sdk-panel: history event', e, ev); }
       }
+      this._off = null;
       this._replaying = false;
+      this.compactions = Math.max(compactions, this.compactions);
+      this.renderContext();
+      this.setTop({ before: page.before ?? null, hasMore: !!page.hasMore });
       if (error) this.notice(`History: ${error}`, 'warn');
       const queued = this.queue;
       this.queue = [];
       this.historyPending = false;
       // Live events that raced the history reply; the ones history already
       // holds are skipped (deltas are never in history and always pass).
-      for (const { ev, ts } of queued) {
+      for (const { ev, ts, off } of queued) {
         if (ev?.sdk?.type !== 'stream_event' && keys.has(envKey(ev))) continue;
+        this._off = off;
         try { this.apply(ev, true, ts); } catch (e) { console.warn('sdk-panel: live event', e, ev); }
       }
+      this._off = null;
+      this.trim();
       this.renderNow();
     }
 
-    // ts: the envelope's server time (ms), when it has one.
-    receive(ev, ts) {
-      if (this.historyPending) { this.queue.push({ ev, ts }); return; }
+    // ts: the envelope's server time (ms), off: its transcript offset, when
+    // it has them. A released box only keeps its caption up to date.
+    receive(ev, ts, off) {
+      if (this.stale) { try { this.applyCaption(ev); } catch (e) { console.warn('sdk-panel: event', e, ev); } return; }
+      if (this.historyPending) { this.queue.push({ ev, ts, off }); return; }
+      this._off = typeof off === 'number' ? off : null;
       try { this.apply(ev, true, ts); } catch (e) { console.warn('sdk-panel: event', e, ev); }
+      this._off = null;
+      this.trim();
+    }
+
+    // ---- the feed window ----
+
+    // A new entry at the feed's end, tagged with the transcript offset of the
+    // envelope being applied (null: none yet, e.g. a block drawn from stream
+    // deltas, until its complete message comes).
+    add(node) {
+      node.vcOff = this._off ?? null;
+      return this.feed.appendChild(node);
+    }
+
+    // The page above the feed, and the "Load earlier" row that asks for it.
+    setTop(top) {
+      this.top = top;
+      this.moreEl.classList.toggle('hidden', !top.hasMore);
+      this.moreEl.disabled = this._olderFrom !== undefined;
+      this.moreEl.textContent = this.moreEl.disabled ? 'Loading…' : 'Load earlier';
+    }
+
+    * entryOffs() {
+      for (let e = this.moreEl.nextElementSibling; e; e = e.nextElementSibling) yield e.vcOff;
+    }
+
+    // Past the cap, the oldest entries go with what the maps hold for them;
+    // "Load earlier" then asks for what came before the oldest kept. The
+    // reader's rows stay put when they are scrolled back.
+    trim() {
+      const following = this.feedFollow.on;
+      const n = feedExcess(this.feed.childElementCount - 1, following);
+      if (n <= 0) return;
+      const h = this.feed.scrollHeight;
+      for (let i = 0; i < n; i++) this.dropEntry(this.moreEl.nextElementSibling);
+      if (!following) this.feed.scrollTop -= h - this.feed.scrollHeight;
+      this.setTop(cursorAbove(this.entryOffs(), this.top));
+    }
+
+    dropEntry(node) {
+      if (node.vcMsg) {
+        this.msgs.delete(node.vcMsg);
+        for (const [pk, s] of this.streams) if (s.rec.id === node.vcMsg) this.streams.delete(pk);
+      }
+      const t = node.vcTool ? this.tools.get(node.vcTool) : null;
+      if (t && t.lineEl === node) {
+        // A call still running keeps its record (the "now:" line, its result).
+        t.lineEl = t.lineName = t.lineText = t.chipEl = null;
+        if (t.done) this.forgetTool(t);
+      }
+      node.remove();
+    }
+
+    forgetTool(t) {
+      this.tools.delete(t.id);
+      this.subs.delete(t.id);
+      this.streams.delete(t.id);
+    }
+
+    // The page before the oldest entry shown, put on top; the reader's rows
+    // stay where they are.
+    loadEarlier() {
+      if (!this.top.hasMore || this._olderFrom !== undefined || this.stale) return;
+      this._olderFrom = this.top.before;
+      this.setTop(this.top);
+      clearTimeout(this._olderTimer);
+      this._olderTimer = setTimeout(() => { this._olderFrom = undefined; this.setTop(this.top); }, HISTORY_WAIT_MS);
+      sendWs({ type: 'sdk:history', sessId: this.sessId, before: this._olderFrom, limit: PAGE });
+    }
+
+    onOlder(page, events) {
+      if (this.stale || page.from !== this._olderFrom) return;
+      clearTimeout(this._olderTimer);
+      this._olderFrom = undefined;
+      const sh = this.shadow();
+      for (const rec of events) {
+        const ev = unwrap(rec);
+        sh._off = ev !== rec && typeof rec.off === 'number' ? rec.off : null;
+        try { sh.apply(ev, false, ev !== rec ? rec.ts : null); } catch (e) { console.warn('sdk-panel: older event', e, ev); }
+      }
+      // A call still running at the page's end: this box's record, if it kept
+      // one, takes the line over (its result updates it); else it has
+      // finished since.
+      for (const t of sh.tools.values()) {
+        if (t.done || !t.lineEl) continue;
+        const mine = this.tools.get(t.id);
+        if (mine && !mine.lineEl && !mine.done) {
+          Object.assign(mine, { lineEl: t.lineEl, lineName: t.lineName, lineText: t.lineText, chipEl: t.chipEl });
+          this.renderToolLine(mine);
+        } else {
+          t.done = true;
+          sh.renderToolLine(t);
+        }
+      }
+      const box = this.feed;
+      const h = box.scrollHeight;
+      const top = box.scrollTop;
+      this.moreEl.after(sh.feed);
+      box.scrollTop = top + (box.scrollHeight - h);
+      if (box.scrollHeight > box.clientHeight) this.feedFollow.hold(box.scrollTop);
+      this.setTop({ before: page.before ?? null, hasMore: !!page.hasMore });
+    }
+
+    // Draws an older page: this box's methods and fields by inheritance, its
+    // own maps and a detached feed, and nothing that reaches the caption, the
+    // "now:" line, the pending chips or the window.
+    shadow() {
+      const sh = Object.create(this);
+      Object.assign(sh, {
+        feed: document.createDocumentFragment(),
+        msgs: new Map(), streams: new Map(), tools: new Map(), subs: new Map(), subCounts: new Map(), subRuns: 0,
+        seen: new Set(), pending: new Map(), pendingEl: el('div'),
+        nowTool: null, gotStatus: true, initModel: null, _quietInit: true, _replaying: true,
+      });
+      for (const k of ['setState', 'setCost', 'renderHeader', 'renderContext', 'renderNow', 'markUnread', 'requestTodo', 'applyStatus', 'modelRefused', 'trim']) sh[k] = () => {};
+      return sh;
+    }
+
+    // ---- shown, hidden, released ----
+
+    // Shown: its panel's tab is active and the box is in the stage (not a
+    // worker on the shelf). Hidden for RELEASE_MS, it drops its feed; shown
+    // again sooner, everything is as it was.
+    setShown(v) {
+      v = !!v;
+      if (v === this.shown) return;
+      this.shown = v;
+      clearTimeout(this._releaseTimer);
+      if (!v) this._releaseTimer = setTimeout(() => this.release(), RELEASE_MS);
+      else if (this.stale) this.requestHistory();
+    }
+
+    // Everything the feed holds goes; the caption stays. Until it is shown
+    // again its events only move the caption.
+    release() {
+      if (this.shown) return;
+      clearTimeout(this._releaseTimer);
+      clearTimeout(this._historyTimer);
+      this.historyPending = false;
+      this.queue = [];
+      this.stale = true;
+      this.reset();
+    }
+
+    // A released box's event: what the caption shows.
+    applyCaption(ev) {
+      const p = ev?.platform;
+      if (p?.kind === 'status') return this.applyStatus(p);
+      if (p?.kind === 'files') return this.requestTodo();
+      if (p?.kind === 'notice' && /^Model not changed/.test(p.text || '')) return this.modelRefused();
+      const m = ev?.sdk;
+      if (!m || m.parent_tool_use_id) return;
+      if (m.type === 'result' && typeof m.total_cost_usd === 'number') this.setCost(m.total_cost_usd);
+      else if (m.type === 'system' && m.subtype === 'compact_boundary') { this.compactions++; this.renderContext(); }
+      else if (m.type === 'system' && m.subtype === 'init' && m.model && m.model !== this.initModel) { this.initModel = m.model; this.renderHeader(); }
     }
 
     apply(ev, live, ts) {
@@ -658,32 +887,38 @@
       if (!p) return;
       if (p.kind === 'message') return this.applyPeerMessage(p, live);
       if (p.kind === 'notice') {
-        // A refused switch: the label goes back to the model still in use.
-        if (/^Model not changed/.test(p.text || '') && this._modelBefore !== undefined) {
-          this.model = this._modelBefore;
-          this.actualModel = this._actualBefore || null;
-          this._modelBefore = undefined;
-          this.renderHeader();
-        }
+        if (/^Model not changed/.test(p.text || '')) this.modelRefused();
         return this.notice(p.text, p.level === 'warning' ? 'warn' : p.level);
       }
       if (p.kind === 'files') { if (live) this.requestTodo(); return; }
-      if (p.kind === 'status') {
-        this.gotStatus = true;
-        if (typeof p.costUsd === 'number') this.setCost(p.costUsd);
-        if (p.model !== undefined) { this.model = p.model || null; this._modelBefore = undefined; }
-        if (p.actualModel !== undefined) this.actualModel = p.actualModel || null;
-        if (p.mappedTo !== undefined) this.mappedTo = p.mappedTo || null;
-        if (p.context && typeof p.context === 'object') this.context = p.context;
-        this.setState(p.state);
-        this.renderHeader();
-      }
+      if (p.kind === 'status') this.applyStatus(p);
+    }
+
+    // A refused switch: the label goes back to the model still in use.
+    modelRefused() {
+      if (this._modelBefore === undefined) return;
+      this.model = this._modelBefore;
+      this.actualModel = this._actualBefore || null;
+      this._modelBefore = undefined;
+      this.renderHeader();
+    }
+
+    applyStatus(p) {
+      this.gotStatus = true;
+      if (typeof p.costUsd === 'number') this.setCost(p.costUsd);
+      if (p.model !== undefined) { this.model = p.model || null; this._modelBefore = undefined; }
+      if (p.actualModel !== undefined) this.actualModel = p.actualModel || null;
+      if (p.mappedTo !== undefined) this.mappedTo = p.mappedTo || null;
+      if (p.context && typeof p.context === 'object') this.context = p.context;
+      this.setState(p.state);
+      this.renderHeader();
     }
 
     applySdk(m, live, ts) {
       if (m.uuid && m.type !== 'stream_event') {
         if (this.seen.has(m.uuid)) return;
         this.seen.add(m.uuid);
+        capOldest(this.seen, SEEN_MAX);
       }
       switch (m.type) {
         case 'stream_event': if (live) this.applyStream(m); return;
@@ -705,7 +940,7 @@
     msgRec(id, pk) {
       if (id && this.msgs.has(id)) return this.msgs.get(id);
       const rec = { id: id || null, pk, blocks: [] };
-      if (id) this.msgs.set(id, rec);
+      if (id) { this.msgs.set(id, rec); capOldest(this.msgs, MAP_MAX); }
       return rec;
     }
 
@@ -717,11 +952,13 @@
         const blk = { type, partial: '', final: false, toolId: opts.toolId || null, tool: this.toolStarted(opts.toolId, opts.toolName, rec.pk) };
         if (!blk.tool.lineEl) {
           const line = blk.tool.lineEl = el('div', `sdk-toolline${rec.pk ? ' sub' : ''}`);
+          line.vcTool = blk.tool.id;
+          line.vcMsg = rec.id;
           if (rec.pk) line.appendChild(this.subChip(rec.pk));
           blk.tool.lineName = line.appendChild(el('span', 'sdk-toolline-name'));
           blk.tool.lineText = line.appendChild(el('span', 'sdk-toolline-text'));
           this.renderToolLine(blk.tool);
-          this.feed.appendChild(line);
+          this.add(line);
         }
         rec.blocks.push(blk);
         return blk;
@@ -744,7 +981,8 @@
         head.addEventListener('click', () => blk.el.classList.toggle('open'));
         blk.el.append(head, blk.body);
       }
-      this.feed.appendChild(blk.el);
+      blk.el.vcMsg = rec.id;
+      this.add(blk.el);
       rec.blocks.push(blk);
       return blk;
     }
@@ -759,8 +997,9 @@
         const type = String(input.subagent_type || 'subagent');
         const n = (this.subCounts.get(type) || 0) + 1;
         this.subCounts.set(type, n);
-        s = { label: `${type.charAt(0).toUpperCase()}${type.slice(1)} ${n}`, color: this.subs.size % 4, description: input.description || '' };
+        s = { label: `${type.charAt(0).toUpperCase()}${type.slice(1)} ${n}`, color: this.subRuns++ % 4, description: input.description || '' };
         this.subs.set(pk, s);
+        capOldest(this.subs, MAP_MAX);
       }
       return s;
     }
@@ -778,18 +1017,25 @@
       let t = id ? this.tools.get(id) : null;
       if (!t) {
         t = { id, name, input: null, done: false, startedAt: this._replaying ? null : Date.now(), sub: !!pk };
-        if (id) this.tools.set(id, t);
+        if (id) { this.tools.set(id, t); capOldest(this.tools, MAP_MAX, (x) => x.done); }
       }
       if (!t.sub && !t.done) { this.nowTool = t; this.renderNow(); }
       return t;
     }
 
+    // A call keeps what its line and the "now:" line show, not its whole
+    // input (a Write's file, an Edit's strings).
     setToolInput(t, input) {
       if (!t) return;
-      t.input = input;
+      input = input && typeof input === 'object' ? input : {};
+      t.input = {
+        description: clip(oneLine(input.description), 500),
+        subagent_type: input.subagent_type ? String(input.subagent_type) : '',
+        gist: clip(oneLine(toolSummary(t.name, input)), 500),
+      };
       // A main-agent Agent call is numbered as it is made, and its line
       // carries the chip its subagent's output will.
-      if ((t.name === 'Agent' || t.name === 'Task') && !t.sub && input?.subagent_type && t.lineEl && !t.chipEl) {
+      if ((t.name === 'Agent' || t.name === 'Task') && !t.sub && t.input.subagent_type && t.lineEl && !t.chipEl) {
         t.chipEl = t.lineEl.insertBefore(this.subChip(t.id), t.lineName);
       }
       this.renderToolLine(t);
@@ -799,8 +1045,8 @@
     renderToolLine(t) {
       const line = t.lineEl;
       if (!line) return;
-      const desc = oneLine(t.input && t.input.description);
-      const gist = desc || oneLine(toolSummary(t.name, t.input));
+      const desc = t.input?.description || '';
+      const gist = desc || t.input?.gist || '';
       // The lite feed shows the description alone, without the tool's name.
       t.lineName.textContent = gist ? `${prettyTool(t.name)} · ` : prettyTool(t.name);
       t.lineText.textContent = gist;
@@ -843,8 +1089,9 @@
             if (selectionInside(blk.body)) cancelRenderDebounce(blk.body);
             else renderMarkdownDebounced(blk.raw, blk.body);
           } else if (d.type === 'thinking_delta') {
-            blk.raw += d.thinking || '';
-            blk.body.appendChild(document.createTextNode(d.thinking || ''));
+            // One text node grows (the body's text is the thinking so far).
+            if (!blk.textNode) blk.textNode = blk.body.appendChild(document.createTextNode(''));
+            blk.textNode.appendData(d.thinking || '');
           } else if (d.type === 'input_json_delta') {
             blk.partial += d.partial_json || '';
           }
@@ -855,6 +1102,7 @@
           if (!blk || blk.final) return;
           if (blk.type === 'tool_use') {
             try { this.setToolInput(blk.tool, JSON.parse(blk.partial || '{}')); } catch {}
+            blk.partial = '';
           } else if (blk.type === 'text') {
             cancelRenderDebounce(blk.body);
             renderMarkdown(blk.raw, blk.body);
@@ -880,26 +1128,39 @@
           let blk = rec.blocks.find(x => x.type === 'tool_use' && x.toolId === b.id);
           if (!blk) blk = this.newBlock(rec, 'tool_use', { toolId: b.id, toolName: b.name });
           blk.final = true;
+          blk.partial = '';
           this.setToolInput(blk.tool, b.input || {});
+          this.stored(blk.tool.lineEl, rec.id);
         } else if (b.type === 'text' || b.type === 'thinking' || b.type === 'redacted_thinking') {
           const t = b.type === 'text' ? 'text' : 'thinking';
           let blk = rec.blocks.find(x => x.type === t && !x.final);
           if (!blk) blk = this.newBlock(rec, t);
           if (!blk) continue;
           blk.final = true;
+          this.stored(blk.el, rec.id);
+          // Drawn for good: the text lives in the DOM only.
           if (t === 'text') {
-            blk.raw = b.text || '';
             cancelRenderDebounce(blk.body);
-            renderMarkdown(blk.raw, blk.body);
+            renderMarkdown(b.text || '', blk.body);
           } else {
-            blk.raw = b.type === 'redacted_thinking' ? '(redacted)' : (b.thinking || blk.raw || '');
-            blk.body.textContent = blk.raw;
+            const raw = b.type === 'redacted_thinking' ? '(redacted)' : (b.thinking || blk.body.textContent || '');
+            blk.textNode = null;
+            blk.body.textContent = raw;
             blk.el.classList.remove('open');
-            blk.el.classList.toggle('sdk-thinking-empty', !blk.raw.trim());
+            blk.el.classList.toggle('sdk-thinking-empty', !raw.trim());
           }
+          blk.raw = '';
         }
       }
       if (m.error) this.notice(`API error: ${typeof m.error === 'string' ? m.error : JSON.stringify(m.error)}`, 'error');
+    }
+
+    // A block's complete message has come: its entry takes the message's
+    // transcript offset (if it had none: drawn from deltas) and id.
+    stored(node, msgId) {
+      if (!node) return;
+      if (node.vcOff == null) node.vcOff = this._off ?? null;
+      if (msgId) node.vcMsg = msgId;
     }
 
     // Tool results. The CLI's echo of a user turn (isReplay) is not
@@ -911,12 +1172,20 @@
       for (const b of c) {
         if (b?.type !== 'tool_result') continue;
         const t = this.tools.get(b.tool_use_id);
-        if (t) { t.done = true; t.error = !!b.is_error; this.renderToolLine(t); }
+        if (t) {
+          t.done = true;
+          t.error = !!b.is_error;
+          this.renderToolLine(t);
+          // A subagent's stream ends with its call.
+          this.streams.delete(t.id);
+        }
         if (t && t === this.nowTool) {
           // The newest main-agent call still running, if any.
           this.nowTool = [...this.tools.values()].reverse().find(x => !x.done && !x.sub) || null;
           this.renderNow();
         }
+        // A line already out of the window takes its record along.
+        if (t && !t.lineEl) this.forgetTool(t);
       }
     }
 
@@ -938,7 +1207,9 @@
         line.title = at.toLocaleString();
       }
       line.appendChild(el('span', 'sdk-result-text', bits.join(' · ')));
-      this.feed.appendChild(line);
+      this.add(line);
+      // The main agent stopped: every stream it had is over.
+      this.streams.clear();
       // total_cost_usd is the running total of this query(), so the latest wins.
       if (typeof m.total_cost_usd === 'number') this.setCost(m.total_cost_usd);
       this.nowTool = null;
@@ -950,8 +1221,10 @@
       switch (m.subtype) {
         case 'init':
           // Emitted at the start of every turn; only a model change is news.
+          // (An older page's first one is not news either.)
           if (m.model && m.model !== this.initModel) {
-            this.notice(`${this.initModel ? 'Model now' : 'Session started ·'} ${m.model}`);
+            if (!this._quietInit) this.notice(`${this.initModel ? 'Model now' : 'Session started ·'} ${m.model}`);
+            this._quietInit = false;
             this.initModel = m.model;
             this.renderHeader();
           }
@@ -1015,7 +1288,7 @@
         }
         bubble.appendChild(strip);
       }
-      this.feed.appendChild(bubble);
+      this.add(bubble);
       if (!this.gotStatus) this.setState('busy');
     }
 
@@ -1046,7 +1319,7 @@
       const line = el('div', 'sdk-user-dropped');
       line.append(el('span', 'sdk-user-dropped-tag', reason === 'interrupted' ? 'cancelled' : 'not sent'), el('span', 'sdk-user-dropped-text', userGist(p.u)));
       line.title = `${reason === 'interrupted' ? 'Cancelled by the interrupt' : 'The session ended before taking it in'}.\n\n${String(p.u.text || '')}`;
-      this.feed.appendChild(line);
+      this.add(line);
     }
 
     // One per SendMessage, emitted on both the sender's and the receiver's
@@ -1062,12 +1335,12 @@
       const card = el('div', 'sdk-peer in');
       card.appendChild(el('div', 'sdk-peer-head', this.isMe(p.to) ? `from ${from}` : `${from} → ${shortName(p.to, this.panel.run)}`));
       card.appendChild(el('div', 'sdk-peer-text', String(p.text || '')));
-      this.feed.appendChild(card);
+      this.add(card);
       this.markUnread();
     }
 
     notice(text, level) {
-      return this.feed.appendChild(el('div', `sdk-notice${level ? ` sdk-notice-${level}` : ''}`, String(text || '')));
+      return this.add(el('div', `sdk-notice${level ? ` sdk-notice-${level}` : ''}`, String(text || '')));
     }
   }
 
@@ -1248,7 +1521,7 @@
         this.main = new Area(this, sessId, { role, name: this.info.title || sessId, label: role === 'orchestrator' ? 'orchestrator' : (this.info.title || 'session') });
         if (role === 'orchestrator') this.main.addAliases(['orch', 'orchestrator']);
         this.mainSlot.appendChild(this.main.el);
-        this.main.requestHistory();
+        this.syncShown();
         this.main.requestTodo();
         this.drawLinksSoon();
       }
@@ -1335,7 +1608,6 @@
       const a = new Area(this, sessId, { role: 'worker', name, label });
       this.workers.set(sessId, a);
       this.workersEl.appendChild(a.el);
-      a.requestHistory();
       a.requestTodo();
       this.layoutWorkers();
       return a;
@@ -1363,7 +1635,14 @@
       this.renderShelf(shelved);
       this.panelEl.classList.toggle('has-workers', this.rowList.length > 0);
       this.workersEl.classList.toggle('crowded', this.rowList.length > 3);
+      this.syncShown();
       this.drawLinksSoon();
+    }
+
+    // The boxes shown: those in the stage of the active tab's panel.
+    syncShown() {
+      this.main?.setShown(this.active);
+      for (const a of this.workers.values()) a.setShown(this.active && this.rowList.includes(a));
     }
 
     // ---- the shelf ----
@@ -1712,8 +1991,14 @@
       sendWs({ type: 'cli:refreshOrchestrator', runId: this.runId });
     }
 
+    // Events were missed: a box shown reloads, a hidden one drops its feed
+    // now (it reloads when shown).
     reloadHistory() {
-      for (const a of this.allAreas()) { a.requestHistory(); a.requestTodo(); }
+      for (const a of this.allAreas()) {
+        if (a.shown) a.requestHistory();
+        else a.release();
+        a.requestTodo();
+      }
       if (this.runId) this.fetchRun();
     }
 
@@ -1730,6 +2015,7 @@
 
     setActive(v) {
       this.active = !!v;
+      this.syncShown();
       clearInterval(this._poll);
       clearInterval(this._tick);
       this._poll = this._tick = null;
@@ -1816,18 +2102,16 @@
         // may come without a known session: show it in the main box.
         const a = areas.get(msg.sessId) || adopt(msg)
           || (!areas.has(msg.sessId) && msg.ev?.platform?.kind === 'notice' ? activePanel()?.main : null);
-        // A freshly adopted area has just asked for history, which queues
-        // this event and drops it if history already holds it.
-        a?.receive(msg.ev, msg.ts);
+        // A freshly adopted area shown has just asked for history, which
+        // queues this event and drops it if history already holds it; one
+        // hidden only moves its caption.
+        a?.receive(msg.ev, msg.ts, msg.off);
         break;
       }
       case 'sdk:history':
-        // {sessId, events} — or the run form {runId, sessions:[{sessId, events}]}.
-        if (Array.isArray(msg.sessions)) {
-          for (const x of msg.sessions) areas.get(x.sessId)?.onHistory(Array.isArray(x.events) ? x.events : [], x.error);
-        } else {
-          areas.get(msg.sessId)?.onHistory(Array.isArray(msg.events) ? msg.events : [], msg.error);
-        }
+        // {sessId, from, events, hasMore, before} — or the run form
+        // {runId, sessions:[{sessId, from, events, hasMore, before}]}.
+        for (const x of Array.isArray(msg.sessions) ? msg.sessions : [msg]) areas.get(x.sessId)?.onPage(x);
         break;
       case 'sdk:todo':
         areas.get(msg.sessId)?.onTodo(msg);
@@ -1844,5 +2128,8 @@
     if (document.visibilityState === 'visible') for (const p of panels.values()) p.pollTodos();
   });
 
-  window.sdkPanel = { mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, _panels: panels, _areas: areas };
+  window.sdkPanel = {
+    mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, _panels: panels, _areas: areas,
+    _feedWindow: { feedExcess, cursorAbove, capOldest, FEED_MAX, FEED_HARD_MAX, PAGE },
+  };
 })();

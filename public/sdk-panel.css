@@ -495,6 +495,21 @@
 /* Feed rows keep their height: a column flex scroller would otherwise
    squash every overflow:hidden child to fit. */
 .sdk-feed > * { flex-shrink: 0; }
+/* The feed keeps its newest entries; this row at its top puts the page
+   before them back. */
+.sdk-feed-more {
+  align-self: center;
+  padding: 2px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.sdk-feed-more:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.sdk-feed-more:disabled { cursor: default; opacity: .7; }
 .sdk-live-pill {
   position: absolute;
   left: 50%;
@@ -550,7 +565,7 @@
 .sdk-feed.lite > .sdk-toolline.error::before { color: var(--red); opacity: 1; }
 .sdk-feed.lite > .sdk-text + .sdk-toolline { margin-top: 2px; }
 .sdk-feed.lite > .sdk-toolline + .sdk-text { margin-top: 4px; }
-.sdk-feed.lite > :not(.sdk-text):not(.sdk-sub):not(.sdk-toolline.has-desc):not(.sdk-user):not(.sdk-user-dropped):not(.sdk-result),
+.sdk-feed.lite > :not(.sdk-text):not(.sdk-sub):not(.sdk-toolline.has-desc):not(.sdk-user):not(.sdk-user-dropped):not(.sdk-result):not(.sdk-feed-more),
 .sdk-feed.lite .sdk-toolline-name { display: none; }
 .sdk-sub { display: flex; gap: 6px; align-items: baseline; }
 .sdk-sub > .sdk-text { flex: 1; min-width: 0; }
