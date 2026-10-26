@@ -39,9 +39,9 @@
 //                  from (cleared by a switch), and the tab's modelMap target for its family. The
 //                  cost is the session folder's running total: every earlier
 //                  session id's in it (baseUsd, a fresh restart's or an
-//                  orchestrator refresh's predecessors) plus this id's own,
-//                  which a resume starts from what its transcript recorded and
-//                  never lets go below it. `context` ({ tokens,
+//                  orchestrator refresh's predecessors) plus this id's own:
+//                  what its transcript recorded, plus what each spawn's query
+//                  spent since it started (costStart). `context` ({ tokens,
 //                  window, compactAt, windowEstimated }, once a main-agent
 //                  reply has counted it): the main agent's context from each
 //                  reply's usage, the window from the turn's modelUsage, both
@@ -272,6 +272,7 @@ function noteTotals(t, env) {
     own = Number.isFinite(ev.platform.costUsd) ? ev.platform.costUsd - base : undefined;
   } else if (ev.sdk?.type === 'result') {
     own = ev.sdk.total_cost_usd;
+    if (typeof own === 'number' && Number.isFinite(own)) t.last.set(env.sessId, own);
   } else if (ev.sdk?.type === 'system' && ev.sdk.subtype === 'compact_boundary' && !ev.sdk.parent_tool_use_id) {
     t.compactions++;
   }
@@ -293,7 +294,7 @@ function transcriptTotals(dir) {
   try {
     fd = fs.openSync(file, 'r');
     const st = fs.fstatSync(fd);
-    if (!t || t.ino !== st.ino || st.size < t.pos) t = { ino: st.ino, pos: 0, own: new Map(), compactions: 0 };
+    if (!t || t.ino !== st.ino || st.size < t.pos) t = { ino: st.ino, pos: 0, own: new Map(), last: new Map(), compactions: 0 };
     let rest = null;   // a line cut by the chunk's end
     while (t.pos + (rest ? rest.length : 0) < st.size) {
       const at = t.pos + (rest ? rest.length : 0);
@@ -310,7 +311,7 @@ function transcriptTotals(dir) {
       rest = start < data.length ? data.subarray(start) : null;
     }
   } catch (e) {
-    if (!t || e.code === 'ENOENT') t = { ino: null, pos: 0, own: new Map(), compactions: 0 };
+    if (!t || e.code === 'ENOENT') t = { ino: null, pos: 0, own: new Map(), last: new Map(), compactions: 0 };
   } finally { if (fd !== undefined) fs.closeSync(fd); }
   totalsCache.delete(file);
   totalsCache.set(file, t);
@@ -321,7 +322,21 @@ function transcriptTotals(dir) {
 function summarizeTotals(t) {
   let costUsd = 0;
   for (const usd of t.own.values()) costUsd += usd;
-  return { costUsd, compactions: t.compactions, own: (sessId) => t.own.get(sessId) || 0 };
+  return { costUsd, compactions: t.compactions, own: (sessId) => t.own.get(sessId) || 0, lastResult: (sessId) => t.last.get(sessId) || 0 };
+}
+
+// Where a resumed spawn's query cost starts counting, from its first result
+// (`first`, total_cost_usd), the priced usage of the spawn's requests until
+// then (`priced`, 0 when none was priced) and the id's last recorded result
+// (`prev`). A resumed Claude Code carries its session's earlier total on
+// (2.1.308 does: same project or not, after a graceful end or an abort), so
+// the spawn adds what is above `prev`; one that started again from 0 adds
+// all of it. Carried on: the first result less what the spawn has spent is
+// still most of `prev`, or (nothing priced) the first result is not below it.
+function costStart(first, priced, prev) {
+  if (!(prev > 0)) return 0;
+  const carried = priced > 0 ? first - priced >= prev / 2 : first >= prev - 1e-9;
+  return carried ? prev : 0;
 }
 
 // Envelopes just appended as bytes [from, to): a cache that had read up to
@@ -419,6 +434,9 @@ class SdkSession {
     this.costUsd = 0;         // the folder's running total: _costBase + this id's own
     this._costBase = 0;       // the folder's other session ids' cost, at spawn
     this._costFloor = 0;      // this id's own cost a resume carried over: no result lowers it
+    this._costStart = 0;      // the spawn's query cost counts from here (null: its first result tells)
+    this._costPrev = 0;       // the id's last recorded result, before this spawn
+    this._spawnPriced = 0;    // the spawn's priced requests (addRequestCost)
     this._initModel = null;   // the model system/init reported
     this.actualModel = null;  // the model of the last main-agent reply
     this.context = { tokens: null, window: null, compactAt: null, windowEstimated: false };   // the main agent's
@@ -503,6 +521,9 @@ class SdkSession {
     const totals = this.sessionDir() ? transcriptTotals(this.sessionDir()) : null;
     this._costFloor = resumeSessionId && totals ? totals.own(this.sessId) : 0;
     this._costBase = totals ? Math.max(0, totals.costUsd - totals.own(this.sessId)) : 0;
+    this._costPrev = resumeSessionId && totals ? totals.lastResult(this.sessId) : 0;
+    this._costStart = resumeSessionId ? null : 0;
+    this._spawnPriced = 0;
     this.costUsd = this._costBase + this._costFloor;
     this.store.registerSession(this.instanceId, this.sessId);
     // A live instance like a CLI tab's pty: the proxy applies its
@@ -681,9 +702,13 @@ class SdkSession {
     } else if (msg.type === 'result') {
       const cost = typeof msg.total_cost_usd === 'number' ? msg.total_cost_usd
         : Object.values(msg.modelUsage || {}).reduce((n, u) => n + (u?.costUSD || 0), 0);
-      // Cumulative for the query: the latest wins, but never below the cost a
-      // resume carried over.
-      if (Number.isFinite(cost)) this.costUsd = this._costBase + Math.max(cost, this._costFloor);
+      // Cumulative for the query: what it has spent since this spawn's start
+      // (costStart) adds to the cost a resume carried over, so a carried-on
+      // total is not counted twice and one restarted from 0 is not lost.
+      if (Number.isFinite(cost)) {
+        if (this._costStart == null) this._costStart = costStart(cost, this._spawnPriced, this._costPrev);
+        this.costUsd = this._costBase + this._costFloor + Math.max(0, cost - this._costStart);
+      }
       const window = main ? contextWindowOf(msg.modelUsage, this.actualModel) : null;
       if (window) this.context = { ...this.context, window, windowEstimated: false };
       this._setState(msg.queued_turn_count > 0 ? 'busy' : 'idle', { force: true });
@@ -869,6 +894,7 @@ class SdkSession {
     if (!usage || !pricing || !this.running || this.state === 'idle') return;
     const usd = requestCost(usage, pricing);
     if (!(usd > 0)) return;
+    this._spawnPriced += usd;
     this.costUsd += usd;
     this._emitStatus();
   }
@@ -1127,6 +1153,7 @@ module.exports.HISTORY_PAGE = HISTORY_PAGE;
 module.exports.transcriptFile = transcriptFile;
 module.exports.recordedCost = recordedCost;
 module.exports.transcriptTotals = transcriptTotals;
+module.exports.costStart = costStart;
 module.exports.historyTotals = historyTotals;
 module.exports.resolveClaudeBinary = resolveClaudeBinary;
 module.exports.DISALLOWED_TOOLS = DISALLOWED_TOOLS;
