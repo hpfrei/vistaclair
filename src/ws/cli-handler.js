@@ -12,7 +12,7 @@ const { DATA_HOME, ensureDir } = require('../utils');
 const createProxyRouter = require('../proxy');
 const { clearPendingQuestionsForTab } = createProxyRouter;
 const folders = require('../session-folders');
-const { readTranscriptPage } = require('../sdk-session');
+const { readTranscriptPage, historyTotals } = require('../sdk-session');
 
 const PROJECT_ROOT = DATA_HOME;
 const PREFIXES = ['cli:', 'sdk:'];
@@ -327,7 +327,8 @@ function handleMessage(ws, msg, bc) {
       // One page of one session ({ sessId }), or of every member of a run
       // ({ runId }). `limit`: envelopes per page (per member); `before`: the
       // cursor of the next older page (a run: { [sessId]: cursor }). The
-      // reply's `from` echoes the cursor asked for (null: the newest page).
+      // reply's `from` echoes the cursor asked for (null: the newest page);
+      // its `totals` are the whole session folder's, for the caption.
       const limit = msg.limit;
       if (msg.runId) {
         const run = bc.orchestration?.getRun(String(msg.runId));
@@ -370,12 +371,14 @@ function sdkSession(mgr, sessId) {
 }
 
 // One page of a session's transcript envelopes, live or saved (its folder
-// outlives it): { events, hasMore, before }.
+// outlives it): { events, hasMore, before, totals }. totals ({ costUsd,
+// compactions }) covers the folder's whole transcript, every page.
 function historyOf(mgr, sessId, { limit, before } = {}) {
   const live = sdkSession(mgr, sessId);
   if (live) return live.historyPage({ limit, before });
   const dir = mgr.sessionDirOf(sessId);
-  return dir ? readTranscriptPage(dir, { sessId, limit, before }) : { events: [], hasMore: false, before: null };
+  return dir ? { ...readTranscriptPage(dir, { sessId, limit, before }), totals: historyTotals(dir) }
+    : { events: [], hasMore: false, before: null, totals: null };
 }
 
 // A page cursor: a byte offset into the transcript, or null (the newest page).

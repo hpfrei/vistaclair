@@ -24,9 +24,12 @@
 // Everything shown is server state: when a box is first shown and after a
 // reconnect it asks for `sdk:history` (the newest page of the session's
 // transcript, no stream deltas), replays it, then continues from the live
-// `sdk:event` broadcasts. The feed is a window: it keeps its newest FEED_MAX
-// entries while following, and "Load earlier" at its top puts the page
-// before them back. A box hidden for RELEASE_MS (its tab not active, or a
+// `sdk:event` broadcasts. The caption's cost and compaction count are the
+// reply's `totals`, the server's over the session folder's whole transcript
+// (every session that ran in it), then moved by live status and
+// compact_boundary events; what a page replays gives way to them. The feed
+// is a window: it keeps its newest FEED_MAX entries while following, and
+// "Load earlier" at its top puts the page before them back. A box hidden for RELEASE_MS (its tab not active, or a
 // worker on the shelf) drops its feed and only keeps its caption up to
 // date; shown again, it asks for the newest page. TODO.md
 // and NOTES.md come from `sdk:todo`, re-asked on the session's own edits to
@@ -682,7 +685,8 @@
 
     onHistory(events, error, page = {}) {
       clearTimeout(this._historyTimer);
-      // Counted again from the page; never fewer than this box has seen.
+      // Without the server's totals: counted again from the page, never
+      // fewer than this box has seen.
       const compactions = this.compactions;
       this.reset();
       this.compactions = 0;
@@ -696,7 +700,12 @@
       }
       this._off = null;
       this._replaying = false;
-      this.compactions = Math.max(compactions, this.compactions);
+      // The caption covers the whole session folder, not the page: the
+      // server's totals over its transcript replace what the page counted.
+      const t = page.totals;
+      if (t && typeof t.costUsd === 'number') this.setCost(t.costUsd);
+      if (t && typeof t.compactions === 'number') this.compactions = t.compactions;
+      else this.compactions = Math.max(compactions, this.compactions);
       this.renderContext();
       this.setTop({ before: page.before ?? null, hasMore: !!page.hasMore });
       if (error) this.notice(`History: ${error}`, 'warn');
@@ -874,8 +883,7 @@
       if (p?.kind === 'notice' && /^Model not changed/.test(p.text || '')) return this.modelRefused();
       const m = ev?.sdk;
       if (!m || m.parent_tool_use_id) return;
-      if (m.type === 'result' && typeof m.total_cost_usd === 'number') this.setCost(m.total_cost_usd);
-      else if (m.type === 'system' && m.subtype === 'compact_boundary') { this.compactions++; this.renderContext(); }
+      if (m.type === 'system' && m.subtype === 'compact_boundary') { this.compactions++; this.renderContext(); }
       else if (m.type === 'system' && m.subtype === 'init' && m.model && m.model !== this.initModel) { this.initModel = m.model; this.renderHeader(); }
     }
 
@@ -1210,8 +1218,8 @@
       this.add(line);
       // The main agent stopped: every stream it had is over.
       this.streams.clear();
-      // total_cost_usd is the running total of this query(), so the latest wins.
-      if (typeof m.total_cost_usd === 'number') this.setCost(m.total_cost_usd);
+      // The caption's cost is not total_cost_usd (this query's own, not the
+      // session folder's): the status that follows every result carries it.
       this.nowTool = null;
       if (!this.gotStatus) this.setState('idle');
       this.renderNow();
@@ -1562,8 +1570,9 @@
       if (this.main) {
         this.main.addAliases([run.orchestrator]);
         this.main.name = run.orchestrator || this.main.name;
-        // Every cost is a session's running total (its latest total_cost_usd):
-        // replace, never add. Only the toolbar adds, across sessions.
+        // Every cost is a session folder's running total (every session
+        // that ran in it): replace, never add. Only the toolbar adds,
+        // across folders.
         const oc = costOf(run.orchestratorCost ?? run.cost);
         if (oc != null) this.main.setCost(oc);
         if (run.orchestratorState) this.main.setState(run.orchestratorState);
@@ -1572,6 +1581,11 @@
       for (const w of run.workers || []) {
         if (!w.sessId) continue;
         if (w.engine && w.engine !== 'sdk') continue;
+        // A worker restarted fresh is a new session in the same folder: its
+        // box (whose history and cost cover the old one's) replaces the old.
+        for (const [id, old] of this.workers) {
+          if (id !== w.sessId && w.id && old.workerId === w.id) { old.destroy(); this.workers.delete(id); }
+        }
         let a = this.workers.get(w.sessId);
         if (!a) a = this.addWorker(w.sessId, w.name || w.worker);
         a.name = w.name || w.worker || a.name;

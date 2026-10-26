@@ -510,6 +510,8 @@ test('status: no context field before a main-agent reply has counted one', async
   s.kill();
 });
 
+const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg || 'cost'}: ${a} !== ${b}`);
+
 test('a resume carries its cost on: seeded from the transcript, never lowered, raised by seedCost', async () => {
   const { s, calls, events } = makeSession();
   const id = '77777777-2222-3333-4444-555555555555';
@@ -518,30 +520,79 @@ test('a resume carries its cost on: seeded from the transcript, never lowered, r
     env(id, { sdk: { type: 'result', total_cost_usd: 0.9 } }),
     env(id, { platform: { kind: 'status', state: 'exited', costUsd: 1.23 } }),
     env(id, { platform: { kind: 'status', state: 'idle', costUsd: 0 } }),
-    // An earlier session of the same folder does not count.
+    // An earlier session of the same folder (a fresh restart's predecessor)
+    // is the base the resumed one's own cost adds to.
     env('88888888-2222-3333-4444-555555555555', { platform: { kind: 'status', state: 'exited', costUsd: 9.9 } }),
   ].join('\n') + '\n');
   assert.strictEqual(SdkSession.recordedCost(s.settings.sessionDir, id), 1.23);
   s.spawn(tmp('proj-'), 80, 24, { resumeSessionId: id });
-  assert.strictEqual(statuses(events)[0].costUsd, 1.23, 'the first status already shows it');
+  near(statuses(events)[0].costUsd, 11.13, 'the first status already shows it');
+  near(statuses(events)[0].baseUsd, 9.9, 'and names the base');
   calls[0].emit({ type: 'result', total_cost_usd: 0.5, queued_turn_count: 0 });
   await tick();
-  assert.strictEqual(s.costUsd, 1.23);
+  near(s.costUsd, 11.13);
   calls[0].emit({ type: 'result', total_cost_usd: 2.0, queued_turn_count: 0 });
   await tick();
-  assert.strictEqual(s.costUsd, 2.0);
-  s.seedCost(1.5);
-  assert.strictEqual(s.costUsd, 2.0);
-  s.seedCost(3);
-  assert.strictEqual(s.costUsd, 3);
-  assert.strictEqual(statuses(events).at(-1).costUsd, 3);
+  near(s.costUsd, 11.9);
+  s.seedCost(11.5);
+  near(s.costUsd, 11.9);
+  s.seedCost(13);
+  near(s.costUsd, 13);
+  near(statuses(events).at(-1).costUsd, 13);
   s.kill();
 
-  // A new conversation starts at zero.
+  // A new conversation in the folder starts at the folder's total.
   const b = makeSession({ sessionDir: s.settings.sessionDir });
   b.s.spawn(tmp('proj-'), 80, 24, {});
-  assert.strictEqual(b.s.costUsd, 0);
+  near(b.s.costUsd, 13);
   b.s.kill();
+  // A new folder starts at zero.
+  const c = makeSession();
+  c.s.spawn(tmp('proj-'), 80, 24, {});
+  assert.strictEqual(c.s.costUsd, 0);
+  c.s.kill();
+});
+
+test('a fresh restart carries every earlier session\'s cost, counted once', async () => {
+  const dir = tmp('folder-');
+  const A = '0aaaaaaa-2222-3333-4444-555555555555';
+  fs.writeFileSync(path.join(dir, 'transcript.jsonl'), [
+    { sessId: A, ts: 1, ev: { sdk: { type: 'result', total_cost_usd: 1.5 } } },
+    { sessId: A, ts: 2, ev: { platform: { kind: 'status', state: 'exited', costUsd: 2 } } },
+  ].map(e => JSON.stringify(e)).join('\n') + '\n');
+
+  // B: a fresh session in A's folder (a restart from notes).
+  const b = makeSession({ sessionDir: dir });
+  b.s.spawn(tmp('proj-'), 80, 24, {});
+  const B = b.s.sessId;
+  near(b.s.costUsd, 2, 'B starts at A\'s cost');
+  near(statuses(b.events)[0].baseUsd, 2);
+  b.calls[0].emit({ type: 'result', total_cost_usd: 0.5, queued_turn_count: 0 });
+  await tick();
+  near(b.s.costUsd, 2.5, 'its own result adds to the base');
+  near(statuses(b.events).at(-1).costUsd, 2.5);
+  b.s.kill();
+  near(SdkSession.transcriptTotals(dir).costUsd, 2.5, 'A + B, not A + (A + B)');
+  near(SdkSession.recordedCost(dir, B), 0.5, 'B\'s own');
+
+  // C: another fresh restart, on A + B.
+  const c = makeSession({ sessionDir: dir });
+  c.s.spawn(tmp('proj-'), 80, 24, {});
+  near(c.s.costUsd, 2.5);
+  c.s.kill();
+  near(SdkSession.transcriptTotals(dir).costUsd, 2.5, 'C has cost nothing yet');
+
+  // B continued: its own 0.5 on top of A's and C's, and its query goes on from there.
+  const b2 = makeSession({ sessionDir: dir });
+  b2.s.spawn(tmp('proj-'), 80, 24, { resumeSessionId: B });
+  near(b2.s.costUsd, 2.5);
+  b2.calls[0].emit({ type: 'result', total_cost_usd: 0.8, queued_turn_count: 0 });
+  await tick();
+  near(b2.s.costUsd, 2.8);
+  b2.s.kill();
+  near(SdkSession.transcriptTotals(dir).costUsd, 2.8);
+  // The history reply says the same over the whole folder.
+  near(b2.s.historyPage().totals.costUsd, 2.8);
 });
 
 test('files: a main-agent write to TODO.md / NOTES.md is signalled when its result arrives, never kept', async () => {

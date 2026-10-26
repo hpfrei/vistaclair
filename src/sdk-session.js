@@ -31,13 +31,17 @@
 //                  `{ user }` at submit, as before. Everything but
 //                  stream_event deltas and `files` signals is appended to
 //                  <sessionDir>/transcript.jsonl, which sdk:history replays
-//                  after a reload or restart.
-//   status         `{ platform: { kind: 'status', state, costUsd, model,
-//                  actualModel, mappedTo, context? } }`: the chosen model (setModel
+//                  after a reload or restart. Each page carries `totals`
+//                  ({ costUsd, compactions }) over the whole file.
+//   status         `{ platform: { kind: 'status', state, costUsd, baseUsd?,
+//                  model, actualModel, mappedTo, context? } }`: the chosen model (setModel
 //                  switches it live), the model the last main-agent reply came
 //                  from (cleared by a switch), and the tab's modelMap target for its family. The
-//                  cost of a resume starts from the last one its transcript
-//                  recorded and never goes below it. `context` ({ tokens,
+//                  cost is the session folder's running total: every earlier
+//                  session id's in it (baseUsd, a fresh restart's or an
+//                  orchestrator refresh's predecessors) plus this id's own,
+//                  which a resume starts from what its transcript recorded and
+//                  never lets go below it. `context` ({ tokens,
 //                  window, compactAt, windowEstimated }, once a main-agent
 //                  reply has counted it): the main agent's context from each
 //                  reply's usage, the window from the turn's modelUsage, both
@@ -88,7 +92,7 @@ const HISTORY_PAGE = 500;              // envelopes per sdk:history page, by def
 const HISTORY_MAX = 5000;              // the most one page may ask for
 const PAGE_CHUNK = 64 * 1024;          // a page is read backwards in chunks of this size
 const STDERR_TAIL = 4096;
-const TAIL_BYTES = 256 * 1024;         // transcript tail read for a resume's cost and stale input
+const TAIL_BYTES = 256 * 1024;         // transcript tail read for stale input
 const MODEL_RE = /^[A-Za-z0-9._-]+(\[1m\])?$/;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
@@ -214,6 +218,15 @@ function readTranscriptPage(dir, { sessId, limit = HISTORY_PAGE, before = null }
   return { events: out, hasMore: oldest != null && oldest > 0, before: oldest };
 }
 
+// What an sdk:history reply carries for the caption, over the folder's whole
+// transcript: { costUsd, compactions }. A live session's own running total
+// may be ahead of its last status line.
+function historyTotals(dir, live = null) {
+  const t = transcriptTotals(dir);
+  const costUsd = live && Number.isFinite(live.costUsd) ? Math.max(t.costUsd, live.costUsd) : t.costUsd;
+  return { costUsd, compactions: t.compactions };
+}
+
 // The last `limit` envelopes of a transcript (readTranscriptPage's events).
 function readTranscript(dir, opts = {}) {
   return readTranscriptPage(dir, opts).events;
@@ -235,23 +248,95 @@ function transcriptTail(dir) {
   return text;
 }
 
-// The cost a transcript recorded for one session id (status envelopes and
-// results), from its tail only; 0 when there is none. Costs are cumulative, so
-// the highest wins: a resume made before the floor existed logged a 0 status.
-function recordedCost(dir, sessId) {
-  const text = transcriptTail(dir);
-  let best = 0;
-  for (const line of text.split('\n')) {
-    if (!line.includes(sessId)) continue;
-    let env;
-    try { env = JSON.parse(line); } catch { continue; }
-    if (env.sessId !== sessId) continue;
-    const ev = env.ev || {};
-    const cost = ev.platform?.kind === 'status' ? ev.platform.costUsd
-      : ev.sdk?.type === 'result' ? ev.sdk.total_cost_usd : undefined;
-    if (typeof cost === 'number' && Number.isFinite(cost) && cost > best) best = cost;
+// Whole-transcript totals for a session folder: what the panel's caption shows
+// however little of the feed it loads. A folder outlives a session id (a
+// resume keeps it, a fresh restart or an orchestrator refresh starts a new id
+// in it), so its cost is every id's own cost added up: a status envelope's
+// costUsd is the folder's running total and its baseUsd (absent before it
+// existed: 0) what the other ids had cost when it spawned; a result's
+// total_cost_usd is its query's own. Per id the highest wins: costs only
+// grow, and a resume made before the floor existed logged a 0 status.
+// compactions counts the main agent's compact_boundary envelopes, every id's.
+// Cached per file and advanced over the bytes appended since (only lines that
+// can matter are parsed); the file is only ever appended to.
+const TOTALS_CHUNK = 1024 * 1024;
+const TOTALS_KEEP = 200;               // folders whose totals stay cached
+const totalsCache = new Map();         // transcript path -> { ino, pos, own: Map<sessId, usd>, compactions }
+
+function noteTotals(t, env) {
+  if (!env || typeof env !== 'object' || typeof env.sessId !== 'string') return;
+  const ev = env.ev || {};
+  let own;
+  if (ev.platform?.kind === 'status') {
+    const base = Number.isFinite(ev.platform.baseUsd) ? ev.platform.baseUsd : 0;
+    own = Number.isFinite(ev.platform.costUsd) ? ev.platform.costUsd - base : undefined;
+  } else if (ev.sdk?.type === 'result') {
+    own = ev.sdk.total_cost_usd;
+  } else if (ev.sdk?.type === 'system' && ev.sdk.subtype === 'compact_boundary' && !ev.sdk.parent_tool_use_id) {
+    t.compactions++;
   }
-  return best;
+  if (typeof own === 'number' && Number.isFinite(own) && own > (t.own.get(env.sessId) || 0)) t.own.set(env.sessId, own);
+}
+
+// Whether a raw line can move the totals: the cheap test before JSON.parse.
+const TOTALS_MARKS = ['"status"', '"result"', '"compact_boundary"'].map(s => Buffer.from(s));
+function mayCount(buf) {
+  return TOTALS_MARKS.some(m => buf.indexOf(m) !== -1);
+}
+
+// { costUsd, compactions, own(sessId) } for a folder's transcript; zeros when
+// there is none.
+function transcriptTotals(dir) {
+  const file = transcriptFile(dir);
+  let t = totalsCache.get(file);
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const st = fs.fstatSync(fd);
+    if (!t || t.ino !== st.ino || st.size < t.pos) t = { ino: st.ino, pos: 0, own: new Map(), compactions: 0 };
+    let rest = null;   // a line cut by the chunk's end
+    while (t.pos + (rest ? rest.length : 0) < st.size) {
+      const at = t.pos + (rest ? rest.length : 0);
+      const buf = Buffer.alloc(Math.min(TOTALS_CHUNK, st.size - at));
+      fs.readSync(fd, buf, 0, buf.length, at);
+      const data = rest ? Buffer.concat([rest, buf]) : buf;
+      let start = 0;
+      for (let nl = data.indexOf(0x0a); nl !== -1; nl = data.indexOf(0x0a, start)) {
+        const line = data.subarray(start, nl);
+        if (mayCount(line)) { try { noteTotals(t, JSON.parse(line.toString('utf8'))); } catch {} }
+        start = nl + 1;
+      }
+      t.pos += start;
+      rest = start < data.length ? data.subarray(start) : null;
+    }
+  } catch (e) {
+    if (!t || e.code === 'ENOENT') t = { ino: null, pos: 0, own: new Map(), compactions: 0 };
+  } finally { if (fd !== undefined) fs.closeSync(fd); }
+  totalsCache.delete(file);
+  totalsCache.set(file, t);
+  if (totalsCache.size > TOTALS_KEEP) totalsCache.delete(totalsCache.keys().next().value);
+  return summarizeTotals(t);
+}
+
+function summarizeTotals(t) {
+  let costUsd = 0;
+  for (const usd of t.own.values()) costUsd += usd;
+  return { costUsd, compactions: t.compactions, own: (sessId) => t.own.get(sessId) || 0 };
+}
+
+// Envelopes just appended as bytes [from, to): a cache that had read up to
+// `from` takes them in without reading them back.
+function totalsAppended(dir, envs, from, to) {
+  const t = totalsCache.get(transcriptFile(dir));
+  if (!t || t.pos !== from) return;
+  for (const env of envs) noteTotals(t, env);
+  t.pos = to;
+}
+
+// The own cost a transcript recorded for one session id (its whole file); 0
+// when there is none.
+function recordedCost(dir, sessId) {
+  return transcriptTotals(dir).own(sessId);
 }
 
 // The owner's turns a transcript left waiting (pending, never delivered nor
@@ -331,8 +416,9 @@ class SdkSession {
     this.busy = false;
     // busy | idle | awaiting (an AskUserQuestion is open) | paused | exited
     this.state = 'idle';
-    this.costUsd = 0;
-    this._costFloor = 0;      // a resume's carried-over cost: no result lowers it
+    this.costUsd = 0;         // the folder's running total: _costBase + this id's own
+    this._costBase = 0;       // the folder's other session ids' cost, at spawn
+    this._costFloor = 0;      // this id's own cost a resume carried over: no result lowers it
     this._initModel = null;   // the model system/init reported
     this.actualModel = null;  // the model of the last main-agent reply
     this.context = { tokens: null, window: null, compactAt: null, windowEstimated: false };   // the main agent's
@@ -411,9 +497,13 @@ class SdkSession {
     this.actualModel = null;
     this._fileTools.clear();
     this._echoes = false;
-    // A resume carries its cost on (the forced idle status below shows it).
-    this._costFloor = resumeSessionId && this.sessionDir() ? recordedCost(this.sessionDir(), this.sessId) : 0;
-    this.costUsd = this._costFloor;
+    // The folder's cost so far carries on: a resume's own (the forced idle
+    // status below shows it) on top of every other id's, a fresh restart's
+    // every earlier id's.
+    const totals = this.sessionDir() ? transcriptTotals(this.sessionDir()) : null;
+    this._costFloor = resumeSessionId && totals ? totals.own(this.sessId) : 0;
+    this._costBase = totals ? Math.max(0, totals.costUsd - totals.own(this.sessId)) : 0;
+    this.costUsd = this._costBase + this._costFloor;
     this.store.registerSession(this.instanceId, this.sessId);
     // A live instance like a CLI tab's pty: the proxy applies its
     // instance-scoped rules (the AskUserQuestion rewrite, the tab's modelMap)
@@ -593,7 +683,7 @@ class SdkSession {
         : Object.values(msg.modelUsage || {}).reduce((n, u) => n + (u?.costUSD || 0), 0);
       // Cumulative for the query: the latest wins, but never below the cost a
       // resume carried over.
-      if (Number.isFinite(cost)) this.costUsd = Math.max(cost, this._costFloor);
+      if (Number.isFinite(cost)) this.costUsd = this._costBase + Math.max(cost, this._costFloor);
       const window = main ? contextWindowOf(msg.modelUsage, this.actualModel) : null;
       if (window) this.context = { ...this.context, window, windowEstimated: false };
       this._setState(msg.queued_turn_count > 0 ? 'busy' : 'idle', { force: true });
@@ -720,7 +810,10 @@ class SdkSession {
     if (!dir || !envs.length) return;
     try {
       fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(transcriptFile(dir), envs.map(e => JSON.stringify(e)).join('\n') + '\n');
+      const text = envs.map(e => JSON.stringify(e)).join('\n') + '\n';
+      fs.appendFileSync(transcriptFile(dir), text);
+      const to = fs.statSync(transcriptFile(dir)).size;
+      totalsAppended(dir, envs, to - Buffer.byteLength(text), to);
     } catch (e) {
       console.error(`[sdk-session] transcript ${dir}: ${e.message}`);
     }
@@ -785,7 +878,8 @@ class SdkSession {
     const family = model ? modelFamily(model) : null;
     const mappedTo = (family && this.settings.modelMap?.[family]) || null;
     const context = this.context.tokens != null ? { ...this.context } : undefined;
-    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, model, actualModel: this.actualModel, mappedTo, ...(context ? { context } : {}) } });
+    const base = this._costBase > 0 ? { baseUsd: this._costBase } : {};
+    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, ...base, model, actualModel: this.actualModel, mappedTo, ...(context ? { context } : {}) } });
   }
 
   // The end of a turn: the SDK's own count (its summary answers from the
@@ -828,10 +922,11 @@ class SdkSession {
   }
 
   // Raise the carried-over cost (orchestration's run.json total for a
-  // resumed member, when the transcript recorded less).
+  // resumed member, when the transcript recorded less). `usd` is a running
+  // total like costUsd: what is above the base is this id's own.
   seedCost(usd) {
-    if (typeof usd !== 'number' || !Number.isFinite(usd) || usd <= this._costFloor) return;
-    this._costFloor = usd;
+    if (typeof usd !== 'number' || !Number.isFinite(usd) || usd - this._costBase <= this._costFloor) return;
+    this._costFloor = usd - this._costBase;
     if (this.costUsd < usd) {
       this.costUsd = usd;
       this._emitStatus();
@@ -977,10 +1072,12 @@ class SdkSession {
     if (packs) releaseToolPacks(packs, reason);
   }
 
-  // Replay for the panel (sdk:history): one page, see readTranscriptPage.
+  // Replay for the panel (sdk:history): one page, see readTranscriptPage,
+  // with the folder's totals (historyTotals).
   historyPage({ limit, before } = {}) {
     const dir = this.sessionDir();
-    return dir ? readTranscriptPage(dir, { sessId: this.sessId, limit, before }) : { events: [], hasMore: false, before: null };
+    if (!dir) return { events: [], hasMore: false, before: null, totals: { costUsd: this.costUsd, compactions: 0 } };
+    return { ...readTranscriptPage(dir, { sessId: this.sessId, limit, before }), totals: historyTotals(dir, this) };
   }
 
   history(opts) {
@@ -1029,6 +1126,8 @@ module.exports.readTranscriptPage = readTranscriptPage;
 module.exports.HISTORY_PAGE = HISTORY_PAGE;
 module.exports.transcriptFile = transcriptFile;
 module.exports.recordedCost = recordedCost;
+module.exports.transcriptTotals = transcriptTotals;
+module.exports.historyTotals = historyTotals;
 module.exports.resolveClaudeBinary = resolveClaudeBinary;
 module.exports.DISALLOWED_TOOLS = DISALLOWED_TOOLS;
 module.exports.SETTING_SOURCES = SETTING_SOURCES;

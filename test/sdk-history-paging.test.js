@@ -19,7 +19,7 @@ process.env.VISTACLAIR_DASHBOARD_PORT = '';
 const test = require('node:test');
 const assert = require('node:assert');
 const SdkSession = require('../src/sdk-session');
-const { readTranscriptPage, readTranscript, transcriptFile, HISTORY_PAGE } = SdkSession;
+const { readTranscriptPage, readTranscript, transcriptFile, transcriptTotals, recordedCost, HISTORY_PAGE } = SdkSession;
 const cliHandler = require('../src/ws/cli-handler');
 
 const SESS = '11111111-2222-3333-4444-555555555555';
@@ -161,7 +161,7 @@ test('sdk:history: the newest page by default, older pages by cursor, `from` ech
   assert.deepStrictEqual(older.events.map(seqOf), Array.from({ length: 200 }, (_, i) => N - 700 + i));
   // An unknown session: an empty page.
   const other = '99999999-2222-3333-4444-555555555555';
-  assert.deepStrictEqual(ask({ type: 'sdk:history', sessId: other })[0], { type: 'sdk:history', sessId: other, from: null, events: [], hasMore: false, before: null });
+  assert.deepStrictEqual(ask({ type: 'sdk:history', sessId: other })[0], { type: 'sdk:history', sessId: other, from: null, events: [], hasMore: false, before: null, totals: null });
 });
 
 test('sdk:history for a run pages each member with its own cursor', () => {
@@ -179,4 +179,84 @@ test('sdk:history for a run pages each member with its own cursor', () => {
   assert.deepStrictEqual(bySess[w].events.map(seqOf), Array.from({ length: 10 }, (_, i) => i));
   assert.strictEqual(bySess[w].hasMore, false);
   assert.strictEqual(bySess[w].from, before[w]);
+});
+
+// ---- whole-transcript totals ----
+
+const OLD = '0aaaaaaa-2222-3333-4444-555555555555';
+const line = (sessId, ev) => JSON.stringify({ sessId, ts: 1, ev });
+const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg || 'cost'}: ${a} !== ${b}`);
+
+// A folder two sessions ran in: OLD (cost and two compactions up front),
+// then SESS (its costs early, a fresh restart's baseUsd on them), then one
+// long turn of tool events far past the newest page and the 256 KB tail.
+function costlyFixture() {
+  const dir = tmpDir();
+  fs.writeFileSync(transcriptFile(dir), [
+    line(OLD, { sdk: { type: 'system', subtype: 'compact_boundary', parent_tool_use_id: null, compact_metadata: { trigger: 'auto' } } }),
+    line(OLD, { sdk: { type: 'result', total_cost_usd: 3 } }),
+    line(OLD, { sdk: { type: 'system', subtype: 'compact_boundary', compact_metadata: { trigger: 'manual' } } }),
+    line(OLD, { platform: { kind: 'status', state: 'exited', costUsd: 4 } }),
+    // A subagent's compaction is not the session's.
+    line(SESS, { sdk: { type: 'system', subtype: 'compact_boundary', parent_tool_use_id: 'toolu_1' } }),
+    line(SESS, { platform: { kind: 'status', state: 'busy', costUsd: 4, baseUsd: 4 } }),
+    line(SESS, { sdk: { type: 'result', total_cost_usd: 1.25 } }),
+    line(SESS, { platform: { kind: 'status', state: 'busy', costUsd: 5.25, baseUsd: 4 } }),
+    line(SESS, { sdk: { type: 'system', subtype: 'compact_boundary', parent_tool_use_id: null } }),
+  ].join('\n') + '\n');
+  writeFixture(dir, 0, 3000);
+  return dir;
+}
+
+test('totals: the whole transcript\'s cost and compactions when the newest page holds none', () => {
+  const dir = costlyFixture();
+  assert.ok(fs.statSync(transcriptFile(dir)).size > 2 * 256 * 1024, 'past the old tail read');
+  const page = readTranscriptPage(dir);
+  assert.strictEqual(page.events.length, HISTORY_PAGE);
+  assert.ok(page.events.every(e => e.ev.sdk?.type === 'assistant'), 'no status, result or compaction on the page');
+  const t = transcriptTotals(dir);
+  near(t.costUsd, 5.25, 'OLD 4 + SESS 1.25, each once');
+  assert.strictEqual(t.compactions, 3, 'the main agent\'s, every session id\'s');
+  near(recordedCost(dir, SESS), 1.25);
+  near(recordedCost(dir, OLD), 4);
+  assert.strictEqual(recordedCost(dir, '99999999-2222-3333-4444-555555555555'), 0);
+  // No transcript: zeros.
+  assert.deepStrictEqual({ ...transcriptTotals(tmpDir()), own: null }, { costUsd: 0, compactions: 0, own: null });
+});
+
+test('totals: cached, and only the bytes appended since are read', () => {
+  const dir = costlyFixture();
+  transcriptTotals(dir);
+  const { result: same, bytes: none } = countReads(() => transcriptTotals(dir));
+  assert.strictEqual(none, 0, 'nothing new: nothing read');
+  near(same.costUsd, 5.25);
+  const tail = [
+    line(SESS, { sdk: { type: 'system', subtype: 'compact_boundary', parent_tool_use_id: null } }),
+    line(SESS, { platform: { kind: 'status', state: 'idle', costUsd: 6, baseUsd: 4 } }),
+  ].join('\n') + '\n';
+  fs.appendFileSync(transcriptFile(dir), tail);
+  // Half a line still being written waits for the next read.
+  fs.appendFileSync(transcriptFile(dir), line(SESS, { sdk: { type: 'result', total_cost_usd: 9 } }).slice(0, 20));
+  const { result: t, bytes } = countReads(() => transcriptTotals(dir));
+  assert.ok(bytes < Buffer.byteLength(tail) + 100, `read ${bytes} bytes`);
+  near(t.costUsd, 6);
+  assert.strictEqual(t.compactions, 4);
+  fs.appendFileSync(transcriptFile(dir), line(SESS, { sdk: { type: 'result', total_cost_usd: 9 } }).slice(20) + '\n');
+  near(transcriptTotals(dir).costUsd, 13, 'OLD 4 + SESS 9');
+});
+
+test('sdk:history: every page carries the whole folder\'s totals', () => {
+  const dir = costlyFixture();
+  const [newest] = ask({ type: 'sdk:history', sessId: SESS }, { dirs: { [SESS]: dir } });
+  assert.deepStrictEqual(Object.keys(newest).sort(), ['before', 'events', 'from', 'hasMore', 'sessId', 'totals', 'type']);
+  assert.deepStrictEqual(newest.totals, { costUsd: 5.25, compactions: 3 });
+  const [older] = ask({ type: 'sdk:history', sessId: SESS, before: newest.before }, { dirs: { [SESS]: dir } });
+  assert.deepStrictEqual(older.totals, newest.totals);
+  // The run form: each member its own folder's.
+  const w = '22222222-2222-3333-4444-555555555555';
+  const small = tmpDir();
+  fs.writeFileSync(transcriptFile(small), line(w, { platform: { kind: 'status', state: 'idle', costUsd: 0.5 } }) + '\n');
+  const run = { runId: 'r2', orchestratorSessId: SESS, workers: [{ sessId: w }] };
+  const [r] = ask({ type: 'sdk:history', runId: 'r2' }, { dirs: { [SESS]: dir, [w]: small }, run });
+  assert.deepStrictEqual(r.sessions.map(x => [x.sessId, x.totals]), [[SESS, { costUsd: 5.25, compactions: 3 }], [w, { costUsd: 0.5, compactions: 0 }]]);
 });

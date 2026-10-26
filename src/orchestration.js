@@ -71,6 +71,7 @@ const folders = require('./session-folders');
 const toolPacks = require('./tool-packs');
 const landing = require('./worktree-landing');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
+const { transcriptTotals } = require('./sdk-session');
 
 const MAX_WORKERS = 5;
 // The model a worker may be launched on (launch_cli `model`), as Claude Code's
@@ -903,12 +904,16 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return { tokens: c.tokens, window: c.window || null, compactAt: c.compactAt || null, percent: c.window ? Math.round((c.tokens / c.window) * 100) : null };
   }
 
-  // The higher of the live and the recorded cost: a member just resumed may
-  // not have reported its carried-over total yet.
-  function costOf(session, stored) {
+  // The highest of the live, the recorded and (an SDK member) its folder's
+  // transcript total: a member just resumed may not have reported its
+  // carried-over total yet, and run.json may hold less than the folder's
+  // every session (one stored before costs carried across a fresh restart).
+  function costOf(session, stored, dir) {
     const live = typeof session?.costUsd === 'number' ? session.costUsd : null;
     const kept = typeof stored === 'number' ? stored : null;
-    return live === null ? kept : kept === null ? live : Math.max(live, kept);
+    const folder = dir ? transcriptTotals(dir).costUsd || null : null;
+    const known = [live, kept, folder].filter(c => c !== null);
+    return known.length ? Math.max(...known) : null;
   }
 
   function describeRun(run) {
@@ -935,7 +940,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       orchestratorSessId: orch?.session.sessId || savedId(st => st.role === 'orchestrator'),
       orchestratorTabId: orch?.tabId || null,
       orchestratorState: memberState(orch?.session, null),
-      orchestratorCost: costOf(orch?.session, run.orchestratorCost),
+      orchestratorCost: costOf(orch?.session, run.orchestratorCost, run.engine === 'sdk' ? orchestratorDir(run) : null),
       compactions: run.compactions || 0,
       refreshSuggested: (run.compactions || 0) >= REFRESH_SUGGESTED_AFTER,
       pendingEvents: run.events.filter(e => e.seq > run.delivered).length,
@@ -947,7 +952,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           engine: run.engine || 'cli',
           model: w.model || live?.session.getSettings().model || null,
           state: memberState(live?.session, w),
-          cost: costOf(live?.session, w.costUsd),
+          cost: costOf(live?.session, w.costUsd, run.engine === 'sdk' ? w.sessionDir : null),
           cwd: w.cwd, branch: w.branch, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: w.lastReport,
           paused: !!w.paused, abandoned: !!w.abandoned,
           closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
