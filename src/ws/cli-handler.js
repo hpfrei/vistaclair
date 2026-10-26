@@ -12,7 +12,7 @@ const { DATA_HOME, ensureDir } = require('../utils');
 const createProxyRouter = require('../proxy');
 const { clearPendingQuestionsForTab } = createProxyRouter;
 const folders = require('../session-folders');
-const { readTranscript } = require('../sdk-session');
+const { readTranscriptPage } = require('../sdk-session');
 
 const PROJECT_ROOT = DATA_HOME;
 const PREFIXES = ['cli:', 'sdk:'];
@@ -324,16 +324,28 @@ function handleMessage(ws, msg, bc) {
       break;
     }
     case 'sdk:history': {
-      // One session ({ sessId }), or every member of a run ({ runId }).
+      // One page of one session ({ sessId }), or of every member of a run
+      // ({ runId }). `limit`: envelopes per page (per member); `before`: the
+      // cursor of the next older page (a run: { [sessId]: cursor }). The
+      // reply's `from` echoes the cursor asked for (null: the newest page).
+      const limit = msg.limit;
       if (msg.runId) {
         const run = bc.orchestration?.getRun(String(msg.runId));
         const d = run ? bc.orchestration.describeRun(run) : null;
         const ids = d ? [d.orchestratorSessId, ...d.workers.map(w => w.sessId)].filter(Boolean) : [];
-        send({ type: 'sdk:history', runId: msg.runId, sessions: ids.map(id => ({ sessId: id, events: historyOf(mgr, id) })) });
+        const cursors = msg.before && typeof msg.before === 'object' ? msg.before : {};
+        send({
+          type: 'sdk:history', runId: msg.runId,
+          sessions: ids.map((id) => {
+            const before = cursorOf(cursors[id]);
+            return { sessId: id, from: before, ...historyOf(mgr, id, { limit, before }) };
+          }),
+        });
         break;
       }
       if (!UUID_RE.test(String(msg.sessId || ''))) break;
-      send({ type: 'sdk:history', sessId: msg.sessId, events: historyOf(mgr, msg.sessId) });
+      const before = cursorOf(msg.before);
+      send({ type: 'sdk:history', sessId: msg.sessId, from: before, ...historyOf(mgr, msg.sessId, { limit, before }) });
       break;
     }
     case 'sdk:todo': {
@@ -357,12 +369,19 @@ function sdkSession(mgr, sessId) {
   return s && s.kind === 'sdk' ? s : null;
 }
 
-// A session's transcript envelopes, live or saved (its folder outlives it).
-function historyOf(mgr, sessId) {
+// One page of a session's transcript envelopes, live or saved (its folder
+// outlives it): { events, hasMore, before }.
+function historyOf(mgr, sessId, { limit, before } = {}) {
   const live = sdkSession(mgr, sessId);
-  if (live) return live.history();
+  if (live) return live.historyPage({ limit, before });
   const dir = mgr.sessionDirOf(sessId);
-  return dir ? readTranscript(dir, { sessId }) : [];
+  return dir ? readTranscriptPage(dir, { sessId, limit, before }) : { events: [], hasMore: false, before: null };
+}
+
+// A page cursor: a byte offset into the transcript, or null (the newest page).
+function cursorOf(v) {
+  const n = Number(v);
+  return v != null && v !== '' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
 }
 
 function sendNotice(send, sessId, text) {
