@@ -441,6 +441,60 @@
     }
     _sessionTotals.delete(instanceId);
     _sessionTotalsAsked.delete(instanceId);
+    _interner.drop(instanceId);
+  }
+
+  /* Hold at most the cap of one session's turns: the oldest leave the page
+     and the tab offers "Load earlier". Turns the user paged back in raise
+     that tab's cap, so the next live turn doesn't throw them out again. */
+  function _trimTimeline(instanceId) {
+    const tab = _openTabs.get(instanceId);
+    if (!tab) return false;
+    const keep = new Set(_splitInteractions);
+    const sel = state.selection;
+    if (sel) keep.add(sel.type === 'tool' ? sel.interactionId : sel.id);
+    const drop = new Set(RET.timelineTrim(state.interactions, instanceId,
+      { cap: RET.LIMITS.TIMELINE_CAP + (tab.extraCap || 0), keep }));
+    if (!drop.size) return false;
+    state.interactions = state.interactions.filter(i => !drop.has(i.id));
+    for (const id of drop) {
+      stopDurationTimer(id);
+      _pendingSseRequests.delete(id);
+      _pendingDetailRequests.delete(id);
+      _sseIndex.delete(id);
+    }
+    for (let k = _recentFull.length - 1; k >= 0; k--) {
+      if (drop.has(_recentFull[k])) _recentFull.splice(k, 1);
+    }
+    tab.hasMore = true;
+    return true;
+  }
+
+  function loadEarlier(instanceId = activeInstanceTab) {
+    const tab = _openTabs.get(instanceId);
+    if (!tab || !tab.hasMore || tab.loadingEarlier) return;
+    const oldest = state.interactions.find(i => i.instanceId === instanceId);
+    tab.loadingEarlier = true;
+    _renderLoadEarlier();
+    sendWs({ type: 'inspector:getEarlier', instanceId, beforeId: oldest?.id || null,
+             before: oldest?.timestamp, limit: RET.LIMITS.EARLIER_PAGE });
+  }
+
+  // The "Load earlier" bar at the top of the timeline, while the server holds
+  // older turns of this session than the page does.
+  function _renderLoadEarlier() {
+    const tab = _openTabs.get(activeInstanceTab);
+    let bar = timelineList.querySelector(':scope > .tl-load-earlier');
+    if (!tab?.hasMore) { bar?.remove(); return; }
+    if (!bar) {
+      bar = document.createElement('button');
+      bar.className = 'tl-load-earlier';
+      bar.style.cssText = 'display:block;width:100%;padding:4px 8px;font-size:11px;cursor:pointer;background:var(--surface, var(--bg));color:var(--text-dim);border:none;border-bottom:1px solid var(--border)';
+      bar.addEventListener('click', () => loadEarlier());
+      timelineList.prepend(bar);
+    }
+    bar.disabled = !!tab.loadingEarlier;
+    bar.textContent = tab.loadingEarlier ? 'Loading earlier turns\u2026' : 'Load earlier turns';
   }
 
   function switchInstanceTab(instanceId) {
@@ -448,6 +502,8 @@
     if (instanceId !== SESSIONS_TAB && !_openTabs.has(instanceId)) { openSessionTab(instanceId); return; }
     if (_splitMode && activeInstanceTab !== instanceId) exitSplitMode();
     activeInstanceTab = instanceId;
+    // The tab left behind keeps summaries only.
+    _scheduleCompaction();
     _showSessionsGrid(instanceId === SESSIONS_TAB);
     renderInspectorTabStrip();
     updateStats();
@@ -616,19 +672,39 @@
     const id = btn.dataset.interactionId;
     const interaction = state.interactions.find(i => i.id === id);
     if (!interaction) return;
+    // A summary has no conversation to put in the command: fetch it first.
+    if (interaction._summary) {
+      _curlPending = id;
+      _pendingDetailRequests.add(id);
+      sendWs({ type: 'interaction:getDetail', id });
+      return;
+    }
     showCurlModal(buildCurlCommand(interaction));
   });
+  let _curlPending = null;
 
-  /* --- Sheet rows: seed the JSON tree on first expand ---
-     autoExpandSmallJsonBlocks() already unfolds anything under ~50 lines,
+  /* --- Sheet rows: build the JSON tree on expand ---
+     A row's JSON is built when it opens (_fillSheetRow) and dropped when it
+     closes. autoExpandSmallJsonBlocks() unfolds anything under ~50 lines,
      so what is left is the big ones, which would otherwise open onto a
      single collapsed `{ role, content }` line. Unfold their outermost
      node once so the row shows something. `toggle` does not bubble —
      hence the capture-phase listener. */
   document.addEventListener('toggle', (e) => {
     const row = e.target;
-    if (!row.classList?.contains('vc-sheet-row') || !row.open || row.dataset.seeded) return;
+    if (!row.classList?.contains('vc-sheet-row')) return;
+    if (!row.open) {
+      // Closed again: its JSON goes; reopening builds it afresh.
+      if (row.dataset.seeded && !_selectionInside(row)) {
+        const detail = row.querySelector('.vc-sheet-detail');
+        if (detail) detail.innerHTML = '';
+        delete row.dataset.seeded;
+      }
+      return;
+    }
+    if (row.dataset.seeded) return;
     row.dataset.seeded = '1';
+    _fillSheetRow(row);
     const node = row.querySelector('.jt-root > details.jt-node');
     if (node) node.open = true;
   }, true);
@@ -692,7 +768,9 @@
     return calls;
   }
 
-  function findToolResult(toolUseId) {
+  // A summary's copy of a result is cut (_truncated); `owner` is the turn whose
+  // detail holds it whole.
+  function findToolResult(toolUseId, out) {
     for (const interaction of state.interactions) {
       const req = interaction.request;
       const msgs = req?.messages || (req?._toolResults && [{ role: 'user', content: req._toolResults }]);
@@ -702,6 +780,7 @@
         const content = Array.isArray(msg.content) ? msg.content : [];
         for (const block of content) {
           if (block.type === 'tool_result' && block.tool_use_id === toolUseId) {
+            if (out) out.owner = interaction;
             return block;
           }
         }
@@ -813,9 +892,12 @@
       }
     }
 
-    // Route SSE to detail panel
+    // Route SSE to detail panel — not while it is off screen: the event is
+    // buffered above, and the panel replays the buffer when it is shown.
     const sel = state.selection;
-    if (_splitMode && _splitInteractions.has(interactionId)) {
+    if (!_inspectorShown()) {
+      if (sel?.type === 'turn' && sel.id === interactionId || _splitInteractions.has(interactionId)) _renderOnShow = true;
+    } else if (_splitMode && _splitInteractions.has(interactionId)) {
       appendSSEToDetail(event, interaction);
     } else if (_splitMode && _liveMode && event.eventType === 'message_start'
                && (interaction.status === 'streaming' || interaction.status === 'pending')
@@ -1066,16 +1148,18 @@
       _gaugeEl.innerHTML = charGauge(interaction._respChars);
     }
 
+    // The chip counts even while the Raw SSE section is closed (and unbuilt).
+    const _sseChip = _scopeFind(scope, 'sse-chip-count');
+    if (_sseChip) {
+      _sseChip.textContent = interaction.response.sseEvents.length;
+      const chipBtn = _sseChip.closest('.vc-chip');
+      if (chipBtn) { chipBtn.classList.remove('is-empty'); chipBtn.disabled = false; }
+    }
     const _sseDetails = _scopeFind(scope, 'raw-sse-details');
     if (_sseDetails) {
       _sseDetails.hidden = false;
       const _sseCount = _scopeFind(scope, 'raw-sse-count');
       if (_sseCount) _sseCount.textContent = interaction.response.sseEvents.length;
-      const _sseChip = _scopeFind(scope, 'sse-chip-count');
-      if (_sseChip) {
-        _sseChip.textContent = interaction.response.sseEvents.length;
-        _sseChip.closest('.vc-chip')?.classList.remove('is-empty');
-      }
       const _ssePre = _scopeFind(scope, 'raw-sse-pre');
       if (_ssePre) {
         const _evtHtml = `<span class="json-key">event:</span> ${escHtml(event.eventType)}\n<span class="json-string">data:</span> ${escHtml(typeof event.data === 'string' ? event.data : JSON.stringify(event.data))}\n`;
@@ -1299,19 +1383,10 @@
   function updateInteraction(updated) {
     const idx = state.interactions.findIndex(i => i.id === updated.id);
     if (idx >= 0) {
-      const localEvents = state.interactions[idx].response?.sseEvents || [];
-      const localSubagent = state.interactions[idx].subagent;
-      const localInferred = state.interactions[idx]._subagentInferred;
-      // Client-side running counter behind the response char gauge — the server
-      // doesn't send it, so a wholesale replace would reset the gauge to zero.
-      const localRespChars = state.interactions[idx]._respChars;
-      state.interactions[idx] = { ...updated, response: { ...updated.response, sseEvents: localEvents } };
-      if (localRespChars) state.interactions[idx]._respChars = localRespChars;
-      if (localSubagent && !state.interactions[idx].subagent) {
-        state.interactions[idx].subagent = localSubagent;
-        // A guess stays a guess — the next column pass may revise it.
-        if (localInferred) state.interactions[idx]._subagentInferred = true;
-      }
+      // Keeps what the summary leaves out and this page already has: the
+      // streamed events, the response gauge (a client-side running counter),
+      // a subagent guess, a fetched conversation.
+      state.interactions[idx] = RET.mergeLiveUpdate(state.interactions[idx], _adoptIncoming(updated));
     }
 
     updateTurnBadge(updated.id, updated.status || 'complete');
@@ -2021,6 +2096,7 @@
   function renderTimelineParallel() {
     const savedScroll = _liveMode ? null : timelineList.scrollTop;
     timelineList.innerHTML = '';
+    _renderLoadEarlier();
     resetSubagentRegistry();
     stopAllFlowAnimations();
 
@@ -3205,15 +3281,61 @@
   const _pendingSseRequests = new Set();
   const _pendingDetailRequests = new Set();
 
+  /* The inspector is on screen when its view is shown and the browser tab is
+     in front. Hidden, nothing renders; hidden for a while, the detail panel
+     and every full-detail turn are dropped, summaries kept. */
+  const _inspectorView = document.getElementById('view-dashboard');
+  function _inspectorShown() {
+    if (document.hidden) return false;
+    return !_inspectorView || (_inspectorView.style.display !== 'none' && !_inspectorView.classList.contains('hidden'));
+  }
+  let _renderOnShow = false;           // a render held back while hidden
+  let _hiddenDropTimer = null;
+  let _wasShown = _inspectorShown();
+
+  function _onInspectorVisibility() {
+    const shown = _inspectorShown();
+    if (shown === _wasShown) return;
+    _wasShown = shown;
+    if (!shown) {
+      if (!_hiddenDropTimer) _hiddenDropTimer = setTimeout(_dropHiddenDetail, RET.LIMITS.HIDDEN_DROP_MS);
+      return;
+    }
+    clearTimeout(_hiddenDropTimer);
+    _hiddenDropTimer = null;
+    if (!_renderOnShow) return;
+    _renderOnShow = false;
+    // Split panes missed what streamed meanwhile: show the selection instead.
+    if (_splitMode) exitSplitMode();
+    if (state.selection) select(state.selection);
+  }
+
+  function _dropHiddenDetail() {
+    _hiddenDropTimer = null;
+    if (_inspectorShown()) return;
+    if (_splitMode) exitSplitMode();
+    _detailView = null;
+    _deferredRender = null;
+    detailContent.innerHTML = '';
+    _compactInteractions({ hidden: true });
+    if (state.selection) _renderOnShow = true;
+  }
+
+  document.addEventListener('visibilitychange', _onInspectorVisibility);
+  if (_inspectorView) {
+    new MutationObserver(_onInspectorVisibility)
+      .observe(_inspectorView, { attributes: true, attributeFilter: ['style', 'class'] });
+  }
+
   /* Every turn's request carries the whole conversation so far, so holding
-     each one at full size grows quadratically over a long session. Past a
-     small budget of recently used items, a finished interaction is trimmed
-     back to the summary shape the server sends on connect (summarizeForInit
-     in src/dashboard-ws.js) — the state every item is in after a page
-     reload. Selecting it again refetches the detail. */
-  const FULL_DETAIL_BUDGET = 10;
+     each one at full size grows quadratically over a long session. Turns
+     arrive as summaries (summarizeForInit in src/dashboard-ws.js); the one on
+     screen fetches its detail, and past a small budget of recently used
+     items a turn is trimmed back to the summary shape. Selecting it again
+     refetches the detail. The decisions live in inspector-retention.js. */
+  const RET = window.inspectorRetention;
   const _recentFull = [];              // ids, least recently used first
-  const _internedText = new Map();     // turns of one conversation share its first message
+  const _interner = RET.createInterner();  // one copy of a session's first message
   let _compactTimer = null;
 
   function _touchFull(id) {
@@ -3228,26 +3350,61 @@
     _compactTimer = setTimeout(() => { _compactTimer = null; _compactInteractions(); }, 1000);
   }
 
-  function _compactInteractions() {
-    _recentFull.splice(0, Math.max(0, _recentFull.length - FULL_DETAIL_BUDGET));
-    const keep = new Set(_recentFull);
+  function _compactInteractions({ hidden = false } = {}) {
+    _recentFull.splice(0, Math.max(0, _recentFull.length - RET.LIMITS.FULL_DETAIL_BUDGET));
+    const keep = new Set();
     const sel = state.selection;
     if (sel) keep.add(sel.type === 'tool' ? sel.interactionId : sel.id);
     for (const id of _splitInteractions) keep.add(id);
-    for (const i of state.interactions) {
-      if (i._summary || keep.has(i.id) || _isLiveInteraction(i)) continue;
-      _compactInteraction(i);
+    const plan = RET.compactionPlan(state.interactions, {
+      recentFull: _recentFull, keep, activeInstance: activeInstanceTab, hidden, now: Date.now(),
+    });
+    if (!plan.length) return;
+    const byId = new Map(state.interactions.map(i => [i.id, i]));
+    for (const { id, dropStream } of plan) {
+      const i = byId.get(id);
+      if (i) _compactInteraction(i, { dropStream });
     }
+    if (hidden) _recentFull.length = 0;
   }
 
-  function _intern(s) {
-    const hit = _internedText.get(s);
-    if (hit !== undefined) return hit;
-    _internedText.set(s, s);
-    return s;
+  // Serialized size of a value, for the size gauges: measured once per object
+  // rather than re-stringifying a whole conversation on every render.
+  const _charsCache = new WeakMap();
+  function _jsonChars(v) {
+    if (v == null) return 0;
+    if (typeof v === 'string') return v.length;
+    if (typeof v !== 'object') return String(v).length;
+    let n = _charsCache.get(v);
+    if (n === undefined) {
+      n = JSON.stringify(v)?.length || 0;
+      _charsCache.set(v, n);
+    }
+    return n;
   }
 
-  function _compactInteraction(i) {
+  // A response body over this size is cut once its turn is trimmed (as the
+  // server cuts it in a summary); the detail fetch brings it back whole.
+  const RESP_BODY_KEEP_MAX = 64 * 1024;
+  function _cutStrings(v, max, depth = 0) {
+    if (typeof v === 'string') return v.length > max ? v.slice(0, max) : v;
+    if (!v || typeof v !== 'object' || depth > 32) return v;
+    if (Array.isArray(v)) return v.map(x => _cutStrings(x, max, depth + 1));
+    const out = {};
+    for (const [k, x] of Object.entries(v)) out[k] = _cutStrings(x, max, depth + 1);
+    return out;
+  }
+
+  // Turns that arrive (live, snapshot, a page of history) share their first
+  // message's text with the session's other turns: keep one copy.
+  function _adoptIncoming(i) {
+    if (typeof i?.request?._firstUserText === 'string') {
+      i.request._firstUserText = _interner.intern(i.instanceId, i.request._firstUserText);
+    }
+    return i;
+  }
+
+  function _compactInteraction(i, { dropStream = false } = {}) {
     const req = i.request;
     if (req) {
       const r = { ...req };
@@ -3256,6 +3413,7 @@
         const last = msgs[msgs.length - 1];
         const lastContent = Array.isArray(last?.content) ? last.content : [];
         r._messageCount = msgs.length;
+        if (!r._messagesChars) r._messagesChars = _jsonChars(msgs);
         r._lastMessage = last ? {
           role: last.role,
           hasText: typeof last.content === 'string' || lastContent[lastContent.length - 1]?.type === 'text',
@@ -3269,16 +3427,17 @@
         if (first) {
           const text = typeof first.content === 'string' ? first.content
             : (Array.isArray(first.content) ? first.content.filter(b => b.type === 'text' && b.text).map(b => b.text).join('\n') : '');
-          r._firstUserText = _intern(text.replace(/\s+/g, ' ').trim());
+          r._firstUserText = _interner.intern(i.instanceId, text.replace(/\s+/g, ' ').trim().slice(0, 8000));
         }
         delete r.messages;
       }
       if (Array.isArray(r.tools)) {
         r._toolCount = r.tools.length;
+        if (!r._toolsChars) r._toolsChars = _jsonChars(r.tools);
         delete r.tools;
       }
       if (r.system) {
-        r._systemChars = typeof r.system === 'string' ? r.system.length : JSON.stringify(r.system).length;
+        if (!r._systemChars) r._systemChars = _jsonChars(r.system);
         delete r.system;
       }
       if (i.isHook) {
@@ -3299,11 +3458,21 @@
     delete i.translatedBody;
     // The stream is a second copy of the response; drop it once the body
     // tells the same story (the select path lazy-loads it back).
+    // A turn still streaming keeps its events unless it is stuck.
     const resp = i.response;
-    if (resp?.body && resp.sseEvents?.length
-        && hasAssistantMessage({ response: { body: resp.body } }) === hasAssistantMessage(i)) {
+    if (resp?.sseEvents?.length && (dropStream || (resp.body && !_isLiveInteraction(i)
+        && hasAssistantMessage({ response: { body: resp.body } }) === hasAssistantMessage(i)))) {
       if (!i._respChars) i._respChars = _respCharCount(i);
       i.response = { ...resp, sseEvents: undefined };
+      if (dropStream) _sseIndex.delete(i.id);
+    }
+    // A large response body is cut like the server cuts it in a summary.
+    if (resp?.body && !i._summary && !_isLiveInteraction(i)) {
+      const chars = _jsonChars(resp.body);
+      if (chars > RESP_BODY_KEEP_MAX) {
+        if (!i._respChars) i._respChars = _respCharCount(i);
+        i.response = { ...i.response, body: _cutStrings(resp.body, 2000), _bodyChars: chars, _bodyTruncated: true };
+      }
     }
     i._summary = true;
   }
@@ -3353,6 +3522,7 @@
      Used by the update/error paths, which must never rebuild — they fire while
      a turn streams. */
   function refreshDetailIfShowing(interaction) {
+    if (!_inspectorShown()) { _renderOnShow = true; return; }
     if (_detailView?.kind !== 'llm') return;
     if (_detailView.id !== interaction.id || !_detailView.root?.isConnected) return;
     patchTurnDetail(interaction);
@@ -3387,6 +3557,9 @@
 
   function select(sel, { userClick = false } = {}) {
     state.selection = sel;
+    // Off screen (another view, a background browser tab) a selection is only
+    // recorded; its detail is fetched and rendered once the inspector shows.
+    if (!_inspectorShown()) { _renderOnShow = true; return; }
     // Phones show timeline and detail one at a time; a tap drills in.
     if (userClick) window.dashboard.mobileShowDetail?.();
 
@@ -3406,7 +3579,7 @@
       const interaction = state.interactions.find(i => i.id === sel.id);
       if (!interaction) return;
 
-      if (interaction._summary) {
+      if (interaction._summary && _needsDetailOnSelect(interaction)) {
         if (!_pendingDetailRequests.has(interaction.id)) {
           _pendingDetailRequests.add(interaction.id);
           sendWs({ type: 'interaction:getDetail', id: interaction.id });
@@ -3474,10 +3647,18 @@
     }
   }
 
+  // jsonBlock marks a small value with its line count (data-jt-lines); a
+  // large one has none and stays folded.
+  // An LLM turn's detail is fetched by the sections that need it, as they
+  // open (_bindLazySections) — not for a turn nobody looks into. Hook and MCP
+  // panels, and a response cut in the summary, show it all at once.
+  function _needsDetailOnSelect(i) {
+    return !!(i.isHook || i.isMcp || i.response?._bodyTruncated || !isStandardLlm(i));
+  }
+
   function autoExpandSmallJsonBlocks(container) {
-    container.querySelectorAll('.jt-root').forEach(root => {
-      const script = root.querySelector('script[type="application/json"]');
-      if (script && script.textContent.split('\n').length <= 50)
+    container.querySelectorAll('.jt-root[data-jt-lines]').forEach(root => {
+      if (Number(root.dataset.jtLines) <= 50)
         root.querySelectorAll('details.jt-node').forEach(d => d.open = true);
     });
   }
@@ -3607,11 +3788,18 @@
   const _isSecOpen = key => _detailPrefs.open.includes(key);
   const _isSecPinned = key => _detailPrefs.pinned.includes(key);
 
+  /* A section body given as a function (the conversation, the tools, the
+     system prompt, the raw stream) is built only while its section is open,
+     and dropped again when it closes. */
+  const _bodyHtml = (body, open) => typeof body === 'function' ? (open ? body() : '') : body;
+
   /* Build one chip + its section. `size:'compact'` marks the small info
      grids, which take their natural height instead of an equal share. */
   function _secHtml(key, label, body, opts = {}) {
     const { count = '', size = 'elastic', empty = false, countId = '', placeholder = '' } = opts;
     const open = !empty && _isSecOpen(key);
+    const lazyBody = typeof body === 'function';
+    body = _bodyHtml(body, open);
     // An open section with nothing in it reads as a broken panel. Append a
     // note rather than replacing the body: #response-blocks must survive so
     // streaming can still fill it, and CSS hides the note once it does.
@@ -3626,7 +3814,7 @@
                title="${escHtml(label)}${empty ? ' — empty' : ' • click to toggle, alt-click to pin'}">
                <span class="vc-chip-pin"></span>${escHtml(label)}${count || countId ? `<span class="vc-chip-count"${countId ? ` id="${countId}"` : ''}>${count}</span>` : ''}
              </button>`,
-      sec: `<div class="${cls.join(' ')}" data-sec="${key}" data-size="${size}"${opts.lazyId ? ` data-lazy-detail="${opts.lazyId}"` : ''}>
+      sec: `<div class="${cls.join(' ')}" data-sec="${key}" data-size="${size}"${opts.lazyId ? ` data-lazy-detail="${opts.lazyId}"` : ''}${lazyBody ? ` data-lazy-body="${open ? '' : 'pending'}"` : ''}>
               <div class="vc-sec-body">${body}</div>
             </div>`,
     };
@@ -3640,7 +3828,8 @@
   function _otherReqParams(req) {
     const other = {};
     for (const [k, v] of Object.entries(req)) {
-      if (!_REQ_KNOWN_KEYS.has(k)) other[k] = v;
+      // _-prefixed keys are the summary's own (counts, sizes), not the request's.
+      if (!_REQ_KNOWN_KEYS.has(k) && !k.startsWith('_')) other[k] = v;
     }
     return other;
   }
@@ -3695,8 +3884,7 @@
     push('req:info', 'Info', infoBody, { size: 'compact' });
 
     if (req.system) {
-      const charLen = typeof req.system === 'string' ? req.system.length : JSON.stringify(req.system).length;
-      push('req:system', 'System', jsonBlock(req.system), { count: charGauge(charLen) });
+      push('req:system', 'System', () => jsonBlock(req.system), { count: charGauge(req._systemChars || _jsonChars(req.system)) });
     } else if (req._systemChars) {
       push('req:system', 'System', '<div class="json-block" style="opacity:0.5">Loading...</div>',
         { count: charGauge(req._systemChars), lazyId: interaction.id });
@@ -3705,32 +3893,32 @@
     }
 
     if (req.messages?.length > 0) {
-      const msgChars = JSON.stringify(req.messages).length;
-      push('req:messages', 'Messages', renderMessages(req.messages),
+      const msgChars = req._messagesChars || _jsonChars(req.messages);
+      push('req:messages', 'Messages', () => renderMessages(req.messages, interaction.id),
         { count: `${req.messages.length} ${charGauge(msgChars)}` });
     } else if (req._messageCount > 0) {
       push('req:messages', 'Messages', '<div class="json-block" style="opacity:0.5">Loading...</div>',
-        { count: String(req._messageCount), lazyId: interaction.id });
+        { count: `${req._messageCount}${req._messagesChars ? ' ' + charGauge(req._messagesChars) : ''}`, lazyId: interaction.id });
     } else {
       push('req:messages', 'Messages', '', { empty: true });
     }
 
     if (req.tools?.length > 0) {
-      const toolChars = JSON.stringify(req.tools).length;
-      push('req:tools', 'Tools', renderTools(req.tools),
+      const toolChars = req._toolsChars || _jsonChars(req.tools);
+      push('req:tools', 'Tools', () => renderTools(req.tools, interaction.id),
         { count: `${req.tools.length} ${charGauge(toolChars)}` });
     } else if (req._toolCount > 0) {
       push('req:tools', 'Tools', '<div class="json-block" style="opacity:0.5">Loading...</div>',
-        { count: String(req._toolCount), lazyId: interaction.id });
+        { count: `${req._toolCount}${req._toolsChars ? ' ' + charGauge(req._toolsChars) : ''}`, lazyId: interaction.id });
     } else {
       push('req:tools', 'Tools', '', { empty: true });
     }
 
-    push('req:thinking', 'Thinking', req.thinking ? jsonBlock(req.thinking) : '', { empty: !req.thinking });
+    push('req:thinking', 'Thinking', req.thinking ? () => jsonBlock(req.thinking) : '', { empty: !req.thinking });
 
     const otherParams = _otherReqParams(req);
     const hasOther = Object.keys(otherParams).length > 0;
-    push('req:other', 'Other', hasOther ? jsonBlock(otherParams) : '', { empty: !hasOther });
+    push('req:other', 'Other', hasOther ? () => jsonBlock(otherParams) : '', { empty: !hasOther });
 
     return out;
   }
@@ -3792,15 +3980,19 @@
         placeholder: blocksHtml.trim() ? '' : blocksPlaceholder });
 
     const sseCount = resp.sseEvents?.length || 0;
-    const ssePre = sseCount > 0 ? resp.sseEvents.map(e =>
-      `<span class="json-key">event:</span> ${escHtml(e.eventType)}\n<span class="json-string">data:</span> ${escHtml(typeof e.data === 'string' ? e.data : JSON.stringify(e.data))}\n`
-    ).join('\n') : '';
     // Kept as <details open> so the existing streaming code that unhides it
-    // and appends to #raw-sse-pre keeps working unchanged.
-    push('resp:sse', 'Raw SSE', `<details id="raw-sse-details" open>
-        <summary>Raw SSE Events (<span id="raw-sse-count">${sseCount}</span>)</summary>
+    // and appends to #raw-sse-pre keeps working unchanged. Built when opened:
+    // it prints every event of the stream.
+    push('resp:sse', 'Raw SSE', () => {
+      const events = interaction.response?.sseEvents || [];
+      const ssePre = events.map(e =>
+        `<span class="json-key">event:</span> ${escHtml(e.eventType)}\n<span class="json-string">data:</span> ${escHtml(typeof e.data === 'string' ? e.data : JSON.stringify(e.data))}\n`
+      ).join('\n');
+      return `<details id="raw-sse-details" open>
+        <summary>Raw SSE Events (<span id="raw-sse-count">${events.length}</span>)</summary>
         <pre class="json-block no-linkify" id="raw-sse-pre">${ssePre}</pre>
-      </details>`, { count: sseCount ? String(sseCount) : '', countId: 'sse-chip-count', empty: !isLive && sseCount === 0 });
+      </details>`;
+    }, { count: sseCount ? String(sseCount) : '', countId: 'sse-chip-count', empty: !isLive && sseCount === 0 });
 
     return out;
   }
@@ -3875,11 +4067,14 @@
     const chip = root.querySelector(`.vc-chip[data-sec="${CSS.escape(key)}"]`);
     if (!sec || !chip) return;
     const { count = '', empty = false, countId = '', placeholder = '' } = opts;
+    const open = !empty && _isSecOpen(key);
 
     const bodyEl = sec.querySelector('.vc-sec-body');
     if (bodyEl) {
-      bodyEl.innerHTML = body + (placeholder ? `<div class="vc-sec-placeholder">${escHtml(placeholder)}</div>` : '');
+      bodyEl.innerHTML = _bodyHtml(body, open) + (placeholder ? `<div class="vc-sec-placeholder">${escHtml(placeholder)}</div>` : '');
     }
+    if (typeof body === 'function') sec.dataset.lazyBody = open ? '' : 'pending';
+    else delete sec.dataset.lazyBody;
 
     if (opts.lazyId) sec.dataset.lazyDetail = opts.lazyId;
     else delete sec.dataset.lazyDetail;
@@ -3899,11 +4094,30 @@
       countEl.remove();
     }
 
-    const open = !empty && _isSecOpen(key);
     sec.classList.toggle('is-open', open);
     chip.classList.toggle('is-open', open);
 
     _decorateSection(sec);
+  }
+
+  /* A section whose body is built on open (data-lazy-body): build it now
+     from the turn on screen, or drop it again once it closes. */
+  function _fillLazySection(root, sec) {
+    if (sec.dataset.lazyBody !== 'pending') return;
+    const interaction = _detailView?.kind === 'llm'
+      ? state.interactions.find(i => i.id === _detailView.id) : null;
+    if (!interaction) return;
+    const key = sec.dataset.sec;
+    const descs = key.startsWith('req:') ? _requestSections(interaction) : _responseSections(interaction);
+    const desc = descs.find(d => d.key === key);
+    if (desc) _applySection(root, desc);
+  }
+
+  function _releaseLazySection(sec) {
+    if (sec.dataset.lazyBody === undefined || sec.dataset.lazyBody === 'pending') return;
+    const bodyEl = sec.querySelector('.vc-sec-body');
+    if (bodyEl) bodyEl.innerHTML = '';
+    sec.dataset.lazyBody = 'pending';
   }
 
   /* Update the parts of an already-rendered turn that actually changed. Called
@@ -4069,6 +4283,14 @@
 
     detailContent.innerHTML = html;
 
+    // Set before the frame binds: a section opened there builds its body from
+    // the turn on screen.
+    _detailView = {
+      key: `turn:${interaction.id}`, kind: 'llm', id: interaction.id,
+      root: detailContent.querySelector('.vc-detail'),
+      sig: _detailSig(interaction), streamed: false,
+    };
+
     const splitEl = detailContent.querySelector('.vc-split');
     _applySplitRatio(splitEl, _detailPrefs.ratio);
     _bindDetailFrame(detailContent, splitEl);
@@ -4077,12 +4299,6 @@
     processMarkdownBlocks(detailContent);
     linkifyDetail(detailContent);
     _bindLazySections(detailContent);
-
-    _detailView = {
-      key: `turn:${interaction.id}`, kind: 'llm', id: interaction.id,
-      root: detailContent.querySelector('.vc-detail'),
-      sig: _detailSig(interaction), streamed: false,
-    };
 
     if (_isLive && interaction.response?.sseEvents?.length > 0) {
       for (const event of interaction.response.sseEvents) {
@@ -4105,6 +4321,7 @@
         sec.classList.add('is-open');
         chip.classList.add('is-open');
         if (!_detailPrefs.open.includes(key)) _detailPrefs.open.push(key);
+        _fillLazySection(root, sec);
         changed = true;
         return true;
       };
@@ -4157,6 +4374,7 @@
             const otherKey = other.dataset.sec;
             if (otherKey === key || _isSecPinned(otherKey)) continue;
             other.classList.remove('is-open');
+            _releaseLazySection(other);
             pane.querySelector(`.vc-chip[data-sec="${CSS.escape(otherKey)}"]`)?.classList.remove('is-open');
             const oi = _detailPrefs.open.indexOf(otherKey);
             if (oi >= 0) _detailPrefs.open.splice(oi, 1);
@@ -4164,12 +4382,14 @@
           sec.classList.add('is-open');
           chip.classList.add('is-open');
           if (!_detailPrefs.open.includes(key)) _detailPrefs.open.push(key);
+          _fillLazySection(root, sec);
           sec.dispatchEvent(new CustomEvent('vc-sec-open'));
         } else {
           sec.classList.remove('is-open');
           chip.classList.remove('is-open');
           const i = _detailPrefs.open.indexOf(key);
           if (i >= 0) _detailPrefs.open.splice(i, 1);
+          _releaseLazySection(sec);
         }
         _saveDetailPrefs();
       });
@@ -4280,9 +4500,15 @@
       html += `<p class="info-label">No input data</p>`;
     }
 
-    const result = findToolResult(tc.id);
+    const found = {};
+    const result = findToolResult(tc.id, found);
+    if (result?._truncated && found.owner?._summary && !_pendingDetailRequests.has(found.owner.id)) {
+      // Shown cut until the full turn lands; the detail handler re-selects.
+      _pendingDetailRequests.add(found.owner.id);
+      sendWs({ type: 'interaction:getDetail', id: found.owner.id });
+    }
     if (result) {
-      html += `<div class="section-title">Result</div>`;
+      html += `<div class="section-title">Result${result._truncated ? ' <span class="info-label">(loading the rest\u2026)</span>' : ''}</div>`;
       if (result.is_error) {
         html += `<div class="content-block"><div class="content-block-header" style="color:var(--red)">Error Result</div>`;
       } else {
@@ -4503,8 +4729,9 @@
      Three columns — row number, size gauge, first chars of the content —
      and a row expands in place into the same JSON tree used elsewhere in
      the frame, capped and scrollable so one big row can't take the pane. */
-  function sheet(contentLabel, rows) {
-    return `<div class="vc-sheet">
+  function sheet(contentLabel, rows, src) {
+    const srcAttr = src ? ` data-sheet-src="${escHtml(src.id)}" data-sheet-kind="${src.kind}"` : '';
+    return `<div class="vc-sheet"${srcAttr}>
       <div class="vc-sheet-head">
         <span class="vc-sheet-c vc-sheet-n">#</span>
         <span class="vc-sheet-c vc-sheet-size">chars</span>
@@ -4515,7 +4742,7 @@
   }
 
   function sheetRow(idx, chars, max, tag, tagCls, text, detailHtml) {
-    return `<details class="vc-sheet-row">
+    return `<details class="vc-sheet-row" data-row="${idx}">
       <summary>
         <span class="vc-sheet-c vc-sheet-n">${idx}</span>
         <span class="vc-sheet-c vc-sheet-size">${msgSizeGauge(chars, max)}</span>
@@ -4528,8 +4755,14 @@
   const MSG_GAUGE_MAX = 80000;
   const TOOL_GAUGE_MAX = 8000;
 
-  function renderMessages(messages) {
-    const rows = messages.map((msg, idx) => {
+  /* Rows carry their first chars and size only; a row's JSON is built when it
+     is opened (and dropped when it closes) from the turn's data — see
+     _fillSheetRow. A long conversation shows its newest MESSAGE_ROWS rows
+     until "show earlier" is clicked. */
+  function renderMessages(messages, interactionId, { all = false } = {}) {
+    const from = all ? 0 : Math.max(0, messages.length - RET.LIMITS.MESSAGE_ROWS);
+    const rows = messages.slice(from).map((msg, k) => {
+      const idx = from + k;
       const role = msg.role || 'unknown';
       let preview = '';
       if (typeof msg.content === 'string') {
@@ -4543,20 +4776,55 @@
           return `[${b.type}]`;
         }).join(' | ');
       }
-      return sheetRow(idx, JSON.stringify(msg).length, MSG_GAUGE_MAX,
+      return sheetRow(idx, _jsonChars(msg), MSG_GAUGE_MAX,
         role, `is-${role.replace(/[^a-z]/gi, '').toLowerCase()}`,
-        truncate(preview, 200), jsonBlock(msg));
+        truncate(preview, 200), '');
     });
-    return sheet('role / content', rows);
+    if (from > 0) {
+      rows.unshift(`<button class="vc-sheet-more" data-sheet-more style="display:block;width:100%;padding:4px 8px;font-size:11px;cursor:pointer;background:none;color:var(--text-dim);border:none;border-bottom:1px solid var(--border)">Show ${from} earlier message${from === 1 ? '' : 's'}</button>`);
+    }
+    return sheet('role / content', rows, { id: interactionId, kind: 'messages' });
   }
 
-  function renderTools(tools) {
+  function renderTools(tools, interactionId) {
     const rows = tools.map((tool, idx) => sheetRow(
-      idx, JSON.stringify(tool).length, TOOL_GAUGE_MAX,
+      idx, _jsonChars(tool), TOOL_GAUGE_MAX,
       tool.name || 'unnamed', 'is-tool',
-      truncate(tool.description || '', 200), jsonBlock(tool)));
-    return sheet('name / description', rows);
+      truncate(tool.description || '', 200), ''));
+    return sheet('name / description', rows, { id: interactionId, kind: 'tools' });
   }
+
+  // An opened sheet row's JSON, from the turn it belongs to. A turn trimmed
+  // meanwhile is fetched again; its section rebuilds when the detail lands.
+  function _fillSheetRow(row) {
+    const sheetEl = row.closest('.vc-sheet');
+    const detail = row.querySelector('.vc-sheet-detail');
+    if (!sheetEl?.dataset.sheetSrc || !detail) return;
+    const id = sheetEl.dataset.sheetSrc;
+    const interaction = state.interactions.find(i => i.id === id);
+    const item = interaction?.request?.[sheetEl.dataset.sheetKind]?.[Number(row.dataset.row)];
+    if (item === undefined) {
+      detail.innerHTML = '<div class="json-block" style="opacity:0.5">Loading...</div>';
+      delete row.dataset.seeded;
+      if (interaction && !_pendingDetailRequests.has(id)) {
+        _pendingDetailRequests.add(id);
+        sendWs({ type: 'interaction:getDetail', id });
+      }
+      return;
+    }
+    detail.innerHTML = jsonBlock(item);
+    autoExpandSmallJsonBlocks(detail);
+    linkifyDetail(detail);
+  }
+
+  document.addEventListener('click', (e) => {
+    const more = e.target.closest('[data-sheet-more]');
+    if (!more) return;
+    const sheetEl = more.closest('.vc-sheet');
+    const id = sheetEl?.dataset.sheetSrc;
+    const msgs = state.interactions.find(i => i.id === id)?.request?.messages;
+    if (msgs) sheetEl.outerHTML = renderMessages(msgs, id, { all: true });
+  });
 
   function compactTokens(usage) {
     if (!usage) return '';
@@ -4881,9 +5149,12 @@
         // holds every turn up to now and every live event follows it; it
         // replaces whatever an earlier subscription left here.
         _dropInstance(id);
-        state.interactions.push(...(msg.interactions || []));
+        state.interactions.push(...(msg.interactions || []).map(_adoptIncoming));
         state.interactions.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         tab.loading = false;
+        tab.hasMore = !!msg.hasMore;
+        tab.loadingEarlier = false;
+        tab.extraCap = 0;
         if (activeInstanceTab === id) switchInstanceTab(id);
         else renderInspectorTabStrip();
         break;
@@ -4906,8 +5177,8 @@
           if ((state.interactions[mid].timestamp || 0) <= _ts) _lo = mid + 1;
           else _hi = mid;
         }
-        state.interactions.splice(_lo, 0, msg.interaction);
-        _touchFull(msg.interaction.id);
+        state.interactions.splice(_lo, 0, _adoptIncoming(msg.interaction));
+        if (!msg.interaction._summary) _touchFull(msg.interaction.id);
         const matchesFilter = msg.interaction.instanceId === activeInstanceTab;
         if (matchesFilter) {
           if (_timelineMode === 'parallel') {
@@ -4921,6 +5192,9 @@
           } else {
             appendTurnToTimeline(msg.interaction);
           }
+          // Past the per-session cap the oldest turns leave the page (and the
+          // timeline is rebuilt without them); "Load earlier" brings them back.
+          if (_trimTimeline(msg.interaction.instanceId)) renderTimelineActive();
           if (_liveMode && !_splitMode && !_wouldInterruptStream(msg.interaction)) {
             // While split mode is active, the panes ARE the live view — auto-selecting
             // each new interaction (incl. hooks) would tear the split down. New parallel
@@ -4931,6 +5205,7 @@
             scrollTimelineToBottom();
           }
         }
+        else _trimTimeline(msg.interaction.instanceId);
         updateStats();
         break;
 
@@ -4962,19 +5237,15 @@
         _pendingDetailRequests.delete(msg.id);
         const dIdx = state.interactions.findIndex(i => i.id === msg.id);
         if (dIdx >= 0 && msg.interaction) {
-          const localEvents = state.interactions[dIdx].response?.sseEvents;
-          const localSubagent = state.interactions[dIdx].subagent;
-          const localInferred = state.interactions[dIdx]._subagentInferred;
-          const localRespChars = state.interactions[dIdx]._respChars;
-          state.interactions[dIdx] = { ...msg.interaction };
-          if (localEvents?.length) state.interactions[dIdx].response.sseEvents = localEvents;
-          if (localRespChars) state.interactions[dIdx]._respChars = localRespChars;
-          if (localSubagent && !state.interactions[dIdx].subagent) {
-            state.interactions[dIdx].subagent = localSubagent;
-            if (localInferred) state.interactions[dIdx]._subagentInferred = true;
-          }
+          state.interactions[dIdx] = RET.mergeDetail(state.interactions[dIdx], msg.interaction);
           _touchFull(msg.id);
-          if (state.selection?.id === msg.id || state.selection?.interactionId === msg.id) {
+          if (_curlPending === msg.id) {
+            _curlPending = null;
+            showCurlModal(buildCurlCommand(state.interactions[dIdx]));
+          }
+          // A tool's result lives in the turn after the one that called it.
+          if (state.selection?.id === msg.id || state.selection?.interactionId === msg.id
+              || state.selection?.type === 'tool') {
             select(state.selection);
           }
         } else if (dIdx >= 0 && !msg.interaction) {
@@ -4984,6 +5255,25 @@
             const loader = el.querySelector('.json-block');
             if (loader) loader.textContent = '(data not available)';
           }
+        }
+        break;
+      }
+
+      case 'inspector:earlier': {
+        const tab = _openTabs.get(msg.instanceId);
+        if (!tab) break;
+        tab.loadingEarlier = false;
+        tab.hasMore = !!msg.hasMore;
+        const have = new Set(state.interactions.map(i => i.id));
+        const older = (msg.interactions || []).filter(i => !have.has(i.id)).map(_adoptIncoming);
+        tab.extraCap = (tab.extraCap || 0) + older.length;
+        state.interactions.unshift(...older);
+        state.interactions.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        if (activeInstanceTab === msg.instanceId) {
+          renderTimelineActive();
+          // The reader asked for what is above: show it, not the live end.
+          timelineList.scrollTop = 0;
+          updateStats();
         }
         break;
       }
