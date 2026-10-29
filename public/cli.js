@@ -1,5 +1,5 @@
 (function () {
-  const { sendWs, state, escHtml, askFormBuildHTML, askFormBind } = window.dashboard;
+  const { sendWs, state, escHtml, askFormBuildHTML, askFormBind, showAlert, showConfirm } = window.dashboard;
   const tabStrip = document.getElementById('cliTabStrip');
   const tabNewBtn = document.getElementById('cliTabNew');
   const container = document.getElementById('cliContainer');
@@ -478,9 +478,9 @@
         pauseBtn.addEventListener('click', (e) => {
           e.stopPropagation();
           if (tab.pausing) {
-            if (confirm('Interrupt now? The session stops mid-step and is saved as interrupted; its resume note may be missing.')) {
-              sendWs({ type: 'cli:interrupt', tabId });
-            }
+            showConfirm('Interrupt now? The session stops mid-step and is saved as interrupted; its resume note may be missing.',
+              { confirmLabel: 'Interrupt', danger: true })
+              .then((ok) => { if (ok) sendWs({ type: 'cli:interrupt', tabId }); });
             return;
           }
           sendWs({ type: 'cli:pause', tabId });
@@ -668,12 +668,12 @@
     sendWs({ type: 'cli:resumeRun', runId, fresh: fresh === true });
   }
 
-  function deleteRun(runId) {
-    if (!confirm(`Delete run ${runId} permanently?\n\n`
+  async function deleteRun(runId) {
+    if (!(await showConfirm(`Delete run ${runId} permanently?\n\n`
       + 'This is not a rollback: your code, commits and merged work are not touched.\n\n'
       + 'Removed: the conversation history of the orchestrator and every worker, their TODO/NOTES, '
       + "the run's session folder and its git worktrees. Unmerged branches are kept.\n\n"
-      + 'This cannot be undone.')) return;
+      + 'This cannot be undone.', { confirmLabel: 'Delete run', danger: true }))) return;
     sendWs({ type: 'cli:deleteRun', runId });
   }
 
@@ -688,13 +688,13 @@
 
   // An orchestrator is deleted with its run (the server refuses it alone); a
   // refused delete is confirmed again through cli:deleteRefused.
-  function deleteSaved(sess) {
+  async function deleteSaved(sess) {
     if (!sess) return;
     if (sess.group?.role === 'orchestrator') { deleteRun(sess.group.runId); return; }
-    if (!confirm(`Delete "${savedTitle(sess)}" permanently?\n\n`
+    if (!(await showConfirm(`Delete "${savedTitle(sess)}" permanently?\n\n`
       + 'This is not a rollback: your code, commits and merged work are not touched.\n\n'
       + 'Removed: its conversation history, its interaction data and its TODO/NOTES folder.\n\n'
-      + 'This cannot be undone.')) return;
+      + 'This cannot be undone.', { confirmLabel: 'Delete', danger: true }))) return;
     sendWs({ type: 'cli:deleteSavedSession', sessionId: sess.id });
   }
 
@@ -1114,10 +1114,10 @@
           body: JSON.stringify({ parent: currentDir, name }),
         });
         const data = await resp.json();
-        if (data.error) { alert(data.error); return; }
+        if (data.error) { showAlert(data.error); return; }
         newRow.classList.add('hidden');
         loadDir(data.created);
-      } catch { alert('Failed to create folder.'); }
+      } catch { showAlert('Failed to create folder.'); }
     }
     function onNewCancel() { newRow.classList.add('hidden'); }
     function onNewKey(e) { if (e.key === 'Enter') onNewOk(); }
@@ -1456,9 +1456,8 @@
           if (dirty) parts.push(`These worktrees have uncommitted changes:\n${dirty}`);
           const ask = busy && dirty ? 'Stop them and delete the run anyway? The changes are lost.'
             : busy ? 'Stop them and delete the run?' : 'Delete the run anyway? The changes are lost.';
-          if (confirm(`${parts.join('\n\n')}\n\n${ask}`)) {
-            sendWs({ type: 'cli:deleteRun', runId: msg.runId, force: true });
-          }
+          showConfirm(`${parts.join('\n\n')}\n\n${ask}`, { confirmLabel: busy ? 'Stop & delete' : 'Delete anyway', danger: true })
+            .then((ok) => { if (ok) sendWs({ type: 'cli:deleteRun', runId: msg.runId, force: true }); });
           break;
         }
         if (msg.error) { window.dashboard.showAlert?.(msg.error); break; }
@@ -1491,14 +1490,16 @@
       }
       case 'cli:closeRefused': {
         if (msg.canForce) {
-          if (confirm(`${msg.reason}\n\nForce-close it anyway?`)) sendWs({ type: 'cli:closeTab', tabId: msg.tabId, forget: msg.forget, force: true });
+          showConfirm(`${msg.reason}\n\nForce-close it anyway?`, { confirmLabel: 'Force close', danger: true })
+            .then((ok) => { if (ok) sendWs({ type: 'cli:closeTab', tabId: msg.tabId, forget: msg.forget, force: true }); });
         } else {
           window.dashboard.showAlert?.(msg.reason);
         }
         break;
       }
       case 'cli:deleteRefused': {
-        if (confirm(`${msg.reason}\n\nDelete it anyway?`)) sendWs({ type: 'cli:deleteSavedSession', sessionId: msg.sessionId, force: true });
+        showConfirm(`${msg.reason}\n\nDelete it anyway?`, { confirmLabel: 'Delete anyway', danger: true })
+          .then((ok) => { if (ok) sendWs({ type: 'cli:deleteSavedSession', sessionId: msg.sessionId, force: true }); });
         break;
       }
       case 'cli:landing': {

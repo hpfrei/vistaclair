@@ -869,20 +869,108 @@ function setupCwdToolbar({ editBtn, label, input, setBtn, onSave }) {
   });
 }
 
-// --- Alert modal (replaces native alert()) ---
+// --- Dialogs (replace native alert(), confirm() and prompt()) ---
+// Each returns a promise. The topmost open dialog owns the keyboard: Escape
+// cancels, Enter confirms (unless Cancel has focus), Tab cycles inside it.
+// A backdrop click cancels. Focus goes back to where it was on close.
+// The message is text (escaped); newlines show as line breaks.
+const DIALOG_BACKDROPS = '.alert-modal-backdrop, .confirm-modal-backdrop';
+
+function openDialog(cls, message, { okLabel, okClass, cancelLabel, input }) {
+  return new Promise((resolve) => {
+    const prevFocus = document.activeElement;
+    const backdrop = document.createElement('div');
+    backdrop.className = cls + '-backdrop';
+    const modal = document.createElement('div');
+    modal.className = cls;
+    modal.setAttribute('role', 'alertdialog');
+    modal.setAttribute('aria-modal', 'true');
+    const msg = document.createElement('div');
+    msg.className = cls + '-message';
+    msg.textContent = String(message ?? '');
+    modal.appendChild(msg);
+    if (input) modal.appendChild(input);
+    const okBtn = document.createElement('button');
+    okBtn.className = okClass;
+    okBtn.textContent = okLabel;
+    let cancelBtn = null;
+    if (cancelLabel) {
+      const actions = document.createElement('div');
+      actions.className = cls + '-actions';
+      cancelBtn = document.createElement('button');
+      cancelBtn.className = cls + '-cancel';
+      cancelBtn.textContent = cancelLabel;
+      actions.append(cancelBtn, okBtn);
+      modal.appendChild(actions);
+    } else {
+      modal.appendChild(okBtn);
+    }
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+
+    let closed = false;
+    const close = (ok) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey, true);
+      backdrop.remove();
+      if (prevFocus && prevFocus.isConnected && typeof prevFocus.focus === 'function') prevFocus.focus();
+      resolve(ok);
+    };
+    function onKey(e) {
+      const open = document.querySelectorAll(DIALOG_BACKDROPS);
+      if (open[open.length - 1] !== backdrop) return;
+      if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation(); close(false);
+      } else if (e.key === 'Enter' && !e.isComposing && e.target !== cancelBtn) {
+        e.preventDefault(); e.stopPropagation(); close(true);
+      } else if (e.key === 'Tab') {
+        const focusable = [input, cancelBtn, okBtn].filter(Boolean);
+        const i = focusable.indexOf(document.activeElement);
+        e.preventDefault();
+        focusable[(i + (e.shiftKey ? -1 : 1) + focusable.length) % focusable.length].focus();
+      }
+    }
+    document.addEventListener('keydown', onKey, true);
+    okBtn.addEventListener('click', () => close(true));
+    cancelBtn?.addEventListener('click', () => close(false));
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(false); });
+    if (input) { input.focus(); input.select(); } else okBtn.focus();
+  });
+}
+
+// OK-only notice. Resolves once dismissed.
 function showAlert(message) {
-  const backdrop = document.createElement('div');
-  backdrop.className = 'alert-modal-backdrop';
-  const modal = document.createElement('div');
-  modal.className = 'alert-modal';
-  modal.innerHTML = `<div class="alert-modal-message">${escHtml(message)}</div><button class="alert-modal-ok">OK</button>`;
-  backdrop.appendChild(modal);
-  document.body.appendChild(backdrop);
-  const okBtn = modal.querySelector('.alert-modal-ok');
-  okBtn.focus();
-  okBtn.addEventListener('click', () => backdrop.remove());
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
-  backdrop.addEventListener('keydown', (e) => { if (e.key === 'Escape') backdrop.remove(); });
+  return openDialog('alert-modal', message, { okLabel: 'OK', okClass: 'alert-modal-ok' })
+    .then(() => undefined);
+}
+
+// Resolves true (confirmed) or false (cancelled).
+// opts: { confirmLabel = 'OK', cancelLabel = 'Cancel', danger = false }
+function showConfirm(message, opts = {}) {
+  return openDialog('confirm-modal', message, {
+    okLabel: opts.confirmLabel || 'OK',
+    okClass: opts.danger ? 'confirm-modal-delete' : 'confirm-modal-ok',
+    cancelLabel: opts.cancelLabel || 'Cancel',
+  });
+}
+
+// Resolves the entered string (untrimmed, may be '') or null when cancelled.
+// opts: showConfirm's, plus { defaultValue = '', placeholder = '', type: 'text' | 'password' }
+function showPrompt(message, opts = {}) {
+  const input = document.createElement('input');
+  input.className = 'confirm-modal-input';
+  input.type = opts.type === 'password' ? 'password' : 'text';
+  input.value = opts.defaultValue ?? '';
+  if (opts.placeholder) input.placeholder = opts.placeholder;
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  return openDialog('confirm-modal', message, {
+    okLabel: opts.confirmLabel || 'OK',
+    okClass: opts.danger ? 'confirm-modal-delete' : 'confirm-modal-ok',
+    cancelLabel: opts.cancelLabel || 'Cancel',
+    input,
+  }).then((ok) => (ok ? input.value : null));
 }
 
 // --- Restart server ---
@@ -1593,6 +1681,8 @@ function askFormBind(container, formData, callbacks, opts = {}) {
 
 window.dashboard = {
   showAlert,
+  showConfirm,
+  showPrompt,
   wantsPlainEditor,
   createPlainEditor,
   state,
