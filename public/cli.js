@@ -420,18 +420,9 @@
       const label = document.createElement('span');
       label.className = 'cli-tab-label';
       const isAppCli = tabId.startsWith('app-');
-      // Orchestration role from the tab's stamp: compass for the orchestrator,
-      // gear for its workers.
-      const orchRole = tab.settings?.orchestration?.role;
-      const roleBadge = orchRole === 'orchestrator' ? '\u{1F9ED} ' : orchRole === 'worker' ? '⚙️ ' : '';
+      // Orchestration role from the tab's stamp: a gear marks a worker.
+      const roleBadge = tab.settings?.orchestration?.role === 'worker' ? '⚙️ ' : '';
       label.textContent = roleBadge + (isAppCli ? '\u{1F528} ' : '') + computeTabLabel(tabId);
-      if (isSdk(tab)) {
-        const sdkBadge = document.createElement('span');
-        sdkBadge.className = 'cli-sdk-badge';
-        sdkBadge.textContent = 'SDK';
-        sdkBadge.title = `Agent SDK session (${tab.settings?.auth === 'subscription' ? 'Claude subscription' : 'API key'} billing)`;
-        label.appendChild(sdkBadge);
-      }
       // An add-on's badge for this session (dashboard.setTabBadge).
       const extBadge = window.dashboard._tabBadgeEl(tab.settings?.name, 'cli-tab-ext-badge');
       if (extBadge) label.appendChild(extBadge);
@@ -1337,14 +1328,6 @@
     }
   });
 
-  settingsModal?.querySelector('.cli-settings-remove-turn')?.addEventListener('click', () => {
-    const tabId = settingsModal._tabId;
-    if (!tabId) return;
-    if (!confirm('Remove the last interaction turn? It will be struck through and no longer count toward the session context going forward. You can still click it to view the response.')) return;
-    sendWs({ type: 'cli:removeLastTurn', tabId });
-    settingsModal.classList.add('hidden');
-  });
-
   // --- Message handler ---
   function handleMessage(msg) {
     switch (msg.type) {
@@ -1456,31 +1439,6 @@
       case 'cli:savedSessions': {
         _savedData = { sessions: msg.sessions || [], runs: msg.runs || [] };
         renderSessions();
-        break;
-      }
-      case 'cli:lastTurnRemoved': {
-        if (msg.ok) {
-          if (msg.tabId) switchTab(msg.tabId);
-          window.dashboard.showToast?.({
-            sender: 'CLI',
-            title: 'Last interaction turn removed',
-            message: 'The last turn was rolled back and no longer counts toward context. You can continue in the CLI tab.',
-            level: 'success',
-          });
-        } else {
-          const reasons = {
-            'no-session': 'No running session for this tab.',
-            'no-transcript': 'No session transcript was found to roll back.',
-            'no-user-turn': 'No user turn was found to remove.',
-            'write-failed': 'Could not write the rolled-back transcript.',
-          };
-          window.dashboard.showToast?.({
-            sender: 'CLI',
-            title: 'Could not remove last turn',
-            message: reasons[msg.reason] || ('Failed' + (msg.reason ? ': ' + msg.reason : '') + '.'),
-            level: 'error',
-          });
-        }
         break;
       }
       case 'cli:fileUploaded': {

@@ -2240,7 +2240,6 @@
         el = buildD3TurnEl(interaction, num, isSub);
       }
 
-      if (interaction.deleted) el.classList.add('turn-deleted');
       el.style.transform = `translate(${item.x}px, ${item.y}px)`;
       el.style.width = item.width + 'px';
       if (item.height > D3_CONST.MIN_ENTRY_HEIGHT) el.style.minHeight = item.height + 'px';
@@ -2445,7 +2444,6 @@
       el = buildD3TurnEl(interaction, num, isSub);
     }
 
-    if (interaction.deleted) el.classList.add('turn-deleted');
     el.style.width = colWidth + 'px';
     if (height > D3_CONST.MIN_ENTRY_HEIGHT) el.style.minHeight = height + 'px';
     el.style.opacity = '0';
@@ -5303,19 +5301,6 @@
         if (msg.totals) _sessionTotals.set(msg.instanceId, msg.totals);
         else _sessionTotals.delete(msg.instanceId);
         if (activeInstanceTab === msg.instanceId) updateStats();
-        break;
-      }
-
-      case 'inspector:turnsDeleted': {
-        const ids = new Set(msg.ids || []);
-        if (ids.size) {
-          for (const i of state.interactions) {
-            if (ids.has(i.id)) i.deleted = true;
-          }
-          for (const id of ids) {
-            document.querySelectorAll(`.turn-group[data-turn-id="${CSS.escape(id)}"]`).forEach(g => g.classList.add('turn-deleted'));
-          }
-        }
         break;
       }
 

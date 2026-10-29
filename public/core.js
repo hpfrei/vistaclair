@@ -1740,7 +1740,6 @@ function handleMessage(msg) {
     case 'inspector:sessionsRemoved':
     case 'inspector:snapshot':
     case 'inspector:earlier':
-    case 'inspector:turnsDeleted':
     case 'inspector:sessionTotals':
       window.inspectorModule?.handleMessage(msg);
       break;
@@ -1772,7 +1771,6 @@ function handleMessage(msg) {
     case 'cli:settingsData':
     case 'cli:savedSessions':
     case 'cli:opened':
-    case 'cli:lastTurnRemoved':
     case 'cli:actionResult':
     case 'cli:closeRefused':
     case 'cli:deleteRefused':

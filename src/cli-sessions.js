@@ -76,46 +76,6 @@ function deleteFullSessionData(store, sessId, cwd) {
   } catch {}
 }
 
-// Roll the native Claude transcript (what `--resume` reads) back by one turn:
-// drop the last genuine user prompt and everything after it (its assistant
-// replies, tool calls/results, and trailing metadata). A .bak is kept in case
-// the rollback needs to be undone. Returns { ok, reason?, cutTimestamp? } where
-// cutTimestamp is the epoch-ms time of the removed user prompt, used to flag the
-// matching inspector interactions.
-function rollbackTranscript(cwd, sessId) {
-  if (!cwd || !sessId) return { ok: false, reason: 'no-session' };
-  const jsonlPath = _jsonlPath(cwd, sessId);
-
-  let raw;
-  try { raw = fs.readFileSync(jsonlPath, 'utf8'); } catch { return { ok: false, reason: 'no-transcript' }; }
-
-  const lines = raw.split('\n');
-  let targetIdx = -1;
-  let targetTs = null;
-  for (let i = 0; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    let o;
-    try { o = JSON.parse(lines[i]); } catch { continue; }
-    if (o.type !== 'user' || o.isMeta || o.isSidechain) continue;
-    const content = o.message && o.message.content;
-    const isPrompt = typeof content === 'string'
-      || (Array.isArray(content) && !content.some(b => b && b.type === 'tool_result'));
-    if (isPrompt) { targetIdx = i; targetTs = o.timestamp || null; }
-  }
-  if (targetIdx < 0) return { ok: false, reason: 'no-user-turn' };
-
-  let out = lines.slice(0, targetIdx).join('\n');
-  if (out.length && !out.endsWith('\n')) out += '\n';
-  try {
-    fs.writeFileSync(jsonlPath + '.bak', raw);
-    fs.writeFileSync(jsonlPath, out);
-  } catch (e) {
-    return { ok: false, reason: 'write-failed' };
-  }
-  const cutTimestamp = targetTs ? Date.parse(targetTs) : null;
-  return { ok: true, cutTimestamp: Number.isFinite(cutTimestamp) ? cutTimestamp : null };
-}
-
 class CliSessionManager {
   constructor(proxyPort, broadcaster, store, opts = {}) {
     this.proxyPort = proxyPort;
@@ -896,25 +856,6 @@ class CliSessionManager {
 
     // spawn may have replaced the session object (engine change).
     if (opts.prompt && opts.autoSubmit) this.sessions.get(tabId).submit(opts.prompt, { from: opts.promptFrom });
-  }
-
-  // Roll a CLI session back one user/assistant turn: truncate the native
-  // transcript (what `--resume` reads) so the last turn no longer counts toward
-  // context, and flag the matching inspector interactions as deleted (kept for
-  // viewing, struck through in the timeline). The running process is left alone.
-  removeLastInteractionTurn(tabId) {
-    const session = this.sessions.get(tabId);
-    if (!session || !session.sessId || !session.cwd) return { ok: false, reason: 'no-session' };
-    const sessId = session.sessId;
-
-    const result = rollbackTranscript(session.cwd, sessId);
-    if (!result.ok) return result;
-
-    const deletedIds = this.store.markSessionTurnDeleted(sessId, result.cutTimestamp);
-    if (deletedIds.length) {
-      this.broadcaster.broadcast({ type: 'inspector:turnsDeleted', sessId, instanceId: `cli-${sessId}`, ids: deletedIds });
-    }
-    return { ok: true, deletedCount: deletedIds.length };
   }
 
   onExit(tabId, callback) {

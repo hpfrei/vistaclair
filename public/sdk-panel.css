@@ -7,21 +7,6 @@
    takes no room), and the composer docked at the bottom. Each box shows one view (TODO / Notes / Live) and scrolls it.
    ============================================================ */
 
-/* Tab strip: the "SDK" badge after the label. */
-.cli-sdk-badge {
-  margin-left: 6px;
-  padding: 0 5px;
-  border-radius: 3px;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: .04em;
-  line-height: 15px;
-  background: var(--purple);
-  color: #fff;
-  opacity: .85;
-  vertical-align: 1px;
-}
-
 .cli-sdk-wrap { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .sdk-wrap .sdk-panel {
   flex: 1;
