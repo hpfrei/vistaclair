@@ -95,7 +95,7 @@ function start() {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => {
     const port = server.address().port;
     const broadcaster = { broadcast(m) { if (m.type === 'cli:paused') { pausedEvents.push(m); log('paused', m.title, m.interrupted ? '(interrupted)' : ''); } } };
-    const store = { registerSession() {}, unregisterSession() {}, loadSessionIntoMemory: () => [], deleteSessionData() {}, markSessionTurnDeleted() {} };
+    const store = { registerSession() {}, unregisterSession() {}, loadSessionIntoMemory: () => [], deleteSessionData() {} };
     mgr = new CliSessionManager(null, broadcaster, store, { authToken: 'e2e', dashboardPort: port });
     control = createSessionControl({ mgr, broadcaster });
     orch = createOrchestration({ mgr, broadcaster, pendingQuestions: new Map(), coreRoot: CORE, dataHome: process.env.VISTACLAIR_HOME, control });

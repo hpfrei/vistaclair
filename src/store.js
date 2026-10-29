@@ -395,45 +395,6 @@ class InteractionStore {
     }
   }
 
-  // Flag every interaction in a session at or after `cutTimestamp` as deleted:
-  // they remain on disk and viewable, but are struck through in the timeline and
-  // no longer count toward the rolled-back context. Returns the affected ids.
-  // With no cutTimestamp, flags only the single highest-seq turn on disk.
-  markSessionTurnDeleted(sessId, cutTimestamp) {
-    const dir = path.join(INTERACTIONS_DIR, sessId);
-    let files;
-    try { files = fs.readdirSync(dir).filter(f => /^\d+\.json$/.test(f)); } catch { return []; }
-    if (files.length === 0) return [];
-
-    let targets = [];
-    if (cutTimestamp == null) {
-      const maxSeq = files.reduce((m, f) => Math.max(m, parseInt(f)), 0);
-      targets = [path.join(dir, `${maxSeq}.json`)];
-    } else {
-      for (const f of files) {
-        const fp = path.join(dir, f);
-        let data;
-        try { data = JSON.parse(fs.readFileSync(fp, 'utf-8')); } catch { continue; }
-        const ts = data.request?.timestamp;
-        if (typeof ts === 'number' && ts >= cutTimestamp) targets.push(fp);
-      }
-    }
-
-    const ids = [];
-    for (const fp of targets) {
-      let data;
-      try { data = JSON.parse(fs.readFileSync(fp, 'utf-8')); } catch { continue; }
-      data.deleted = true;
-      try { fs.writeFileSync(fp, JSON.stringify(data, null, 2)); } catch { continue; }
-      if (data.id) {
-        ids.push(data.id);
-        const mem = this.interactions.get(data.id);
-        if (mem) mem.deleted = true;
-      }
-    }
-    return ids;
-  }
-
   add(interaction) {
     // Re-adding a known id must not leave a second entry in `order`: eviction
     // would then delete the map entry while a dangling id remained, and
@@ -670,7 +631,6 @@ class InteractionStore {
       disableAutoMemory: req.disableAutoMemory !== false,
       subagent: subagent || undefined,
       pricing: data.pricing || (req.model ? getModelPricing(DATA_HOME, req.model) : undefined),
-      deleted: data.deleted || undefined,
       rules: Array.isArray(data.rules) ? data.rules : undefined,
     };
     if (data.isHook) {
@@ -822,7 +782,6 @@ class InteractionStore {
       },
       subagent: interaction.subagent || undefined,
       pricing: interaction.pricing || undefined,
-      deleted: interaction.deleted || undefined,
       rules: interaction.rules?.length ? interaction.rules : undefined,
     };
     if (interaction.isHook) {

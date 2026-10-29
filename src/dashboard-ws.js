@@ -156,7 +156,7 @@ function forClients(message) {
 // the sessions it has open (inspector:subscribe).
 const SESSION_SCOPED = new Set([
   'interaction:start', 'interaction:update', 'interaction:complete', 'interaction:error',
-  'interaction:enriched', 'sse_event', 'inspector:turnsDeleted', 'inspector:sessionTotals',
+  'interaction:enriched', 'sse_event', 'inspector:sessionTotals',
 ]);
 
 // A turn as a freshly opened tab gets it: the summary shape (public/inspector.js

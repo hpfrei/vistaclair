@@ -875,23 +875,6 @@ aside#timeline {
   padding: 2px 12px;
 }
 
-/* A turn rolled back out of context: struck through but still clickable. */
-.turn-group.turn-deleted {
-  position: relative;
-  opacity: 0.55;
-}
-.turn-group.turn-deleted::after {
-  content: "";
-  position: absolute;
-  left: 6px;
-  right: 6px;
-  top: 50%;
-  height: 2px;
-  background: var(--red, #e5484d);
-  pointer-events: none;
-}
-.turn-group.turn-deleted .timeline-entry { cursor: pointer; }
-
 .timeline-entry {
   padding: 10px 12px;
   cursor: pointer;
@@ -1964,43 +1947,8 @@ footer {
 }
 .tab-close:hover { opacity: 1; }
 
-/* CLI subtab theming — always dark to match the terminal area */
-#cliTabStrip .view-tab {
-  background: rgba(255, 255, 255, 0.10);
-  color: rgba(200, 210, 230, 0.6);
-  border-color: rgba(255, 255, 255, 0.10);
-  border-bottom: none;
-}
-#cliTabStrip .view-tab:hover {
-  background: rgba(255, 255, 255, 0.18);
-  color: rgba(230, 235, 245, 0.9);
-}
-#cliTabStrip .view-tab.active,
-#cliTabStrip .view-tab.active:hover {
-  background: #1a1a2e;
-  color: #e0e0e0;
-  border-color: rgba(160, 160, 255, 0.4);
-  border-bottom-color: #1a1a2e;
-  font-weight: 600;
-}
-#cliTabStrip .view-tab.instance-exited {
-  color: rgba(255, 127, 127, 0.7);
-}
-#cliTabStrip .view-tab.instance-exited.active {
-  color: rgba(200, 200, 220, 0.5);
-}
 #cliTabStrip .tab-close:hover {
-  color: #f7768e;
-}
-#cliTabStrip .view-tab-new {
-  background: rgba(160, 160, 255, 0.12);
-  color: rgba(180, 190, 230, 0.7);
-  border-color: rgba(160, 160, 255, 0.2);
-  border-bottom: none;
-}
-#cliTabStrip .view-tab-new:hover {
-  background: rgba(160, 160, 255, 0.22);
-  color: rgba(220, 225, 245, 0.95);
+  color: var(--red);
 }
 
 /* Directory subtab "+" button — slightly brighter than inactive tabs */
@@ -6113,8 +6061,7 @@ aside#timeline.parallel-mode {
 
 /* --- the node: an Apps-tab instrument, sized by the layout ---
    Glass + hairline + tick corners, the same shell the app cards use. The tick
-   brackets are background layers rather than pseudo-elements because ::after
-   is already spoken for by .turn-deleted's strike-through.
+   brackets are background layers rather than pseudo-elements.
    overflow:hidden is a guard, not the fix: computeNodeHeight and the 44px
    header agree, so nothing should ever need clipping — but if they ever drift
    again, a node clips its own tail instead of drawing over its neighbour. */

@@ -203,12 +203,6 @@ function handleMessage(ws, msg, bc) {
         });
       }
       break;
-    case 'cli:removeLastTurn':
-      if (msg.tabId) {
-        const result = mgr.removeLastInteractionTurn(msg.tabId);
-        send({ type: 'cli:lastTurnRemoved', tabId: msg.tabId, ok: result.ok, reason: result.reason || null });
-      }
-      break;
     case 'cli:requestScrollback':
       if (msg.tabId) {
         const session = mgr.get(msg.tabId);
