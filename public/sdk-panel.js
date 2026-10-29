@@ -13,7 +13,7 @@
 // only in the Inspector. A turn the agent has not taken in yet waits as a
 // chip under the feed; its bubble lands where the agent took it in. A splitter between the two moves (double-click:
 // back to the table's own height); the last position is kept for new boxes.
-// Every box opens on Live. Hovering either pane of Live shows a ⤢ that opens
+// Every box opens on Live. Each pane of Live has a ⤢ in its corner that opens
 // it big in a dialog, still live; ×, Esc or the backdrop puts it back.
 // A closed or ended worker leaves the row for the shelf, a column in the
 // stage's top-left corner, left of the orchestrator's box: one card per

@@ -527,35 +527,35 @@
   cursor: pointer;
   z-index: 2;
 }
-/* Each pane of Live: a ⤢ in its top-right corner (clear of the scrollbar),
-   shown on hover, opens it in a dialog; the pane moves there and back. */
+/* Each pane of Live: a ⤢ in its top-right corner, clear of the scrollbar,
+   opens it in a dialog; the pane moves there and back. It wears the Live
+   tab's colours, filled on hover; both panes keep a gutter right of their
+   rows so it covers none of them (in the dialog, without the button, none). */
+.sdk-view-live { --sdk-max-size: 22px; }
+.sdk-view-live .sdk-todo-scroll,
+.sdk-view-live .sdk-feed.lite { padding-right: calc(var(--sdk-max-size) + 18px); }
 .sdk-max-btn {
   position: absolute;
   top: 4px;
-  right: 14px;
+  right: 12px;
   z-index: 2;
-  width: 22px;
-  height: 22px;
+  width: var(--sdk-max-size);
+  height: var(--sdk-max-size);
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 5px;
-  background: color-mix(in srgb, var(--bg-surface) 85%, transparent);
-  color: var(--text-dim);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+  color: var(--accent);
   font-size: 13px;
+  font-weight: 600;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .15s;
+  transition: background .15s, color .15s;
 }
-.sdk-todo-top:hover > .sdk-max-btn,
-.sdk-todo-lite:hover > .sdk-max-btn,
-.sdk-max-btn:focus-visible { opacity: .55; pointer-events: auto; }
-.sdk-todo-top > .sdk-max-btn:hover,
-.sdk-todo-lite > .sdk-max-btn:hover { opacity: 1; color: var(--accent); border-color: var(--accent); }
-/* No hover to reveal it: dimmed and always there. */
+.sdk-max-btn:hover, .sdk-max-btn:focus-visible { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* A finger needs a bigger target. */
 @media (hover: none) and (pointer: coarse) {
-  .sdk-max-btn { opacity: .4; pointer-events: auto; width: 30px; height: 30px; }
+  .sdk-view-live { --sdk-max-size: 30px; }
 }
 /* The dialog: most of the viewport, the pane filling its body. */
 .sdk-max { width: 94vw; height: 88vh; max-height: none; overflow: hidden; }
