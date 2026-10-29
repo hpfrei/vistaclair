@@ -135,3 +135,41 @@ test('the dashboard wires the registry: window.dashboard, the tab strip, the × 
   assert.ok(!/openMore|data-act="more"/.test(sdk), 'no ⋯ menu');
   assert.match(sdk, /_tabHooks\.onChange\(/);
 });
+
+// cli.js's renderTabStrip, run on a stub DOM. A throw there also stops
+// switchTab before sdkPanel.setActive, which leaves every SDK box unshown and
+// its Live feed empty (it never asks for sdk:history).
+function renderStrip(tabList) {
+  const src = read('cli.js');
+  const start = src.indexOf('  function renderTabStrip() {');
+  const end = src.indexOf('\n  }\n', start);
+  assert.ok(start > 0 && end > start, 'renderTabStrip found in cli.js');
+  const node = () => ({
+    children: [], dataset: {}, style: {}, classList: { add() {} },
+    appendChild(c) { this.children.push(c); }, addEventListener() {},
+  });
+  const strip = { ...node(), querySelectorAll: () => [], insertBefore(c) { this.children.push(c); } };
+  const run = new Function('tabStrip', 'tabNewBtn', 'tabs', 'activeTabId', 'pendingAskOverlays', 'isSdk', 'computeTabLabel', 'updateStreamingState', 'scheduleCloseMenuClose', 'document', 'window',
+    src.slice(start, end + 4) + '\nrenderTabStrip();');
+  const tabs = new Map(tabList.map((t, i) => [`tab-${i + 1}`, t]));
+  run(strip, null, tabs, 'tab-1', new Map(), (t) => t?.kind === 'sdk', (id) => id, () => {}, () => {},
+    { createElement: node }, { dashboard: { _tabBadgeEl: () => null } });
+  // [Sessions, ...one button per tab]; a tab's buttons by their class.
+  return strip.children.slice(1).map(b => b.children.map(c => c.className).filter(Boolean));
+}
+
+test('renderTabStrip draws orchestration and worktree tabs without throwing', () => {
+  const orchestration = (role) => ({ runId: 'abc123', role });
+  const wt = { branch: 'b', base: 'main' };
+  const buttons = renderStrip([
+    { kind: 'sdk', status: 'running', settings: { orchestration: orchestration('orchestrator') } },
+    { kind: 'cli', status: 'running', settings: { orchestration: orchestration('orchestrator') } },
+    { kind: 'cli', status: 'running', settings: { orchestration: orchestration('worker'), worktree: wt } },
+    { kind: 'cli', status: 'running', settings: { worktree: wt } },
+  ]);
+  const has = (i, cls) => buttons[i].some(c => c.includes(cls));
+  assert.ok(!has(0, 'cli-pause-btn'), 'an SDK tab pauses from its toolbar');
+  assert.ok(has(1, 'cli-pause-btn'), 'an orchestrator terminal tab pauses its run');
+  assert.ok(!has(2, 'cli-pause-btn') && !has(2, 'cli-land-btn'), 'a worker neither pauses nor lands by itself');
+  assert.ok(has(3, 'cli-pause-btn') && has(3, 'cli-land-btn'), 'a plain isolated tab pauses and lands');
+});

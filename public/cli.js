@@ -421,7 +421,8 @@
       label.className = 'cli-tab-label';
       const isAppCli = tabId.startsWith('app-');
       // Orchestration role from the tab's stamp: a gear marks a worker.
-      const roleBadge = tab.settings?.orchestration?.role === 'worker' ? '⚙️ ' : '';
+      const orchRole = tab.settings?.orchestration?.role;
+      const roleBadge = orchRole === 'worker' ? '⚙️ ' : '';
       label.textContent = roleBadge + (isAppCli ? '\u{1F528} ' : '') + computeTabLabel(tabId);
       // An add-on's badge for this session (dashboard.setTabBadge).
       const extBadge = window.dashboard._tabBadgeEl(tab.settings?.name, 'cli-tab-ext-badge');
