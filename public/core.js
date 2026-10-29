@@ -1801,7 +1801,6 @@ function handleMessage(msg) {
       state.cliModel = msg.model || null;
       if (Array.isArray(msg.aliases)) state.cliModelAliases = msg.aliases;
       state.cliFallbackEngine = msg.fallbackEngine || 'sdk';
-      window.cliModule?.handleMessage(msg);
       break;
 
     // Proxy rules

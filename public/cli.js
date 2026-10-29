@@ -2,7 +2,6 @@
   const { sendWs, state, escHtml, askFormBuildHTML, askFormBind } = window.dashboard;
   const tabStrip = document.getElementById('cliTabStrip');
   const tabNewBtn = document.getElementById('cliTabNew');
-  const modelCog = document.getElementById('cliModelCog');
   const container = document.getElementById('cliContainer');
   const sessionsView = document.getElementById('cliSessions');
   const settingsModal = document.getElementById('cliSettingsModal');
@@ -900,13 +899,13 @@
   // Relative times age while the tab is open.
   setInterval(() => { if (sessionsShown()) renderSessions(); }, 60000);
 
-  // --- Default model for new CLI tabs ---
+  // --- Model picker options ---
 
   // Options for a model picker: the CLI's own aliases (which `--model` accepts
   // but models.json does not list), then a `<model>[1m]` variant per catalog
   // model that supports the 1M context window, then the resolved Anthropic
-  // catalog. The tab-strip cog and the per-tab settings modal both draw from
-  // this, so the two can never drift apart.
+  // catalog. The per-tab settings modal and the SDK panel's model menu both draw
+  // from this, so the two can never drift apart.
   function modelPickerOptions() {
     const aliases = (state.cliModelAliases || []).map(a => ({
       value: a.value, label: a.label, group: a.group || 'Aliases', price: '',
@@ -934,99 +933,6 @@
         price: fmtPrice(m),
       })),
     ];
-  }
-
-  function updateModelCog() {
-    if (!modelCog) return;
-    const current = state.cliModel || 'opus';
-    const engine = state.cliFallbackEngine === 'terminal' ? ', terminal engine' : '';
-    modelCog.title = `New CLI tabs use: ${current}${engine} — click to change`;
-  }
-
-  modelCog?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    showModelMenu();
-  });
-
-  function showModelMenu() {
-    closeModelMenu();
-    const menu = document.createElement('div');
-    menu.className = 'cli-new-menu';
-    menu.id = 'cliModelMenu';
-
-    // New sessions open in the Agent SDK panel; the terminal engine is a
-    // fallback preference, not a per-launch question.
-    const engineHeader = document.createElement('div');
-    engineHeader.className = 'cli-new-menu-header';
-    engineHeader.textContent = 'Engine for new CLI tabs';
-    menu.appendChild(engineHeader);
-    const terminal = state.cliFallbackEngine === 'terminal';
-    const engineItem = document.createElement('div');
-    engineItem.className = 'cli-new-menu-item' + (terminal ? ' is-selected' : '');
-    engineItem.textContent = (terminal ? '✓ ' : '') + 'Use the terminal engine for new sessions';
-    const engineNote = document.createElement('div');
-    engineNote.className = 'cli-model-menu-note';
-    engineNote.textContent = 'Fallback if Agent SDK use on subscriptions becomes restricted';
-    engineItem.appendChild(engineNote);
-    engineItem.addEventListener('click', () => {
-      closeModelMenu();
-      sendWs({ type: 'prefs:fallbackEngine:set', value: terminal ? 'sdk' : 'terminal' });
-    });
-    menu.appendChild(engineItem);
-    const engineDivider = document.createElement('div');
-    engineDivider.className = 'cli-new-menu-divider';
-    menu.appendChild(engineDivider);
-
-    const header = document.createElement('div');
-    header.className = 'cli-new-menu-header';
-    header.textContent = 'Model for new CLI tabs';
-    menu.appendChild(header);
-
-    const current = state.cliModel || 'opus';
-    let lastGroup = null;
-    for (const opt of modelPickerOptions()) {
-      if (opt.group !== lastGroup) {
-        lastGroup = opt.group;
-        const divider = document.createElement('div');
-        divider.className = 'cli-new-menu-divider';
-        menu.appendChild(divider);
-      }
-      const item = document.createElement('div');
-      item.className = 'cli-new-menu-item' + (opt.value === current ? ' is-selected' : '');
-      item.textContent = (opt.value === current ? '✓ ' : '') + opt.label;
-      if (opt.price) {
-        const price = document.createElement('span');
-        price.className = 'cli-model-menu-current';
-        price.textContent = opt.price;
-        item.appendChild(price);
-      }
-      item.addEventListener('click', () => {
-        closeModelMenu();
-        sendWs({ type: 'prefs:cliModel:set', value: opt.value });
-      });
-      menu.appendChild(item);
-    }
-
-    document.body.appendChild(menu);
-    const rect = modelCog.getBoundingClientRect();
-    menu.style.position = 'fixed';
-    menu.style.top = rect.bottom + 4 + 'px';
-    const menuWidth = menu.offsetWidth || 260;
-    let left = rect.right - menuWidth;
-    if (left < 8) left = 8;
-    if (left + menuWidth > window.innerWidth - 8) left = window.innerWidth - menuWidth - 8;
-    menu.style.left = left + 'px';
-    const onClickOutside = (e) => {
-      if (!menu.contains(e.target) && e.target !== modelCog) {
-        closeModelMenu();
-        document.removeEventListener('click', onClickOutside, true);
-      }
-    };
-    setTimeout(() => document.addEventListener('click', onClickOutside, true), 0);
-  }
-
-  function closeModelMenu() {
-    document.getElementById('cliModelMenu')?.remove();
   }
 
   function formatModelMap(modelMap) {
@@ -1356,11 +1262,11 @@
     });
 
     // Per-tab --model. Empty means "unset", which makes the server re-apply the
-    // tab-strip cog default at the next spawn.
+    // default model for new tabs at the next spawn.
     const modelSel = settingsModal.querySelector('[data-setting="model"]');
     if (modelSel) {
-      const cogDefault = state.cliModel || 'opus';
-      modelSel.innerHTML = `<option value="">Default (${escHtml(cogDefault)}, from the ⚙ cog)</option>`;
+      const defaultModel = state.cliModel || 'opus';
+      modelSel.innerHTML = `<option value="">Default (${escHtml(defaultModel)})</option>`;
       let lastGroup = null;
       let matched = false;
       for (const opt of modelPickerOptions()) {
@@ -1442,12 +1348,6 @@
   // --- Message handler ---
   function handleMessage(msg) {
     switch (msg.type) {
-      case 'prefs:cliModel': {
-        updateModelCog();
-        // Keep an open picker in sync when the change came from another window.
-        if (document.getElementById('cliModelMenu')) showModelMenu();
-        break;
-      }
       case 'cli:output': {
         const tab = tabs.get(msg.tabId);
         if (tab?.terminal) {

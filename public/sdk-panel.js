@@ -1509,7 +1509,7 @@
     _menu = null;
   }
 
-  // The same options as the tab settings and the tab-strip cog. A switch
+  // The same options as the tab settings. A switch
   // keeps the conversation and its cost; the next turn caches the whole
   // context again at the new model's rate, so the menu says so.
   const RECACHE_TEXT = 'The context and the cost so far are kept. The next turn re-caches the whole context at the new model\'s rate.';

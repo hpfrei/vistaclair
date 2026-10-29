@@ -160,36 +160,6 @@ body.nav-loading .view-nav {
   transition: color 0.15s, background 0.15s;
 }
 .view-tab-new:hover { color: rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.16); }
-/* Default-model cog. `margin-left:auto` pins it to the right edge of the
-   flex tab strip, clear of the tabs and the "+" button. */
-.cli-model-cog {
-  margin-left: auto;
-  padding: 5px 10px;
-  font-size: 13px;
-  line-height: 1;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  border-bottom: none;
-  color: rgba(255, 255, 255, 0.45);
-  cursor: pointer;
-  border-radius: 8px 8px 0 0;
-  flex-shrink: 0;
-  transition: color 0.15s, background 0.15s;
-}
-.cli-model-cog:hover { color: rgba(255, 255, 255, 0.9); background: rgba(255, 255, 255, 0.16); }
-.cli-model-menu-current {
-  margin-left: auto;
-  padding-left: 10px;
-  font-size: 11px;
-  opacity: 0.55;
-}
-.cli-new-menu-item.is-selected { font-weight: 600; }
-.cli-model-menu-note {
-  margin-top: 2px;
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.55;
-}
 /* Inspector tab strip: scrollable tabs + pinned action button */
 .inspector-tab-wrapper {
   overflow: hidden;
@@ -7179,7 +7149,7 @@ aside#timeline {
 .modal-footer { border-top: 1px solid var(--vc-hair); }
 
 /* --- E. Buttons -----------------------------------------------
-   The kit's .btn scale. .view-tab / .view-tab-new / .cli-model-cog
+   The kit's .btn scale. .view-tab / .view-tab-new
    live on the gradient and beat this on specificity, so they keep
    their translucent-on-gradient treatment. */
 button,
