@@ -47,7 +47,7 @@
 // cli.js owns the tab; this file owns what is inside its wrap.
 (function () {
   const D = window.dashboard;
-  const { sendWs, state, escHtml, renderMarkdown, renderMarkdownDebounced, cancelRenderDebounce } = D;
+  const { sendWs, state, escHtml, renderMarkdown, renderMarkdownDebounced, cancelRenderDebounce, showConfirm } = D;
 
   const POLL_MS = 15000;           // backstop: TODO/NOTES edits normally arrive as platform.files
   const TICK_MS = 1000;            // the "now:" line's elapsed time
@@ -2212,16 +2212,18 @@
 
     // The same pause flow as the tab strip: an orchestrator pauses its run,
     // a plain tab itself; while pausing it offers "Force stop".
-    pause() {
+    async pause() {
       const info = this.info;
       if (info.pausing) {
-        if (confirm('Force stop? It stops right away, in the middle of its step. It is still saved, but the resume note may be missing.')) {
+        if (await showConfirm('Force stop? It stops right away, in the middle of its step. It is still saved, but the resume note may be missing.',
+          { confirmLabel: 'Force stop', danger: true })) {
           sendWs({ type: 'cli:interrupt', tabId: this.tabId });
         }
         return;
       }
       if (this.runId) {
-        if (!confirm('Pause & save this run? Every session saves its progress and closes; the orchestrator goes last. This can take a minute. Resume later from the + menu. Nothing is lost.')) return;
+        if (!(await showConfirm('Pause & save this run? Every session saves its progress and closes; the orchestrator goes last. This can take a minute. Resume later from the + menu. Nothing is lost.',
+          { confirmLabel: 'Pause & save' }))) return;
         sendWs({ type: 'cli:pauseRun', runId: this.runId });
       } else {
         sendWs({ type: 'cli:pause', tabId: this.tabId });
@@ -2369,9 +2371,10 @@
     tabInfo() { return window.tabHookInfo(this.tabId, { kind: 'sdk', settings: this.info.settings }); }
     tabActions(info = this.tabInfo()) { return window.dashboard._tabHooks.actionsFor(info); }
 
-    refresh() {
+    async refresh() {
       if (!this.runId || !this.canRefresh) return;
-      if (!confirm(`Fresh orchestrator?\n\n${FRESH_TEXT}`)) return;
+      if (!(await showConfirm(`Fresh orchestrator?\n\n${FRESH_TEXT}`, { confirmLabel: 'Fresh orchestrator' }))) return;
+      if (!this.canRefresh) return;
       this.main?.freshBtn.setAttribute('aria-disabled', 'true');
       sendWs({ type: 'cli:refreshOrchestrator', runId: this.runId });
     }

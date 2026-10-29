@@ -1,7 +1,7 @@
 // === MCP Tool Manager — inline collapsible items with Monaco editors ===
 (function() {
   'use strict';
-  const { state, sendWs, escHtml, showAlert } = window.dashboard;
+  const { state, sendWs, escHtml, showAlert, showConfirm, showPrompt } = window.dashboard;
 
   // --- State ---
   const mcp = {
@@ -386,13 +386,15 @@
       const delBtn = e.target.closest('.mcp-del-btn');
       if (delBtn) {
         e.stopPropagation();
-        if (confirm(`Delete tool "${delBtn.dataset.slug}"? This cannot be undone.`)) {
-          sendWs({ type: 'mcp:tool:delete', slug: delBtn.dataset.slug });
-          if (mcp.expandedSlug === delBtn.dataset.slug) {
+        const slug = delBtn.dataset.slug;
+        showConfirm(`Delete tool "${slug}"? This cannot be undone.`, { confirmLabel: 'Delete', danger: true }).then((ok) => {
+          if (!ok) return;
+          sendWs({ type: 'mcp:tool:delete', slug });
+          if (mcp.expandedSlug === slug) {
             mcp.expandedSlug = null;
             disposeEditor();
           }
-        }
+        });
         return;
       }
 
@@ -400,9 +402,9 @@
       const restoreBtn = e.target.closest('.rule-restore-btn');
       if (restoreBtn) {
         e.stopPropagation();
-        if (confirm('Restore this tool to its original built-in version?')) {
-          sendWs({ type: 'mcp:tool:restore', slug: restoreBtn.dataset.slug });
-        }
+        const slug = restoreBtn.dataset.slug;
+        showConfirm('Restore this tool to its original built-in version?', { confirmLabel: 'Restore', danger: true })
+          .then((ok) => { if (ok) sendWs({ type: 'mcp:tool:restore', slug }); });
         return;
       }
 
@@ -464,8 +466,8 @@
 
   // ========== NEW TOOL ==========
 
-  function createNewTool() {
-    const name = prompt('Tool name (e.g. my-tool):');
+  async function createNewTool() {
+    const name = await showPrompt('Tool name', { placeholder: 'e.g. my-tool', confirmLabel: 'Create' });
     if (!name?.trim()) return;
     const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50);
     if (slug.length < 2) { showAlert('Name too short.'); return; }

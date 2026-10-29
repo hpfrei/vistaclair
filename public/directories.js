@@ -1,6 +1,6 @@
 (function directoriesModule() {
   'use strict';
-  const { escHtml, sendWs } = window.dashboard;
+  const { escHtml, sendWs, showConfirm } = window.dashboard;
 
   const tabStrip = document.getElementById('dirTabStrip');
   const tabNewBtn = document.getElementById('dirTabNew');
@@ -498,23 +498,31 @@
       && ov.editor.getModel().getAlternativeVersionId() !== ov.savedVersion);
   }
 
-  // Returns false when the user chose to keep unsaved edits open.
-  function closeOverlay() {
-    if (!activeOverlay) return true;
-    if (isOverlayDirty(activeOverlay)
-        && !confirm(`Discard unsaved changes to ${activeOverlay.entry.name}?`)) return false;
-    if (activeOverlay.editor) { activeOverlay.editor.dispose(); activeOverlay.editor = null; }
-    const tab = activeOverlay.tab;
-    activeOverlay.el.remove();
-    document.removeEventListener('keydown', activeOverlay.keyHandler);
-    window.removeEventListener('beforeunload', activeOverlay.unloadHandler);
+  // Resolves false when the user chose to keep unsaved edits open. Callers
+  // racing on one dirty overlay share a single question.
+  async function closeOverlay() {
+    const ov = activeOverlay;
+    if (!ov) return true;
+    if (isOverlayDirty(ov)) {
+      ov.discardAsk ||= showConfirm(`Discard unsaved changes to ${ov.entry.name}?`,
+        { confirmLabel: 'Discard', danger: true });
+      const discard = await ov.discardAsk;
+      ov.discardAsk = null;
+      if (!discard) return false;
+      if (activeOverlay !== ov) return true;
+    }
+    if (ov.editor) { ov.editor.dispose(); ov.editor = null; }
+    const tab = ov.tab;
+    ov.el.remove();
+    document.removeEventListener('keydown', ov.keyHandler);
+    window.removeEventListener('beforeunload', ov.unloadHandler);
     activeOverlay = null;
     if (tab) tab.selectedFile = null;
     return true;
   }
 
-  function showOverlay(tab, filePath, entry) {
-    if (!closeOverlay()) return;
+  async function showOverlay(tab, filePath, entry) {
+    if (!(await closeOverlay())) return;
     tab.selectedFile = filePath;
 
     const files = getFileList(tab);
@@ -690,7 +698,8 @@
         });
         const data = await resp.json().catch(() => ({}));
         if (resp.status === 409 && !force) {
-          if (!confirm(`${ov.entry.name} changed on disk since it was opened. Overwrite it?`)) {
+          if (!(await showConfirm(`${ov.entry.name} changed on disk since it was opened. Overwrite it?`,
+              { confirmLabel: 'Overwrite', danger: true }))) {
             setSaveStatus(ov, 'Not saved — changed on disk', true);
             return;
           }
@@ -1097,42 +1106,41 @@
     return `Delete ${total} items?\n\n${lines.join('\n')}\n\n${warn}`;
   }
 
-  function deleteSelected(tab) {
+  async function deleteSelected(tab) {
     const sel = getSelectedEntries(tab);
     if (sel.paths.length === 0) return;
     // Snapshot both: the dialog is async and the panel can navigate under it.
     const cwd = tab.cwd;
     const paths = sel.paths;
 
-    showConfirmModal(buildDeleteMessage(sel), async () => {
-      try {
-        const resp = await fetch('/api/delete-files', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ paths, cwd }),
-        });
-        const result = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          // Without this an expired session returns {error} and no errors[],
-          // so the reload below would look exactly like a successful delete.
-          notifyDelete('error', result.error || `Delete failed (${resp.status})`);
-        } else if (result.errors?.length) {
-          const names = result.errors.slice(0, 3).map(e => String(e.path).split('/').pop());
-          const more = result.errors.length > 3 ? `, +${result.errors.length - 3} more` : '';
-          notifyDelete('error', `Could not delete ${names.join(', ')}${more}`);
-        } else {
-          notifyDelete('success', `Deleted ${describeSelection(sel)}`);
-        }
-      } catch (err) {
-        notifyDelete('error', 'Delete failed: ' + err.message);
-      } finally {
-        // Refresh even on throw: a network error otherwise leaves the panel
-        // showing entries that may already be gone.
-        tab.selectedPaths.clear();
-        tab._lastSelectedIndex = -1;
-        loadDir(tab.id, cwd);
+    if (!(await showConfirm(buildDeleteMessage(sel), { confirmLabel: 'Delete', danger: true }))) return;
+    try {
+      const resp = await fetch('/api/delete-files', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths, cwd }),
+      });
+      const result = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        // Without this an expired session returns {error} and no errors[],
+        // so the reload below would look exactly like a successful delete.
+        notifyDelete('error', result.error || `Delete failed (${resp.status})`);
+      } else if (result.errors?.length) {
+        const names = result.errors.slice(0, 3).map(e => String(e.path).split('/').pop());
+        const more = result.errors.length > 3 ? `, +${result.errors.length - 3} more` : '';
+        notifyDelete('error', `Could not delete ${names.join(', ')}${more}`);
+      } else {
+        notifyDelete('success', `Deleted ${describeSelection(sel)}`);
       }
-    });
+    } catch (err) {
+      notifyDelete('error', 'Delete failed: ' + err.message);
+    } finally {
+      // Refresh even on throw: a network error otherwise leaves the panel
+      // showing entries that may already be gone.
+      tab.selectedPaths.clear();
+      tab._lastSelectedIndex = -1;
+      loadDir(tab.id, cwd);
+    }
   }
 
   // ── Directory listing in preview panel ─────────────────────────────
@@ -1295,45 +1303,6 @@
     for (const row of wrap.children) {
       row.classList.toggle('selected', tab.selectedPaths.has(row.dataset.path));
     }
-  }
-
-  // ── Confirm modal ─────────────────────────────────────────────────
-
-  function showConfirmModal(message, onConfirm) {
-    const backdrop = document.createElement('div');
-    backdrop.className = 'confirm-modal-backdrop';
-    const modal = document.createElement('div');
-    modal.className = 'confirm-modal';
-
-    const msg = document.createElement('div');
-    msg.className = 'confirm-modal-message';
-    msg.textContent = message;
-
-    const actions = document.createElement('div');
-    actions.className = 'confirm-modal-actions';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'confirm-modal-cancel';
-    cancelBtn.textContent = 'Cancel';
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'confirm-modal-delete';
-    deleteBtn.textContent = 'Delete';
-
-    actions.appendChild(cancelBtn);
-    actions.appendChild(deleteBtn);
-    modal.appendChild(msg);
-    modal.appendChild(actions);
-    backdrop.appendChild(modal);
-    document.body.appendChild(backdrop);
-
-    deleteBtn.focus();
-
-    const close = () => backdrop.remove();
-    cancelBtn.addEventListener('click', close);
-    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-    backdrop.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
-    deleteBtn.addEventListener('click', () => { close(); onConfirm(); });
   }
 
   // ── Terminal panel ─────────────────────────────────────────────────

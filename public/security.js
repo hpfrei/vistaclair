@@ -5,6 +5,7 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
+  const { showConfirm } = window.dashboard;
   let loaded = false;
 
   async function api(path, opts = {}) {
@@ -83,7 +84,8 @@
     };
 
     $('tgDisableBtn').onclick = async () => {
-      if (!confirm('Disable Telegram login? External access will require the auth token again (or be unavailable in server mode).')) return;
+      if (!(await showConfirm('Disable Telegram login? External access will require the auth token again (or be unavailable in server mode).',
+        { confirmLabel: 'Disable', danger: true }))) return;
       try {
         await api('api/tg-login/config', { method: 'POST', body: JSON.stringify({ botToken: '', ownerUserId: '' }) });
         setStatus('Disabled', true);
@@ -92,7 +94,7 @@
     };
 
     $('revokeAllBtn').onclick = async () => {
-      if (!confirm('Log out all other sessions?')) return;
+      if (!(await showConfirm('Log out all other sessions?', { confirmLabel: 'Log out all', danger: true }))) return;
       await api('api/sessions', { method: 'DELETE' });
       loadSessions();
     };

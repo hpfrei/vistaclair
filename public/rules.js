@@ -1,6 +1,6 @@
 (function rulesModule() {
   'use strict';
-  const { state, escHtml, sendWs, showAlert } = window.dashboard;
+  const { state, escHtml, sendWs, showAlert, showConfirm } = window.dashboard;
 
   state.rules = [];
   let dragSrcId = null;
@@ -239,9 +239,9 @@
     const delBtn = e.target.closest('.rule-del-btn');
     if (delBtn) {
       e.stopPropagation();
-      if (confirm('Delete this rule? The server will restart.')) {
-        sendWs({ type: 'rule:delete', id: delBtn.dataset.id });
-      }
+      const id = delBtn.dataset.id;
+      showConfirm('Delete this rule? The server will restart.', { confirmLabel: 'Delete', danger: true })
+        .then((ok) => { if (ok) sendWs({ type: 'rule:delete', id }); });
       return;
     }
 
@@ -259,9 +259,9 @@
     const restoreBtn = e.target.closest('.rule-restore-btn');
     if (restoreBtn) {
       e.stopPropagation();
-      if (confirm('Restore this rule to its original built-in version?')) {
-        sendWs({ type: 'rule:restore', id: restoreBtn.dataset.id });
-      }
+      const id = restoreBtn.dataset.id;
+      showConfirm('Restore this rule to its original built-in version?', { confirmLabel: 'Restore', danger: true })
+        .then((ok) => { if (ok) sendWs({ type: 'rule:restore', id }); });
       return;
     }
 

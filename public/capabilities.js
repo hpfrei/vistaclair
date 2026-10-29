@@ -2,7 +2,7 @@
 // CAPABILITIES MODULE — skills, agents, hooks, models
 // ============================================================
 (function capabilitiesModule() {
-  const { state, escHtml, sendWs, showAlert } = window.dashboard;
+  const { state, escHtml, sendWs, showAlert, showConfirm } = window.dashboard;
 
   // --- Templates ---
 
@@ -851,23 +851,20 @@ Available templates in this skill directory:
     }
 
     if (delBtn) {
-      const kind = delBtn.dataset.kind;
+      const { kind, name, event, entry } = delBtn.dataset;
+      const del = { danger: true, confirmLabel: 'Delete' };
       if (kind === 'skill') {
-        if (confirm(`Delete skill ${delBtn.dataset.name}?`)) {
-          sendWs({ type: 'skill:delete', name: delBtn.dataset.name });
-        }
+        showConfirm(`Delete skill ${name}?`, del)
+          .then((ok) => { if (ok) sendWs({ type: 'skill:delete', name }); });
       } else if (kind === 'agent') {
-        if (confirm(`Delete agent ${delBtn.dataset.name}?`)) {
-          sendWs({ type: 'agent:delete', name: delBtn.dataset.name });
-        }
+        showConfirm(`Delete agent ${name}?`, del)
+          .then((ok) => { if (ok) sendWs({ type: 'agent:delete', name }); });
       } else if (kind === 'hook') {
-        if (confirm('Delete this hook?')) {
-          sendWs({ type: 'hook:delete', event: delBtn.dataset.event, entryIndex: parseInt(delBtn.dataset.entry) });
-        }
+        showConfirm('Delete this hook?', del)
+          .then((ok) => { if (ok) sendWs({ type: 'hook:delete', event, entryIndex: parseInt(entry) }); });
       } else if (kind === 'model') {
-        if (confirm(`Delete model "${delBtn.dataset.name}"?`)) {
-          sendWs({ type: 'model:delete', name: delBtn.dataset.name });
-        }
+        showConfirm(`Delete model "${name}"?`, del)
+          .then((ok) => { if (ok) sendWs({ type: 'model:delete', name }); });
       }
     }
   });
