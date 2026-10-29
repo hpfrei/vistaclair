@@ -53,6 +53,7 @@ function create(bc, { authStatus = claudeAuth.authStatus, login = claudeAuth.log
       type: 'prefs:claudeAuth',
       pref: caps.getClaudeAuthPref(DATA_HOME) || null,
       hasSubscription: caps.hasClaudeSubscription(),
+      hasApiKey: !!caps.getAnthropicApiKey(DATA_HOME),
     });
   });
 

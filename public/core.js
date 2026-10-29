@@ -31,7 +31,7 @@ const state = {
   editingHook: null,
   models: [],
   providers: [],
-  claudeAuth: { pref: null, hasSubscription: false },
+  claudeAuth: { pref: null, hasSubscription: false, hasApiKey: null },
   cliModel: null,
   cliModelAliases: [],
   editingModel: null,

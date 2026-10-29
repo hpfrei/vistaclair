@@ -1608,6 +1608,16 @@
           const n = msg.sessions || 0;
           window.dashboard.showToast?.({ sender: 'Agent SDK', title: 'Model map applied', message: `${routed.length ? routed.join(', ') : 'Nothing mapped'} · ${n} running session${n === 1 ? '' : 's'}`, level: 'success' });
         }
+        if (msg.action === 'auth') {
+          // The SDK billing toggle: who switched now, who after its turn.
+          const a = msg.applied || {};
+          const n = (k) => a[k] || 0;
+          const bits = [n('now') + n('already') && `${n('now') + n('already')} now`, n('pending') && `${n('pending')} after the turn in progress`, n('saved') && `${n('saved')} when resumed`, n('failed') && `${n('failed')} failed`].filter(Boolean);
+          // An ended tab's toggle shows what its resume will use.
+          const t = msg.tabId && tabs.get(msg.tabId);
+          if (t && isSdk(t) && t.status === 'exited') { t.settings = { ...t.settings, auth: msg.auth }; window.sdkPanel?.update(msg.tabId, sdkInfo(t)); }
+          window.dashboard.showToast?.({ sender: 'Agent SDK', title: `Billing: ${msg.auth === 'apikey' ? 'API credits' : 'Claude subscription'}`, message: `${msg.runId ? 'The whole run, and the workers it launches later' : 'This session'}${bits.length ? ` · ${bits.join(', ')}` : ''}`, level: n('failed') ? 'warning' : 'success' });
+        }
         if (msg.action === 'deleteRun' && msg.keptBranches?.length) {
           window.dashboard.showToast?.({ sender: 'CLI', title: 'Run deleted', message: `Unmerged branches kept: ${msg.keptBranches.join(', ')}`, level: 'info' });
         }

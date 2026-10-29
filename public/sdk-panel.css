@@ -103,6 +103,32 @@
 }
 .sdk-tb-btn.on:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 28%, var(--bg)); }
 .sdk-tb-models.on svg { color: var(--accent); }
+/* Billing: Subscription | API credits for the whole run (or the tab's
+   session). Lit: in force; part-lit (striped): the members differ; dashed:
+   a switch waiting for a turn's end; orange: the usage limit stopped one. */
+.sdk-bill { display: inline-flex; flex: none; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.sdk-bill button {
+  border: none;
+  background: var(--bg);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sdk-bill button + button { border-left: 1px solid var(--border); }
+.sdk-bill button:hover:not([aria-disabled="true"]) { color: var(--text); background: var(--bg-hover); }
+.sdk-bill button.on { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); color: var(--accent); font-weight: 600; }
+.sdk-bill button.part {
+  color: var(--text);
+  background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--bg)) 0 4px, var(--bg) 4px 8px);
+}
+.sdk-bill button.pending { color: var(--accent); outline: 1px dashed var(--accent); outline-offset: -3px; }
+.sdk-bill button[aria-disabled="true"] { opacity: .45; cursor: default; }
+.sdk-bill.alert { border-color: var(--orange); box-shadow: 0 0 0 2px color-mix(in srgb, var(--orange) 28%, transparent); }
+.sdk-bill.alert button[data-auth="apikey"]:not(.on) { color: var(--orange); font-weight: 600; }
+.sdk-bill-short { display: none; }
 /* An add-on's badge (dashboard.setTabBadge), on the toolbar and the tab strip. */
 .sdk-toolbar-ext:empty { display: none; }
 .tab-ext-badge {
@@ -393,6 +419,8 @@
 .sdk-state-awaiting { background: color-mix(in srgb, var(--orange) 25%, transparent); color: var(--orange); font-weight: 600; }
 .sdk-state-paused, .sdk-state-pausing { background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow); }
 .sdk-state-exited { background: var(--bg-hover); color: var(--text-dim); }
+/* Billing on a box: which (members differ), or a switch after this turn. */
+.sdk-area-bill.pending { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
 .sdk-area-report, .sdk-shelf-rep { background: color-mix(in srgb, var(--cyan) 18%, transparent); color: var(--cyan); }
 .sdk-report-done, .sdk-report-complete { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
 .sdk-report-blocked, .sdk-report-failed { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
@@ -615,7 +643,7 @@
 
 /* The feed (under the TODO table): the agent's own text and the descriptions
    of its tool calls, and the same of its subagents behind their chips; no
-   thinking, notices or messages. */
+   thinking, notices or messages, but a usage-limit card (it needs a click). */
 .sdk-feed.lite { font-size: 12px; gap: 4px; padding: 6px 12px 10px; }
 /* The output text reads first; a description is a quiet aside between it,
    in its own colour (a muted cyan), so the two never blend. */
@@ -635,7 +663,7 @@
 .sdk-feed.lite > .sdk-toolline.error::before { color: var(--red); opacity: 1; }
 .sdk-feed.lite > .sdk-text + .sdk-toolline { margin-top: 2px; }
 .sdk-feed.lite > .sdk-toolline + .sdk-text { margin-top: 4px; }
-.sdk-feed.lite > :not(.sdk-text):not(.sdk-sub):not(.sdk-toolline.has-desc):not(.sdk-user):not(.sdk-user-dropped):not(.sdk-result):not(.sdk-feed-more),
+.sdk-feed.lite > :not(.sdk-text):not(.sdk-sub):not(.sdk-toolline.has-desc):not(.sdk-user):not(.sdk-user-dropped):not(.sdk-result):not(.sdk-limit):not(.sdk-feed-more),
 .sdk-feed.lite .sdk-toolline-name { display: none; }
 .sdk-sub { display: flex; gap: 6px; align-items: baseline; }
 .sdk-sub > .sdk-text { flex: 1; min-width: 0; }
@@ -714,6 +742,22 @@
 .sdk-notice { align-self: center; font-size: 11px; color: var(--text-dim); text-align: center; white-space: pre-wrap; max-width: 90%; }
 .sdk-notice-warn { color: var(--orange); }
 .sdk-notice-error { color: var(--red); }
+/* The subscription's usage limit: a card with its one-click way on. */
+.sdk-limit {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--orange) 50%, var(--border));
+  border-radius: 6px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--orange) 8%, var(--bg));
+}
+.sdk-limit-head { font-weight: 600; }
+.sdk-limit-text, .sdk-limit-hint { color: var(--text-dim); }
+.sdk-limit-go { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); font-weight: 600; }
+.sdk-limit-go:disabled { color: var(--text-dim); border-color: var(--border); font-weight: normal; }
+.sdk-limit-link { border: none; background: none; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
 /* Turns the platform typed in: one line, the whole text on click. */
 .sdk-notice-injected {
   align-self: stretch;
@@ -965,6 +1009,8 @@
   .sdk-shelf.folded .sdk-shelf-tab { flex: 0 0 auto; flex-direction: row; padding: 4px 8px; border-right: none; writing-mode: horizontal-tb; }
   .sdk-toolbar { padding: 4px 8px; gap: 6px; }
   .sdk-toolbar-meta { display: none; }
+  .sdk-bill-long { display: none; }
+  .sdk-bill-short { display: inline; }
   .vc-composer { padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
   .vc-composer textarea { font-size: 16px; } /* no iOS zoom on focus */
 }

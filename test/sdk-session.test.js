@@ -372,11 +372,11 @@ const statuses = (events) => events().filter(e => e.ev.platform?.kind === 'statu
 test('setModel: live on a running query, settings only when not running; refused when exited or invalid', async () => {
   const { s, calls, events } = makeSession({ model: 'sonnet', modelMap: { fable: null, opus: 'gpt-x', sonnet: null, haiku: null } });
   s.spawn(tmp('proj-'), 80, 24, {});
-  assert.deepStrictEqual(statuses(events)[0], { kind: 'status', state: 'idle', costUsd: 0, model: 'sonnet', actualModel: null, mappedTo: null });
+  assert.deepStrictEqual(statuses(events)[0], { kind: 'status', state: 'idle', costUsd: 0, model: 'sonnet', actualModel: null, mappedTo: null, credential: 'api-key' });
   assert.deepStrictEqual(await s.setModel('claude-opus-4-5[1m]'), { ok: true, model: 'claude-opus-4-5[1m]' });
   assert.deepStrictEqual(calls[0].models, ['claude-opus-4-5[1m]']);
   assert.strictEqual(s.settings.model, 'claude-opus-4-5[1m]');
-  assert.deepStrictEqual(statuses(events).at(-1), { kind: 'status', state: 'idle', costUsd: 0, model: 'claude-opus-4-5[1m]', actualModel: null, mappedTo: 'gpt-x' });
+  assert.deepStrictEqual(statuses(events).at(-1), { kind: 'status', state: 'idle', costUsd: 0, model: 'claude-opus-4-5[1m]', actualModel: null, mappedTo: 'gpt-x', credential: 'api-key' });
   await assert.rejects(s.setModel('bad model'), /invalid model/);
   await assert.rejects(s.setModel(''), /invalid model/);
   await assert.rejects(s.setModel(undefined), /invalid model/);
@@ -1069,4 +1069,197 @@ test('an exit callback that relaunches into the same tab keeps the new session l
   assert.ok(mgr.list().some(t => t.tabId === tabId));
   assert.strictEqual(calls[1].inputs[0].message.content[0].text, 'follow-up');
   mgr.remove(tabId);
+});
+
+// --- Billing switch (setAuth) and the subscription's usage limit ---
+
+test('billing switch while idle: a resume of the same id on the other credential, cost and context carried', async () => {
+  setLogin(SIGNED_IN);
+  try {
+    const { s, calls, events, broadcasts } = makeSession({ auth: 'subscription' });
+    s.spawn(tmp('proj-'), 80, 24, {});
+    const sessId = s.sessId;
+    assert.strictEqual(statuses(events).at(-1).credential, 'subscription');
+    calls[0].emit({ type: 'assistant', message: { model: 'claude-haiku-4-5', content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 1200 } }, parent_tool_use_id: null });
+    calls[0].emit({ type: 'result', total_cost_usd: 0.25, queued_turn_count: 0 });
+    await tick();
+    assert.strictEqual(s.state, 'idle');
+
+    assert.deepStrictEqual(s.setAuth('apikey'), { auth: 'apikey', applied: 'now' });
+    assert.strictEqual(calls.length, 2, 'respawned at once');
+    assert.ok(calls[0].closed, 'the old query is closed');
+    const o = calls[1].options;
+    assert.strictEqual(o.resume, sessId, 'the same conversation is resumed');
+    assert.strictEqual(o.env.ANTHROPIC_API_KEY, 'sk-ant-test');
+    assert.strictEqual(o.env.CLAUDE_CODE_OAUTH_TOKEN, undefined, 'no OAuth beside the key');
+    assert.strictEqual(s.sessId, sessId);
+    assert.strictEqual(s.settings.auth, 'apikey', 'a later resume keeps it');
+    assert.ok(!broadcasts.some(b => b.type === 'cli:exit'), 'no exit in between');
+    const st = statuses(events).at(-1);
+    assert.strictEqual(st.credential, 'api-key');
+    near(st.costUsd, 0.25, 'the cost so far carries on');
+    assert.strictEqual(st.context.tokens, 1200, 'and the context');
+    assert.ok(events().some(e => /Billing switched to API credits/.test(e.ev.platform?.text || '')));
+    // The resumed CLI carries its total on: counted once.
+    calls[1].emit({ type: 'result', total_cost_usd: 0.31, queued_turn_count: 0 });
+    await tick();
+    near(s.costUsd, 0.31);
+
+    // The same credential again: nothing respawns.
+    assert.strictEqual(s.setAuth('apikey').applied, 'already');
+    assert.strictEqual(calls.length, 2);
+    // And back.
+    assert.strictEqual(s.setAuth('subscription').applied, 'now');
+    assert.strictEqual(calls[2].options.env.ANTHROPIC_API_KEY, undefined);
+    assert.strictEqual(calls[2].options.resume, sessId);
+    s.kill();
+  } finally {
+    setLogin(SIGNED_OUT);
+  }
+});
+
+test('billing switch while busy waits for the turn\'s end; a pausing or ended session only keeps it in its settings', async () => {
+  setLogin(SIGNED_IN);
+  try {
+    const { s, calls, events } = makeSession({ auth: 'subscription' });
+    s.spawn(tmp('proj-'), 80, 24, {});
+    s.submit('work');
+    assert.strictEqual(s.state, 'busy');
+    assert.strictEqual(s.setAuth('apikey').applied, 'pending');
+    assert.strictEqual(statuses(events).at(-1).authPending, 'apikey', 'the panel shows it pending');
+    await tick();
+    assert.strictEqual(calls.length, 1, 'nothing is cut off');
+    // A queued turn follows: still busy, still waiting.
+    calls[0].emit({ type: 'result', total_cost_usd: 0.1, queued_turn_count: 1 });
+    await tick();
+    assert.strictEqual(calls.length, 1);
+    calls[0].emit({ type: 'result', total_cost_usd: 0.2, queued_turn_count: 0 });
+    await tick();
+    assert.strictEqual(calls.length, 2, 'switched once the turn ended');
+    assert.strictEqual(calls[1].options.env.ANTHROPIC_API_KEY, 'sk-ant-test');
+    assert.strictEqual(statuses(events).at(-1).authPending, undefined);
+    near(s.costUsd, 0.2);
+
+    // Pending when the owner pauses it: the pause wins, the settings keep it.
+    s.submit('more');
+    assert.strictEqual(s.setAuth('subscription').applied, 'pending');
+    s.pausing = true;
+    calls[1].emit({ type: 'result', total_cost_usd: 0.3, queued_turn_count: 0 });
+    await tick();
+    assert.strictEqual(calls.length, 2, 'a pausing session is not respawned');
+    assert.strictEqual(s.settings.auth, 'subscription');
+    assert.strictEqual(s.setAuth('apikey').applied, 'saved');
+    s.pausing = false;
+    s.kill();
+    assert.strictEqual(s.setAuth('subscription').applied, 'saved', 'an ended session: its resume uses it');
+    assert.strictEqual(s.settings.auth, 'subscription');
+    assert.strictEqual(calls.length, 2);
+  } finally {
+    setLogin(SIGNED_OUT);
+  }
+});
+
+test('billing switch: a missing credential or an unknown billing is refused', () => {
+  const { s } = makeSession({ auth: 'apikey' });
+  s.spawn(tmp('proj-'), 80, 24, {});
+  assert.throws(() => s.setAuth('subscription'), /No Claude subscription is signed in/);
+  assert.throws(() => s.setAuth('credits'), /unknown billing/);
+  const key = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    assert.throws(() => s.setAuth('apikey'), /No Anthropic API key is stored/);
+  } finally {
+    process.env.ANTHROPIC_API_KEY = key;
+  }
+  assert.strictEqual(s.settings.auth, 'apikey');
+  s.kill();
+});
+
+test('usageLimitOf: every form the SDK emits for a reached limit, and no transient 429 or overload', () => {
+  const { usageLimitOf } = SdkSession;
+  const reply = (error, text) => ({ type: 'assistant', error, message: { model: '<synthetic>', content: [{ type: 'text', text }] }, parent_tool_use_id: null });
+  assert.deepStrictEqual(usageLimitOf({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1767000000, rateLimitType: 'five_hour' } }), { text: null, resetsAt: 1767000000 });
+  assert.deepStrictEqual(usageLimitOf({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', overageStatus: 'rejected' } }), { text: null, resetsAt: null });
+  assert.deepStrictEqual(usageLimitOf(reply('rate_limit', "You've hit your limit · resets 3pm (Europe/Zurich)")), { text: "You've hit your limit · resets 3pm (Europe/Zurich)", resetsAt: null });
+  assert.ok(usageLimitOf(reply('billing_error', "You're out of extra usage · resets Nov 1")));
+  assert.ok(usageLimitOf({ type: 'result', subtype: 'success', is_error: true, result: "You've reached your usage limit" }));
+  assert.ok(usageLimitOf({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['x', "You've hit your weekly limit"] }));
+  // Not the usage limit:
+  assert.strictEqual(usageLimitOf({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning', utilization: 0.9 } }), null, 'a warning');
+  assert.strictEqual(usageLimitOf({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', overageStatus: 'allowed', isUsingOverage: true } }), null, 'going on in extra usage');
+  assert.strictEqual(usageLimitOf(reply('rate_limit', 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit"}}')), null, 'a transient 429');
+  assert.strictEqual(usageLimitOf(reply('overloaded', 'API Error: 529 Overloaded')), null);
+  assert.strictEqual(usageLimitOf({ type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 429, error: 'rate_limit' }), null, 'a retry');
+  assert.strictEqual(usageLimitOf({ type: 'result', is_error: true, result: 'API Error: 429 rate_limit_error' }), null);
+  assert.strictEqual(usageLimitOf({ type: 'result', is_error: false, result: "You've hit your stride." }), null, 'a successful answer');
+  assert.strictEqual(usageLimitOf({ type: 'assistant', message: { content: [{ type: 'text', text: "You've hit your limit" }] } }), null, 'the model quoting it');
+});
+
+test('usage limit: the turn ends with a notice; "Continue on API credits" switches and continues the turn', async () => {
+  setLogin(SIGNED_IN);
+  try {
+    const { s, calls, events } = makeSession({ auth: 'subscription' });
+    s.spawn(tmp('proj-'), 80, 24, {});
+    s.submit('build it');
+    const text = "You've hit your limit · resets 3pm (Europe/Zurich)";
+    calls[0].emit({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1767000000 } });
+    calls[0].emit({ type: 'assistant', error: 'rate_limit', message: { model: '<synthetic>', content: [{ type: 'text', text }] }, parent_tool_use_id: null });
+    assert.ok(!events().some(e => e.ev.platform?.kind === 'usage-limit'), 'not before the turn ends');
+    calls[0].emit({ type: 'result', subtype: 'success', is_error: true, result: text, total_cost_usd: 0.1, queued_turn_count: 0 });
+    await tick();
+    const notices = events().filter(e => e.ev.platform?.kind === 'usage-limit');
+    assert.strictEqual(notices.length, 1);
+    assert.deepStrictEqual(notices[0].ev.platform, { kind: 'usage-limit', text, resetsAt: 1767000000, apiKey: true });
+    assert.strictEqual(statuses(events).at(-1).limited, true);
+
+    assert.strictEqual(s.setAuth('apikey', { continueTurn: true }).applied, 'now');
+    await tick();
+    assert.strictEqual(calls[1].options.env.ANTHROPIC_API_KEY, 'sk-ant-test');
+    const sent = calls[1].inputs.map(m => m.message.content.at(-1).text);
+    assert.deepStrictEqual(sent, [SdkSession.CONTINUE_TEXT], 'the stopped turn goes on, without retyping');
+    assert.ok(events().some(e => e.ev.user?.from === 'vistaclair' && e.ev.user.text === SdkSession.CONTINUE_TEXT));
+    assert.strictEqual(statuses(events).at(-1).limited, undefined);
+    assert.strictEqual(s.state, 'busy');
+
+    // On the API key, a 429 with the same words raises no notice; nor does a
+    // transient one on the subscription.
+    calls[1].emit({ type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text }] }, parent_tool_use_id: null });
+    calls[1].emit({ type: 'result', is_error: true, result: text, total_cost_usd: 0.2, queued_turn_count: 0 });
+    await tick();
+    assert.strictEqual(events().filter(e => e.ev.platform?.kind === 'usage-limit').length, 1);
+    s.setAuth('subscription');
+    s.submit('again');
+    calls[2].emit({ type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 429, error: 'rate_limit' });
+    calls[2].emit({ type: 'result', subtype: 'success', is_error: false, result: 'done', total_cost_usd: 0.3, queued_turn_count: 0 });
+    await tick();
+    assert.strictEqual(events().filter(e => e.ev.platform?.kind === 'usage-limit').length, 1);
+    s.kill();
+  } finally {
+    setLogin(SIGNED_OUT);
+  }
+});
+
+test('usage limit with no API key stored: the notice says so; a limited session already on the key just continues', async () => {
+  setLogin(SIGNED_IN);
+  const key = process.env.ANTHROPIC_API_KEY;
+  try {
+    delete process.env.ANTHROPIC_API_KEY;
+    const { s, calls, events } = makeSession({ auth: 'subscription' });
+    s.spawn(tmp('proj-'), 80, 24, {});
+    s.submit('x');
+    calls[0].emit({ type: 'result', is_error: true, result: "You've hit your limit", total_cost_usd: 0, queued_turn_count: 0 });
+    await tick();
+    assert.strictEqual(events().find(e => e.ev.platform?.kind === 'usage-limit').ev.platform.apiKey, false);
+    process.env.ANTHROPIC_API_KEY = key;
+    // Switched by the toolbar first (no continue), then the notice's button.
+    assert.strictEqual(s.setAuth('apikey').applied, 'now');
+    assert.strictEqual(calls[1].inputs.length, 0, 'a plain switch sends nothing');
+    assert.strictEqual(s.setAuth('apikey', { continueTurn: true }).applied, 'already');
+    await tick();
+    assert.deepStrictEqual(calls[1].inputs.map(m => m.message.content.at(-1).text), [SdkSession.CONTINUE_TEXT]);
+    s.kill();
+  } finally {
+    process.env.ANTHROPIC_API_KEY = key;
+    setLogin(SIGNED_OUT);
+  }
 });

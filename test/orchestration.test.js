@@ -43,6 +43,8 @@ function fakeMgr() {
     submit(data, opts) { submits.push({ tabId, data, opts }); writes.push({ tabId, data }); writes.push({ tabId, data: '\r' }); },
     // SdkSession.seedCost: a resumed member's carried-over cost.
     seedCost(usd) { this.seeded = usd; },
+    // SdkSession.setAuth: the billing switch (the real one respawns).
+    setAuth(auth, opts) { (this.authCalls ||= []).push([auth, opts]); this.settings.auth = auth; return { auth, applied: this.busy ? 'pending' : 'now' }; },
   });
   const mgr = {
     sessions, launches, writes, closed, submits, emitted,
@@ -435,6 +437,45 @@ test('a run-wide model map: every live member, a closed member\'s saved entry, a
   assert.deepStrictEqual(mgr.sessions.get(w3.tabId).settings.modelMap, cleared.modelMap);
   assert.throws(() => orch.setRunModelMap(runId, null), /modelMap must be an object/);
   assert.throws(() => orch.setRunModelMap('nope', {}), /run not found/);
+});
+
+test('a run-wide billing switch: every live member, a stopped member\'s saved entry, and the workers launched later', async () => {
+  const { mgr, orch } = setup({ credentials: () => ({ apiKey: true, subscription: true }) });
+  const r = await orch.openCli({ cwd: tmpDir(), mode: 'orchestrator', engine: 'sdk', auth: 'subscription', isolation: 'none' });
+  const orchSession = mgr.sessions.get(r.tabId);
+  const { runId } = orchSession.settings.orchestration;
+  assert.strictEqual(orchSession.settings.auth, 'subscription');
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const w2 = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'y' });
+  const w2Id = mgr.sessions.get(w2.tabId).sessId;
+  mgr.closeQuiet(w2.tabId, 'closed');
+  mgr.sessions.get(w1.tabId).busy = true;
+
+  const out = orch.setRunAuth(runId, 'apikey', { continueTurn: true });
+  assert.deepStrictEqual(out, { runId, auth: 'apikey', sessions: 2, applied: { now: 1, pending: 1 } }, 'the idle one now, the busy one after its turn');
+  assert.deepStrictEqual(orchSession.authCalls, [['apikey', { continueTurn: true }]]);
+  assert.deepStrictEqual(mgr.sessions.get(w1.tabId).authCalls, [['apikey', { continueTurn: true }]]);
+  assert.strictEqual(mgr.findSaved(w2Id).settings.auth, 'apikey', 'a stopped member resumes on it');
+  assert.strictEqual(orch.getRun(runId).auth, 'apikey');
+  const w3 = orch.launchWorker(orchSession.instanceId, { title: 'c', task: 'z' });
+  assert.strictEqual(mgr.sessions.get(w3.tabId).settings.auth, 'apikey', 'a worker launched later inherits it');
+
+  // And back, for the run's base too.
+  orch.setRunAuth(runId, 'subscription');
+  assert.strictEqual(orch.getRun(runId).auth, 'subscription');
+  assert.strictEqual(mgr.sessions.get(w3.tabId).settings.auth, 'subscription');
+  assert.throws(() => orch.setRunAuth(runId, 'credits'), /auth must be/);
+  assert.throws(() => orch.setRunAuth('nope', 'apikey'), /run not found/);
+
+  // A credential that is not there is refused, and nothing changes.
+  const k = setup({ credentials: () => ({ apiKey: false, subscription: true }) });
+  const rk = await k.orch.openCli({ cwd: tmpDir(), mode: 'orchestrator', engine: 'sdk', auth: 'subscription', isolation: 'none' });
+  const kRun = k.mgr.sessions.get(rk.tabId).settings.orchestration.runId;
+  assert.throws(() => k.orch.setRunAuth(kRun, 'apikey'), /No Anthropic API key is stored/);
+  assert.strictEqual(k.orch.getRun(kRun).auth, 'subscription');
+  // A terminal run has no billing switch.
+  const c = await k.orch.openCli({ cwd: tmpDir(), mode: 'orchestrator', engine: 'cli', isolation: 'none' });
+  assert.throws(() => k.orch.setRunAuth(k.mgr.sessions.get(c.tabId).settings.orchestration.runId, 'subscription'), /only an Agent SDK run/);
 });
 
 test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds its own', async (t) => {

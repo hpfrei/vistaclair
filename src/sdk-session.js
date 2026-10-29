@@ -52,6 +52,19 @@
 //   files          `{ platform: { kind: 'files', todo, notes } }` when a
 //                  main-agent tool call that wrote the folder's TODO.md /
 //                  NOTES.md has returned: the panel re-reads them (sdk:todo).
+//   billing        setAuth switches settings.auth ('apikey' | 'subscription').
+//                  The credential is in the CLI's environment, so the query
+//                  is replaced by a resume of the same session id (context
+//                  and cost carry on, as after a pause): at once when idle,
+//                  after the turn's end when busy (authPending in the status
+//                  meanwhile); a pausing or ended session only keeps it in
+//                  its settings. The status carries the `credential` in use.
+//   usage limit    a turn the Claude subscription's usage limit stopped
+//                  (usageLimitOf: a rejected rate_limit_event, Claude Code's
+//                  own limit texts; never a transient 429) ends with
+//                  `{ platform: { kind: 'usage-limit', text, resetsAt,
+//                  apiKey } }`; setAuth('apikey', { continueTurn }) then
+//                  continues the stopped turn on API credits.
 //   exit           the query ending (or kill) broadcasts the same `cli:exit`
 //                  a PTY exit does, so the manager's exit callbacks and
 //                  listeners (Pro's addExitHook, orchestration) fire alike.
@@ -95,6 +108,11 @@ const STDERR_TAIL = 4096;
 const TAIL_BYTES = 256 * 1024;         // transcript tail read for stale input
 const MODEL_RE = /^[A-Za-z0-9._-]+(\[1m\])?$/;
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const AUTHS = { apikey: 'api-key', subscription: 'subscription' };   // settings.auth -> credential
+// Claude Code's texts for a usage limit genuinely reached: the SDK's
+// USAGE_LIMIT_ERROR_PREFIXES when it exports them, else this copy (0.3.299).
+const USAGE_LIMIT_PREFIXES = ["You've hit your", "You've reached your", "You're out of usage credits", 'Your org is out of usage · add funds to continue', 'Your org is out of usage · contact your admin', "Your seat type doesn't include usage credits", "Your seat type doesn't include usage", 'Your usage allocation has been disabled by your admin', "Your group's usage limit is set to $0", 'Fable 5 requires usage credits', "You're out of extra usage", "Your seat type doesn't include extra usage"];
+const CONTINUE_TEXT = "[vistaclair] The Claude subscription's usage limit stopped your last turn before it was done. This session now runs on API credits: continue where you left off.";
 
 function uploadUrl(sessId, name) {
   return `/api/sdk/upload?sessId=${encodeURIComponent(sessId)}&name=${encodeURIComponent(name)}`;
@@ -151,6 +169,32 @@ function contextWindowOf(modelUsage, answered) {
 function estimatedWindow(answered, chosen) {
   if (/\[1m\]$/i.test(String(chosen || ''))) return 1000000;
   return caps.contextWindowFor(DATA_HOME, answered) || caps.contextWindowFor(DATA_HOME, chosen) || null;
+}
+
+// Whether a message says the Claude subscription's usage limit was reached:
+// { text, resetsAt } (resetsAt in epoch seconds, or null), else null. Three
+// forms: a rate_limit_event whose status is rejected with no extra usage to
+// go on; an API error reply (assistant `error`) or an error result whose text
+// is one of Claude Code's limit texts. A transient 429 or an overload (an
+// api_retry, an error reply with another text) is not one.
+function usageLimitOf(msg, prefixes = USAGE_LIMIT_PREFIXES) {
+  if (!msg || typeof msg !== 'object') return null;
+  const isLimit = (t) => typeof t === 'string' && prefixes.some(p => t.trimStart().startsWith(p));
+  if (msg.type === 'rate_limit_event') {
+    const i = msg.rate_limit_info || {};
+    if (i.status !== 'rejected' || i.overageStatus === 'allowed' || i.overageStatus === 'allowed_warning') return null;
+    return { text: null, resetsAt: Number.isFinite(i.resetsAt) ? i.resetsAt : null };
+  }
+  if (msg.type === 'assistant' && msg.error) {
+    const c = msg.message?.content;
+    const text = typeof c === 'string' ? c : Array.isArray(c) ? c.filter(b => b?.type === 'text').map(b => b.text).join('\n') : '';
+    return isLimit(text) ? { text: text.trim(), resetsAt: null } : null;
+  }
+  if (msg.type === 'result' && msg.is_error) {
+    const text = [msg.result, ...(Array.isArray(msg.errors) ? msg.errors : [])].find(isLimit);
+    return text ? { text: text.trim(), resetsAt: null } : null;
+  }
+  return null;
 }
 
 // The session's transcript file (envelopes, one per line).
@@ -457,6 +501,11 @@ class SdkSession {
     this._exitState = null;
     this._awaiting = false;
     this._stderr = '';
+    this._credential = null;      // the spawn's: 'api-key' | 'subscription'
+    this._authPending = null;     // a switch waiting for the turn's end: 'apikey' | 'subscription'
+    this._continuePending = false; // ... and then continues a turn the usage limit stopped
+    this._turnLimit = null;       // a usage-limit signal in the turn in progress
+    this._limit = null;           // the last turn was stopped by it: { text, resetsAt }
     // Set by the manager: persists the busy flag in the open-tab manifest, and
     // settings changed in place (setModel) in the manifest and history.
     this.onStateChange = null;
@@ -515,6 +564,7 @@ class SdkSession {
     this.actualModel = null;
     this._fileTools.clear();
     this._echoes = false;
+    this._turnLimit = null;
     // The folder's cost so far carries on: a resume's own (the forced idle
     // status below shows it) on top of every other id's, a fresh restart's
     // every earlier id's.
@@ -659,6 +709,11 @@ class SdkSession {
       }
     }
     if (gen !== this._spawnGen) return;
+    this._ended(exitCode);
+  }
+
+  // The current spawn is over: what a PTY exit reports.
+  _ended(exitCode) {
     this._releasePacks('exit');
     this._dropPending('ended');
     this._input?.close();
@@ -681,6 +736,8 @@ class SdkSession {
     this.emitEvent({ sdk: msg });
     if (!msg || typeof msg !== 'object') return;
     const main = !msg.parent_tool_use_id;
+    const limit = usageLimitOf(msg, (this._sdk || sdk)?.USAGE_LIMIT_ERROR_PREFIXES || USAGE_LIMIT_PREFIXES);
+    if (limit) this._turnLimit = { text: limit.text || this._turnLimit?.text || null, resetsAt: limit.resetsAt ?? this._turnLimit?.resetsAt ?? null };
     // A CLI that does not echo: what was waiting is in the turn starting or
     // the one about to.
     if (main && !this._echoes && msg.type === 'result') this._deliverAll();
@@ -711,6 +768,7 @@ class SdkSession {
       }
       const window = main ? contextWindowOf(msg.modelUsage, this.actualModel) : null;
       if (window) this.context = { ...this.context, window, windowEstimated: false };
+      if (main) this._noteTurnLimit();
       this._setState(msg.queued_turn_count > 0 ? 'busy' : 'idle', { force: true });
       if (main) this._refreshContext();
     } else if (msg.type === 'assistant') {
@@ -883,6 +941,7 @@ class SdkSession {
     this.busy = busy;
     if (changed || force) this._emitStatus();
     if (busyChanged) this.onStateChange?.(this);
+    if (state === 'idle' && this._authPending) this._switchSoon();
   }
 
   // The status envelope: state, cost and the model picture.
@@ -905,7 +964,8 @@ class SdkSession {
     const mappedTo = (family && this.settings.modelMap?.[family]) || null;
     const context = this.context.tokens != null ? { ...this.context } : undefined;
     const base = this._costBase > 0 ? { baseUsd: this._costBase } : {};
-    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, ...base, model, actualModel: this.actualModel, mappedTo, ...(context ? { context } : {}) } });
+    const billing = { credential: this._credential, ...(this._authPending ? { authPending: this._authPending } : {}), ...(this._limit ? { limited: true } : {}) };
+    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, ...base, model, actualModel: this.actualModel, mappedTo, ...(context ? { context } : {}), ...billing } });
   }
 
   // The end of a turn: the SDK's own count (its summary answers from the
@@ -945,6 +1005,97 @@ class SdkSession {
     this.onSettingsChange?.(this);
     this._emitStatus();
     return { ok: true, model };
+  }
+
+  // Switch the billing (settings.auth: 'apikey' | 'subscription'), see the
+  // header. Kept in the settings in any case, so a resume uses it; a running
+  // session on another credential is resumed on this one, at once when idle
+  // (and nothing waits to be taken in), else after its turn. continueTurn:
+  // a turn the usage limit stopped goes on after the switch. Throws when the
+  // credential is missing. Resolves { auth, applied: 'now' | 'pending' |
+  // 'already' | 'saved' }.
+  setAuth(auth, { continueTurn = false } = {}) {
+    const want = AUTHS[auth];
+    if (!want) throw new Error(`unknown billing ${JSON.stringify(auth)}`);
+    const creds = caps.claudeCredentials(DATA_HOME);
+    if (want === 'api-key' && !creds.apiKey) throw new Error('No Anthropic API key is stored: add one on the Models page.');
+    if (want === 'subscription' && !creds.subscription) throw new Error('No Claude subscription is signed in: Sign in to Claude, in the dashboard header.');
+    if (this.settings.auth !== auth) {
+      this.settings = { ...this.settings, auth };
+      this.onSettingsChange?.(this);
+    }
+    if (!this.running || this.pausing) {
+      this._authPending = null;
+      this._continuePending = false;
+      return { auth, applied: 'saved' };
+    }
+    if (continueTurn) this._continuePending = true;
+    if (this._credential === want) {
+      const had = this._authPending;
+      this._authPending = null;
+      if (this._continuePending && !this.busy) this._continueLimited();
+      else if (had) this._emitStatus();
+      return { auth, applied: 'already' };
+    }
+    this._authPending = auth;
+    if (this.state === 'idle' && !this._pending.size) {
+      this._switchAuth();
+      return { auth, applied: 'now' };
+    }
+    this._emitStatus();
+    return { auth, applied: 'pending' };
+  }
+
+  // A pending switch: once the turn has ended (a result's state change runs
+  // inside the query's loop, so the respawn waits for it to return).
+  _switchSoon() {
+    if (this._switchTimer) return;
+    const gen = this._spawnGen;
+    this._switchTimer = setImmediate(() => {
+      this._switchTimer = null;
+      if (gen !== this._spawnGen || !this._authPending) return;
+      if (!this.running || this.pausing) { this._authPending = null; this._continuePending = false; return; }
+      if (this.state !== 'idle' || this._pending.size) return;   // a next turn came first: its end
+      this._switchAuth();
+    });
+  }
+
+  // Replace the query with a resume of the same session id on the pending
+  // billing: the pause/resume path, without the exit in between.
+  _switchAuth() {
+    const auth = this._authPending;
+    this._authPending = null;
+    try {
+      this.spawn(this.cwd, 0, 0, { resumeSessionId: this.sessId, autoMemory: this.autoMemory });
+    } catch (e) {
+      // The old query is gone already: end as an exit would.
+      this.emitEvent({ platform: { kind: 'notice', level: 'error', text: `The billing switch failed: ${e.message}` } });
+      this._ended(1);
+      return;
+    }
+    this.emitEvent({ platform: { kind: 'notice', text: `Billing switched to ${auth === 'apikey' ? 'API credits' : 'the Claude subscription'}: the conversation continues.` } });
+    this.onSettingsChange?.(this);
+    if (this._continuePending) this._continueLimited();
+  }
+
+  // A turn the usage limit stopped goes on (on the new credential).
+  _continueLimited() {
+    const stopped = this._limit;
+    this._continuePending = false;
+    this._limit = null;
+    if (!stopped) { this._emitStatus(); return; }
+    try { this.submit(CONTINUE_TEXT, { from: 'vistaclair' }); } catch (e) { console.error(`[sdk-session] ${e.message}`); }
+  }
+
+  // The end of a main turn: one the usage limit stopped (on the subscription)
+  // says so in the feed, with what the owner can do about it.
+  _noteTurnLimit() {
+    const hit = this._turnLimit;
+    this._turnLimit = null;
+    if (!hit || this._credential !== 'subscription') { this._limit = null; return; }
+    this._limit = hit;
+    const apiKey = !!caps.claudeCredentials(DATA_HOME).apiKey;
+    this.emitEvent({ platform: { kind: 'usage-limit', text: hit.text, resetsAt: hit.resetsAt, apiKey } });
   }
 
   // Raise the carried-over cost (orchestration's run.json total for a
@@ -1157,6 +1308,8 @@ module.exports.transcriptFile = transcriptFile;
 module.exports.recordedCost = recordedCost;
 module.exports.transcriptTotals = transcriptTotals;
 module.exports.costStart = costStart;
+module.exports.usageLimitOf = usageLimitOf;
+module.exports.CONTINUE_TEXT = CONTINUE_TEXT;
 module.exports.historyTotals = historyTotals;
 module.exports.resolveClaudeBinary = resolveClaudeBinary;
 module.exports.DISALLOWED_TOOLS = DISALLOWED_TOOLS;
