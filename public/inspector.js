@@ -1226,6 +1226,15 @@
     _lanesSync();
     _lanesView.built = true;
     for (const lane of _lanesView.lanes.values()) {
+      // History opens folded, except the results of each lane's newest turn
+      // that has any.
+      const turns = [...lane.feed.querySelectorAll(':scope > .ln-turn')].reverse();
+      for (const el of turns) {
+        const calls = (lane.views.get(el.dataset.id)?.calls || []).filter(c => c.body);
+        if (!calls.length) continue;
+        for (const c of calls) _resultOpen(c, false);
+        break;
+      }
       lane.feed.scrollTop = lane.feed.scrollHeight;
       lane.expectTop = lane.feed.scrollTop;
     }
@@ -1236,7 +1245,7 @@
     if (!_lanesView) return;
     clearInterval(_lanesTimer);
     _lanesTimer = null;
-    for (const lane of _lanesView.lanes.values()) cancelAnimationFrame(lane.raf);
+    for (const lane of _lanesView.lanes.values()) { cancelAnimationFrame(lane.raf); lane.io.disconnect(); }
     _lanesView.root.remove();
     _lanesView = null;
     detailContent.classList.remove('lanes-active');
@@ -1307,11 +1316,12 @@
       if (keys.has(k)) continue;
       cancelAnimationFrame(lane.raf);
       for (const tv of lane.views.values()) _turnDrop(tv);
+      lane.io.disconnect();
       lane.el.remove();
       v.lanes.delete(k);
     }
     // Results and Agent links that arrived since a call was drawn.
-    for (const call of v.calls.values()) _callRefresh(call);
+    for (const call of v.calls.values()) _callRefresh(call, true);
     _lanesStatus();
   }
 
@@ -1344,6 +1354,16 @@
     feed.addEventListener('wheel', e => {
       if (e.deltaY < 0 && feed.scrollHeight > feed.clientHeight) _lanePause(lane);
     }, { passive: true });
+    // An open result pushed off the top by newer content folds to its line —
+    // only while following: a paused reader's page must not move under them.
+    lane.io = new IntersectionObserver(entries => {
+      if (!lane.follow) return;
+      for (const e of entries) {
+        if (!e.isIntersecting && e.rootBounds && e.boundingClientRect.bottom <= e.rootBounds.top + 1) {
+          _resultFoldAbove(e.target._call);
+        }
+      }
+    }, { root: feed });
     // A lane opening after the first frame slides in.
     if (_lanesView?.built) {
       el.classList.add('is-entering');
@@ -1509,6 +1529,13 @@
       lane.win = {};
       _laneRender(lane);
     }
+    // Results that went off the top while paused fold now.
+    const top = lane.feed.getBoundingClientRect().top;
+    for (const tv of lane.views.values()) {
+      for (const c of tv.calls) {
+        if (c.open && !c.manual && c.body.getBoundingClientRect().bottom <= top) _resultFoldAbove(c);
+      }
+    }
     _laneFollow(lane);
   }
 
@@ -1594,7 +1621,10 @@
     tv.el.remove();
     tv.lane.views.delete(tv.id);
     if (v?.turns.get(tv.id) === tv) v.turns.delete(tv.id);
-    for (const call of tv.calls) if (v?.calls.get(call.id) === call) v.calls.delete(call.id);
+    for (const call of tv.calls) {
+      if (call.body) tv.lane.io.unobserve(call.body);
+      if (v?.calls.get(call.id) === call) v.calls.delete(call.id);
+    }
   }
 
   // "#12 · 14:02:33 · 4.2s"
@@ -1672,7 +1702,7 @@
     const el = _blockEl(tv, 'ln-tool', animate);
     el.innerHTML = `<div class="ln-call"><span class="ln-call-ico"></span><span class="ln-call-name"></span>`
       + `<span class="ln-call-arg"></span><span class="ln-spin"></span></div>`;
-    const call = { id, el, name, input: null, server, result: false };
+    const call = { id, el, name, lane: tv.lane, input: null, server, result: false, body: null, open: false, manual: false };
     tv.calls.push(call);
     if (input !== undefined) _callFill(call, input);
     else {
@@ -1695,9 +1725,9 @@
     _callRefresh(call);
   }
 
-  // Attach the call's result once the next turn brought it; colour an Agent
-  // call like the lane of the subagent it ran.
-  function _callRefresh(call) {
+  // Attach the call's result once the next turn brought it — open, when it
+  // arrives live — and colour an Agent call like the lane of the subagent it ran.
+  function _callRefresh(call, live = false) {
     const v = _lanesView;
     if (!v || !call.id) return;
     call.el.classList.toggle('is-pending', !call.server && !call.result);
@@ -1722,14 +1752,98 @@
     const res = document.createElement('button');
     res.className = 'ln-result' + (r.error ? ' is-error' : '') + (v.built ? ' ln-in' : '');
     res.textContent = `\u2514 ${r.text}`;
+    res._call = call;
     call.el.appendChild(res);
-    if (r.preview) {
-      const pre = document.createElement('pre');
-      pre.className = 'ln-result-pre';
-      pre.hidden = true;
-      pre.textContent = r.preview + (block._truncated ? '\n\u2026' : '');
-      call.el.appendChild(pre);
+    if (!r.preview) return;
+    // The output itself, its first rows only; the rest stays a string until asked for.
+    const rows = LANES.resultRows(r.preview + (block._truncated ? '\n\u2026' : ''));
+    const body = document.createElement('div');
+    body.className = 'ln-result-body' + (r.error ? ' is-error' : '');
+    body.hidden = true;
+    body._call = call;
+    body.innerHTML = '<pre class="ln-result-pre"></pre>';
+    body.firstChild.textContent = rows.head;
+    if (rows.more) {
+      const more = document.createElement('button');
+      more.className = 'ln-result-more';
+      more.textContent = `\u2026 ${rows.more} more line${rows.more === 1 ? '' : 's'}`;
+      body.appendChild(more);
+      call.rest = rows.rest;
     }
+    call.el.appendChild(body);
+    call.body = body;
+    if (live && v.built) _resultOpen(call, true);
+  }
+
+  // Open a result's output: an eased height and fade.
+  function _resultOpen(call, animate) {
+    const body = call.body;
+    if (!body || call.open) return;
+    call.open = true;
+    call.el.classList.add('is-open');
+    const token = call.anim = (call.anim || 0) + 1;
+    body.hidden = false;
+    if (!call.manual) call.lane.io.observe(body);
+    if (!animate || _reduceMotion?.matches) {
+      body.style.height = body.style.opacity = '';
+      _laneFollow(call.lane);
+      return;
+    }
+    body.style.height = '0px';
+    body.style.opacity = '0';
+    void body.offsetHeight;
+    body.style.height = body.scrollHeight + 'px';
+    body.style.opacity = '1';
+    _afterTransition(body, () => {
+      if (call.anim !== token) return;
+      body.style.height = body.style.opacity = '';
+      _laneFollow(call.lane);
+    });
+  }
+
+  // Fold it back to its line: a smooth height, unless it is off screen.
+  function _resultClose(call, animate) {
+    const body = call.body;
+    if (!body || !call.open) return;
+    call.open = false;
+    call.el.classList.remove('is-open');
+    call.lane.io.unobserve(body);
+    const token = call.anim = (call.anim || 0) + 1;
+    const done = () => {
+      if (call.anim !== token) return;
+      body.hidden = true;
+      body.style.height = body.style.opacity = '';
+    };
+    if (!animate || _reduceMotion?.matches) { done(); return; }
+    body.style.height = body.offsetHeight + 'px';
+    body.style.opacity = '1';
+    void body.offsetHeight;
+    body.style.height = '0px';
+    body.style.opacity = '0';
+    _afterTransition(body, done);
+  }
+
+  // A result that went off the top folds at once — nobody sees it — and the
+  // lane scrolls up by what it gave back, so what is in view stays put.
+  function _resultFoldAbove(call) {
+    if (!call || call.manual || !call.open) return;
+    const feed = call.lane.feed;
+    const top = feed.scrollTop, height = feed.scrollHeight;
+    _resultClose(call, false);
+    const diff = height - feed.scrollHeight;
+    if (diff > 0) {
+      feed.scrollTop = top - diff;
+      call.lane.expectTop = feed.scrollTop;
+    }
+  }
+
+  // transitionend, or a timer in case it never fires (the element left).
+  function _afterTransition(el, fn) {
+    let fired = false;
+    const once = () => { if (fired) return; fired = true; el.removeEventListener('transitionend', onEnd); fn(); };
+    const onEnd = e => { if (e.target === el && e.propertyName === 'height') once(); };
+    el.addEventListener('transitionend', onEnd);
+    setTimeout(once, 260);
   }
 
   // One streamed event into a turn's element.
@@ -1851,13 +1965,27 @@
       think.textContent = think.textContent.replace(/[\u25B8\u25BE]$/, open ? '\u25BE' : '\u25B8');
       return;
     }
+    // A result opened or folded by hand stays that way.
     const res = e.target.closest('.ln-result');
     if (res) {
-      const pre = res.nextElementSibling;
-      if (pre?.classList.contains('ln-result-pre')) pre.hidden = !pre.hidden;
+      const call = res._call;
+      if (!call?.body) return;
+      call.manual = true;
+      if (call.open) _resultClose(call, true); else _resultOpen(call, true);
       return;
     }
-    if (e.target.closest('.ln-result-pre')) return;
+    const more = e.target.closest('.ln-result-more');
+    if (more) {
+      const call = more.parentElement._call;
+      if (!call) return;
+      call.manual = true;
+      call.lane.io.unobserve(call.body);
+      call.body.firstChild.textContent += '\n' + (call.rest || '');
+      call.rest = '';
+      more.remove();
+      return;
+    }
+    if (e.target.closest('.ln-result-body')) return;
     const quote = e.target.closest('.ln-user');
     if (quote) { quote.classList.toggle('is-open'); return; }
     const agent = e.target.closest('.ln-call.is-agent');

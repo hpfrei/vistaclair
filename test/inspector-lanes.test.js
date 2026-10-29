@@ -130,3 +130,17 @@ test('a lane renders its newest turns, capped, and pages back on demand', () => 
   assert.deepStrictEqual(L.pageOlder(ids, { from: 60, to: 100 }), { from: 40, to: 80 });
   assert.deepStrictEqual(L.pageOlder(ids, { from: 5, to: 40 }), { from: 0, to: 40 });
 });
+
+test('a result shows its first 50 rows inline, the rest behind "more"', () => {
+  const text = Array.from({ length: 120 }, (_, k) => `row ${k + 1}`).join('\n');
+  const r = L.resultRows(text);
+  assert.strictEqual(r.head.split('\n').length, 50);
+  assert.strictEqual(r.head.split('\n')[49], 'row 50');
+  assert.strictEqual(r.more, 70);
+  assert.strictEqual(r.rest.split('\n')[0], 'row 51');
+  assert.strictEqual(r.head + '\n' + r.rest, text);
+  assert.deepStrictEqual(L.resultRows('a\nb'), { head: 'a\nb', rest: '', more: 0 });
+  assert.strictEqual(L.resultRows('x\n'.repeat(50).slice(0, -1)).more, 0);
+  assert.strictEqual(L.resultRows(text, 100).more, 20);
+  assert.deepStrictEqual(L.resultRows(undefined), { head: '', rest: '', more: 0 });
+});

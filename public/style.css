@@ -1488,7 +1488,7 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
 }
 .ln-older:hover { color: var(--text); }
 .ln-empty { padding: 12px 0; font-size: 11px; font-style: italic; color: var(--text-dim); }
-.ln-older[hidden], .ln-empty[hidden], .ln-result-pre[hidden], .ln-pill[hidden] { display: none; }
+.ln-older[hidden], .ln-empty[hidden], .ln-result-body[hidden], .ln-pill[hidden] { display: none; }
 
 .ln-sep {
   margin: 10px 0 5px;
@@ -1612,20 +1612,35 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
 }
 .ln-result:hover { color: var(--text); }
 .ln-result.is-error { color: var(--red); }
+/* A result's output under its line: at most 50 rows (one row per line). */
+.ln-result-body {
+  overflow: hidden;
+  margin: 0 0 4px 14px;
+  transition: height .18s ease-out, opacity .18s ease-out;
+}
 .ln-result-pre {
-  margin: 2px 0 4px 14px;
-  padding: 6px 8px;
-  max-height: 240px;
-  overflow: auto;
-  border: 1px solid var(--vc-hair);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  font-size: 11px;
-  color: var(--text);
-  white-space: pre-wrap;
-  word-break: break-word;
+  margin: 1px 0 0;
+  padding: 4px 8px;
+  overflow-x: auto;
+  border-left: 2px solid var(--vc-hair);
+  background: var(--vc-glass-2);
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  white-space: pre;
   cursor: text;
 }
+.ln-result-body.is-error .ln-result-pre { color: var(--red); border-left-color: color-mix(in srgb, var(--red) 40%, transparent); }
+.ln-result-more {
+  all: unset;
+  display: block;
+  padding: 1px 8px 2px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  opacity: .8;
+  cursor: pointer;
+}
+.ln-result-more:hover { color: var(--text); opacity: 1; }
 .ln-error { font-family: var(--font-mono); font-size: 11.5px; color: var(--red); }
 .ln-wait { display: flex; gap: 4px; padding: 4px 0; }
 .ln-wait span {
@@ -1682,7 +1697,7 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
 @keyframes ln-in { from { opacity: 0; transform: translateY(6px); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .ln-lane { transition: none; }
+  .ln-lane, .ln-result-body { transition: none; }
   .ln-in, .ln-lane.is-flash, .ln-lane.is-live .ln-dot, .ln-spin, .ln-wait span,
   .ln-text.is-streaming > :last-child::after, .ln-text.is-streaming:empty::after { animation: none; }
 }
