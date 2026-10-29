@@ -12,6 +12,8 @@
     PAGE_TURNS: 20,
     // Turns a lane holds in the DOM at most; older ones come back on scroll-up.
     MAX_RENDERED: 40,
+    // Rows of a tool result shown inline; the rest open on click.
+    RESULT_ROWS: 50,
     // A subagent with nothing streaming this long counts as done.
     IDLE_DONE_MS: 30 * 1000,
     // A done lane folds to a thin rail after this long.
@@ -189,6 +191,14 @@
     return { text, error: false, preview };
   }
 
+  /* A result's text split for the inline view: the first `max` rows, and
+     what is left behind "… N more lines". { head, rest, more } */
+  function resultRows(text, max = LIMITS.RESULT_ROWS) {
+    const lines = String(text ?? '').split('\n');
+    if (lines.length <= max) return { head: lines.join('\n'), rest: '', more: 0 };
+    return { head: lines.slice(0, max).join('\n'), rest: lines.slice(max).join('\n'), more: lines.length - max };
+  }
+
   const _norm = s => (s || '').replace(/\s+/g, ' ').trim();
 
   /* Agent tool call (tool_use_id) -> the agentId of the subagent it ran, so a
@@ -272,7 +282,7 @@
 
   const api = {
     LIMITS, LANE_MAIN, isLaneTurn, laneKeyOf, groupLanes, newUserText, turnUserText,
-    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, agentLinks, laneDone,
+    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, agentLinks, laneDone,
     laneWindow, pageOlder,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
