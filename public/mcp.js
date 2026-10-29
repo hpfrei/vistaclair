@@ -25,8 +25,7 @@
   let isEditorDirty = false;
 
   function getMonacoTheme() {
-    const t = localStorage.getItem('theme') || 'bright';
-    return t === 'dark' ? 'vs-dark' : 'vs';
+    return 'vs';
   }
 
   // Phones never load Monaco; createEditor mounts a plain textarea instead.
