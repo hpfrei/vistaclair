@@ -53,6 +53,21 @@ function firstUserText(msgs) {
   return text.replace(/\s+/g, ' ').trim().slice(0, SUMMARY_FIRST_TEXT_MAX);
 }
 
+// What the user (or a parent agent) newly said in this turn: the text blocks
+// of the newest user message, without Claude Code's <system-reminder> blocks.
+// The live lanes quote it; a turn that only answers tool calls has none.
+// Kept in step with newUserText in public/inspector-lanes.js.
+function newUserText(msgs) {
+  const last = msgs[msgs.length - 1];
+  if (last?.role !== 'user') return null;
+  const parts = typeof last.content === 'string' ? [last.content]
+    : (Array.isArray(last.content) ? last.content.filter(b => b?.type === 'text' && b.text).map(b => b.text) : []);
+  const text = parts
+    .map(t => t.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim())
+    .filter(Boolean).join('\n\n');
+  return text ? text.slice(0, SUMMARY_STRING_MAX) : null;
+}
+
 // The summary shape every turn reaches a browser in (snapshots, live
 // interaction:* messages, paged history): no messages, tools, system or
 // translated copy — the conversation so far, which every turn of a long
@@ -87,6 +102,8 @@ function summarizeForInit(interaction) {
       }
       const text = firstUserText(msgs);
       if (text) s.request._firstUserText = text;
+      const fresh = newUserText(msgs);
+      if (fresh) s.request._newUserText = fresh;
       delete s.request.messages;
     }
     if (s.request.tools) {
@@ -446,5 +463,6 @@ class DashboardBroadcaster {
 
 module.exports = DashboardBroadcaster;
 module.exports.summarizeForInit = summarizeForInit;
+module.exports.newUserText = newUserText;
 module.exports.earlierPage = earlierPage;
 module.exports.SNAPSHOT_LIMIT = SNAPSHOT_LIMIT;

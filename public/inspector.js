@@ -93,11 +93,6 @@
   // --- Focus mode: detail panel takes over full width ---
   let _focusMode = false;
 
-  // --- Split mode: show parallel streaming interactions side by side ---
-  let _splitMode = false;
-  const _splitPanes = new Map();          // interactionId -> { pane, streamState }
-  const _splitInteractions = new Set();
-
   function flushPendingMarkdown() {
     if (_pendingMarkdownBodyEl) {
       cancelRenderDebounce(_pendingMarkdownBodyEl);
@@ -430,7 +425,7 @@
     for (let k = _recentFull.length - 1; k >= 0; k--) {
       if (dropped.has(_recentFull[k])) _recentFull.splice(k, 1);
     }
-    if ([..._splitInteractions].some(id => dropped.has(id))) exitSplitMode();
+    if (_lanesView?.instanceId === instanceId) _lanesTeardown();
     const sel = state.selection;
     if (sel && dropped.has(sel.type === 'tool' ? sel.interactionId : sel.id)) {
       state.selection = null;
@@ -450,7 +445,7 @@
   function _trimTimeline(instanceId) {
     const tab = _openTabs.get(instanceId);
     if (!tab) return false;
-    const keep = new Set(_splitInteractions);
+    const keep = new Set();
     const sel = state.selection;
     if (sel) keep.add(sel.type === 'tool' ? sel.interactionId : sel.id);
     const drop = new Set(RET.timelineTrim(state.interactions, instanceId,
@@ -500,8 +495,11 @@
   function switchInstanceTab(instanceId) {
     // Opening a session from elsewhere (a CLI or SDK panel) lands on its tab.
     if (instanceId !== SESSIONS_TAB && !_openTabs.has(instanceId)) { openSessionTab(instanceId); return; }
-    if (_splitMode && activeInstanceTab !== instanceId) exitSplitMode();
+    // Another tab (or a fresh snapshot of this one) starts its lanes over.
+    _lanesTeardown();
+    _lanesPinned = false;
     activeInstanceTab = instanceId;
+    _lanesUpdateBackBtn();
     // The tab left behind keeps summaries only.
     _scheduleCompaction();
     _showSessionsGrid(instanceId === SESSIONS_TAB);
@@ -894,47 +892,18 @@
 
     // Route SSE to detail panel — not while it is off screen: the event is
     // buffered above, and the panel replays the buffer when it is shown.
+    // In live mode the lanes take every turn of the session.
     const sel = state.selection;
     if (!_inspectorShown()) {
-      if (sel?.type === 'turn' && sel.id === interactionId || _splitInteractions.has(interactionId)) _renderOnShow = true;
-    } else if (_splitMode && _splitInteractions.has(interactionId)) {
-      appendSSEToDetail(event, interaction);
-    } else if (_splitMode && _liveMode && event.eventType === 'message_start'
-               && (interaction.status === 'streaming' || interaction.status === 'pending')
-               && !interaction.isHook && !interaction.isMcp
-               && interaction.instanceId === activeInstanceTab
-               && interaction.instanceId === _splitGroupInstance()) {
-      // A new parallel streamer began after split mode was already active —
-      // give it its own pane so all concurrent interactions stay visible.
-      addSplitPane(interaction);
-      appendSSEToDetail(event, interaction);
+      if (sel?.type === 'turn' && sel.id === interactionId || _lanesView) _renderOnShow = true;
+    } else if (_lanesView) {
+      _lanesOnSSE(interaction, event);
     } else if (sel?.type === 'turn' && sel.id === interactionId) {
-      if (event.eventType === 'message_start' && !_splitMode && _liveMode) {
-        _trySplitMode(interactionId);
-      }
-      if (_splitMode && _splitInteractions.has(interactionId)) {
-        appendSSEToDetail(event, interaction);
-      } else {
-        appendSSEToDetail(event, interaction);
-      }
-    } else if (_liveMode && !_splitMode && event.eventType === 'message_start'
-               && (interaction.status === 'streaming' || interaction.status === 'pending')
-               && interaction.instanceId === activeInstanceTab) {
-      if (_trySplitMode(interactionId)) {
-        appendSSEToDetail(event, interaction);
-      }
-    }
-
-    if (event.eventType === 'message_stop' && _splitMode && _splitInteractions.has(interactionId)) {
-      _removeSplitPane(interactionId);
+      appendSSEToDetail(event, interaction);
     }
   }
 
-  function _getStreamState(interactionId) {
-    if (_splitMode && interactionId) {
-      const pane = _splitPanes.get(interactionId);
-      if (pane) return pane.streamState;
-    }
+  function _getStreamState() {
     return { blockMap: _streamBlockMap, thinkingTokens: _streamThinkingTokens,
              lastTextBody: () => _lastStreamTextBodyEl, setLastTextBody: v => { _lastStreamTextBodyEl = v; },
              pendingMd: () => _pendingMarkdownBodyEl, setPendingMd: v => { _pendingMarkdownBodyEl = v; } };
@@ -974,11 +943,11 @@
 
   function appendSSEToDetail(event, interaction, scope) {
     const { eventType, data } = event;
-    scope = scope || (_splitMode && _splitPanes.has(interaction.id) ? _splitPanes.get(interaction.id).pane : null) || document;
+    scope = scope || document;
     // Once a turn has streamed into the panel, #response-blocks and #raw-sse-pre
     // are ours — patchTurnDetail must not rebuild them from the buffer.
     if (scope === document && _detailView?.id === interaction.id) _detailView.streamed = true;
-    const ss = _getStreamState(interaction.id);
+    const ss = _getStreamState();
     const blockMap = ss.blockMap;
     const thinkingTokens = ss.thinkingTokens;
 
@@ -1183,171 +1152,734 @@
     }
   }
 
-  // --- Split mode: parallel streaming detail panes ---
+  // ============================================================
+  // LIVE LANES — the detail panel while live mode is on
+  // ============================================================
+  /* One column per agent of the open session — the main thread leftmost,
+     each subagent beside it \u2014 each a running feed of that agent's turns.
+     Lanes are kept in step with state.interactions by _lanesSync (batched to
+     a frame): turn elements are created, moved and dropped, never rebuilt;
+     streamed events go straight to their turn's element. Live mode off, none
+     of this runs and the detail panel is the request/response view.
+     The decisions (grouping, pairing, windows) are in inspector-lanes.js. */
+  const LANES = window.inspectorLanes;
+  const LANE_MAIN = LANES.LANE_MAIN;
+  let _lanesView = null;     // { instanceId, root, lanes, turns, calls, results, links, byId, built }
+  let _lanesPinned = false;  // live, but the reader opened a turn's full detail
+  let _lanesSyncQueued = 0;
+  let _lanesTimer = null;
+  const _reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 
-  function _splitGroupInstance() {
-    for (const id of _splitInteractions) {
-      const i = state.interactions.find(x => x.id === id);
-      if (i) return i.instanceId;
+  function _lanesActive() {
+    return _liveMode && !_lanesPinned && activeInstanceTab !== SESSIONS_TAB;
+  }
+
+  // "Lanes" beside the focus button, while a turn opened from live mode is shown.
+  const _lanesBackBtn = document.createElement('button');
+  _lanesBackBtn.className = 'detail-lanes-btn';
+  _lanesBackBtn.title = 'Back to the live lanes';
+  _lanesBackBtn.textContent = '\u21A9 lanes';
+  _lanesBackBtn.hidden = true;
+  document.getElementById('detail')?.appendChild(_lanesBackBtn);
+  _lanesBackBtn.addEventListener('click', () => {
+    _lanesPinned = false;
+    _lanesUpdateBackBtn();
+    _lanesShow();
+  });
+
+  function _lanesUpdateBackBtn() {
+    _lanesBackBtn.hidden = !(_liveMode && _lanesPinned && activeInstanceTab !== SESSIONS_TAB);
+  }
+
+  function _lanesShow() {
+    if (!_lanesActive()) return;
+    if (!_inspectorShown()) { _renderOnShow = true; return; }
+    if (_lanesView?.instanceId === activeInstanceTab && _lanesView.root.isConnected) {
+      // Clearing the timeline may have hidden the panel.
+      emptyState.classList.add('hidden');
+      detailContent.classList.remove('hidden');
+      _lanesQueueSync();
+      return;
     }
-    return undefined;
+    _lanesBuild();
   }
 
-  function _findParallelStreamers(interactionId) {
-    const source = state.interactions.find(i => i.id === interactionId);
-    const sourceInstance = source?.instanceId;
-    return state.interactions.filter(i =>
-      i.id !== interactionId
-      && (i.status === 'streaming' || i.status === 'pending')
-      && !i.isHook && !i.isMcp
-      && i.instanceId === sourceInstance
-    );
-  }
-
-  function _makePaneStreamState() {
-    const st = {
-      blockMap: new Map(),
-      thinkingTokens: new Map(),
-      _lastTextBody: null,
-      _pendingMd: null,
-      lastTextBody: () => st._lastTextBody,
-      setLastTextBody: v => { st._lastTextBody = v; },
-      pendingMd: () => st._pendingMd,
-      setPendingMd: v => { st._pendingMd = v; },
-    };
-    return st;
-  }
-
-  function _renderSplitPaneContent(interaction) {
-    const req = interaction.request || {};
-    const resp = interaction.response || {};
-    const timing = interaction.timing || {};
-    const model = req.model || 'unknown';
-    const shortModel = model.replace('claude-', '').split('-202')[0];
-    const statusOk = resp.status >= 200 && resp.status < 300;
-    const respChars = interaction._respChars || 0;
-
-    let html = '';
-    html += `<div class="detail-panel response-panel">`;
-    html += `<div class="section-title">Response <span id="resp-char-gauge">${respChars ? charGauge(respChars) : ''}</span></div>`;
-    html += `<div class="info-grid">
-      <span class="info-label">Status</span><span class="info-value ${statusOk ? 'status-ok' : 'status-err'}" id="resp-status">${resp.status || '--'}</span>
-      <span class="info-label">TTFB</span><span class="info-value" id="resp-ttfb">${timing.ttfb ? formatDuration(timing.ttfb) : '--'}</span>
-      <span class="info-label">Duration</span><span class="info-value" id="resp-duration">${timing.duration ? formatDuration(timing.duration) : '--'}</span>
-    </div>`;
-    html += `<div id="response-blocks"></div>`;
-    html += `</div>`;
-    return html;
-  }
-
-  function _buildSplitPane(interaction) {
-    const pane = document.createElement('div');
-    pane.className = 'detail-split-pane';
-    pane.dataset.splitId = interaction.id;
-
-    const sa = interaction.subagent;
-    const label = sa ? (getSubagentLabel(sa) || sa.agentType || 'Agent') : 'Main Thread';
-    const color = sa?.agentId ? getSubagentColor(sa) : 'var(--accent)';
-    const model = (interaction.request?.model || 'unknown').replace('claude-', '').split('-202')[0];
-
-    const header = document.createElement('div');
-    header.className = 'split-pane-header';
-    header.style.borderBottomColor = color;
-    header.style.color = color;
-    header.innerHTML = `${escHtml(label)} <span style="color:var(--text-dim);font-weight:400">${escHtml(model)}</span>`;
-    pane.appendChild(header);
-
-    const content = document.createElement('div');
-    content.innerHTML = _renderSplitPaneContent(interaction);
-    pane.appendChild(content);
-
-    return pane;
-  }
-
-  function enterSplitMode(interactions) {
-    _splitMode = true;
-    _splitPanes.clear();
-    _splitInteractions.clear();
-
+  function _lanesBuild() {
+    _lanesTeardown();
+    _detailView = null;
+    _deferredRender = null;
     emptyState.classList.add('hidden');
     detailContent.classList.remove('hidden');
-    detailContent.classList.add('split-active');
+    detailContent.classList.add('lanes-active');
     detailContent.innerHTML = '';
+    const root = document.createElement('div');
+    root.className = 'ln-strip';
+    detailContent.appendChild(root);
+    _lanesView = {
+      instanceId: activeInstanceTab, root, built: false,
+      lanes: new Map(),     // lane key -> lane
+      turns: new Map(),     // interaction id -> turn view
+      calls: new Map(),     // tool_use_id -> call view
+      results: new Map(), links: new Map(), byId: new Map(), stopped: new Set(),
+    };
+    root.addEventListener('click', _lanesOnClick);
+    _lanesSync();
+    _lanesView.built = true;
+    for (const lane of _lanesView.lanes.values()) {
+      lane.feed.scrollTop = lane.feed.scrollHeight;
+      lane.expectTop = lane.feed.scrollTop;
+    }
+    _lanesTimer = setInterval(_lanesStatus, 2000);
+  }
 
-    for (const interaction of interactions) {
-      _splitInteractions.add(interaction.id);
-      const pane = _buildSplitPane(interaction);
-      const streamState = _makePaneStreamState();
-      _splitPanes.set(interaction.id, { pane, streamState });
-      detailContent.appendChild(pane);
+  function _lanesTeardown() {
+    if (!_lanesView) return;
+    clearInterval(_lanesTimer);
+    _lanesTimer = null;
+    for (const lane of _lanesView.lanes.values()) cancelAnimationFrame(lane.raf);
+    _lanesView.root.remove();
+    _lanesView = null;
+    detailContent.classList.remove('lanes-active');
+  }
 
-      if (interaction.response?.sseEvents?.length > 0) {
-        for (const evt of interaction.response.sseEvents) {
-          appendSSEToDetail(evt, interaction, pane);
-        }
+  function _lanesQueueSync() {
+    if (!_lanesView || _lanesSyncQueued) return;
+    _lanesSyncQueued = requestAnimationFrame(() => { _lanesSyncQueued = 0; _lanesSync(); });
+  }
+
+  // Bring every lane in line with the session's turns.
+  function _lanesSync() {
+    const v = _lanesView;
+    if (!v || !v.root.isConnected) return;
+    const mine = state.interactions.filter(i => i.instanceId === v.instanceId);
+    v.byId = new Map(mine.map(i => [i.id, i]));
+    v.results = LANES.toolResultIndex(mine);
+    v.links = LANES.agentLinks(mine, extractToolCalls);
+    v.stopped = new Set(mine.filter(i => i.isHook && i.hookEvent === 'SubagentStop')
+      .map(i => i.subagent?.agentId || i.hookAgentId).filter(Boolean));
+    // Turn labels as the timeline numbers them: #n on the main thread, #Sn
+    // per subagent.
+    v.numbers = new Map();
+    let n = 0;
+    const subCounts = new Map();
+    for (const i of mine) {
+      if (i.isMcp || i.isHook || !isStandardLlm(i) || !hasAssistantMessage(i)) continue;
+      const aid = i.subagent?.agentId;
+      if (aid) {
+        const k = (subCounts.get(aid) || 0) + 1;
+        subCounts.set(aid, k);
+        v.numbers.set(i.id, `#S${k}`);
+      } else {
+        v.numbers.set(i.id, `#${++n}`);
       }
+    }
+
+    const groups = LANES.groupLanes(mine, v.instanceId);
+    const keys = new Set(groups.map(g => g.key));
+    let prev = null;
+    for (const g of groups) {
+      let lane = v.lanes.get(g.key);
+      if (!lane) {
+        // A lane guessed from its spawning call ('pending-<tool_use_id>') keeps
+        // its column once the agent's real id is known.
+        for (const [k, l] of v.lanes) {
+          if (!keys.has(k) && k.startsWith('pending-') && v.links.get(k.slice(8)) === g.key) {
+            v.lanes.delete(k);
+            l.key = g.key;
+            l.el.dataset.lane = g.key;
+            lane = l;
+            break;
+          }
+        }
+        if (!lane) lane = _laneCreate(g.key);
+        v.lanes.set(g.key, lane);
+      }
+      lane.ids = g.ids;
+      lane.subagent = g.subagent;
+      if (prev ? prev.el.nextElementSibling !== lane.el : v.root.firstElementChild !== lane.el) {
+        if (prev) prev.el.after(lane.el); else v.root.prepend(lane.el);
+      }
+      prev = lane;
+      _laneHeader(lane);
+      _laneRender(lane);
+    }
+    for (const [k, lane] of v.lanes) {
+      if (keys.has(k)) continue;
+      cancelAnimationFrame(lane.raf);
+      for (const tv of lane.views.values()) _turnDrop(tv);
+      lane.el.remove();
+      v.lanes.delete(k);
+    }
+    // Results and Agent links that arrived since a call was drawn.
+    for (const call of v.calls.values()) _callRefresh(call);
+    _lanesStatus();
+  }
+
+  function _laneCreate(key) {
+    const el = document.createElement('section');
+    el.className = 'ln-lane';
+    el.dataset.lane = key;
+    el.innerHTML = `<header class="ln-head"><span class="ln-dot"></span><span class="ln-label"></span>`
+      + `<span class="ln-model"></span><span class="ln-stats"></span><span class="ln-state"></span></header>`
+      + `<div class="ln-feed"><div class="ln-empty">Waiting for the first turn\u2026</div><div class="ln-older" hidden></div></div>`
+      + `<button class="ln-pill" hidden>\u2193 live</button>`
+      + `<button class="ln-rail" title="Show this lane"><span class="ln-rail-label"></span></button>`;
+    const lane = {
+      key, el, feed: el.querySelector('.ln-feed'), older: el.querySelector('.ln-older'),
+      empty: el.querySelector('.ln-empty'), pill: el.querySelector('.ln-pill'),
+      ids: [], views: new Map(), win: {}, follow: true, raf: 0, expectTop: 0,
+      subagent: null, doneAt: null, railOpened: false, wantOlder: false,
+    };
+    const feed = lane.feed;
+    feed.addEventListener('scroll', () => {
+      // A scroll we did not make is the reader's: up pauses, back down resumes.
+      if (Math.abs(feed.scrollTop - lane.expectTop) > 2) {
+        const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight <= FOLLOW_SLACK_PX;
+        if (atBottom && !lane.win.toId) _laneResume(lane);
+        else if (!atBottom) _lanePause(lane);
+        lane.expectTop = feed.scrollTop;
+      }
+      if (feed.scrollTop < 40) _laneOlder(lane);
+    }, { passive: true });
+    feed.addEventListener('wheel', e => {
+      if (e.deltaY < 0 && feed.scrollHeight > feed.clientHeight) _lanePause(lane);
+    }, { passive: true });
+    // A lane opening after the first frame slides in.
+    if (_lanesView?.built) {
+      el.classList.add('is-entering');
+      requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('is-entering')));
+    }
+    return lane;
+  }
+
+  const _laneColor = lane => lane.key === LANE_MAIN ? 'var(--accent)' : getSubagentColor(lane.subagent);
+  const _laneLabel = lane => lane.key === LANE_MAIN ? 'main'
+    : (getSubagentLabel(lane.subagent) || lane.subagent?.agentType || 'subagent');
+  const _shortModel = m => (m || '').replace('claude-', '').split('-202')[0];
+  const _fmtTok = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+
+  function _setText(el, text) { if (el && el.textContent !== text) el.textContent = text; }
+
+  // Label, model, live dot, and the lane's output tokens and cost so far.
+  function _laneHeader(lane) {
+    const v = _lanesView;
+    if (lane.subagent?.agentId) registerSubagent(lane.subagent);
+    lane.el.style.setProperty('--ln-color', _laneColor(lane));
+    const label = _laneLabel(lane);
+    _setText(lane.el.querySelector('.ln-label'), label);
+    _setText(lane.el.querySelector('.ln-rail-label'), label);
+    let out = 0, cost = 0, priced = false, model = '', live = false;
+    for (const id of lane.ids) {
+      const i = v.byId.get(id);
+      if (!i) continue;
+      out += i.usage?.output_tokens || 0;
+      const c = computeCost(i.usage, i.pricing);
+      if (c != null) { cost += c; priced = true; }
+      if (i.request?.model) model = i.request.model;
+      if (_isLiveInteraction(i)) live = true;
+    }
+    _setText(lane.el.querySelector('.ln-model'), _shortModel(model));
+    _setText(lane.el.querySelector('.ln-stats'), out ? `\u2193${_fmtTok(out)}${priced ? ' \u00B7 ' + formatCost(cost) : ''}` : '');
+    lane.el.classList.toggle('is-live', live);
+    lane.empty.hidden = lane.ids.length > 0;
+  }
+
+  // Render the lane's window of turns: add what is new, drop what left.
+  function _laneRender(lane) {
+    const v = _lanesView;
+    const ids = lane.ids;
+    const w = LANES.laneWindow(ids, lane.win);
+    lane.win = { fromId: ids[w.from] ?? null, toId: w.to >= ids.length ? null : ids[w.to - 1] };
+    const want = ids.slice(w.from, w.to);
+    const wantSet = new Set(want);
+    const anchor = lane.follow ? null : _laneAnchor(lane);
+    for (const [id, tv] of lane.views) {
+      if (!wantSet.has(id)) _turnDrop(tv);
+    }
+    // Only turns joining at the live end fade in, not history paged in above.
+    let lastHeld = -1;
+    want.forEach((id, k) => { if (lane.views.has(id)) lastHeld = k; });
+    let after = lane.older;
+    for (const [k, id] of want.entries()) {
+      let tv = lane.views.get(id);
+      if (!tv) {
+        const i = v.byId.get(id);
+        if (!i) continue;
+        tv = _turnCreate(lane, i, v.built && k > lastHeld);
+        lane.views.set(id, tv);
+        v.turns.set(id, tv);
+      } else {
+        _turnCaption(tv, v.byId.get(id));
+      }
+      if (after.nextElementSibling !== tv.el) after.after(tv.el);
+      after = tv.el;
+    }
+    const tab = _openTabs.get(v.instanceId);
+    lane.older.hidden = !(w.from > 0 || tab?.hasMore);
+    _setText(lane.older, tab?.loadingEarlier && lane.wantOlder ? 'Loading earlier turns\u2026' : '\u2191 earlier turns');
+    if (anchor) _laneRestore(lane, anchor);
+    else _laneFollow(lane);
+  }
+
+  // The first turn in view and its offset, to hold the reading position while
+  // turns come and go above it.
+  function _laneAnchor(lane) {
+    const top = lane.feed.scrollTop;
+    for (const el of lane.feed.children) {
+      if (el.classList.contains('ln-turn') && el.offsetTop + el.offsetHeight > top) return { el, off: el.offsetTop - top };
+    }
+    return null;
+  }
+
+  function _laneRestore(lane, a) {
+    if (!a?.el.isConnected) return;
+    lane.feed.scrollTop = a.el.offsetTop - a.off;
+    lane.expectTop = lane.feed.scrollTop;
+  }
+
+  // Scroll-up reached the top: show older turns, from the page or the server.
+  function _laneOlder(lane) {
+    const v = _lanesView;
+    if (!v) return;
+    const ids = lane.ids;
+    const from = lane.win.fromId ? ids.indexOf(lane.win.fromId) : 0;
+    if (from > 0) {
+      const to = lane.win.toId ? ids.indexOf(lane.win.toId) + 1 : ids.length;
+      const w = LANES.pageOlder(ids, { from, to });
+      lane.win = { fromId: ids[w.from], toId: w.to >= ids.length ? null : ids[w.to - 1] };
+      if (lane.win.toId) _lanePause(lane);
+      lane.wantOlder = false;
+      const anchor = _laneAnchor(lane);
+      const follow = lane.follow;
+      lane.follow = false;
+      _laneRender(lane);
+      lane.follow = follow;
+      _laneRestore(lane, anchor);
+      return;
+    }
+    const tab = _openTabs.get(v.instanceId);
+    if (!tab?.hasMore || tab.loadingEarlier) return;
+    lane.wantOlder = true;
+    loadEarlier(v.instanceId);
+    _setText(lane.older, 'Loading earlier turns\u2026');
+  }
+
+  // A page of history arrived: lanes that asked for it step back into it.
+  function _lanesOnEarlier() {
+    const v = _lanesView;
+    if (!v) return;
+    _lanesSync();
+    for (const lane of v.lanes.values()) {
+      if (lane.wantOlder) _laneOlder(lane);
+      lane.wantOlder = false;
     }
   }
 
-  function addSplitPane(interaction) {
-    if (_splitInteractions.has(interaction.id)) return;
-    _splitInteractions.add(interaction.id);
-    const pane = _buildSplitPane(interaction);
-    const streamState = _makePaneStreamState();
-    _splitPanes.set(interaction.id, { pane, streamState });
-    detailContent.appendChild(pane);
+  // Eased follow of the lane's bottom, one frame at a time.
+  function _laneFollow(lane) {
+    if (!lane.follow || lane.raf) return;
+    if (_selectionInside(lane.feed)) { _lanePause(lane); return; }
+    const feed = lane.feed;
+    const step = () => {
+      lane.raf = 0;
+      if (!lane.follow || !feed.isConnected) return;
+      const target = feed.scrollHeight - feed.clientHeight;
+      const d = target - feed.scrollTop;
+      if (d <= 1) return;
+      feed.scrollTop = _reduceMotion?.matches ? target : feed.scrollTop + Math.max(2, d * 0.22);
+      lane.expectTop = feed.scrollTop;
+      lane.raf = requestAnimationFrame(step);
+    };
+    lane.raf = requestAnimationFrame(step);
+  }
 
-    if (interaction.response?.sseEvents?.length > 0) {
-      for (const evt of interaction.response.sseEvents) {
-        appendSSEToDetail(evt, interaction, pane);
+  function _lanePause(lane) {
+    if (!lane.follow) return;
+    lane.follow = false;
+    cancelAnimationFrame(lane.raf);
+    lane.raf = 0;
+    lane.pill.hidden = false;
+  }
+
+  function _laneResume(lane) {
+    lane.follow = true;
+    lane.pill.hidden = true;
+    if (lane.win.toId) {
+      // Paged back past the cap: go back to the newest turns.
+      lane.win = {};
+      _laneRender(lane);
+    }
+    _laneFollow(lane);
+  }
+
+  // Selecting text in a lane pauses it, like scrolling up.
+  document.addEventListener('selectionchange', () => {
+    if (!_lanesView) return;
+    for (const lane of _lanesView.lanes.values()) {
+      if (lane.follow && _selectionInside(lane.feed)) _lanePause(lane);
+    }
+  });
+
+  // Done subagents dim, then fold to a rail.
+  function _lanesStatus() {
+    const v = _lanesView;
+    if (!v) return;
+    const now = Date.now();
+    for (const lane of v.lanes.values()) {
+      if (lane.key === LANE_MAIN) continue;
+      let live = false, last = null;
+      for (const id of lane.ids) {
+        const i = v.byId.get(id);
+        if (!i) continue;
+        if (_isLiveInteraction(i)) live = true;
+        const end = (i.timing?.startedAt || i.timestamp || 0) + (i.timing?.duration || 0);
+        if (last == null || end > last) last = end;
       }
+      let resultSeen = false;
+      for (const [tuid, aid] of v.links) {
+        if (aid === lane.key && v.results.has(tuid)) { resultSeen = true; break; }
+      }
+      const done = LANES.laneDone({ live, resultSeen, stopped: v.stopped.has(lane.key), lastActivity: last }, now);
+      if (!done) {
+        lane.doneAt = null;
+        lane.railOpened = false;
+      } else if (lane.doneAt == null) {
+        lane.doneAt = now;
+      }
+      lane.el.classList.toggle('is-done', done);
+      _setText(lane.el.querySelector('.ln-state'), done ? '\u2713 done' : '');
+      lane.el.classList.toggle('is-rail', done && !lane.railOpened && now - lane.doneAt >= LANES.LIMITS.RAIL_AFTER_MS);
     }
   }
 
-  function exitSplitMode() {
-    _splitMode = false;
-    _splitPanes.clear();
-    _splitInteractions.clear();
-    detailContent.classList.remove('split-active');
-  }
+  // --- Turns ---
 
-  function _removeSplitPane(interactionId) {
-    if (!_splitMode || !_splitInteractions.has(interactionId)) return;
-    const entry = _splitPanes.get(interactionId);
-    if (!entry) return;
-
-    entry.pane.classList.add('split-pane-collapsing');
-    setTimeout(() => {
-      if (entry.pane.parentNode) entry.pane.remove();
-      _splitPanes.delete(interactionId);
-      _splitInteractions.delete(interactionId);
-
-      if (_splitInteractions.size <= 1) {
-        const remainingId = _splitInteractions.values().next().value;
-        exitSplitMode();
-        if (remainingId) {
-          select({ type: 'turn', id: remainingId });
-        }
-      }
-    }, 300);
-  }
-
-  function _trySplitMode(interactionId) {
-    const parallel = _findParallelStreamers(interactionId);
-    if (parallel.length === 0) return false;
-
-    const current = state.interactions.find(i => i.id === interactionId);
-    if (!current) return false;
-
-    const allStreamers = [current, ...parallel];
-    if (_splitMode) {
-      for (const i of allStreamers) {
-        if (!_splitInteractions.has(i.id)) addSplitPane(i);
+  function _turnCreate(lane, i, animate) {
+    const el = document.createElement('article');
+    el.className = 'ln-turn' + (animate ? ' ln-in' : '');
+    el.dataset.id = i.id;
+    el.innerHTML = `<div class="ln-sep"><span class="ln-sep-cap"></span></div>`;
+    const tv = { id: i.id, el, lane, blocks: new Map(), body: null, live: false, streamed: false, calls: [], waitEl: null };
+    const text = LANES.turnUserText(i);
+    if (text) {
+      const who = lane.key === LANE_MAIN ? 'You' : (lane.ids[0] === i.id ? 'Task prompt' : 'Message');
+      const q = document.createElement('blockquote');
+      q.className = 'ln-user';
+      q.innerHTML = `<span class="ln-user-who">${escHtml(who)}</span>${escHtml(text)}`;
+      el.appendChild(q);
+    }
+    tv.body = document.createElement('div');
+    tv.body.className = 'ln-blocks';
+    el.appendChild(tv.body);
+    _turnCaption(tv, i);
+    if (_isLiveInteraction(i)) {
+      tv.live = true;
+      el.classList.add('is-live');
+      const events = i.response?.sseEvents || [];
+      for (const e of events) _turnApply(tv, i, e, false);
+      if (!tv.blocks.size) {
+        tv.waitEl = document.createElement('div');
+        tv.waitEl.className = 'ln-wait';
+        tv.waitEl.innerHTML = '<span></span><span></span><span></span>';
+        tv.body.appendChild(tv.waitEl);
       }
     } else {
-      enterSplitMode(allStreamers);
+      _turnFromBody(tv, i);
     }
-    return true;
+    return tv;
+  }
+
+  function _turnDrop(tv) {
+    const v = _lanesView;
+    tv.el.remove();
+    tv.lane.views.delete(tv.id);
+    if (v?.turns.get(tv.id) === tv) v.turns.delete(tv.id);
+    for (const call of tv.calls) if (v?.calls.get(call.id) === call) v.calls.delete(call.id);
+  }
+
+  // "#12 · 14:02:33 · 4.2s"
+  function _turnCaption(tv, i) {
+    if (!i) return;
+    const parts = [];
+    const n = _lanesView?.numbers?.get(i.id);
+    if (n) parts.push(n);
+    const at = i.timing?.startedAt || i.timestamp;
+    if (at) parts.push(formatWallTime(at));
+    if (_isLiveInteraction(i)) parts.push('live');
+    else if (i.timing?.duration != null) parts.push(formatDuration(i.timing.duration));
+    if (i.status === 'error') parts.push('error');
+    _setText(tv.el.querySelector('.ln-sep-cap'), parts.join(' \u00B7 '));
+  }
+
+  // A finished turn, from its response body.
+  function _turnFromBody(tv, i) {
+    const content = i.response?.body?.content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+          const b = _thinkBlock(tv, false);
+          b.text.textContent = block.thinking || '';
+          _thinkFold(b, block.type === 'redacted_thinking' ? null : Math.round((block.thinking || '').length / 4));
+        } else if (block.type === 'text' && block.text) {
+          const b = _textBlock(tv, false);
+          b.el._rawText = block.text;
+          renderMarkdown(block.text, b.el);
+        } else if (block.type === 'tool_use' || block.type === 'server_tool_use') {
+          _callBlock(tv, block.id, block.name, block.input, false, block.type === 'server_tool_use');
+        }
+      }
+    }
+    _turnError(tv, i);
+  }
+
+  function _turnError(tv, i) {
+    const err = i.response?.error || (i.status === 'error' ? 'error' : null);
+    if (!err || tv.el.querySelector('.ln-error')) return;
+    const msg = typeof err === 'string' ? err : (err.message || err.error?.message || JSON.stringify(err));
+    const el = document.createElement('div');
+    el.className = 'ln-error';
+    el.textContent = truncate(msg, 300);
+    tv.body.appendChild(el);
+  }
+
+  function _blockEl(tv, cls, animate) {
+    if (tv.waitEl) { tv.waitEl.remove(); tv.waitEl = null; }
+    const el = document.createElement('div');
+    el.className = cls + (animate ? ' ln-in' : '');
+    tv.body.appendChild(el);
+    return el;
+  }
+
+  function _thinkBlock(tv, animate) {
+    const el = _blockEl(tv, 'ln-think', animate);
+    el.innerHTML = `<button class="ln-think-sum">\u2234 thinking</button><div class="ln-think-body"></div>`;
+    return { kind: 'thinking', el, text: el.querySelector('.ln-think-body'), tokens: 0 };
+  }
+
+  function _thinkFold(b, tokens) {
+    b.el.classList.remove('is-live');
+    b.el.classList.add('is-folded');
+    const tok = tokens == null ? ' (redacted)' : ` \u00B7 ${_fmtTok(tokens)} tok`;
+    _setText(b.el.querySelector('.ln-think-sum'), `\u2234 thinking${tok} \u25B8`);
+  }
+
+  function _textBlock(tv, animate) {
+    const el = _blockEl(tv, 'ln-text markdown-body', animate);
+    return { kind: 'text', el };
+  }
+
+  function _callBlock(tv, id, name, input, animate, server = false) {
+    const el = _blockEl(tv, 'ln-tool', animate);
+    el.innerHTML = `<div class="ln-call"><span class="ln-call-ico"></span><span class="ln-call-name"></span>`
+      + `<span class="ln-call-arg"></span><span class="ln-spin"></span></div>`;
+    const call = { id, el, name, input: null, server, result: false };
+    tv.calls.push(call);
+    if (input !== undefined) _callFill(call, input);
+    else {
+      el.querySelector('.ln-call-ico').textContent = LANES.toolLine(name, null).icon;
+      _setText(el.querySelector('.ln-call-name'), name || 'tool');
+    }
+    return { kind: 'tool', el, call, json: '' };
+  }
+
+  function _callFill(call, input) {
+    const v = _lanesView;
+    call.input = input || {};
+    const line = LANES.toolLine(call.name, call.input);
+    call.el.querySelector('.ln-call-ico').textContent = line.icon;
+    _setText(call.el.querySelector('.ln-call-name'), line.name);
+    const arg = call.el.querySelector('.ln-call-arg');
+    _setText(arg, line.arg);
+    arg.title = line.title;
+    if (call.id && v) v.calls.set(call.id, call);
+    _callRefresh(call);
+  }
+
+  // Attach the call's result once the next turn brought it; colour an Agent
+  // call like the lane of the subagent it ran.
+  function _callRefresh(call) {
+    const v = _lanesView;
+    if (!v || !call.id) return;
+    call.el.classList.toggle('is-pending', !call.server && !call.result);
+    if (call.name === 'Agent' || call.name === 'Task') {
+      const aid = v.links.get(call.id);
+      const lane = aid && v.lanes.get(aid);
+      if (lane) {
+        // Colours follow the subagent registry, which a timeline rebuild renumbers.
+        const line = call.el.querySelector('.ln-call');
+        line.classList.add('is-agent');
+        line.dataset.agentLane = aid;
+        line.title = `Show ${_laneLabel(lane)}`;
+        call.el.style.setProperty('--ln-agent', _laneColor(lane));
+      }
+    }
+    if (call.result) return;
+    const block = v.results.get(call.id);
+    if (!block) return;
+    const r = LANES.resultLine(block);
+    call.result = true;
+    call.el.classList.remove('is-pending');
+    const res = document.createElement('button');
+    res.className = 'ln-result' + (r.error ? ' is-error' : '') + (v.built ? ' ln-in' : '');
+    res.textContent = `\u2514 ${r.text}`;
+    call.el.appendChild(res);
+    if (r.preview) {
+      const pre = document.createElement('pre');
+      pre.className = 'ln-result-pre';
+      pre.hidden = true;
+      pre.textContent = r.preview + (block._truncated ? '\n\u2026' : '');
+      call.el.appendChild(pre);
+    }
+  }
+
+  // One streamed event into a turn's element.
+  function _turnApply(tv, i, event, animate) {
+    const { eventType, data } = event;
+    if (eventType === 'message_start') { tv.streamed = true; return; }
+    if (eventType === 'content_block_start') {
+      tv.streamed = true;
+      const cb = data?.content_block;
+      if (!cb) return;
+      let b = null;
+      if (cb.type === 'thinking' || cb.type === 'redacted_thinking') {
+        b = _thinkBlock(tv, animate);
+        b.el.classList.add('is-live');
+        b.redacted = cb.type === 'redacted_thinking';
+      } else if (cb.type === 'text') {
+        b = _textBlock(tv, animate);
+        b.el.classList.add('is-streaming');
+        if (cb.text) { b.el._rawText = cb.text; renderMarkdownDebounced(cb.text, b.el); }
+      } else if (cb.type === 'tool_use' || cb.type === 'server_tool_use') {
+        b = _callBlock(tv, cb.id, cb.name, undefined, animate, cb.type === 'server_tool_use');
+      }
+      if (b) tv.blocks.set(data.index, b);
+      return;
+    }
+    const b = tv.blocks.get(data?.index);
+    if (eventType === 'content_block_delta' && b) {
+      const delta = data.delta || {};
+      if (delta.type === 'thinking_delta' && b.kind === 'thinking') {
+        b.text.appendChild(document.createTextNode(delta.thinking || ''));
+        b.chars = (b.chars || 0) + (delta.thinking || '').length;
+        if (delta.estimated_tokens) b.tokens += delta.estimated_tokens;
+        b.text.scrollTop = b.text.scrollHeight;
+      } else if (delta.type === 'text_delta' && b.kind === 'text') {
+        const el = b.el;
+        el._rawText = (el._rawText || '') + (delta.text || '');
+        if (_selectionInside(el)) { cancelRenderDebounce(el); _deferredMarkdown.add(el); }
+        else renderMarkdownDebounced(el._rawText, el);
+      } else if (delta.type === 'input_json_delta' && b.kind === 'tool') {
+        b.json += delta.partial_json || '';
+      }
+      return;
+    }
+    if (eventType === 'content_block_stop' && b) _blockFinish(b);
+    if (eventType === 'message_stop') {
+      for (const blk of tv.blocks.values()) _blockFinish(blk);
+    }
+  }
+
+  function _blockFinish(b) {
+    if (b.done) return;
+    b.done = true;
+    if (b.kind === 'thinking') {
+      _thinkFold(b, b.redacted ? null : (b.tokens || Math.round((b.chars || 0) / 4)));
+    } else if (b.kind === 'text') {
+      const el = b.el;
+      el.classList.remove('is-streaming');
+      cancelRenderDebounce(el);
+      if (el._rawText) {
+        if (_selectionInside(el)) _deferredMarkdown.add(el);
+        else renderMarkdown(el._rawText, el);
+      }
+    } else if (b.kind === 'tool') {
+      let input = {};
+      try { input = b.json ? JSON.parse(b.json) : {}; } catch {}
+      _callFill(b.call, input);
+    }
+  }
+
+  // --- Live hooks from the message and SSE paths ---
+
+  function _lanesOnSSE(interaction, event) {
+    const v = _lanesView;
+    if (interaction.instanceId !== v.instanceId) return;
+    const tv = v.turns.get(interaction.id);
+    // A turn without its element yet gets it (with the events so far) on sync.
+    if (!tv) { _lanesQueueSync(); return; }
+    _turnApply(tv, interaction, event, true);
+    if (event.eventType === 'message_delta' && event.data?.usage) _laneHeader(tv.lane);
+    _laneFollow(tv.lane);
+  }
+
+  // A turn's status moved (complete, error): finish its element.
+  function _lanesOnUpdate(i) {
+    const v = _lanesView;
+    if (i.instanceId !== v.instanceId) return;
+    const tv = v.turns.get(i.id);
+    if (tv && tv.live && !_isLiveInteraction(i)) {
+      tv.live = false;
+      tv.el.classList.remove('is-live');
+      if (tv.waitEl) { tv.waitEl.remove(); tv.waitEl = null; }
+      if (tv.streamed) {
+        for (const b of tv.blocks.values()) _blockFinish(b);
+        _turnError(tv, i);
+      } else {
+        _turnFromBody(tv, i);
+      }
+      _laneFollow(tv.lane);
+    }
+    _lanesQueueSync();
+  }
+
+  function _lanesOnClick(e) {
+    const v = _lanesView;
+    if (!v) return;
+    const laneEl = e.target.closest('.ln-lane');
+    const lane = laneEl && v.lanes.get(laneEl.dataset.lane);
+    if (e.target.closest('.ln-pill')) { if (lane) _laneResume(lane); return; }
+    if (e.target.closest('.ln-older')) { if (lane) _laneOlder(lane); return; }
+    if (e.target.closest('.ln-rail')) {
+      if (lane) { lane.railOpened = true; laneEl.classList.remove('is-rail'); }
+      return;
+    }
+    const think = e.target.closest('.ln-think-sum');
+    if (think) {
+      const box = think.parentElement;
+      if (box.classList.contains('is-live')) return;
+      const open = box.classList.toggle('is-folded') === false;
+      think.textContent = think.textContent.replace(/[\u25B8\u25BE]$/, open ? '\u25BE' : '\u25B8');
+      return;
+    }
+    const res = e.target.closest('.ln-result');
+    if (res) {
+      const pre = res.nextElementSibling;
+      if (pre?.classList.contains('ln-result-pre')) pre.hidden = !pre.hidden;
+      return;
+    }
+    if (e.target.closest('.ln-result-pre')) return;
+    const quote = e.target.closest('.ln-user');
+    if (quote) { quote.classList.toggle('is-open'); return; }
+    const agent = e.target.closest('.ln-call.is-agent');
+    if (agent) {
+      const target = v.lanes.get(agent.dataset.agentLane);
+      if (!target) return;
+      target.railOpened = true;
+      target.el.classList.remove('is-rail');
+      target.el.scrollIntoView({ behavior: _reduceMotion?.matches ? 'auto' : 'smooth', block: 'nearest', inline: 'nearest' });
+      target.el.classList.remove('is-flash');
+      void target.el.offsetWidth;
+      target.el.classList.add('is-flash');
+      return;
+    }
+    if (e.target.closest('a')) return;
+    // Anything else in a turn opens it in the full detail view — not the end
+    // of a drag that selected text.
+    const turnEl = e.target.closest('.ln-turn');
+    if (!turnEl) return;
+    const s = window.getSelection();
+    if (s && !s.isCollapsed && turnEl.contains(s.anchorNode)) return;
+    select({ type: 'turn', id: turnEl.dataset.id }, { userClick: true });
   }
 
   // --- Focus mode ---
@@ -1400,10 +1932,7 @@
       refreshDetailIfShowing(state.interactions[idx] || updated);
     }
 
-    const uStatus = updated.status || 'complete';
-    if ((uStatus === 'complete' || uStatus === 'error') && _splitMode && _splitInteractions.has(updated.id)) {
-      _removeSplitPane(updated.id);
-    }
+    if (_lanesView && idx >= 0) _lanesOnUpdate(state.interactions[idx]);
   }
 
   function markInteractionError(id, error) {
@@ -1415,9 +1944,7 @@
     }
     updateTurnBadge(id, 'error');
     if (interaction) refreshDetailIfShowing(interaction);
-    if (_splitMode && _splitInteractions.has(id)) {
-      _removeSplitPane(id);
-    }
+    if (_lanesView && interaction) _lanesOnUpdate(interaction);
   }
 
   // ============================================================
@@ -1484,7 +2011,15 @@
       liveBtn.classList.toggle('active', _liveMode);
       liveBtn.innerHTML = liveButtonContent(_liveMode);
       liveBtn.title = _liveMode ? 'Live mode on' : 'Live mode off';
+      _lanesPinned = false;
+      _lanesUpdateBackBtn();
       if (_liveMode) selectLastAndFollow();
+      else if (_lanesView) {
+        // Off: no trace of the lanes; the panel shows the selection as always.
+        _lanesTeardown();
+        if (state.selection) select(state.selection);
+        else selectLastAndFollow();
+      }
     });
     header.appendChild(toggle);
     const aside = document.getElementById('timeline');
@@ -2303,6 +2838,8 @@
       parallelRegions,
       postHookClosedCol,
     };
+    // The column pass may have moved a turn to another agent.
+    _lanesQueueSync();
 
     // Set up resize observer
     if (!_d3ResizeObserver) {
@@ -3303,20 +3840,22 @@
     _hiddenDropTimer = null;
     if (!_renderOnShow) return;
     _renderOnShow = false;
-    // Split panes missed what streamed meanwhile: show the selection instead.
-    if (_splitMode) exitSplitMode();
-    if (state.selection) select(state.selection);
+    // Lanes missed what streamed meanwhile: build them again.
+    _lanesTeardown();
+    if (_lanesActive()) _lanesShow();
+    else if (state.selection) select(state.selection);
   }
 
   function _dropHiddenDetail() {
     _hiddenDropTimer = null;
     if (_inspectorShown()) return;
-    if (_splitMode) exitSplitMode();
+    const hadLanes = !!_lanesView;
+    _lanesTeardown();
     _detailView = null;
     _deferredRender = null;
     detailContent.innerHTML = '';
     _compactInteractions({ hidden: true });
-    if (state.selection) _renderOnShow = true;
+    if (state.selection || hadLanes) _renderOnShow = true;
   }
 
   document.addEventListener('visibilitychange', _onInspectorVisibility);
@@ -3353,7 +3892,6 @@
     const keep = new Set();
     const sel = state.selection;
     if (sel) keep.add(sel.type === 'tool' ? sel.interactionId : sel.id);
-    for (const id of _splitInteractions) keep.add(id);
     const plan = RET.compactionPlan(state.interactions, {
       recentFull: _recentFull, keep, activeInstance: activeInstanceTab, hidden, now: Date.now(),
     });
@@ -3421,6 +3959,8 @@
         // wide-layout matches an Agent call's prompt against.
         const results = last?.role === 'user' ? lastContent.filter(b => b.type === 'tool_result') : [];
         if (results.length) r._toolResults = results;
+        const fresh = LANES.newUserText(msgs);
+        if (fresh) r._newUserText = fresh;
         const first = msgs.find(m => m.role === 'user');
         if (first) {
           const text = typeof first.content === 'string' ? first.content
@@ -3567,6 +4107,19 @@
       d3UpdateSelection(_d3State.nodesLayer);
     }
 
+    // Live mode shows the lanes. A turn opened by hand shows its full detail
+    // and stays until the reader goes back to the lanes.
+    if (_liveMode) {
+      if (userClick) _lanesPinned = true;
+      _lanesUpdateBackBtn();
+      if (_lanesActive()) {
+        if (sel.type === 'turn') document.querySelector(`.turn-entry[data-id="${sel.id}"]`)?.classList.add('selected');
+        _lanesShow();
+        return;
+      }
+      _lanesTeardown();
+    }
+
     if (sel.type === 'turn') {
       const el = document.querySelector(`.turn-entry[data-id="${sel.id}"]`);
       if (el) {
@@ -3597,11 +4150,6 @@
       if (interaction.isStreaming && !interaction.response?.sseEvents?.length && !_pendingSseRequests.has(interaction.id)) {
         _pendingSseRequests.add(interaction.id);
         sendWs({ type: 'interaction:getSseEvents', id: interaction.id });
-      }
-
-      if (_splitMode) {
-        if (_splitInteractions.has(sel.id)) return;
-        exitSplitMode();
       }
 
       emptyState.classList.add('hidden');
@@ -3636,8 +4184,6 @@
         _pendingSseRequests.add(interaction.id);
         sendWs({ type: 'interaction:getSseEvents', id: interaction.id });
       }
-
-      if (_splitMode) exitSplitMode();
 
       emptyState.classList.add('hidden');
       detailContent.classList.remove('hidden');
@@ -5200,15 +5746,16 @@
           // Past the per-session cap the oldest turns leave the page (and the
           // timeline is rebuilt without them); "Load earlier" brings them back.
           if (_trimTimeline(msg.interaction.instanceId)) renderTimelineActive();
-          if (_liveMode && !_splitMode && !_wouldInterruptStream(msg.interaction)) {
-            // While split mode is active, the panes ARE the live view — auto-selecting
-            // each new interaction (incl. hooks) would tear the split down. New parallel
-            // streamers get their own pane via the message_start SSE routing instead.
+          // A turn opened from live mode stays put; otherwise live follows the
+          // newest (and the lanes show it).
+          if (_liveMode && !_lanesPinned && !_wouldInterruptStream(msg.interaction)) {
             select({ type: 'turn', id: msg.interaction.id });
             scrollTimelineToBottom();
           } else if (_liveMode) {
             scrollTimelineToBottom();
           }
+          // Hooks name the agent an Agent call ran, and when it stopped.
+          if (_lanesView) _lanesQueueSync();
         }
         else _trimTimeline(msg.interaction.instanceId);
         updateStats();
@@ -5279,6 +5826,7 @@
           // The reader asked for what is above: show it, not the live end.
           timelineList.scrollTop = 0;
           updateStats();
+          _lanesOnEarlier();
         }
         break;
       }
@@ -5314,6 +5862,7 @@
           } else {
             updateTurnSubagentBadge(interaction);
           }
+          _lanesQueueSync();
           if (state.selection?.type === 'turn' && state.selection.id === msg.interactionId) {
             select({ type: 'turn', id: msg.interactionId });
           }
