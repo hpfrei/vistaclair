@@ -170,7 +170,6 @@
   <div id="view-claude" class="hidden" style="display:none">
     <div class="view-nav" id="cliTabStrip">
       <button class="view-tab-new" id="cliTabNew" title="New CLI">+</button>
-      <button class="cli-model-cog" id="cliModelCog" title="Model and engine for new CLI tabs">&#9881;</button>
     </div>
     <div class="cli-container" id="cliContainer">
       <div class="cli-sessions" id="cliSessions"></div>
@@ -187,7 +186,7 @@
       <div class="modal-body">
         <div id="cliAuthHint" class="cli-auth-hint hidden"></div>
         <h4 style="margin:0 0 10px">Model</h4>
-        <p style="margin:0 0 12px;font-size:12px;opacity:0.7">The model this tab asks for, passed as <code>--model</code> when it starts. Takes effect the next time the tab respawns &mdash; a running session cannot be moved between models. Leave on "Default" to pick up whatever the tab-strip cog (&#9881;) is set to at the next spawn.</p>
+        <p style="margin:0 0 12px;font-size:12px;opacity:0.7">The model this tab asks for, passed as <code>--model</code> when it starts. Takes effect the next time the tab respawns &mdash; a running session cannot be moved between models. Leave on "Default" to use the default model for new tabs at the next spawn.</p>
         <select data-setting="model" style="width:100%;padding:4px 6px"></select>
         <h4 style="margin:18px 0 10px">Model Mapping</h4>
         <p style="margin:0 0 12px;font-size:12px;opacity:0.7">A separate layer from the setting above: the model chosen there is what the CLI <em>asks</em> for, while this remaps it on the way through the proxy. Map incoming Claude model families to any configured model. Applied per-request before global proxy rules (e.g. the Model Override rule). Leave as "Default" to pass through unchanged. Only models with an API key configured are selectable.</p>

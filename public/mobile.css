@@ -48,7 +48,7 @@
   /* Comfortable tap targets on the chrome that gets tapped most. */
   .view-tab { min-height: 40px; padding: 8px 14px; font-size: 13px; }
   .view-tab-close { padding: 6px; margin: -6px; font-size: 16px; }
-  .view-tab-new, .cli-model-cog { min-width: 40px; min-height: 40px; }
+  .view-tab-new { min-width: 40px; min-height: 40px; }
   .sc-worker-main { padding: 7px 6px; }
   .sc-actions .vc-btn { min-height: 34px; }
   .toast-item-close { font-size: 20px; padding: 6px 8px; }
