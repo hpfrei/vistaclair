@@ -13,7 +13,8 @@
 // only in the Inspector. A turn the agent has not taken in yet waits as a
 // chip under the feed; its bubble lands where the agent took it in. A splitter between the two moves (double-click:
 // back to the table's own height); the last position is kept for new boxes.
-// Every box opens on Live.
+// Every box opens on Live. Hovering either pane of Live shows a ⤢ that opens
+// it big in a dialog, still live; ×, Esc or the backdrop puts it back.
 // A closed or ended worker leaves the row for the shelf, a column in the
 // stage's top-left corner, left of the orchestrator's box: one card per
 // worker, newest closed first (foldable to a tab, per run). A card opens that
@@ -344,6 +345,7 @@
                 <div class="sdk-todo-wrap"></div>
               </div>
               <button type="button" class="sdk-live-pill hidden">↓ Go to bottom</button>
+              <button type="button" class="sdk-max-btn" title="Maximize">⤢</button>
             </div>
             <div class="sdk-todo-split" title="Drag to resize · double-click to reset"></div>
             <div class="sdk-todo-lite">
@@ -352,6 +354,7 @@
                 <button type="button" class="sdk-live-pill hidden">↓ Go to bottom</button>
               </div>
               <div class="sdk-pending hidden"></div>
+              <button type="button" class="sdk-max-btn" title="Maximize">⤢</button>
             </div>
           </div>
           <div class="sdk-view sdk-view-notes markdown-body"></div>
@@ -378,6 +381,9 @@
       this.moreEl = q('.sdk-feed-more');
       this.moreEl.addEventListener('click', () => this.loadEarlier());
       this.pendingEl = q('.sdk-pending');
+      const lite = q('.sdk-todo-lite');
+      q('.sdk-todo-top > .sdk-max-btn').addEventListener('click', () => openMax(this, this.todoTop, 'TODO'));
+      q('.sdk-todo-lite > .sdk-max-btn').addEventListener('click', () => openMax(this, lite, 'Live feed'));
       this.segBtns = Object.fromEntries([...root.querySelectorAll('.sdk-seg button')].map(b => [b.dataset.v, b]));
 
       for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
@@ -439,6 +445,7 @@
     }
 
     destroy() {
+      if (_max?.area === this) closeMax();
       this.feedFollow.destroy();
       this.todoFollow.destroy();
       clearTimeout(this._historyTimer);
@@ -858,6 +865,8 @@
       v = !!v;
       if (v === this.shown) return;
       this.shown = v;
+      // A box that leaves the stage takes its maximized pane with it.
+      if (!v && _max?.area === this) closeMax();
       clearTimeout(this._releaseTimer);
       if (!v) this._releaseTimer = setTimeout(() => this.release(), RELEASE_MS);
       else if (this.stale) this.requestHistory();
@@ -1350,6 +1359,52 @@
     notice(text, level) {
       return this.add(el('div', `sdk-notice${level ? ` sdk-notice-${level}` : ''}`, String(text || '')));
     }
+  }
+
+  // ---- a pane of Live maximized (one at a time) ----------------------------
+  // The pane itself moves into the dialog, so it keeps updating (its
+  // followers, "Load earlier" and the pills go with it); a comment holds its
+  // place in the box, and on close it goes back there. ×, Esc or a click on
+  // the backdrop closes it; so does its box leaving the stage or going away.
+
+  let _max = null;
+  function closeMax() {
+    if (!_max) return;
+    const { area, pane, slot, overlay, onKey } = _max;
+    _max = null;
+    document.removeEventListener('keydown', onKey, true);
+    slot.replaceWith(pane);
+    overlay.remove();
+    // Moved, its scrollers start at the top: back to the bottom, or the reader's place.
+    area.feedFollow.settle();
+    area.todoFollow.settle();
+  }
+
+  function openMax(area, pane, what) {
+    closeMax();
+    closeMenu();
+    const overlay = el('div', 'curl-modal-overlay sdk-max-overlay');
+    overlay.innerHTML = `
+      <div class="curl-modal sdk-max" role="dialog" aria-modal="true">
+        <div class="curl-modal-header"><span class="sdk-max-title"></span><button type="button" class="curl-modal-close" title="Close (Esc)">×</button></div>
+        <div class="sdk-max-body"></div>
+      </div>`;
+    const title = `${area.label} · ${what}`;
+    overlay.querySelector('.sdk-max-title').textContent = title;
+    overlay.querySelector('.sdk-max').setAttribute('aria-label', title);
+    const slot = document.createComment('maximized');
+    pane.replaceWith(slot);
+    overlay.querySelector('.sdk-max-body').appendChild(pane);
+    document.body.appendChild(overlay);
+    const close = overlay.querySelector('.curl-modal-close');
+    close.addEventListener('click', closeMax);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeMax(); });
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMax(); } };
+    document.addEventListener('keydown', onKey, true);
+    _max = { area, pane, slot, overlay, onKey };
+    area.feedFollow.settle();
+    area.todoFollow.settle();
+    close.focus();
   }
 
   // ---- menus (one open at a time): a box's model, the toolbar's ⋯ ----------
