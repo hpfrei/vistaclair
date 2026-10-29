@@ -114,6 +114,28 @@ test('live interaction messages reach browsers in summary form, listeners in ful
   done();
 });
 
+test('a summary carries the newest user text for the live lanes, reminders left out', () => {
+  const { DashboardBroadcaster, done } = setup();
+  const { summarizeForInit } = DashboardBroadcaster;
+  const prompt = (content) => summarizeForInit(llmTurn('t', { request: { model: 'm', messages: [
+    { role: 'user', content: 'older' }, { role: 'assistant', content: 'ok' }, { role: 'user', content },
+  ] } })).request;
+
+  const r = prompt([
+    { type: 'text', text: '<system-reminder>\ncontext\n</system-reminder>' },
+    { type: 'text', text: 'Fix the  bug\nplease' },
+  ]);
+  assert.strictEqual(r._newUserText, 'Fix the  bug\nplease');
+  assert.strictEqual(r._firstUserText, 'older');
+  assert.strictEqual(prompt('plain string prompt')._newUserText, 'plain string prompt');
+  // A turn that only answers tool calls has no new user text.
+  assert.strictEqual(prompt([{ type: 'tool_result', tool_use_id: 'x', content: 'r' },
+                             { type: 'text', text: '<system-reminder>x</system-reminder>' }])._newUserText, undefined);
+  // Cut like every other kept string.
+  assert.strictEqual(prompt('Q'.repeat(5000))._newUserText.length, 2000);
+  done();
+});
+
 test('a large response body is cut in the summary; getDetail returns it whole', () => {
   const { store, wss, bc, done } = setup();
   const browser = connect(wss);

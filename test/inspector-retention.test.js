@@ -22,7 +22,7 @@ test('past the budget, the least recently used full turns are trimmed', () => {
   assert.ok(plan.every(p => !p.dropStream));
 });
 
-test('the selection and split panes stay full; summaries are left alone', () => {
+test('kept turns (the selection) stay full; summaries are left alone', () => {
   const items = [full('sel'), full('pane'), full('old'), { ...full('sum'), _summary: true }];
   const plan = R.compactionPlan(items, { recentFull: [], keep: new Set(['sel', 'pane']), activeInstance: 'a', now: NOW });
   assert.deepStrictEqual(plan.map(p => p.id), ['old']);

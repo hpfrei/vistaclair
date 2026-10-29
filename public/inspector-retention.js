@@ -6,7 +6,7 @@
 // free of the DOM so test/inspector-retention.test.js can run them.
 (function (root) {
   const LIMITS = {
-    // Turns kept at full detail besides the one on screen and the split panes.
+    // Turns kept at full detail besides the one on screen.
     FULL_DETAIL_BUDGET: 10,
     // Turns per session held in the timeline; older ones come back with
     // "Load earlier". Trimmed once the count passes CAP + SLACK, so a busy
@@ -34,8 +34,8 @@
   }
 
   /* Which turns to trim back to the summary shape. `recentFull` lists ids
-     least recently used first; `keep` holds the selection and the split
-     panes. A live turn's request is trimmed like any other — the streaming
+     least recently used first; `keep` holds the selection. A live
+     turn's request is trimmed like any other — the streaming
      view needs only its events — but it keeps the events until it is stuck.
      Hidden, nothing is exempt. Returns [{ id, dropStream }]: dropStream says
      the buffered events may go even though the turn is still live. */
@@ -58,8 +58,8 @@
   }
 
   /* The oldest turns of one session to drop from the page once it holds more
-     than cap + slack, bringing it back to cap. The selection, split panes and
-     turns still live stay. Returns their ids, oldest first. */
+     than cap + slack, bringing it back to cap. The selection and turns still
+     live stay. Returns their ids, oldest first. */
   function timelineTrim(items, instanceId, opts = {}) {
     const { cap = LIMITS.TIMELINE_CAP, slack = LIMITS.TIMELINE_SLACK, keep = new Set() } = opts;
     const mine = items.filter(i => i.instanceId === instanceId);
