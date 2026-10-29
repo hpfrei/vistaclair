@@ -396,6 +396,19 @@ test('setModel: live on a running query, settings only when not running; refused
   b.s.kill();
 });
 
+test('a new model map on a running session: its status names the new target at once', async () => {
+  const { s, events } = makeSession({ model: 'opus' });
+  s.updateSettings({ modelMap: { fable: null, opus: 'gpt-x', sonnet: null, haiku: null } });
+  assert.strictEqual(statuses(events).length, 0, 'not running: nothing to tell');
+  s.spawn(tmp('proj-'), 80, 24, {});
+  const before = statuses(events).length;
+  s.updateSettings({ showThinking: true });
+  assert.strictEqual(statuses(events).length, before, 'another setting says nothing');
+  s.updateSettings({ modelMap: { fable: null, opus: 'gpt-y', sonnet: null, haiku: null } });
+  assert.strictEqual(statuses(events).at(-1).mappedTo, 'gpt-y');
+  s.kill();
+});
+
 test('status: the init model when none is chosen, and the model of the last main-agent reply', async () => {
   const { s, calls, events } = makeSession();
   s.spawn(tmp('proj-'), 80, 24, {});

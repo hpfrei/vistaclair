@@ -323,6 +323,7 @@
             <button type="button" class="sdk-stop hidden" title="Stop what this session is doing now. It stays open and waits for your next message.">■</button>
             <span class="sdk-chip sdk-area-report hidden"></span>
             <span class="sdk-area-cost"></span>
+            <button type="button" class="sdk-fresh hidden">↻ Fresh</button>
           </div>
           <div class="sdk-cap-right">
             <button type="button" class="sdk-shelve" title="Put it back on the shelf">◂ Shelf</button>
@@ -366,6 +367,7 @@
       this.stopBtn = q('.sdk-stop');
       this.reportEl = q('.sdk-area-report');
       this.costEl = q('.sdk-area-cost');
+      this.freshBtn = q('.sdk-fresh');
       this.ctxEl = q('.sdk-ctx');
       this.ctxFill = q('.sdk-ctx-bar > i');
       this.ctxTxt = q('.sdk-ctx-txt');
@@ -389,6 +391,7 @@
       for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
       this.modelBtn.addEventListener('click', (e) => { e.stopPropagation(); openModelMenu(this, this.modelBtn); });
       this.stopBtn.addEventListener('click', () => this.stop());
+      this.freshBtn.addEventListener('click', () => this.panel.refresh());
       q('.sdk-shelve').addEventListener('click', () => this.panel.openShelved(null));
       q('.sdk-insp').addEventListener('click', () => {
         // Straight to this session's tab, opened (and loaded) if need be.
@@ -1407,7 +1410,7 @@
     close.focus();
   }
 
-  // ---- menus (one open at a time): a box's model, the toolbar's ⋯ ----------
+  // ---- menus (one open at a time): a box's model ----------------------------
 
   let _menu = null;
   function closeMenu() {
@@ -1421,15 +1424,20 @@
   // The same options as the tab settings and the tab-strip cog. A switch
   // keeps the conversation and its cost; the next turn caches the whole
   // context again at the new model's rate, so the menu says so.
+  const RECACHE_TEXT = 'The context and the cost so far are kept. The next turn re-caches the whole context at the new model\'s rate.';
+  function modelOptions() {
+    const listed = window.cliModule?.modelPickerOptions?.() || [];
+    return listed.length ? listed : FALLBACK_MODELS.map(v => ({ value: v, label: v, group: 'Aliases', price: '' }));
+  }
+
   function openModelMenu(area, anchor) {
     const reopen = _menu?.owner === area;
     closeMenu();
     if (reopen || area.ended()) return;
-    const listed = window.cliModule?.modelPickerOptions?.() || [];
-    const opts = listed.length ? listed : FALLBACK_MODELS.map(v => ({ value: v, label: v, group: 'Aliases', price: '' }));
+    const opts = modelOptions();
     const cur = area.model || '';
     const box = el('div', 'sdk-model-menu');
-    box.appendChild(el('div', 'sdk-model-warn', 'The context and the cost so far are kept. The next turn re-caches the whole context at the new model\'s rate.'));
+    box.appendChild(el('div', 'sdk-model-warn', RECACHE_TEXT));
     let group = null;
     for (const o of opts) {
       if (o.group !== group) { group = o.group; box.appendChild(el('div', 'sdk-model-group', group || '')); }
@@ -1439,17 +1447,24 @@
       if (o.price) b.appendChild(el('span', 'sdk-model-opt-price', o.price));
       b.addEventListener('click', () => {
         closeMenu();
-        if (o.value === cur) return;
-        area._modelBefore = area.model;
-        area._actualBefore = area.actualModel;
-        area.model = o.value;
-        area.actualModel = null;
-        area.renderHeader();
-        sendWs({ type: 'sdk:setModel', sessId: area.sessId, model: o.value });
+        switchModel(area, o.value);
       });
       box.appendChild(b);
     }
     showMenu(box, anchor, area);
+  }
+
+  // Shown at once; a refused switch puts the label back (modelRefused).
+  // False when there was nothing to switch.
+  function switchModel(area, model) {
+    if (!model || model === area.model || area.ended()) return false;
+    area._modelBefore = area.model;
+    area._actualBefore = area.actualModel;
+    area.model = model;
+    area.actualModel = null;
+    area.renderHeader();
+    sendWs({ type: 'sdk:setModel', sessId: area.sessId, model });
+    return true;
   }
 
   // Below the anchor, or above it when there is no room; a click outside or
@@ -1468,6 +1483,137 @@
     _menu = { el: box, owner, onDown, onKey };
   }
 
+  // ---- the toolbar's Models dialog (one at a time) --------------------------
+  // For a run (its orchestrator's tab) every member, else the tab's session:
+  // switch every running session to one model (sdk:setModel each, as the
+  // boxes' menus do), and the model map, applied to all of them at once and
+  // (a run) kept for the workers launched later (cli:sessionModelMap). The map
+  // targets and their availability come with cli:settingsData, as for the
+  // terminal tab's settings dialog.
+
+  const FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'];
+  let _models = null;
+  function closeModels() {
+    if (!_models) return;
+    _models.overlay.remove();
+    document.removeEventListener('keydown', _models.onKey, true);
+    _models = null;
+  }
+
+  function openModels(panel) {
+    closeModels();
+    closeMenu();
+    const isRun = !!panel.runId;
+    const live = panel.allAreas().filter(a => !a.ended());
+    const overlay = el('div', 'modal-overlay sdk-models-overlay');
+    const box = el('div', 'modal-box sdk-models');
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    const head = el('div', 'modal-header');
+    head.appendChild(el('span', null, isRun ? `Models · run ${panel.runId}` : 'Models'));
+    const close = el('button', 'modal-close', '×');
+    close.type = 'button';
+    close.title = 'Close';
+    head.appendChild(close);
+    const body = el('div', 'modal-body sdk-models-body');
+
+    // Switch: the running sessions and the model each is on now.
+    const sw = el('section', 'sdk-models-sec');
+    sw.appendChild(el('h4', null, isRun ? 'Switch every running session' : 'Switch the model'));
+    sw.appendChild(el('div', 'sdk-model-warn', RECACHE_TEXT));
+    const list = el('div', 'sdk-models-list');
+    for (const a of live) {
+      const row = el('div', 'sdk-models-sess');
+      row.appendChild(el('span', 'sdk-models-sess-name', a.label));
+      const m = a.shownModel();
+      row.appendChild(el('span', 'sdk-models-sess-model', m ? `${fmtModel(m)}${a.mappedTo ? ` → ${fmtModel(a.mappedTo)}` : ''}` : '—'));
+      list.appendChild(row);
+    }
+    if (!live.length) list.appendChild(el('div', 'sdk-models-empty', 'No session is running.'));
+    sw.appendChild(list);
+    const pickRow = el('div', 'sdk-models-row');
+    const pick = el('select', 'sdk-models-select');
+    pick.setAttribute('aria-label', 'Model');
+    const cur = panel.main?.model || '';
+    let group = null;
+    let og = null;
+    for (const o of modelOptions()) {
+      if (o.group !== group) { group = o.group; og = el('optgroup'); og.label = group || ''; pick.appendChild(og); }
+      const opt = el('option', null, o.price ? `${o.label}  [${o.price}]` : o.label);
+      opt.value = o.value;
+      if (o.value === cur) opt.selected = true;
+      og.appendChild(opt);
+    }
+    const switchBtn = el('button', 'sdk-tb-btn sdk-models-go', live.length > 1 ? `Switch all ${live.length}` : 'Switch');
+    switchBtn.type = 'button';
+    switchBtn.disabled = !live.length;
+    pickRow.append(pick, switchBtn);
+    sw.appendChild(pickRow);
+    body.appendChild(sw);
+
+    // Map: a model family to a configured model, on its way through the proxy.
+    const mp = el('section', 'sdk-models-sec');
+    mp.appendChild(el('h4', null, 'Model map'));
+    mp.appendChild(el('div', 'sdk-models-hint', isRun
+      ? 'Rewrites a model family on its way through the proxy, for every session in this run now and for the workers it launches later. "Default" passes it through unchanged.'
+      : 'Rewrites a model family on its way through the proxy, for this session. "Default" passes it through unchanged.'));
+    const selects = {};
+    const grid = el('div', 'sdk-models-map');
+    for (const f of FAMILIES) {
+      const label = el('label', 'sdk-models-map-row');
+      label.appendChild(el('span', 'sdk-models-fam', f[0].toUpperCase() + f.slice(1)));
+      const sel = selects[f] = el('select', 'sdk-models-select');
+      sel.dataset.map = f;
+      sel.disabled = true;
+      sel.appendChild(el('option', null, 'Loading…'));
+      label.appendChild(sel);
+      grid.appendChild(label);
+    }
+    mp.appendChild(grid);
+    const applyRow = el('div', 'sdk-models-row sdk-models-row-end');
+    const applyBtn = el('button', 'sdk-tb-btn sdk-models-go', isRun ? 'Apply to the run' : 'Apply');
+    applyBtn.type = 'button';
+    applyBtn.disabled = true;
+    applyRow.appendChild(applyBtn);
+    mp.appendChild(applyRow);
+    body.appendChild(mp);
+
+    box.append(head, body);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    switchBtn.addEventListener('click', () => {
+      const n = live.filter(a => switchModel(a, pick.value)).length;
+      closeModels();
+      D.showToast?.({ sender: 'Agent SDK', message: n ? `Switching ${n} session${n === 1 ? '' : 's'} to ${pick.value}` : `Already on ${pick.value}`, level: 'info' });
+    });
+    applyBtn.addEventListener('click', () => {
+      const modelMap = Object.fromEntries(FAMILIES.map(f => [f, selects[f].value || null]));
+      sendWs({ type: 'cli:sessionModelMap', tabId: panel.tabId, modelMap });
+      closeModels();
+    });
+    close.addEventListener('click', closeModels);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeModels(); });
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeModels(); } };
+    document.addEventListener('keydown', onKey, true);
+    _models = { panel, overlay, selects, applyBtn, onKey };
+    sendWs({ type: 'cli:getSettings', tabId: panel.tabId });
+    pick.focus();
+  }
+
+  // cli:settingsData (cli.js passes it on): the map's targets for an open
+  // dialog of that tab.
+  function onSettingsData(msg) {
+    if (!_models || _models.panel.tabId !== msg.tabId || !Array.isArray(msg.models)) return;
+    const map = msg.settings?.modelMap || {};
+    for (const f of FAMILIES) {
+      const sel = _models.selects[f];
+      window.cliModule?.fillModelMapSelect?.(sel, msg.models, map[f] || null);
+      sel.disabled = false;
+    }
+    _models.applyBtn.disabled = false;
+  }
+
   // ---- pick a session and send (one dialog at a time) ----------------------
 
   let _pick = null;
@@ -1484,6 +1630,8 @@
   // ---- Panel: one SDK tab --------------------------------------------------
 
   const FRESH_TEXT = 'Swap the orchestrator for a new one with a clean memory. It continues from its notes. Workers aren\'t touched.';
+  // The toolbar's Models button: the tab strip's model-settings arrows.
+  const MODELS_ICON = '<svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M1 3h10m-2-2l2 2-2 2"/><path d="M1 7h10m-2-2l2 2-2 2"/><path d="M1 11h10m-2-2l2 2-2 2"/></svg>';
   const composerHint = (role) => `Message… (Enter or Ctrl+Enter, then Enter sends to the ${role === 'orchestrator' ? 'orchestrator' : 'session'}, Tab picks another · Shift+Enter new line · Esc stops the ${role === 'orchestrator' ? 'orchestrator' : 'session'})`;
 
   class Panel {
@@ -1507,11 +1655,13 @@
             <span class="sdk-toolbar-title"></span>
             <span class="sdk-toolbar-meta"></span>
             <span class="sdk-toolbar-ext"></span>
-            <button type="button" class="sdk-tb-btn sdk-fresh-chip suggested hidden" data-act="fresh"></button>
             <span class="sdk-toolbar-cost"></span>
             <span class="sdk-spacer"></span>
-            <button type="button" class="sdk-tb-btn" data-act="pause">Pause &amp; save</button>
-            <button type="button" class="sdk-tb-btn sdk-tb-more hidden" data-act="more" title="More">⋯</button>
+            <span class="sdk-tb-right">
+              <button type="button" class="sdk-tb-btn sdk-tb-models" data-act="models">${MODELS_ICON}<span class="sdk-tb-lbl">Models</span></button>
+              <span class="sdk-tb-actions"></span>
+              <button type="button" class="sdk-tb-btn" data-act="pause">Pause &amp; save</button>
+            </span>
           </div>
           <div class="sdk-stage">
             <svg class="sdk-links" aria-hidden="true"></svg>
@@ -1541,13 +1691,12 @@
       this.shelfTitle = q('.sdk-shelf-title');
       this.shelfList = q('.sdk-shelf-list');
       this.pauseBtn = q('[data-act="pause"]');
-      this.freshChip = q('[data-act="fresh"]');
-      this.moreBtn = q('[data-act="more"]');
+      this.modelsBtn = q('[data-act="models"]');
+      this.actionsEl = q('.sdk-tb-actions');
       this.composer = q('vc-composer');
 
       this.pauseBtn.addEventListener('click', () => this.pause());
-      this.freshChip.addEventListener('click', () => this.refresh());
-      this.moreBtn.addEventListener('click', (e) => { e.stopPropagation(); this.openMore(); });
+      this.modelsBtn.addEventListener('click', () => openModels(this));
       this.shelfTab.addEventListener('click', () => this.foldShelf(!this.shelfEl.classList.contains('folded')));
       this.composer.addEventListener('send', (e) => this.openPicker(e.detail));
       // Esc stops the top box (the orchestrator, or a plain tab's session);
@@ -2006,47 +2155,54 @@
         ? 'Saving… Click to stop immediately (the resume note may be missing).'
         : this.runId ? 'Every session saves its progress and closes. Resume later from the + menu. Nothing is lost.'
           : 'The session saves its progress and closes. Resume later from the + menu. Nothing is lost.';
-      // A run's orchestrator can hand over to a fresh one: from the ⋯ menu,
-      // or the chip once it has compacted a few times.
-      const run = this.run;
-      const isRun = !!this.runId && !isWorkerTab;
-      this.canRefresh = isRun && !!(run?.orchestratorRunning && !run.pausing && !info.pausing);
-      this.moreBtn.classList.toggle('hidden', !isRun && !this.tabActions().length);
+      // Models: the whole run from its orchestrator's tab, or the tab's own
+      // session; a model map in force shows on the button.
+      this.modelsBtn.classList.toggle('hidden', isWorkerTab);
+      const map = Object.entries(info.settings?.modelMap || {}).filter(([, v]) => v);
+      this.modelsBtn.classList.toggle('on', map.length > 0);
+      this.modelsBtn.title = [
+        this.runId ? 'Models for the whole run: switch every running session, or map model families for every session (and the workers launched later)'
+          : 'Models for this session: switch it, or map model families',
+        ...map.map(([f, v]) => `Map: ${f} → ${v}`),
+      ].join('\n');
+      // An add-on's actions for this tab (dashboard.registerTabAction): a
+      // button each; a toggle's state shows pressed.
+      const tabInfo = this.tabInfo();
+      this.actionsEl.replaceChildren(...this.tabActions(tabInfo).map((action) => {
+        const b = el('button', `sdk-tb-btn sdk-tb-action${action.active ? ' on' : ''}`);
+        b.type = 'button';
+        // A leading symbol ("📱 Follow…") stays when a narrow toolbar drops the words.
+        const m = /^(\S{1,4})\s+(.+)$/u.exec(action.label);
+        if (m && !/[A-Za-z0-9]/.test(m[1])) b.append(el('span', 'sdk-tb-ico', m[1]), el('span', 'sdk-tb-lbl', m[2]));
+        else b.textContent = action.label;
+        b.title = action.title || action.label;
+        if (action.active) b.setAttribute('aria-pressed', 'true');
+        b.addEventListener('click', () => window.dashboard._tabHooks.runAction(action, tabInfo));
+        return b;
+      }));
       // An add-on's badge for this session (dashboard.setTabBadge).
       const extBadge = window.dashboard._tabBadgeEl(info.settings?.name, 'sdk-toolbar-ext-badge');
       this.extBadgeEl.replaceChildren(...(extBadge ? [extBadge] : []));
-      this.freshChip.classList.toggle('hidden', !(this.canRefresh && run.refreshSuggested));
-      this.freshChip.disabled = false;
-      this.freshChip.textContent = `orchestrator compacted ${run?.compactions || 0}× · start fresh?`;
-      this.freshChip.title = FRESH_TEXT;
+      // A run's orchestrator can hand over to a fresh one, from its box's
+      // caption; the control lights up once it has compacted a few times.
+      const run = this.run;
+      const isRun = !!this.runId && !isWorkerTab;
+      this.canRefresh = isRun && !!(run?.orchestratorRunning && !run.pausing && !info.pausing);
+      this.renderFresh();
     }
 
-    // The ⋯ menu: what the toolbar does not show all the time.
-    openMore() {
-      const reopen = _menu?.owner === this;
-      closeMenu();
-      if (reopen) return;
-      const box = el('div', 'sdk-model-menu sdk-more-menu');
-      if (this.runId) {
-        const b = el('button', 'sdk-model-opt');
-        b.type = 'button';
-        b.appendChild(el('span', 'sdk-model-opt-label', 'Fresh orchestrator'));
-        b.disabled = !this.canRefresh;
-        b.title = this.canRefresh ? FRESH_TEXT : `${FRESH_TEXT}\nNot now: the orchestrator is not running, or the run is pausing.`;
-        b.addEventListener('click', () => { closeMenu(); this.refresh(); });
-        box.appendChild(b);
-      }
-      // An add-on's actions for this tab (dashboard.registerTabAction).
-      const info = this.tabInfo();
-      for (const action of this.tabActions(info)) {
-        const b = el('button', 'sdk-model-opt');
-        b.type = 'button';
-        b.appendChild(el('span', 'sdk-model-opt-label', action.label));
-        if (action.title) b.title = action.title;
-        b.addEventListener('click', () => { closeMenu(); window.dashboard._tabHooks.runAction(action, info); });
-        box.appendChild(b);
-      }
-      showMenu(box, this.moreBtn, this);
+    renderFresh() {
+      const b = this.main?.role === 'orchestrator' ? this.main.freshBtn : null;
+      if (!b) return;
+      const isRun = !!this.runId && this.info.settings?.orchestration?.role !== 'worker';
+      b.classList.toggle('hidden', !isRun);
+      const suggested = this.canRefresh && !!this.run?.refreshSuggested;
+      b.classList.toggle('suggested', suggested);
+      b.setAttribute('aria-disabled', String(!this.canRefresh));
+      b.textContent = suggested ? `↻ Fresh · compacted ${this.run.compactions || 0}×` : '↻ Fresh';
+      b.title = !this.canRefresh ? `Fresh orchestrator: ${FRESH_TEXT}\nNot now: the orchestrator is not running, or the run is pausing.`
+        : suggested ? `Fresh orchestrator: ${FRESH_TEXT}\nSuggested: the orchestrator has compacted ${this.run.compactions || 0}× in this run.`
+          : `Fresh orchestrator: ${FRESH_TEXT}`;
     }
 
     // This tab as add-on tab actions see it (public/tab-hooks.js).
@@ -2056,7 +2212,7 @@
     refresh() {
       if (!this.runId || !this.canRefresh) return;
       if (!confirm(`Fresh orchestrator?\n\n${FRESH_TEXT}`)) return;
-      this.freshChip.disabled = true;
+      this.main?.freshBtn.setAttribute('aria-disabled', 'true');
       sendWs({ type: 'cli:refreshOrchestrator', runId: this.runId });
     }
 
@@ -2103,6 +2259,7 @@
       this._ro.disconnect();
       if (_pick?.panel === this) closePicker();
       if (_menu && (_menu.owner === this || this.allAreas().includes(_menu.owner))) closeMenu();
+      if (_models?.panel === this) closeModels();
       for (const a of this.allAreas()) a.destroy();
       this.workers.clear();
       this.main = null;
@@ -2198,7 +2355,7 @@
   });
 
   window.sdkPanel = {
-    mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, _panels: panels, _areas: areas,
+    mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, onSettingsData, _panels: panels, _areas: areas,
     _feedWindow: { feedExcess, cursorAbove, capOldest, FEED_MAX, FEED_HARD_MAX, PAGE },
   };
 })();

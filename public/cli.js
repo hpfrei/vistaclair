@@ -453,6 +453,10 @@
       });
       btn.appendChild(label);
 
+      // Model settings and pause sit on the tab only for a terminal tab; an
+      // SDK tab has them in its own toolbar (sdk-panel.js).
+      const sdkTab = isSdk(tab);
+
       // Model override / settings button
       const hasOverride = tab.settings &&
         tab.settings.modelMap && Object.values(tab.settings.modelMap).some(v => v);
@@ -466,12 +470,12 @@
         e.stopPropagation();
         openSettings(tabId);
       });
-      btn.appendChild(settingsBtn);
+      if (!sdkTab) btn.appendChild(settingsBtn);
 
       // Pause: a plain tab pauses itself, an orchestrator its whole run; a
       // worker only through its orchestrator. While pausing, it offers
       // "Interrupt now" — a pause has no timeout.
-      if (tab.status === 'running' && orchRole !== 'worker') {
+      if (!sdkTab && tab.status === 'running' && orchRole !== 'worker') {
         const pauseBtn = document.createElement('span');
         pauseBtn.className = 'cli-model-override-btn cli-pause-btn' + (tab.pausing ? ' pausing' : '');
         pauseBtn.textContent = tab.pausing ? '⏹' : '⏸';
@@ -1294,6 +1298,41 @@
     return `${f(inC)}/${f(outC)} per 1M`;
   }
 
+  // One modelMap family's <select>: "Default (passthrough)", then every model
+  // with its price, the ones that cannot be picked disabled with the reason.
+  // The settings dialog here and the SDK toolbar's Models dialog share it.
+  function fillModelMapSelect(sel, models, current) {
+    // Server-decided (capabilities.listModelsWithAvailability). This file used
+    // to carry the only correct copy of this predicate on the platform; it is
+    // now the payload's, and every surface reads the same one.
+    const hasAuth = (m) => !!m.usable;
+    const isRetired = (m) => m.lifecycle === 'retired';
+    const allModels = [...(models || [])].sort((a, b) => {
+      // Retired models sink to the bottom, then unauthenticated, then alphabetical.
+      const aRet = isRetired(a), bRet = isRetired(b);
+      if (aRet !== bRet) return aRet ? 1 : -1;
+      const aKey = hasAuth(a), bKey = hasAuth(b);
+      if (aKey !== bKey) return aKey ? -1 : 1;
+      return (a.label || a.name).localeCompare(b.label || b.name);
+    });
+    sel.innerHTML = '<option value="">Default (passthrough)</option>';
+    allModels.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.name;
+      let label = m.label || m.name;
+      if (m.isNew) label += ' (new)';
+      const price = fmtPrice(m);
+      if (price) label += `  [${price}]`;
+      if (isRetired(m)) { opt.disabled = true; label += ' — unavailable (retired)'; }
+      else if (m.disabled) { opt.disabled = true; label += ' — unavailable (disabled)'; }
+      else if (!hasAuth(m)) { opt.disabled = true; label += ' — unavailable (no API key)'; }
+      else if (m.lifecycle === 'deprecated') label += m.retiresAt ? ` (deprecated, retiring ${m.retiresAt})` : ' (deprecated)';
+      opt.textContent = label;
+      if (current === m.name) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
   function populateSettings(tabId, settings, models, hasSubscription, interactionsDir) {
     if (!settingsModal || settingsModal._tabId !== tabId) return;
     settingsModal._interactionsDir = interactionsDir || null;
@@ -1310,39 +1349,10 @@
       }
     }
     const modelMap = settings.modelMap || { fable: null, opus: null, sonnet: null, haiku: null };
-    // Server-decided (capabilities.listModelsWithAvailability). This file used
-    // to carry the only correct copy of this predicate on the platform; it is
-    // now the payload's, and every surface reads the same one.
-    const hasAuth = (m) => !!m.usable;
-    const isRetired = (m) => m.lifecycle === 'retired';
-    const allModels = (models || []).sort((a, b) => {
-      // Retired models sink to the bottom, then unauthenticated, then alphabetical.
-      const aRet = isRetired(a), bRet = isRetired(b);
-      if (aRet !== bRet) return aRet ? 1 : -1;
-      const aKey = hasAuth(a), bKey = hasAuth(b);
-      if (aKey !== bKey) return aKey ? -1 : 1;
-      return (a.label || a.name).localeCompare(b.label || b.name);
-    });
 
     ['fable', 'opus', 'sonnet', 'haiku'].forEach(family => {
       const sel = settingsModal.querySelector(`[data-map="${family}"]`);
-      if (!sel) return;
-      sel.innerHTML = '<option value="">Default (passthrough)</option>';
-      allModels.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        let label = m.label || m.name;
-        if (m.isNew) label += ' (new)';
-        const price = fmtPrice(m);
-        if (price) label += `  [${price}]`;
-        if (isRetired(m)) { opt.disabled = true; label += ' — unavailable (retired)'; }
-        else if (m.disabled) { opt.disabled = true; label += ' — unavailable (disabled)'; }
-        else if (!hasAuth(m)) { opt.disabled = true; label += ' — unavailable (no API key)'; }
-        else if (m.lifecycle === 'deprecated') label += m.retiresAt ? ` (deprecated, retiring ${m.retiresAt})` : ' (deprecated)';
-        opt.textContent = label;
-        if (modelMap[family] === m.name) opt.selected = true;
-        sel.appendChild(opt);
-      });
+      if (sel) fillModelMapSelect(sel, models, modelMap[family]);
     });
 
     // Per-tab --model. Empty means "unset", which makes the server re-apply the
@@ -1540,6 +1550,7 @@
       }
       case 'cli:settingsData': {
         populateSettings(msg.tabId, msg.settings || {}, msg.models || [], msg.hasSubscription, msg.interactionsDir);
+        window.sdkPanel?.onSettingsData?.(msg);
         break;
       }
       case 'cli:savedSessions': {
@@ -1592,6 +1603,11 @@
           break;
         }
         if (msg.error) { window.dashboard.showAlert?.(msg.error); break; }
+        if (msg.action === 'modelMap') {
+          const routed = Object.entries(msg.modelMap || {}).filter(([, v]) => v).map(([f, v]) => `${f} → ${v}`);
+          const n = msg.sessions || 0;
+          window.dashboard.showToast?.({ sender: 'Agent SDK', title: 'Model map applied', message: `${routed.length ? routed.join(', ') : 'Nothing mapped'} · ${n} running session${n === 1 ? '' : 's'}`, level: 'success' });
+        }
         if (msg.action === 'deleteRun' && msg.keptBranches?.length) {
           window.dashboard.showToast?.({ sender: 'CLI', title: 'Run deleted', message: `Unmerged branches kept: ${msg.keptBranches.join(', ')}`, level: 'info' });
         }
@@ -2002,5 +2018,5 @@
   _mobileBar?.onTabChange(null);
 
   // Expose module
-  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, modelPickerOptions };
+  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, modelPickerOptions, fillModelMapSelect };
 })();

@@ -87,10 +87,22 @@
 }
 .sdk-tb-btn:hover:not(:disabled) { background: var(--bg-hover); }
 .sdk-tb-btn:disabled { opacity: .45; cursor: default; }
-.sdk-tb-btn.suggested { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 60%, var(--border)); }
-/* "orchestrator compacted N× · start fresh?" beside the run's meta. */
-.sdk-fresh-chip { border-radius: 999px; font-size: 10px; padding: 0 8px; line-height: 17px; }
-.sdk-tb-more { padding: 2px 7px; line-height: 1; letter-spacing: .05em; }
+/* Right side: Models, an add-on's actions, Pause & save. One unit: a narrow
+   toolbar wraps it whole onto its own line, right-aligned. */
+.sdk-tb-right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; min-width: 0; }
+.sdk-tb-actions { display: flex; align-items: center; gap: 6px; }
+.sdk-tb-actions:empty { display: none; }
+.sdk-tb-models,
+.sdk-tb-action { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.sdk-tb-models svg { flex: none; color: var(--purple); }
+/* A model map in force, or an add-on toggle that is on: the Live tab's blue. */
+.sdk-tb-btn.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+}
+.sdk-tb-btn.on:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 28%, var(--bg)); }
+.sdk-tb-models.on svg { color: var(--accent); }
 /* An add-on's badge (dashboard.setTabBadge), on the toolbar and the tab strip. */
 .sdk-toolbar-ext:empty { display: none; }
 .tab-ext-badge {
@@ -306,6 +318,28 @@
 }
 .sdk-stop:hover { background: color-mix(in srgb, var(--red) 15%, var(--bg)); border-color: var(--red); }
 .sdk-area-cost { font-family: var(--vc-mono, ui-monospace, monospace); font-size: 11px; color: var(--green); flex-shrink: 0; }
+/* ↻ Fresh on the orchestrator's caption; the Live tab's blue once the
+   orchestrator has compacted enough that a fresh one is suggested. */
+.sdk-fresh {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 7px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.sdk-fresh:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.sdk-fresh.suggested {
+  color: var(--accent);
+  font-weight: 600;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+}
+.sdk-fresh.suggested:hover { background: color-mix(in srgb, var(--accent) 28%, var(--bg)); }
+.sdk-fresh[aria-disabled="true"] { opacity: .45; cursor: default; color: var(--text-dim); border-color: var(--border); background: var(--bg); font-weight: normal; }
 .sdk-cap-right { margin-left: auto; flex: none; display: flex; align-items: center; gap: 6px; }
 /* Context: a thin bar and the % of the window; the tooltip has the numbers. */
 .sdk-ctx {
@@ -752,6 +786,46 @@
 .sdk-model-opt-label { flex: 1; }
 .sdk-model-opt-price { color: var(--text-dim); font-size: 10px; font-family: var(--vc-mono, ui-monospace, monospace); }
 
+/* --- the toolbar's Models dialog --- */
+.sdk-models { max-width: 480px; max-height: calc(100vh - 32px); display: flex; flex-direction: column; text-align: left; }
+.sdk-models .modal-header { color: var(--text); }
+.sdk-models .modal-close { color: var(--text-dim); padding: 0 4px; line-height: 1; }
+.sdk-models-body { overflow-y: auto; display: flex; flex-direction: column; gap: 18px; font-size: 12px; }
+.sdk-models-sec h4 { margin: 0 0 8px; font-size: 13px; }
+.sdk-models-sec .sdk-model-warn { padding: 0 0 8px; margin-bottom: 8px; }
+.sdk-models-hint { color: var(--text-dim); line-height: 1.45; margin-bottom: 10px; }
+.sdk-models-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; max-height: 150px; overflow-y: auto; }
+.sdk-models-sess { display: flex; align-items: baseline; gap: 8px; padding: 2px 6px; border-radius: 5px; }
+.sdk-models-sess:nth-child(odd) { background: color-mix(in srgb, var(--bg-hover) 55%, transparent); }
+.sdk-models-sess-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sdk-models-sess-model { font-family: var(--vc-mono, ui-monospace, monospace); font-size: 11px; color: var(--purple); white-space: nowrap; }
+.sdk-models-empty { color: var(--text-dim); padding: 2px 6px; }
+.sdk-models-row { display: flex; gap: 8px; align-items: center; }
+.sdk-models-row-end { justify-content: flex-end; margin-top: 10px; }
+.sdk-models-select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+.sdk-models-select:focus { outline: none; border-color: var(--accent); }
+.sdk-models-map { display: flex; flex-direction: column; gap: 6px; }
+.sdk-models-map-row { display: flex; align-items: center; gap: 8px; }
+.sdk-models-fam { width: 56px; flex: none; font-weight: 600; }
+.sdk-models-go {
+  flex: none;
+  padding: 4px 12px;
+  color: var(--accent);
+  font-weight: 600;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg));
+}
+.sdk-models-go:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 28%, var(--bg)); }
+
 /* --- send: pick the session, then confirm --- */
 .sdk-pick { width: min(960px, 92vw); max-width: none; text-align: left; outline: none; }
 .sdk-pick-title { font-size: 15px; font-weight: 600; }
@@ -893,4 +967,9 @@
   .sdk-toolbar-meta { display: none; }
   .vc-composer { padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
   .vc-composer textarea { font-size: 16px; } /* no iOS zoom on focus */
+}
+/* A phone held upright: an add-on's button keeps its symbol, the words are
+   in its tooltip and the tab's × menu. */
+@media (max-width: 380px) {
+  .sdk-tb-action:has(.sdk-tb-ico) .sdk-tb-lbl { display: none; }
 }
