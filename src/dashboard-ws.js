@@ -241,6 +241,7 @@ class DashboardBroadcaster {
         type: 'prefs:claudeAuth',
         pref: caps.getClaudeAuthPref(PROJECT_ROOT) || null,
         hasSubscription: caps.hasClaudeSubscription(),
+        hasApiKey: !!caps.getAnthropicApiKey(PROJECT_ROOT),
       }));
       ws.send(JSON.stringify({
         type: 'prefs:cliModel',

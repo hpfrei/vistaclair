@@ -112,6 +112,7 @@ function handleMessage(ws, msg, bc) {
         bc.broadcast({ type: 'provider:list', providers: caps.listProviders(PROJECT_ROOT) });
         // Resolved models include provider apiKey, so refresh models too
         bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
+        bc.broadcast({ type: 'prefs:claudeAuth', ...claudeAuthState() });
       } else {
         send({ type: 'chat:error', text: `Cannot save provider: ${msg.key}` });
       }
@@ -121,6 +122,7 @@ function handleMessage(ws, msg, bc) {
       const ok = caps.deleteProvider(PROJECT_ROOT, msg.key);
       if (ok) {
         bc.broadcast({ type: 'provider:list', providers: caps.listProviders(PROJECT_ROOT) });
+        bc.broadcast({ type: 'prefs:claudeAuth', ...claudeAuthState() });
       } else {
         send({ type: 'chat:error', text: `Cannot delete provider: ${msg.key} (in use or not found)` });
       }
@@ -177,6 +179,8 @@ function claudeAuthState() {
   return {
     pref: caps.getClaudeAuthPref(PROJECT_ROOT) || null,
     hasSubscription: caps.hasClaudeSubscription(),
+    // Whether a key is stored (never the key): the SDK toolbar's billing toggle.
+    hasApiKey: !!caps.getAnthropicApiKey(PROJECT_ROOT),
   };
 }
 

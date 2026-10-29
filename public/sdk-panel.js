@@ -38,6 +38,12 @@
 // The composer has no remembered target: every message is sent through one
 // dialog that shows the session map with the orchestrator selected; Tab moves
 // the selection, a fresh Enter sends.
+// The toolbar's billing toggle (Subscription | API credits) switches the
+// whole run, or a plain tab's session (cli:sessionAuth): each box's status
+// names its credential and a switch waiting for its turn's end; members on
+// different ones show both halves part-lit. A turn the subscription's usage
+// limit stopped leaves a card in its feed (platform `usage-limit`) whose
+// button switches to API credits and continues it; the toggle lights up too.
 // cli.js owns the tab; this file owns what is inside its wrap.
 (function () {
   const D = window.dashboard;
@@ -88,6 +94,11 @@
   // History holds the broadcast envelopes ({sessId, runId?, ts, ev}); take the ev.
   const unwrap = (rec) => (rec && typeof rec === 'object' && rec.ev && typeof rec.ev === 'object') ? rec.ev : rec;
   const ENDED = new Set(['exited', 'stopped', 'abandoned', 'closed']);
+  // Billing: settings.auth ids, the credential a status names, their words.
+  const AUTH_IDS = ['subscription', 'apikey'];
+  const authOf = (credential) => credential === 'api-key' ? 'apikey' : 'subscription';
+  const BILL_TEXT = { subscription: 'the Claude subscription', apikey: 'API credits' };
+  const BILL_SHORT = { subscription: 'Sub', apikey: 'API' };
   const STATE_TEXT = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing', closed: 'closed' };
   // `claude-sonnet-5-5` → `sonnet-5-5`; aliases and `[1m]` stay as they are.
   const fmtModel = (m) => String(m || '').replace(/^claude-/, '');
@@ -320,6 +331,7 @@
             <span class="sdk-area-name"></span>
             <button type="button" class="sdk-model" title="Change this session's model"></button>
             <span class="sdk-chip sdk-area-state"></span>
+            <span class="sdk-chip sdk-area-bill hidden"></span>
             <button type="button" class="sdk-stop hidden" title="Stop what this session is doing now. It stays open and waits for your next message.">■</button>
             <span class="sdk-chip sdk-area-report hidden"></span>
             <span class="sdk-area-cost"></span>
@@ -364,6 +376,7 @@
       this.nameEl = q('.sdk-area-name');
       this.modelBtn = q('.sdk-model');
       this.stateEl = q('.sdk-area-state');
+      this.billEl = q('.sdk-area-bill');
       this.stopBtn = q('.sdk-stop');
       this.reportEl = q('.sdk-area-report');
       this.costEl = q('.sdk-area-cost');
@@ -538,6 +551,8 @@
       this.finalEl.classList.toggle('hidden', !(r?.summary && (ended || !this.todo?.rows?.length)));
       if (r?.summary) this.finalEl.textContent = `${r.status || 'report'}: ${r.summary}`;
       this.costEl.textContent = fmtCost(this.cost);
+      this.costEl.title = this.credential ? `Billed to ${BILL_TEXT[authOf(this.credential)]}` : '';
+      this.renderBill();
       const m = this.shownModel();
       this.modelBtn.textContent = m ? `${fmtModel(m)}${this.mappedTo ? ` → ${fmtModel(this.mappedTo)}` : ''} ▾` : 'model ▾';
       this.modelBtn.title = [
@@ -552,6 +567,66 @@
       this.segBtns.live.textContent = t.length ? `Live ${done}/${t.length}` : 'Live';
       this.renderContext();
       this.renderNow();
+    }
+
+    // Quiet unless it matters: a switch waiting for this session's turn to
+    // end, or (members on different billing) which one this box is on.
+    renderBill() {
+      const pending = !this.ended() && this.authPending;
+      const mixed = !this.ended() && this.credential && this.panel.billing().on.size > 1;
+      this.billEl.classList.toggle('hidden', !(pending || mixed));
+      this.billEl.classList.toggle('pending', !!pending);
+      this.billEl.textContent = pending ? `→ ${BILL_SHORT[pending]} after this turn` : mixed ? BILL_SHORT[authOf(this.credential)] : '';
+      this.billEl.title = pending ? `Switching to ${BILL_TEXT[pending]} after this turn: nothing is cut off.`
+        : mixed ? `This session is billed to ${BILL_TEXT[authOf(this.credential)]}.` : '';
+    }
+
+    // A turn the subscription's usage limit stopped: what happened and, with
+    // an API key stored, one click that continues it on API credits (the
+    // whole run for a run's member: the limit is the account's).
+    limitNotice(p) {
+      const n = el('div', 'sdk-notice sdk-notice-warn sdk-limit');
+      const when = p.resetsAt ? ` · resets ${new Date(p.resetsAt * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : '';
+      n.appendChild(el('div', 'sdk-limit-head', `Claude subscription usage limit reached${when}`));
+      if (p.text) n.appendChild(el('div', 'sdk-limit-text', p.text));
+      if (p.apiKey) {
+        const run = !!this.panel.runId || this.role === 'worker';
+        const b = el('button', 'sdk-tb-btn sdk-limit-go', 'Continue on API credits');
+        b.type = 'button';
+        b.title = run ? 'Every session of the run switches to API credits (the limit is the account\'s, so the others would hit it too); the ones it stopped continue.'
+          : 'This session switches to API credits and continues the stopped turn.';
+        b.addEventListener('click', () => {
+          if (b.disabled) return;
+          this._limitSent = true;
+          sendWs({ type: 'cli:sessionAuth', sessId: this.sessId, auth: 'apikey', continue: true });
+          this.renderLimit();
+        });
+        n.appendChild(b);
+        if (run) n.appendChild(el('div', 'sdk-limit-hint', 'Switches the whole run'));
+      } else {
+        const line = el('div', 'sdk-limit-hint', 'No Anthropic API key is stored, so it cannot go on with API credits: add one on the ');
+        const link = el('button', 'sdk-limit-link', 'Models page');
+        link.type = 'button';
+        link.addEventListener('click', () => { if (typeof switchView === 'function') switchView('models'); });
+        line.append(link, document.createTextNode(', or wait for the reset.'));
+        n.appendChild(line);
+      }
+      this.add(n);
+      this.renderLimit();
+      return n;
+    }
+
+    // The cards' buttons follow the session: open while it is stopped by the
+    // limit, done once it went on.
+    renderLimit() {
+      const open = !!this.limited && !this.ended();
+      if (!open) this._limitSent = false;
+      for (const b of this.feed.querySelectorAll('.sdk-limit-go')) {
+        b.disabled = !open || !!this._limitSent;
+        b.textContent = open ? (this._limitSent ? 'Switching…' : 'Continue on API credits')
+          : this.credential === 'api-key' ? '✓ Continued on API credits' : 'Continue on API credits';
+        b.classList.toggle('hidden', !open && this.credential !== 'api-key');
+      }
     }
 
     // The main agent's context: % of the window, exact or the model
@@ -911,6 +986,7 @@
         return this.notice(p.text, p.level === 'warning' ? 'warn' : p.level);
       }
       if (p.kind === 'files') { if (live) this.requestTodo(); return; }
+      if (p.kind === 'usage-limit') return this.limitNotice(p);
       if (p.kind === 'status') this.applyStatus(p);
     }
 
@@ -930,6 +1006,18 @@
       if (p.actualModel !== undefined) this.actualModel = p.actualModel || null;
       if (p.mappedTo !== undefined) this.mappedTo = p.mappedTo || null;
       if (p.context && typeof p.context === 'object') this.context = p.context;
+      // Billing (absent from older transcripts' statuses).
+      if (p.credential !== undefined) {
+        const was = [this.credential, this.authPending, this.limited].join();
+        this.credential = p.credential || null;
+        this.authPending = p.authPending || null;
+        this.limited = !!p.limited;
+        if ([this.credential, this.authPending, this.limited].join() !== was) {
+          this.renderLimit();
+          this.panel.renderToolbar();
+          for (const a of this.panel.allAreas()) if (a !== this) a.renderBill();
+        }
+      }
       this.setState(p.state);
       this.renderHeader();
     }
@@ -1658,6 +1746,9 @@
             <span class="sdk-toolbar-cost"></span>
             <span class="sdk-spacer"></span>
             <span class="sdk-tb-right">
+              <span class="sdk-bill" role="group" aria-label="Billing">
+                <button type="button" data-auth="subscription"><span class="sdk-bill-long">Subscription</span><span class="sdk-bill-short">Sub</span></button><button type="button" data-auth="apikey"><span class="sdk-bill-long">API credits</span><span class="sdk-bill-short">API</span></button>
+              </span>
               <button type="button" class="sdk-tb-btn sdk-tb-models" data-act="models">${MODELS_ICON}<span class="sdk-tb-lbl">Models</span></button>
               <span class="sdk-tb-actions"></span>
               <button type="button" class="sdk-tb-btn" data-act="pause">Pause &amp; save</button>
@@ -1692,11 +1783,14 @@
       this.shelfList = q('.sdk-shelf-list');
       this.pauseBtn = q('[data-act="pause"]');
       this.modelsBtn = q('[data-act="models"]');
+      this.billEl = q('.sdk-bill');
+      this.billBtns = Object.fromEntries([...this.billEl.querySelectorAll('button')].map(b => [b.dataset.auth, b]));
       this.actionsEl = q('.sdk-tb-actions');
       this.composer = q('vc-composer');
 
       this.pauseBtn.addEventListener('click', () => this.pause());
       this.modelsBtn.addEventListener('click', () => openModels(this));
+      for (const [auth, b] of Object.entries(this.billBtns)) b.addEventListener('click', () => this.setBilling(auth));
       this.shelfTab.addEventListener('click', () => this.foldShelf(!this.shelfEl.classList.contains('folded')));
       this.composer.addEventListener('send', (e) => this.openPicker(e.detail));
       // Esc stops the top box (the orchestrator, or a plain tab's session);
@@ -2134,6 +2228,71 @@
       }
     }
 
+    // What the running sessions are billed to: { on: Set of 'subscription' |
+    // 'apikey', pending: areas switching after their turn, limited: areas
+    // the subscription's usage limit stopped }. None running: the tab's
+    // settings say.
+    billing() {
+      const live = this.allAreas().filter(a => !a.ended() && a.credential);
+      const on = new Set(live.map(a => authOf(a.credential)));
+      if (!on.size && AUTH_IDS.includes(this.info.settings?.auth)) on.add(this.info.settings.auth);
+      return {
+        on,
+        live,
+        pending: live.filter(a => a.authPending),
+        limited: live.filter(a => a.limited && a.credential === 'subscription'),
+      };
+    }
+
+    // The toggle: the billing in force lit, both halves part-lit when the
+    // members differ, a pending switch outlined, an option without its
+    // credential greyed with the reason (aria-disabled keeps the tooltip).
+    renderBilling(isWorkerTab) {
+      this.billEl.classList.toggle('hidden', isWorkerTab);
+      if (isWorkerTab) return;
+      const { on, live, pending, limited } = this.billing();
+      const ca = state.claudeAuth || {};
+      const missing = {
+        apikey: ca.hasApiKey === false ? 'No Anthropic API key is stored: add one on the Models page.' : null,
+        subscription: ca.hasSubscription === false ? 'No Claude subscription is signed in: Sign in to Claude, in the dashboard header.' : null,
+      };
+      const scope = this.runId ? 'every session of the run, and the workers it launches later' : 'this session';
+      const names = (list) => list.map(a => a.label).join(', ');
+      this.billEl.classList.toggle('mixed', on.size > 1);
+      this.billEl.classList.toggle('alert', limited.length > 0);
+      for (const auth of AUTH_IDS) {
+        const b = this.billBtns[auth];
+        const only = on.size === 1 && on.has(auth);
+        const part = on.size > 1 && on.has(auth);
+        const going = pending.filter(a => a.authPending === auth);
+        b.classList.toggle('on', only);
+        b.classList.toggle('part', part);
+        b.classList.toggle('pending', going.length > 0);
+        const off = !!missing[auth] && !only;
+        b.setAttribute('aria-disabled', String(off));
+        b.setAttribute('aria-pressed', String(only));
+        const lines = [];
+        if (only) lines.push(`Billed to ${BILL_TEXT[auth]}: ${scope}.`);
+        else if (part) lines.push(`On ${BILL_TEXT[auth]}: ${names(live.filter(a => authOf(a.credential) === auth))}.`);
+        if (going.length) lines.push(`Switching to ${BILL_TEXT[auth]} after this turn: ${names(going)}.`);
+        if (off) lines.push(missing[auth]);
+        else if (!only) {
+          lines.push(`Click to bill ${scope} to ${BILL_TEXT[auth]}. An idle session switches now, a busy one after its turn; the conversation and the cost so far carry on.`);
+          if (auth === 'apikey' && limited.length) lines.push(`The subscription's usage limit stopped ${names(limited)}: they continue on API credits.`);
+        }
+        b.title = lines.join('\n');
+      }
+    }
+
+    setBilling(auth) {
+      const b = this.billBtns[auth];
+      if (!b || b.getAttribute('aria-disabled') === 'true') return;
+      const { on, pending, limited } = this.billing();
+      if (on.size === 1 && on.has(auth) && !pending.some(a => a.authPending !== auth)) return;
+      // Lit by the usage limit: the click is its "Continue on API credits".
+      sendWs({ type: 'cli:sessionAuth', tabId: this.tabId, sessId: this.info.sessId, auth, ...(auth === 'apikey' && limited.length ? { continue: true } : {}) });
+    }
+
     renderToolbar() {
       const info = this.info;
       this.titleEl.textContent = info.title || (info.cwd || '').split('/').filter(Boolean).pop() || 'Agent SDK';
@@ -2155,6 +2314,7 @@
         ? 'Saving… Click to stop immediately (the resume note may be missing).'
         : this.runId ? 'Every session saves its progress and closes. Resume later from the + menu. Nothing is lost.'
           : 'The session saves its progress and closes. Resume later from the + menu. Nothing is lost.';
+      this.renderBilling(isWorkerTab);
       // Models: the whole run from its orchestrator's tab, or the tab's own
       // session; a model map in force shows on the button.
       this.modelsBtn.classList.toggle('hidden', isWorkerTab);
@@ -2321,6 +2481,22 @@
     return null;
   }
 
+  // A usage limit is noticed wherever the owner is looking: a toast, once a
+  // minute per tab (every member of a run hits the same limit).
+  const LIMIT_TOAST_MS = 60000;
+  function limitToast(a, p) {
+    const panel = a.panel;
+    if (Date.now() - (panel._limitToastAt || 0) < LIMIT_TOAST_MS) return;
+    panel._limitToastAt = Date.now();
+    D.showToast?.({
+      sender: 'Agent SDK', level: 'warning', title: 'Claude subscription usage limit reached',
+      message: `${panel.info.title || 'An SDK tab'} · ${a.label} stopped. ${p.apiKey ? 'Continue on API credits from its feed, or with the toolbar\'s billing toggle.' : 'No API key is stored: add one on the Models page to continue on API credits.'}`,
+    });
+  }
+
+  // prefs:claudeAuth: which credentials exist, for every toggle.
+  function onCredentials() { for (const p of panels.values()) p.renderToolbar(); }
+
   function handleMessage(msg) {
     switch (msg.type) {
       case 'sdk:event': {
@@ -2332,6 +2508,7 @@
         // queues this event and drops it if history already holds it; one
         // hidden only moves its caption.
         a?.receive(msg.ev, msg.ts, msg.off);
+        if (a && msg.ev?.platform?.kind === 'usage-limit') limitToast(a, msg.ev.platform);
         break;
       }
       case 'sdk:history':
@@ -2355,7 +2532,7 @@
   });
 
   window.sdkPanel = {
-    mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, onSettingsData, _panels: panels, _areas: areas,
+    mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, onSettingsData, onCredentials, _panels: panels, _areas: areas,
     _feedWindow: { feedExcess, cursorAbove, capOldest, FEED_MAX, FEED_HARD_MAX, PAGE },
   };
 })();

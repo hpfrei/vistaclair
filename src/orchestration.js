@@ -1500,6 +1500,43 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return { runId: run.runId, modelMap, sessions: live.length };
   }
 
+  // The billing for the whole run (the SDK toolbar's toggle, a usage-limit
+  // notice's "Continue on API credits"): every live member switches
+  // (SdkSession.setAuth: at once when idle, after its turn when busy, a
+  // pausing one only in its settings), every stopped member's saved entry
+  // follows (a resume reads it), and run.auth, so a worker launched or
+  // restarted later and a fresh orchestrator inherit it. continueTurn: a
+  // member the usage limit stopped goes on after its switch.
+  function setRunAuth(runId, auth, { continueTurn = false } = {}) {
+    if (auth !== 'apikey' && auth !== 'subscription') throw new Error('auth must be "apikey" or "subscription"');
+    const run = getRun(runId);
+    if (!run) throw new Error('run not found');
+    if (run.engine !== 'sdk') throw new Error('only an Agent SDK run has a billing switch');
+    const creds = claudeCredentials() || {};
+    if (auth === 'apikey' && !creds.apiKey) throw new Error('No Anthropic API key is stored: add one on the Models page.');
+    if (auth === 'subscription' && !creds.subscription) throw new Error('No Claude subscription is signed in: Sign in to Claude, in the dashboard header.');
+    run.auth = auth;
+    saveRun(run);
+    const live = findByStamp(st => st.runId === run.runId);
+    const applied = {};
+    for (const { session } of live) {
+      let how = 'saved';
+      if (typeof session.setAuth === 'function') {
+        try { how = session.setAuth(auth, { continueTurn }).applied; } catch (e) { how = 'failed'; console.error(`[orchestration] billing switch of ${session.getSettings().name}: ${e.message}`); }
+      } else {
+        session.updateSettings({ auth });
+        mgr.noteSettingsChanged?.(session);
+      }
+      applied[how] = (applied[how] || 0) + 1;
+    }
+    const liveIds = new Set(live.map(m => m.session.sessId).filter(Boolean));
+    for (const e of savedEntries()) {
+      if (e.settings?.orchestration?.runId !== run.runId || liveIds.has(e.id)) continue;
+      mgr.patchSavedSettings?.(e.id, (st) => ({ ...st, auth }));
+    }
+    return { runId: run.runId, auth, sessions: live.length, applied };
+  }
+
   // A member resumed with its own transcript carries its recorded cost on.
   function seedResumedCost(tabId, usd) {
     const s = tabId ? mgr.get(tabId) : null;
@@ -2359,7 +2396,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
-    memberModelChanged, setRunModelMap,
+    memberModelChanged, setRunModelMap, setRunAuth,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
 }

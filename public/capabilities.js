@@ -900,8 +900,10 @@ Available templates in this skill directory:
         state.claudeAuth = {
           pref: msg.pref || null,
           hasSubscription: !!msg.hasSubscription,
+          hasApiKey: typeof msg.hasApiKey === 'boolean' ? msg.hasApiKey : null,
         };
         renderModelsPanel();
+        window.sdkPanel?.onCredentials?.();
         break;
       case 'model:refresh:scanned':
         showScanResults(msg.results);

@@ -280,6 +280,34 @@ function handleMessage(ws, msg, bc) {
       });
       break;
     }
+    case 'cli:sessionAuth': {
+      // The SDK toolbar's billing toggle (by tabId) and a usage-limit
+      // notice's "Continue on API credits" (by sessId, continue: true): a
+      // run member switches the whole run (orchestration.setRunAuth: every
+      // member, and the workers launched later); a plain tab only itself.
+      // An ended session is no longer live: its saved entry takes it, so
+      // its resume runs on the new billing.
+      const sessId = String(msg.sessId || '');
+      const session = (msg.tabId && mgr.get(msg.tabId)) || mgr.getBySessId(sessId);
+      const saved = session ? null : mgr.findSaved(sessId);
+      const st = (session ? session.getSettings() : saved?.settings)?.orchestration;
+      const auth = String(msg.auth || '');
+      const continueTurn = msg.continue === true;
+      actionResult(send, 'auth', msg, () => {
+        if (st?.runId) return bc.orchestration.setRunAuth(st.runId, auth, { continueTurn });
+        if (session?.kind === 'sdk') {
+          const { applied } = session.setAuth(auth, { continueTurn });
+          return { auth, sessions: 1, applied: { [applied]: 1 } };
+        }
+        if (saved?.settings?.engine !== 'sdk') throw new Error('that Agent SDK session is not open');
+        if (auth !== 'apikey' && auth !== 'subscription') throw new Error('auth must be "apikey" or "subscription"');
+        const creds = caps.claudeCredentials(DATA_HOME);
+        if (!(auth === 'apikey' ? creds.apiKey : creds.subscription)) throw new Error(auth === 'apikey' ? 'No Anthropic API key is stored: add one on the Models page.' : 'No Claude subscription is signed in: Sign in to Claude, in the dashboard header.');
+        mgr.patchSavedSettings(sessId, (s) => ({ ...s, auth }));
+        return { auth, sessions: 0, applied: { saved: 1 } };
+      });
+      break;
+    }
     case 'cli:refreshOrchestrator':
       actionResult(send, 'refresh', msg, () => bc.orchestration.refreshOrchestrator(String(msg.runId || '')));
       break;
