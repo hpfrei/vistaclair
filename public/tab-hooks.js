@@ -1,10 +1,15 @@
 // Tab actions and tab badges an add-on's client module adds to session tabs,
 // through window.dashboard (core.js wires one registry there):
 //
-//   registerTabAction({ id, label, title?, when?(info) → bool, onClick(info) })
+//   registerTabAction({ id, label, title?, when?(info) → bool, active?(info)
+//     → bool, activeLabel?, activeTitle?, onClick(info) })
 //     → its unregister function; unregisterTabAction(id). A menu item in the
-//     terminal tab's × menu and the Agent SDK toolbar's ⋯ menu of every tab
-//     whose info `when` accepts (every tab without `when`).
+//     terminal tab's × menu and a button in the Agent SDK toolbar of every
+//     tab whose info `when` accepts (every tab without `when`). `active` makes
+//     it a toggle: while it holds, the toolbar button is drawn pressed, and
+//     both say activeLabel / activeTitle (label / title when not given);
+//     onClick decides what a click does in either state. A change of state is
+//     drawn at the next re-render (any registry change, e.g. setTabBadge).
 //   setTabBadge(name, { text, title?, onClick?(name) } | null) — a chip on the
 //     tab and the SDK toolbar of the session with that settings.name (a name
 //     survives a resume, a refresh and a reboot; a tab id does not). null
@@ -44,8 +49,13 @@
       if (typeof a.label !== 'string' || !a.label) throw new Error('registerTabAction: label must be a non-empty string');
       if (typeof a.onClick !== 'function') throw new Error('registerTabAction: onClick must be a function');
       if (a.when != null && typeof a.when !== 'function') throw new Error('registerTabAction: when must be a function');
+      if (a.active != null && typeof a.active !== 'function') throw new Error('registerTabAction: active must be a function');
+      const str = (v) => typeof v === 'string' && v ? v : null;
       actions.delete(a.id);   // a re-registration moves to the end
-      actions.set(a.id, { id: a.id, label: a.label, title: typeof a.title === 'string' ? a.title : null, when: a.when || null, onClick: a.onClick });
+      actions.set(a.id, {
+        id: a.id, label: a.label, title: str(a.title), activeLabel: str(a.activeLabel), activeTitle: str(a.activeTitle),
+        when: a.when || null, isActive: a.active || null, onClick: a.onClick,
+      });
       changed();
       return () => { if (actions.get(a.id)?.onClick === a.onClick) unregisterTabAction(a.id); };
     }
@@ -54,14 +64,24 @@
       if (actions.delete(id)) changed();
     }
 
-    // The actions for a tab, in registration order. A `when` that throws
-    // hides its action.
+    // The actions for a tab, in registration order, as that tab shows them:
+    // { id, label, title, active, onClick }. A `when` that throws hides its
+    // action; an `active` that throws reads as not active.
     function actionsFor(info) {
       const out = [];
       for (const a of actions.values()) {
         let show = true;
         if (a.when) { try { show = !!a.when(info); } catch { show = false; } }
-        if (show) out.push(a);
+        if (!show) continue;
+        let on = false;
+        if (a.isActive) { try { on = !!a.isActive(info); } catch { on = false; } }
+        out.push({
+          id: a.id,
+          label: (on && a.activeLabel) || a.label,
+          title: (on && a.activeTitle) || a.title,
+          active: on,
+          onClick: a.onClick,
+        });
       }
       return out;
     }

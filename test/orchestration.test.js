@@ -88,6 +88,9 @@ function fakeMgr() {
     listSaved: () => history,
     findSaved: (id) => history.find(h => h.id === id) || null,
     forgetSaved(id) { history = history.filter(h => h.id !== id); },
+    patchSavedSettings(id, fn) { const h = history.find(x => x.id === id); if (h) h.settings = fn(h.settings || {}); return !!h; },
+    settingsNoted: [],
+    noteSettingsChanged(s) { mgr.settingsNoted.push(s.tabId); },
     deleteSavedSession(id) { history = history.filter(h => h.id !== id); },
     lost: new Set(),        // sessIds whose transcript was deleted
     transcriptExists: (cwd, id) => !mgr.lost.has(id),
@@ -398,6 +401,40 @@ test('the New CLI dialog: its payload, the orchestrator model and a run-wide mod
   assert.strictEqual(sc.model, undefined);
   assert.strictEqual(sc.modelMap, undefined);
   assert.strictEqual(orch.getRun(sc.orchestration.runId).orchestratorModel, null);
+});
+
+test('a run-wide model map: every live member, a closed member\'s saved entry, and the workers launched later', async (t) => {
+  const catalog = [
+    { name: 'gpt-x', label: 'GPT X', providerKey: 'openai', usable: true },
+    { name: 'old', label: 'Old', providerKey: 'openai', usable: true, lifecycle: 'retired' },
+  ];
+  const { mgr, orch } = setup({ models: () => catalog });
+  const r = await orch.openCli({ cwd: tmpDir(), mode: 'orchestrator', engine: 'sdk', isolation: 'none' });
+  const orchSession = mgr.sessions.get(r.tabId);
+  const { runId } = orchSession.settings.orchestration;
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const w2 = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'y' });
+  const w2Id = mgr.sessions.get(w2.tabId).sessId;
+  mgr.closeQuiet(w2.tabId, 'closed');
+
+  const out = orch.setRunModelMap(runId, { opus: 'gpt-x', sonnet: 'old', haiku: '', bogus: 'gpt-x' });
+  const want = { fable: null, opus: 'gpt-x', sonnet: null, haiku: null };
+  assert.deepStrictEqual(out, { runId, modelMap: want, sessions: 2 }, 'retired targets and unknown families are dropped');
+  assert.deepStrictEqual(orchSession.settings.modelMap, want);
+  assert.deepStrictEqual(mgr.sessions.get(w1.tabId).settings.modelMap, want);
+  assert.deepStrictEqual(mgr.settingsNoted.sort(), [r.tabId, w1.tabId].sort(), 'the manifest, saved entry and tabs follow');
+  assert.deepStrictEqual(mgr.findSaved(w2Id).settings.modelMap, want, 'a closed member resumes with it');
+  assert.deepStrictEqual(orch.getRun(runId).base.stamps.modelMap, want);
+
+  const w3 = orch.launchWorker(orchSession.instanceId, { title: 'c', task: 'z' });
+  assert.deepStrictEqual(mgr.sessions.get(w3.tabId).settings.modelMap, want, 'a worker launched later inherits it');
+
+  // An empty map routes nothing, run-wide.
+  const cleared = orch.setRunModelMap(runId, {});
+  assert.deepStrictEqual(cleared.modelMap, { fable: null, opus: null, sonnet: null, haiku: null });
+  assert.deepStrictEqual(mgr.sessions.get(w3.tabId).settings.modelMap, cleared.modelMap);
+  assert.throws(() => orch.setRunModelMap(runId, null), /modelMap must be an object/);
+  assert.throws(() => orch.setRunModelMap('nope', {}), /run not found/);
 });
 
 test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds its own', async (t) => {

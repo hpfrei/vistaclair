@@ -62,6 +62,27 @@ test('registerTabAction: when() picks the tabs, in registration order; unregiste
   assert.deepStrictEqual(h.actionsFor(ORCH), []);
 });
 
+test('a toggle action: active() picks the label, the title and the pressed state per tab', () => {
+  const h = createTabHooks();
+  const bound = new Set(['abc123']);
+  h.registerTabAction({
+    id: 'tg', label: 'Follow', title: 'Follow it', activeLabel: 'Following', activeTitle: 'Click to stop',
+    when: (i) => !!i.runId, active: (i) => bound.has(i.runId), onClick() {},
+  });
+  h.registerTabAction({ id: 'half', label: 'Half', title: 'hint', active: () => true, onClick() {} });
+  h.registerTabAction({ id: 'broken', label: 'Broken', active() { throw new Error('x'); }, onClick() {} });
+  const [tg, half, broken] = h.actionsFor(ORCH);
+  assert.deepStrictEqual([tg.label, tg.title, tg.active], ['Following', 'Click to stop', true]);
+  assert.deepStrictEqual([half.label, half.title, half.active], ['Half', 'hint', true], 'no activeLabel: the label stays');
+  assert.strictEqual(broken.active, false, 'an active() that throws is not active');
+  bound.clear();
+  const [off] = h.actionsFor(ORCH);
+  assert.deepStrictEqual([off.label, off.title, off.active], ['Follow', 'Follow it', false]);
+  assert.strictEqual(h.actionsFor(PLAIN).find(a => a.id === 'half').active, true);
+  assert.strictEqual(h.actionsFor(PLAIN)[0].id, 'half', 'when() still picks the tabs');
+  assert.throws(() => h.registerTabAction({ id: 'x', label: 'x', onClick() {}, active: true }), /active/);
+});
+
 test('registerTabAction refuses a malformed action; runAction never throws', () => {
   const h = createTabHooks();
   assert.throws(() => h.registerTabAction({ label: 'x', onClick() {} }), /id/);
@@ -109,6 +130,8 @@ test('the dashboard wires the registry: window.dashboard, the tab strip, the × 
   assert.match(cli, /_tabHooks\.onChange\(\(\) => renderTabStrip\(\)\)/, 're-rendered on a change');
   const sdk = read('sdk-panel.js');
   assert.match(sdk, /_tabBadgeEl\(info\.settings\?\.name/, 'a badge on the toolbar');
-  assert.match(sdk, /moreBtn\.classList\.toggle\('hidden', !isRun && !this\.tabActions\(\)\.length\)/, 'the ⋯ menu shows for actions alone');
+  assert.match(sdk, /this\.actionsEl\.replaceChildren\(\.\.\.this\.tabActions\(tabInfo\)\.map\(/, 'a toolbar button per action');
+  assert.match(sdk, /action\.active \? ' on' : ''/, 'a toggle that is on shows pressed');
+  assert.ok(!/openMore|data-act="more"/.test(sdk), 'no ⋯ menu');
   assert.match(sdk, /_tabHooks\.onChange\(/);
 });

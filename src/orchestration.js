@@ -1474,6 +1474,32 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return true;
   }
 
+  // A model map for the whole run (the SDK toolbar's Models dialog): every
+  // live member's settings (the proxy reads them per request, so the next
+  // request is rewritten), every member's saved entry (a resume reads it),
+  // and the run's base stamps, so a worker launched or restarted later and a
+  // fresh orchestrator inherit it. Targets not usable now are dropped; an
+  // empty map routes nothing.
+  function setRunModelMap(runId, value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('modelMap must be an object');
+    const run = getRun(runId);
+    if (!run) throw new Error('run not found');
+    const modelMap = parseModelMap(value, remapTargets()) || Object.fromEntries(MODEL_FAMILIES.map(f => [f, null]));
+    run.base.stamps = { ...run.base.stamps, modelMap };
+    saveRun(run);
+    const live = findByStamp(st => st.runId === run.runId);
+    for (const { session } of live) {
+      session.updateSettings({ modelMap });
+      mgr.noteSettingsChanged?.(session);
+    }
+    const liveIds = new Set(live.map(m => m.session.sessId).filter(Boolean));
+    for (const e of savedEntries()) {
+      if (e.settings?.orchestration?.runId !== run.runId || liveIds.has(e.id)) continue;
+      mgr.patchSavedSettings?.(e.id, (st) => ({ ...st, modelMap }));
+    }
+    return { runId: run.runId, modelMap, sessions: live.length };
+  }
+
   // A member resumed with its own transcript carries its recorded cost on.
   function seedResumedCost(tabId, usd) {
     const s = tabId ? mgr.get(tabId) : null;
@@ -2333,7 +2359,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
-    memberModelChanged,
+    memberModelChanged, setRunModelMap,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
 }

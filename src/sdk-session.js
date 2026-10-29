@@ -1112,6 +1112,9 @@ class SdkSession {
 
   updateSettings(newSettings) {
     this.settings = { ...this.settings, ...newSettings };
+    // A new model map rewrites the next request already (the proxy reads the
+    // settings per request); the caption's "→ target" follows now.
+    if (newSettings && 'modelMap' in newSettings && this.running) this._emitStatus();
   }
 
   getSettings() {

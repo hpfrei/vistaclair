@@ -263,6 +263,23 @@ function handleMessage(ws, msg, bc) {
     case 'cli:interrupt':
       actionResult(send, 'interrupt', msg, () => bc.sessionControl.interrupt(msg.tabId));
       break;
+    case 'cli:sessionModelMap': {
+      // The SDK toolbar's Models dialog: a run member's tab routes the whole
+      // run (orchestration.setRunModelMap: every member, and the workers
+      // launched later); a plain tab only itself.
+      const session = msg.tabId ? mgr.get(msg.tabId) : null;
+      const st = session?.getSettings().orchestration;
+      actionResult(send, 'modelMap', msg, () => {
+        if (!session) throw new Error('that tab is not open');
+        if (st?.runId) return bc.orchestration.setRunModelMap(st.runId, msg.modelMap);
+        const given = msg.modelMap && typeof msg.modelMap === 'object' ? msg.modelMap : {};
+        const modelMap = Object.fromEntries(['fable', 'opus', 'sonnet', 'haiku'].map(f => [f, typeof given[f] === 'string' && given[f] ? given[f] : null]));
+        mgr.updateSettings(msg.tabId, { modelMap });
+        mgr.noteSettingsChanged(session);
+        return { modelMap, sessions: 1 };
+      });
+      break;
+    }
     case 'cli:refreshOrchestrator':
       actionResult(send, 'refresh', msg, () => bc.orchestration.refreshOrchestrator(String(msg.runId || '')));
       break;
