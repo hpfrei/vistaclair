@@ -4,7 +4,7 @@
   box-sizing: border-box;
 }
 
-/* Variables are defined in theme-dark.css / theme-hpflabs.css */
+/* Variables are defined in theme-bright.css */
 
 /* ============================================================
    MONO DATA SURFACES
@@ -3102,23 +3102,6 @@ footer {
   border-color: var(--text-dim);
 }
 .ask-cancel-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
-/* Theme toggle */
-.theme-toggle {
-  background: none;
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  font-size: 13px;
-  cursor: pointer;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-family: inherit;
-  line-height: 1;
-}
-.theme-toggle:hover {
-  color: var(--text);
-  background: var(--bg-hover);
-}
 
 /* Scrollbar styling */
 ::-webkit-scrollbar { width: 8px; height: 8px; }

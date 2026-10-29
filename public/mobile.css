@@ -124,10 +124,9 @@
     -webkit-text-fill-color: var(--text);
   }
   .header-actions { padding-bottom: 0; gap: 6px; }
-  /* Restart and theme live in the "More" sheet; Pro chrome (subscription,
+  /* Restart lives in the "More" sheet; Pro chrome (subscription,
      update, spend pill) is out of scope on phones. */
   .header-actions .restart-server-btn,
-  .header-actions .theme-toggle,
   .header-actions .pro-header-btn,
   .header-actions .pro-check-btn,
   .header-actions .pro-update-btn,

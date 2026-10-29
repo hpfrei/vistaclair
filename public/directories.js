@@ -79,7 +79,7 @@
   }
 
   function getMonacoTheme() {
-    return document.documentElement.getAttribute('data-theme') === 'light' ? 'vs' : 'vs-dark';
+    return 'vs';
   }
 
   // ── Tab management ─────────────────────────────────────────────────
@@ -1343,10 +1343,7 @@
   let dirShellSeq = 0;
 
   function getCliTheme() {
-    const isDark = document.documentElement.getAttribute('data-theme') !== 'bright';
-    return isDark
-      ? { background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#a0a0ff', selectionBackground: 'rgba(160,160,255,0.3)' }
-      : { background: '#f8f8f8', foreground: '#1a1a1a', cursor: '#3355aa', selectionBackground: 'rgba(50,80,170,0.2)' };
+    return { background: '#1a1a2e', foreground: '#e0e0e0', cursor: '#a0a0ff', selectionBackground: 'rgba(160,160,255,0.3)' };
   }
 
   function openTerminal(tab, reconnectShellId) {
@@ -1831,18 +1828,6 @@
     switchTab(tab.id);
     loadDir(tab.id, '');
   });
-
-  // ── Theme sync ─────────────────────────────────────────────────────
-
-  const themeToggle = document.getElementById('themeToggle');
-  if (themeToggle) {
-    themeToggle.addEventListener('click', () => {
-      setTimeout(() => {
-        if (!monacoReady) return;
-        monaco.editor.setTheme(getMonacoTheme());
-      }, 100);
-    });
-  }
 
   // ── Restore saved directory tabs on load ────────────────────────────
 

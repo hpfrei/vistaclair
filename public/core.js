@@ -1,18 +1,3 @@
-// --- Theme toggle ---
-(function initTheme() {
-  const btn = document.getElementById('themeToggle');
-  const link = document.getElementById('themeLink');
-  let theme = localStorage.getItem('theme') || 'bright';
-  btn.textContent = theme;
-
-  btn.addEventListener('click', () => {
-    theme = theme === 'dark' ? 'bright' : 'dark';
-    link.href = `theme-${theme}.css`;
-    localStorage.setItem('theme', theme);
-    btn.textContent = theme;
-  });
-})();
-
 // --- State ---
 const state = {
   interactions: [],
@@ -395,12 +380,10 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
     return;
   }
 
-  // Theme is kept in localStorage by the header toggle ('bright' | 'dark').
-  const theme = (localStorage.getItem('theme') || 'bright') === 'dark' ? 'vs-dark' : 'vs';
   const editor = monaco.editor.create(editorDiv, {
     value: text,
     language: _MONACO_LANGS[ext] || 'plaintext',
-    theme,
+    theme: 'vs',
     readOnly: true,
     minimap: { enabled: false },
     scrollBeyondLastLine: false,

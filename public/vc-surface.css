@@ -5,11 +5,11 @@
    (--vc-display, --vc-signal, --vcp-*) — pro depends on this file,
    never the other way around.
 
-   Load order: vc-surface.css -> theme-{bright,dark}.css -> style.css
+   Load order: vc-surface.css -> theme-bright.css -> style.css
    This file derives its tokens from the palette vars and supplies
-   theme-agnostic defaults; the theme file that loads after it owns
-   the raw palette and overrides the few tokens (glows, shadows)
-   that need a per-theme value.
+   defaults; the theme file that loads after it owns the raw palette
+   and overrides the few tokens (glows, shadows) that need a
+   different value.
 
    NOT touched here (the product's identity, kept on the gradient):
      .header-gradient-bar, .view-nav, #timeline-resizer, nav-travel
@@ -61,8 +61,8 @@
   --vc-inset-hi:  inset 0 1px 0 color-mix(in srgb, var(--text-bright) 6%, transparent);
 }
 
-/* --bg-deep and the deeper dark shadows are set per-theme in
-   theme-dark.css / theme-bright.css; these are the safe fallbacks. */
+/* --bg-deep and the deeper shadows are set in theme-bright.css;
+   these are the safe fallbacks. */
 :root { --bg-deep: color-mix(in srgb, var(--bg) 85%, #000); }
 
 /* ============================================================

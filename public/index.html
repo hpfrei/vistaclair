@@ -2,7 +2,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#1a1a2e">
+  <meta name="theme-color" content="#ffffff">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="vistaclair">
@@ -18,7 +18,7 @@
   <!-- Order matters: vc-surface derives its tokens from the palette, so it
        loads first and the theme file overrides its glow/shadow tokens. -->
   <link rel="stylesheet" href="vc-surface.css">
-  <link rel="stylesheet" id="themeLink" href="theme-bright.css">
+  <link rel="stylesheet" href="theme-bright.css">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="mcp.css">
   <link rel="stylesheet" href="sdk-panel.css">
@@ -40,13 +40,6 @@
     };
   </script>
   <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
-  <script>
-    // Apply saved theme before paint to prevent flash
-    (function() {
-      var t = localStorage.getItem('theme') || 'bright';
-      document.getElementById('themeLink').href = 'theme-' + t + '.css';
-    })();
-  </script>
 </head>
 <body>
   <header>
@@ -71,7 +64,6 @@
       <button class="restart-server-btn" id="restartServerBtn" title="Restart vistaclair server">&#8635; Restart</button>
       <button id="claudeAuthPill" class="claude-auth-pill hidden" type="button" title="Claude sign-in"></button>
       <span id="status" class="status disconnected">disconnected</span>
-      <button class="theme-toggle" id="themeToggle" title="Toggle theme">bright</button>
     </div>
   </header>
   <div class="header-gradient-bar"></div>
@@ -957,7 +949,6 @@ jq -r '.tool_input.command' |
       <button class="mobile-sheet-item" data-view="capabilities">Tools &amp; MCP</button>
       <button class="mobile-sheet-item" data-view="home" data-home-section="security">Security</button>
       <div class="mobile-sheet-sep"></div>
-      <button class="mobile-sheet-item" data-proxy="themeToggle">Theme: <span id="mobileThemeLabel">bright</span></button>
       <button class="mobile-sheet-item" data-proxy="restartServerBtn">Restart server</button>
     </div>
   </div>

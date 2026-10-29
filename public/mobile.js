@@ -69,15 +69,6 @@
     if (e.key === 'Escape' && !sheet.classList.contains('hidden')) closeSheet();
   });
 
-  // Keep the sheet's theme label in step with the header toggle.
-  const themeBtn = document.getElementById('themeToggle');
-  const themeLabel = document.getElementById('mobileThemeLabel');
-  if (themeBtn && themeLabel) {
-    const sync = () => { themeLabel.textContent = themeBtn.textContent; };
-    sync();
-    new MutationObserver(sync).observe(themeBtn, { childList: true, characterData: true, subtree: true });
-  }
-
   // --- Inspector: timeline ⇄ detail drill-down ----------------------
   // Desktop shows both panes side by side. On a phone the timeline is
   // full-width and a tap slides the detail over it; "‹ Timeline" (or the
