@@ -4524,10 +4524,28 @@
       html += `<div class="json-block" style="opacity:0.5">Loading... ${charGauge(req._toolResponseChars)}</div>`;
     }
 
+    // Images pasted into the prompt: the hook payload names none, the store
+    // reads them from the transcript (src/prompt-images.js).
+    if (interaction.promptImages?.length) {
+      html += '<div class="section-title">Attached Images</div><div class="hook-prompt-images">';
+      for (const p of interaction.promptImages) {
+        html += `<figure class="hook-prompt-image">
+          <button data-filepath="${escHtml(p)}" title="Preview ${escHtml(p)}"><img loading="lazy" alt="" src="/api/raw-file?path=${encodeURIComponent(p)}"></button>
+          <figcaption>${escHtml(p)}</figcaption>
+        </figure>`;
+      }
+      html += '</div>';
+    }
+
     html += '<div class="section-title">Raw Hook Data</div>';
     html += jsonBlock(req);
 
     detailContent.innerHTML = html;
+    for (const btn of detailContent.querySelectorAll('.hook-prompt-image button')) {
+      btn.addEventListener('click', () => openFilePreview(btn.dataset.filepath));
+      // Claude Code's temp dir is cleared in time: the path stays, the picture goes.
+      btn.querySelector('img').addEventListener('error', () => btn.closest('.hook-prompt-image').classList.add('is-gone'));
+    }
     autoExpandSmallJsonBlocks(detailContent);
     linkifyDetail(detailContent);
     _detailView = { key: `turn:${interaction.id}`, kind: 'hook', id: interaction.id,
@@ -4799,6 +4817,7 @@
       sseCount: resp.sseEvents?.length || 0,
       subagent: sub ? `${sub.agentId}|${sub.agentType}|${sub.description}|${interaction._subagentInferred ? 1 : 0}` : '',
       model: req.model || '',
+      promptImages: interaction.promptImages?.length || 0,
       secs: {
         'req:info': `${req.model}|${req.max_tokens}|${req.temperature}|${interaction.isStreaming}|${sub ? sub.agentId : ''}|${(interaction.rules || []).map(r => `${r.id}:${r.delta}`).join(',')}`,
         'req:system': `${bulk(req.system)}|${req._systemChars || 0}`,
@@ -6089,7 +6108,12 @@
 
       case 'interaction:enriched': {
         const interaction = state.interactions.find(i => i.id === msg.interactionId);
-        if (interaction) {
+        if (interaction && msg.promptImages) {
+          interaction.promptImages = msg.promptImages;
+          if (state.selection?.type === 'turn' && state.selection.id === msg.interactionId) {
+            select({ type: 'turn', id: msg.interactionId });
+          }
+        } else if (interaction) {
           interaction.subagent = msg.subagent;
           delete interaction._subagentInferred;
           if (_timelineMode === 'parallel') {
