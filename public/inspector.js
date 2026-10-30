@@ -1223,6 +1223,14 @@
       results: new Map(), links: new Map(), byId: new Map(), stopped: new Set(),
     };
     root.addEventListener('click', _lanesOnClick);
+    root.addEventListener('mouseover', e => {
+      const t = e.target.closest?.('.ln-call-thumb');
+      if (t) _thumbPopShow(t);
+    });
+    root.addEventListener('mouseout', e => {
+      if (e.target.closest?.('.ln-call-thumb') && !e.relatedTarget?.closest?.('.ln-call-thumb')) _thumbPopHide();
+    });
+    root.addEventListener('scroll', _thumbPopHide, true);
     _lanesSync();
     _lanesView.built = true;
     for (const lane of _lanesView.lanes.values()) {
@@ -1248,6 +1256,8 @@
     for (const lane of _lanesView.lanes.values()) { cancelAnimationFrame(lane.raf); lane.io.disconnect(); }
     _lanesView.root.remove();
     _lanesView = null;
+    _thumbPop?.remove();
+    _thumbPop = null;
     detailContent.classList.remove('lanes-active');
   }
 
@@ -1748,6 +1758,7 @@
     const arg = call.el.querySelector('.ln-call-arg');
     _callArg(arg, line);
     arg.title = line.title;
+    _callThumb(call);
     // What the call is for, under its line.
     let desc = call.el.querySelector('.ln-call-desc');
     if (line.desc && !desc) {
@@ -1839,7 +1850,7 @@
       call.rest = rows.rest;
     }
     if (!r.error) {
-      const media = LANES.mediaPaths(r.preview, _pathCategory);
+      const media = LANES.mediaPaths(r.preview, _pathCategory, undefined, call.media ? [call.media] : []);
       if (media.items.length) body.appendChild(_thumbStrip(media, call));
     }
     call.el.appendChild(body);
@@ -1856,33 +1867,7 @@
     const strip = document.createElement('div');
     strip.className = 'ln-thumbs';
     for (const { path, category } of items) {
-      const t = document.createElement('button');
-      t.className = 'ln-thumb is-' + category;
-      t.dataset.filepath = path;
-      t.title = 'Preview ' + path;
-      if (category === 'audio') {
-        t.textContent = '\u266A';
-      } else {
-        const img = document.createElement('img');
-        img.loading = 'lazy';
-        img.alt = '';
-        img.src = category === 'video'
-          ? '/api/video-thumb?i=1&path=' + encodeURIComponent(path)
-          : '/api/raw-file?path=' + encodeURIComponent(path);
-        img.addEventListener('error', () => {
-          // A video's first frame may still be cut when another strip asks.
-          if (category === 'video' && !img.dataset.retried) {
-            img.dataset.retried = '1';
-            setTimeout(() => { img.src = img.src; }, 1500);
-            return;
-          }
-          t.hidden = true;
-          _thumbsGone(strip, call);
-        });
-        t.appendChild(img);
-        if (category === 'video') t.insertAdjacentHTML('beforeend', '<span class="ln-thumb-play">\u25B6</span>');
-      }
-      strip.appendChild(t);
+      strip.appendChild(_thumbButton(path, category, () => _thumbsGone(strip, call)));
     }
     if (more) {
       const m = document.createElement('span');
@@ -1892,6 +1877,74 @@
     }
     return strip;
   }
+
+  // One thumbnail: a button holding the image (a video's frame, a note for
+  // audio); a file that will not load hides it, then calls gone().
+  function _thumbButton(path, category, gone) {
+    const t = document.createElement('button');
+    t.className = 'ln-thumb is-' + category;
+    t.dataset.filepath = path;
+    t.title = 'Preview ' + path;
+    if (category === 'audio') {
+      t.textContent = '\u266A';
+      return t;
+    }
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.alt = '';
+    img.src = category === 'video'
+      ? '/api/video-thumb?i=1&path=' + encodeURIComponent(path)
+      : '/api/raw-file?path=' + encodeURIComponent(path);
+    img.addEventListener('error', () => {
+      // A video's first frame may still be cut when another strip asks.
+      if (category === 'video' && !img.dataset.retried) {
+        img.dataset.retried = '1';
+        setTimeout(() => { img.src = img.src; }, 1500);
+        return;
+      }
+      t.hidden = true;
+      gone();
+    });
+    t.appendChild(img);
+    if (category === 'video') t.insertAdjacentHTML('beforeend', '<span class="ln-thumb-play">\u25B6</span>');
+    return t;
+  }
+
+  /* A media file the call names in its input gets its thumbnail on the
+     call's line, beside the name, no taller than the line; the result's
+     strip then leaves that file out. */
+  function _callThumb(call) {
+    const media = LANES.callMedia(call.input, _pathCategory);
+    const line = call.el.querySelector('.ln-call');
+    const old = line.querySelector('.ln-call-thumb');
+    if (old?.dataset.filepath === media?.path) return;
+    old?.remove();
+    call.media = media?.path || null;
+    if (!media) return;
+    const t = _thumbButton(media.path, media.category, () => {});
+    t.classList.add('ln-call-thumb');
+    line.querySelector('.ln-call-arg').after(t);
+  }
+
+  // Hovering a call line's thumbnail shows it larger, beside it.
+  let _thumbPop = null;
+  function _thumbPopShow(t) {
+    const img = t.querySelector('img');
+    if (!img || t.hidden) return;
+    if (!_thumbPop) {
+      _thumbPop = document.createElement('img');
+      _thumbPop.className = 'ln-thumb-pop';
+      _thumbPop.alt = '';
+      document.body.appendChild(_thumbPop);
+    }
+    _thumbPop.src = img.src;
+    const r = t.getBoundingClientRect();
+    const size = 180;
+    _thumbPop.style.left = Math.max(4, Math.min(r.left, innerWidth - size - 4)) + 'px';
+    _thumbPop.style.top = (r.bottom + size + 8 < innerHeight ? r.bottom + 4 : Math.max(4, r.top - size - 4)) + 'px';
+    _thumbPop.hidden = false;
+  }
+  function _thumbPopHide() { if (_thumbPop) _thumbPop.hidden = true; }
 
   // Every thumbnail failed: the strip goes, and a lane it sat above the top
   // of scrolls up by its height, so what is in view stays put.
