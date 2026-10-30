@@ -148,11 +148,21 @@
 .sdk-link-busy circle { fill: var(--busy); }
 .sdk-link-awaiting path { stroke: var(--orange); }
 .sdk-link-ended path { stroke-dasharray: 3 4; opacity: .6; }
-.sdk-link path.flash-down, .sdk-link path.flash-up { stroke: var(--magenta); stroke-width: 2.4; stroke-dasharray: 7 6; }
-.sdk-link path.flash-down { animation: sdk-dash-down .45s linear infinite; }
-.sdk-link path.flash-up { animation: sdk-dash-up .45s linear infinite; }
-@keyframes sdk-dash-down { from { stroke-dashoffset: 26; } to { stroke-dashoffset: 0; } }
-@keyframes sdk-dash-up { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 26; } }
+/* A lit line. Each runs from the orchestrator (its start) to the worker: a
+   falling dashoffset moves the dashes toward the worker (down), a rising one
+   toward the orchestrator (up). Over them a pulse, one bright stretch, runs
+   the line's length from sender to receiver (--len: set by drawLinks). */
+.sdk-link path.flash-down, .sdk-link path.flash-up { stroke: var(--magenta); stroke-width: 2.4; stroke-dasharray: 8 8; }
+.sdk-link path.flash-down { animation: sdk-dash-down .8s linear infinite; }
+.sdk-link path.flash-up { animation: sdk-dash-up .8s linear infinite; }
+@keyframes sdk-dash-down { from { stroke-dashoffset: 32; } to { stroke-dashoffset: 0; } }
+@keyframes sdk-dash-up { from { stroke-dashoffset: 0; } to { stroke-dashoffset: 32; } }
+.sdk-link path.sdk-link-pulse { stroke: transparent; stroke-width: 5; stroke-linecap: round; transition: none; }
+.sdk-link path.sdk-link-pulse.pulse-down, .sdk-link path.sdk-link-pulse.pulse-up { stroke: var(--magenta); stroke-dasharray: 28px var(--len); }
+.sdk-link path.pulse-down { animation: sdk-pulse-down 1.5s linear 3; }
+.sdk-link path.pulse-up { animation: sdk-pulse-up 1.5s linear 3; }
+@keyframes sdk-pulse-down { from { stroke-dashoffset: 28px; } to { stroke-dashoffset: calc(-1 * var(--len)); } }
+@keyframes sdk-pulse-up { from { stroke-dashoffset: calc(-1 * var(--len)); } to { stroke-dashoffset: 28px; } }
 
 /* The top: the shelf, then the orchestrator's box; alone, it fills the stage. */
 .sdk-head { position: relative; z-index: 1; display: flex; gap: 14px; flex: 1; min-height: 0; }
