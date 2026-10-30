@@ -2,7 +2,7 @@
   'use strict';
   const { state, escHtml, highlightJSON, renderJSON, jsonBlock, formatDuration, truncate,
           renderMarkdown, renderMarkdownDebounced, cancelRenderDebounce, sendWs,
-          linkifyFilePaths, openFilePreview, fileCategory,
+          linkifyFilePaths, openFilePreview, openTextPreview, fileCategory,
           timelineList, detailContent, emptyState, statsEl } = window.dashboard;
 
   // Absolute file paths anywhere in the detail pane (tool input JSON, tool
@@ -1897,6 +1897,7 @@
   // of scrolls up by its height, so what is in view stays put.
   function _thumbsGone(strip, call) {
     if (strip.querySelector('.ln-thumb:not([hidden]), .ln-thumbs-more')) return;
+    if (!call) { strip.hidden = true; return; }
     const feed = call.lane.feed;
     const above = strip.getBoundingClientRect().bottom <= feed.getBoundingClientRect().top;
     const top = feed.scrollTop, height = feed.scrollHeight;
@@ -1906,6 +1907,52 @@
       feed.scrollTop = top - diff;
       call.lane.expectTop = feed.scrollTop;
     }
+  }
+
+  /* A result whole in the big modal, as a .md file opens: its thumbnails
+     above, its paths links. One the summary cut is fetched in full (the
+     turn that carries it) and shown again when it lands, if still open. */
+  let _resultModalWait = null;   // { id, call, overlay }
+  function _resultModal(call, block = _lanesView?.results.get(call.id)) {
+    if (!block) return;
+    const r = LANES.resultLine(block);
+    const line = LANES.toolLine(call.name, call.input);
+    const media = r.error ? null : LANES.mediaPaths(r.preview, _pathCategory, 100);
+    let strip = null;
+    if (media?.items.length) {
+      strip = _thumbStrip(media, null);
+      strip.classList.add('file-preview-thumbs');
+      strip.addEventListener('click', e => {
+        const t = e.target.closest('.ln-thumb');
+        if (t) openFilePreview(t.dataset.filepath);
+      });
+    }
+    const cut = !!block._truncated;
+    const overlay = openTextPreview({
+      title: `${line.name} ${r.error ? 'error' : 'result'}`,
+      subtitle: line.title || line.arg,
+      text: r.preview + (cut ? '\n\u2026' : ''),
+      markdown: !r.error && LANES.looksLikeMarkdown(r.preview),
+      note: cut ? 'loading the rest\u2026' : '',
+      before: strip,
+    });
+    _resultModalWait = null;
+    if (!cut) return;
+    const id = LANES.resultHolder(state.interactions, call.id);
+    if (!id) return;
+    _resultModalWait = { id, call, overlay };
+    _pendingDetailRequests.add(id);
+    sendWs({ type: 'interaction:getDetail', id });
+  }
+
+  // The turn's detail landed: the open modal shows the whole result.
+  function _resultModalDetail(i) {
+    const w = _resultModalWait;
+    if (!w || w.id !== i.id) return;
+    _resultModalWait = null;
+    if (!w.overlay.isConnected) return;
+    const block = LANES.toolResultsOf(i).find(b => b.tool_use_id === w.call.id);
+    if (block && !block._truncated) _resultModal(w.call, block);
   }
 
   // Open a result's output: an eased height and fade.
@@ -2125,7 +2172,11 @@
     if (link) { e.preventDefault(); openFilePreview(link.dataset.filepath); return; }
     const thumb = e.target.closest('.ln-thumb');
     if (thumb) { openFilePreview(thumb.dataset.filepath); return; }
-    if (e.target.closest('.ln-result-body')) return;
+    const resBody = e.target.closest('.ln-result-body');
+    if (resBody) {
+      if (resBody._call && LANES.bodyClickOpens(e.target, window.getSelection()?.toString())) _resultModal(resBody._call);
+      return;
+    }
     const quote = e.target.closest('.ln-user');
     if (quote) { quote.classList.toggle('is-open'); return; }
     const agent = e.target.closest('.ln-call.is-agent');
@@ -6078,6 +6129,7 @@
         if (dIdx >= 0 && msg.interaction) {
           state.interactions[dIdx] = RET.mergeDetail(state.interactions[dIdx], msg.interaction);
           _touchFull(msg.id);
+          _resultModalDetail(state.interactions[dIdx]);
           if (_curlPending === msg.id) {
             _curlPending = null;
             showCurlModal(buildCurlCommand(state.interactions[dIdx]));
