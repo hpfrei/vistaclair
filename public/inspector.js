@@ -4792,7 +4792,7 @@
         <span class="info-label">Agent</span><span class="info-value" style="color:var(--cyan)">${escHtml(sa.agentType || 'unknown')}</span>
         <span class="info-label">Agent ID</span><span class="info-value">${escHtml(sa.agentId || '--')}</span>
         <span class="info-label">Description</span><span class="info-value">${escHtml(sa.description || '--')}</span>
-        <span class="info-label">Attributed</span><span class="info-value"${interaction._subagentInferred ? ' style="color:var(--text-dim)"' : ''}>${interaction._subagentInferred ? 'guessed from spawn prompt' : 'by server'}</span>
+        <span class="info-label">Attributed</span><span class="info-value"${interaction._subagentInferred || interaction.subagentProvisional ? ' style="color:var(--text-dim)"' : ''}>${interaction._subagentInferred ? 'guessed from spawn prompt' : interaction.subagentProvisional ? 'by server, from the request (unconfirmed)' : 'by server'}</span>
       </div>`;
     }
     push('req:info', 'Info', infoBody, { size: 'compact' });
@@ -4932,7 +4932,7 @@
       usage: interaction.usage ? JSON.stringify(interaction.usage) : '',
       respChars: _respCharCount(interaction),
       sseCount: resp.sseEvents?.length || 0,
-      subagent: sub ? `${sub.agentId}|${sub.agentType}|${sub.description}|${interaction._subagentInferred ? 1 : 0}` : '',
+      subagent: sub ? `${sub.agentId}|${sub.agentType}|${sub.description}|${interaction._subagentInferred ? 1 : 0}|${interaction.subagentProvisional ? 1 : 0}` : '',
       model: req.model || '',
       promptImages: interaction.promptImages?.length || 0,
       secs: {
@@ -6226,8 +6226,11 @@
             select({ type: 'turn', id: msg.interactionId });
           }
         } else if (interaction) {
-          interaction.subagent = msg.subagent;
+          // Confirms or corrects the guess the turn started with; null puts it
+          // back on the main thread.
+          interaction.subagent = msg.subagent || undefined;
           delete interaction._subagentInferred;
+          delete interaction.subagentProvisional;
           if (_timelineMode === 'parallel') {
             queueTimelineParallelRebuild();
           } else {

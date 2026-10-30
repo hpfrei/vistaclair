@@ -242,6 +242,10 @@ function parseSSEString(eventStr) {
   }
 }
 
+// Where a completed tool_use block of a stream goes (the store's turn
+// attribution); set by createProxyRouter.
+let onToolUseBlock = null;
+
 // Shared SSE event tracking for inspector/dashboard (used by both paths)
 function trackSSEEvent(event, interaction, activeToolBlocks, broadcaster, instanceId) {
   if (event.eventType === 'message_start') {
@@ -268,6 +272,14 @@ function trackSSEEvent(event, interaction, activeToolBlocks, broadcaster, instan
     if (tb) tb.inputJson += event.data.delta.partial_json || '';
   }
   if (event.eventType === 'content_block_stop') {
+    // Claude Code runs a tool once its block is complete, before the response
+    // ends — an Agent call's subagent may send its first turn right away.
+    const tb = activeToolBlocks.get(event.data?.index);
+    if (tb && onToolUseBlock) {
+      let input = null;
+      if (tb.name === 'Agent' || tb.name === 'Task') { try { input = JSON.parse(tb.inputJson || '{}'); } catch {} }
+      onToolUseBlock(interaction, { type: 'tool_use', id: tb.id, name: tb.name, input });
+    }
     activeToolBlocks.delete(event.data?.index);
   }
 
@@ -328,6 +340,7 @@ function sendDummyResponse(ctx, { text, model, usage }) {
 }
 
 function createProxyRouter(store, broadcaster, targetUrl) {
+  onToolUseBlock = (interaction, block) => store.noteToolUse(interaction, block);
   // Rule cache: re-reads manifest on every request (cheap), re-requires JS only when files change
   const _ruleCache = new Map(); // id -> { mtime, fn }
 
@@ -420,6 +433,8 @@ function createProxyRouter(store, broadcaster, targetUrl) {
       isStreaming,
       status: 'pending',
     };
+    // Its lane from the start: which agent's turn this is, read off the request.
+    store.attributeTurn(interaction);
 
     // --- Run proxy rules (may return response hooks) ---
     // Each rule's effect on the request is measured: `interaction.rules` is one

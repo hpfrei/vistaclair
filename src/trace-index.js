@@ -62,6 +62,15 @@ class TraceIndex {
     return this.agentMeta.get(agentId) || null;
   }
 
+  /** The agent an Agent tool call (by its tool_use id) spawned, from the meta files. */
+  agentForToolUse(toolUseId) {
+    if (!toolUseId) return null;
+    for (const [agentId, meta] of this.agentMeta) {
+      if (meta.toolUseId === toolUseId) return agentId;
+    }
+    return null;
+  }
+
   getPromptImages(promptId) {
     return promptId ? (this.promptImages.get(promptId) || null) : null;
   }
