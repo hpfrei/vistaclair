@@ -1673,6 +1673,8 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
   white-space: pre;
   cursor: text;
 }
+/* File links keep the lane's mono font, so a linked row is no taller. */
+.ln-result-pre .file-link, .ln-call-arg .file-link { font: inherit; word-break: normal; }
 .ln-result-body.is-error .ln-result-pre { color: var(--red); border-left-color: color-mix(in srgb, var(--red) 40%, transparent); }
 .ln-result-more {
   all: unset;

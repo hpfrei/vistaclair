@@ -117,14 +117,18 @@
   };
 
   /* A tool call as one line: an icon, the tool's name and its key argument,
-     not the JSON. { icon, name, arg, title, desc } — title is the argument
-     whole; desc is what the call says it is for (its `description`), unless
-     the argument already is that. */
+     not the JSON. { icon, name, arg, title, desc, path, linkable } — title is
+     the argument whole; desc is what the call says it is for (its
+     `description`), unless the argument already is that. path is the file
+     the argument names, when it is one a file link would be made of (the
+     line shows it shortened); linkable is the part of arg whose paths may
+     become links — not the last word of a cut argument, maybe half a path. */
   function toolLine(name, input) {
     const icon = TOOL_ICONS[name] || (String(name).startsWith('mcp__') ? '◇' : '•');
     let shown = name || 'tool';
     let arg = '';
     let title = '';
+    let file = '';
     const inp = input && typeof input === 'object' ? input : null;
     if (inp) {
       const path = inp.file_path || inp.notebook_path || inp.filePath;
@@ -148,6 +152,7 @@
       } else if (path) {
         arg = shortPath(path);
         title = path;
+        if (typeof path === 'string' && FILE_PATH_ONLY.test(path)) file = path;
       } else {
         for (const k of ['command', 'pattern', 'query', 'url', 'description', 'prompt']) {
           if (typeof inp[k] === 'string' && inp[k]) { arg = inp[k]; break; }
@@ -162,7 +167,9 @@
     const full = oneLine(arg);
     const about = typeof inp?.description === 'string' ? oneLine(inp.description) : '';
     const desc = about && about !== full ? cut(about) : '';
-    return { icon, name: shown, arg: cut(full), title: title || full, desc };
+    const shownArg = cut(full);
+    const linkable = file ? '' : shownArg === full ? full : shownArg.replace(/\S*$/, '');
+    return { icon, name: shown, arg: shownArg, title: title || full, desc, path: file, linkable };
   }
 
   /* A tool result as one dim line, and the text its expanded preview shows.
@@ -235,6 +242,7 @@
   // Kept in step with _FILE_PATH_RE in public/core.js, so a thumbnail is
   // shown for exactly the paths linkifyFilePaths makes links of.
   const FILE_PATH_RE = /(\/(?:home|tmp|var|etc|usr|opt|mnt|root|srv|proc|nix|snap)[^\s"'<>),;:\]]*\.[a-zA-Z0-9]{1,10})/g;
+  const FILE_PATH_ONLY = new RegExp(`^${FILE_PATH_RE.source}$`);
   const MEDIA_SCAN_CHARS = 200000;
 
   /* The media files a result's text names, for its thumbnail strip: each path
