@@ -6,6 +6,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const L = require('../public/inspector-lanes.js');
 
 const turn = (id, extra = {}) => ({ id, instanceId: 'a', status: 'complete', request: {}, ...extra });
@@ -65,6 +67,20 @@ test('a tool call reads as one line: icon, name, key argument', () => {
   assert.strictEqual(line('mcp__x__y', { thing: 'v' }), 'mcp__x__y v');
   assert.strictEqual(line('Read', null), 'Read ');
   assert.ok(L.toolLine('Bash', { command: 'x'.repeat(500) }).arg.length <= 160);
+});
+
+test('a call\'s description shows once, on one line', () => {
+  const desc = (n, i) => L.toolLine(n, i).desc;
+  assert.strictEqual(desc('Bash', { command: 'npm test', description: '  Run the\n tests ' }), 'Run the tests');
+  assert.strictEqual(desc('mcp__x__y', { url: 'https://x', description: 'Why' }), 'Why');
+  // Already the call's argument: not twice.
+  assert.strictEqual(desc('Agent', { description: 'Find callers', prompt: 'p' }), '');
+  assert.strictEqual(desc('mcp__x__y', { thing: 'v', description: 'Only this' }), '');
+  assert.strictEqual(desc('Bash', { command: 'ls' }), '');
+  assert.strictEqual(desc('Bash', { command: 'ls', description: 42 }), '');
+  assert.strictEqual(desc('Read', null), '');
+  const long = desc('Bash', { command: 'ls', description: 'y'.repeat(500) });
+  assert.ok(long.length <= 160 && long.endsWith('\u2026'));
 });
 
 test('a tool result reads as one dim line', () => {
@@ -143,4 +159,33 @@ test('a result shows its first 50 rows inline, the rest behind "more"', () => {
   assert.strictEqual(L.resultRows('x\n'.repeat(50).slice(0, -1)).more, 0);
   assert.strictEqual(L.resultRows(text, 100).more, 20);
   assert.deepStrictEqual(L.resultRows(undefined), { head: '', rest: '', more: 0 });
+});
+
+test('media paths in a result: each once, in order, capped with a count', () => {
+  const kinds = { png: 'image', jpg: 'image', mp4: 'video', mp3: 'audio', pdf: 'pdf', js: 'text' };
+  const categoryOf = p => kinds[p.split('.').pop().toLowerCase()] || 'unknown';
+  const text = [
+    'Saved /tmp/out/a.png and "/home/u/b.mp4", see /home/u/src/x.js',
+    '/tmp/out/a.png again, /home/u/doc.pdf, /home/u/voice.mp3;',
+    'relative ./c.png and https://example.com/d.png are not paths',
+  ].join('\n');
+  assert.deepStrictEqual(L.mediaPaths(text, categoryOf), { items: [
+    { path: '/tmp/out/a.png', category: 'image' },
+    { path: '/home/u/b.mp4', category: 'video' },
+    { path: '/home/u/voice.mp3', category: 'audio' },
+  ], more: 0 });
+  const many = Array.from({ length: 11 }, (_, k) => `/tmp/f${k}.jpg`).join('\n') + '\n/tmp/f0.jpg';
+  const r = L.mediaPaths(many, categoryOf);
+  assert.strictEqual(r.items.length, 8);
+  assert.strictEqual(r.items[7].path, '/tmp/f7.jpg');
+  assert.strictEqual(r.more, 3);
+  assert.strictEqual(L.mediaPaths(many, categoryOf, 2).more, 9);
+  assert.deepStrictEqual(L.mediaPaths(undefined, categoryOf), { items: [], more: 0 });
+});
+
+test('media path detection matches linkifyFilePaths in public/core.js', () => {
+  const read = f => fs.readFileSync(path.join(__dirname, '../public', f), 'utf8');
+  const core = read('core.js').match(/const _FILE_PATH_RE = (\/.+\/g);/)[1];
+  const lanes = read('inspector-lanes.js').match(/const FILE_PATH_RE = (\/.+\/g);/)[1];
+  assert.strictEqual(lanes, core);
 });

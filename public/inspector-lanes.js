@@ -14,6 +14,8 @@
     MAX_RENDERED: 40,
     // Rows of a tool result shown inline; the rest open on click.
     RESULT_ROWS: 50,
+    // Media thumbnails under one tool result; the rest read "+N".
+    RESULT_THUMBS: 8,
     // A subagent with nothing streaming this long counts as done.
     IDLE_DONE_MS: 30 * 1000,
     // A done lane folds to a thin rail after this long.
@@ -115,7 +117,9 @@
   };
 
   /* A tool call as one line: an icon, the tool's name and its key argument,
-     not the JSON. { icon, name, arg, title } — title is the argument whole. */
+     not the JSON. { icon, name, arg, title, desc } — title is the argument
+     whole; desc is what the call says it is for (its `description`), unless
+     the argument already is that. */
   function toolLine(name, input) {
     const icon = TOOL_ICONS[name] || (String(name).startsWith('mcp__') ? '◇' : '•');
     let shown = name || 'tool';
@@ -156,7 +160,9 @@
       }
     }
     const full = oneLine(arg);
-    return { icon, name: shown, arg: cut(full), title: title || full };
+    const about = typeof inp?.description === 'string' ? oneLine(inp.description) : '';
+    const desc = about && about !== full ? cut(about) : '';
+    return { icon, name: shown, arg: cut(full), title: title || full, desc };
   }
 
   /* A tool result as one dim line, and the text its expanded preview shows.
@@ -197,6 +203,32 @@
     const lines = String(text ?? '').split('\n');
     if (lines.length <= max) return { head: lines.join('\n'), rest: '', more: 0 };
     return { head: lines.slice(0, max).join('\n'), rest: lines.slice(max).join('\n'), more: lines.length - max };
+  }
+
+  // Kept in step with _FILE_PATH_RE in public/core.js, so a thumbnail is
+  // shown for exactly the paths linkifyFilePaths makes links of.
+  const FILE_PATH_RE = /(\/(?:home|tmp|var|etc|usr|opt|mnt|root|srv|proc|nix|snap)[^\s"'<>),;:\]]*\.[a-zA-Z0-9]{1,10})/g;
+  const MEDIA_SCAN_CHARS = 200000;
+
+  /* The media files a result's text names, for its thumbnail strip: each path
+     once, in order of first mention, `categoryOf(path)` deciding its kind
+     ('image', 'video', 'audio'; anything else is skipped). { items: [{ path,
+     category }], more } — `more` counts the media paths past `max`. */
+  function mediaPaths(text, categoryOf, max = LIMITS.RESULT_THUMBS) {
+    const items = [];
+    const seen = new Set();
+    let more = 0;
+    const s = String(text ?? '').slice(0, MEDIA_SCAN_CHARS);
+    for (const m of s.matchAll(FILE_PATH_RE)) {
+      const path = m[1];
+      if (seen.has(path)) continue;
+      seen.add(path);
+      const category = categoryOf(path);
+      if (category !== 'image' && category !== 'video' && category !== 'audio') continue;
+      if (items.length < max) items.push({ path, category });
+      else more++;
+    }
+    return { items, more };
   }
 
   const _norm = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -282,7 +314,7 @@
 
   const api = {
     LIMITS, LANE_MAIN, isLaneTurn, laneKeyOf, groupLanes, newUserText, turnUserText,
-    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, agentLinks, laneDone,
+    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, mediaPaths, agentLinks, laneDone,
     laneWindow, pageOlder,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

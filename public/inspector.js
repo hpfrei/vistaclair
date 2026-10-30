@@ -1721,6 +1721,18 @@
     const arg = call.el.querySelector('.ln-call-arg');
     _setText(arg, line.arg);
     arg.title = line.title;
+    // What the call is for, under its line.
+    let desc = call.el.querySelector('.ln-call-desc');
+    if (line.desc && !desc) {
+      desc = document.createElement('div');
+      desc.className = 'ln-call-desc';
+      call.el.querySelector('.ln-call').after(desc);
+    }
+    if (desc) {
+      desc.textContent = line.desc;
+      desc.title = typeof call.input.description === 'string' ? call.input.description : '';
+      desc.hidden = !line.desc;
+    }
     if (call.id && v) v.calls.set(call.id, call);
     _callRefresh(call);
   }
@@ -1770,9 +1782,74 @@
       body.appendChild(more);
       call.rest = rows.rest;
     }
+    if (!r.error) {
+      const media = LANES.mediaPaths(r.preview, _pathCategory);
+      if (media.items.length) body.appendChild(_thumbStrip(media, call));
+    }
     call.el.appendChild(body);
     call.body = body;
     if (live && v.built) _resultOpen(call, true);
+  }
+
+  const _pathCategory = p => fileCategory((p.match(/\.([^./]+)$/) || [])[1]?.toLowerCase() || '');
+
+  /* The media files a result names, as thumbnails under its output; a click
+     opens the preview, as the path's link does. Their size is fixed, so
+     loading never moves the lane; one whose file is gone just leaves. */
+  function _thumbStrip({ items, more }, call) {
+    const strip = document.createElement('div');
+    strip.className = 'ln-thumbs';
+    for (const { path, category } of items) {
+      const t = document.createElement('button');
+      t.className = 'ln-thumb is-' + category;
+      t.dataset.filepath = path;
+      t.title = 'Preview ' + path;
+      if (category === 'audio') {
+        t.textContent = '\u266A';
+      } else {
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.alt = '';
+        img.src = category === 'video'
+          ? '/api/video-thumb?i=1&path=' + encodeURIComponent(path)
+          : '/api/raw-file?path=' + encodeURIComponent(path);
+        img.addEventListener('error', () => {
+          // A video's first frame may still be cut when another strip asks.
+          if (category === 'video' && !img.dataset.retried) {
+            img.dataset.retried = '1';
+            setTimeout(() => { img.src = img.src; }, 1500);
+            return;
+          }
+          t.hidden = true;
+          _thumbsGone(strip, call);
+        });
+        t.appendChild(img);
+        if (category === 'video') t.insertAdjacentHTML('beforeend', '<span class="ln-thumb-play">\u25B6</span>');
+      }
+      strip.appendChild(t);
+    }
+    if (more) {
+      const m = document.createElement('span');
+      m.className = 'ln-thumbs-more';
+      m.textContent = `+${more} more`;
+      strip.appendChild(m);
+    }
+    return strip;
+  }
+
+  // Every thumbnail failed: the strip goes, and a lane it sat above the top
+  // of scrolls up by its height, so what is in view stays put.
+  function _thumbsGone(strip, call) {
+    if (strip.querySelector('.ln-thumb:not([hidden]), .ln-thumbs-more')) return;
+    const feed = call.lane.feed;
+    const above = strip.getBoundingClientRect().bottom <= feed.getBoundingClientRect().top;
+    const top = feed.scrollTop, height = feed.scrollHeight;
+    strip.hidden = true;
+    const diff = height - feed.scrollHeight;
+    if (above && diff > 0) {
+      feed.scrollTop = top - diff;
+      call.lane.expectTop = feed.scrollTop;
+    }
   }
 
   // Open a result's output: an eased height and fade.
@@ -1985,6 +2062,8 @@
       more.remove();
       return;
     }
+    const thumb = e.target.closest('.ln-thumb');
+    if (thumb) { openFilePreview(thumb.dataset.filepath); return; }
     if (e.target.closest('.ln-result-body')) return;
     const quote = e.target.closest('.ln-user');
     if (quote) { quote.classList.toggle('is-open'); return; }

@@ -1488,7 +1488,8 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
 }
 .ln-older:hover { color: var(--text); }
 .ln-empty { padding: 12px 0; font-size: 11px; font-style: italic; color: var(--text-dim); }
-.ln-older[hidden], .ln-empty[hidden], .ln-result-body[hidden], .ln-pill[hidden] { display: none; }
+.ln-older[hidden], .ln-empty[hidden], .ln-result-body[hidden], .ln-pill[hidden],
+.ln-thumbs[hidden], .ln-thumb[hidden] { display: none; }
 
 .ln-sep {
   margin: 10px 0 5px;
@@ -1582,6 +1583,16 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
   cursor: pointer;
 }
 .ln-call.is-agent .ln-call-ico, .ln-call.is-agent .ln-call-name { color: var(--ln-agent); }
+.ln-call-desc {
+  padding: 0 6px 1px 14px;
+  font-family: var(--vc-sans);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ln-call-desc[hidden] { display: none; }
 .ln-spin {
   display: none;
   align-self: center;
@@ -1641,6 +1652,47 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
   cursor: pointer;
 }
 .ln-result-more:hover { color: var(--text); opacity: 1; }
+/* Media files a result names, as thumbnails. The strip's height is fixed
+   (room for a thin scrollbar included): images arriving never move the lane. */
+.ln-thumbs {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  height: 56px;
+  margin: 3px 0 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.ln-thumb {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: 64px;
+  height: 48px;
+  padding: 0;
+  border: 1px solid var(--vc-hair);
+  border-radius: 4px;
+  background: var(--vc-glass-2);
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 18px;
+  cursor: pointer;
+}
+.ln-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.ln-thumb:hover, .ln-thumb:focus-visible { border-color: var(--accent); color: var(--text); outline: none; }
+.ln-thumb-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #fff;
+  text-shadow: 0 0 3px rgba(0, 0, 0, .8);
+  pointer-events: none;
+}
+.ln-thumbs-more { flex: none; align-self: center; padding: 0 4px 8px; font-size: 10.5px; color: var(--text-dim); }
 .ln-error { font-family: var(--font-mono); font-size: 11.5px; color: var(--red); }
 .ln-wait { display: flex; gap: 4px; padding: 4px 0; }
 .ln-wait span {
