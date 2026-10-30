@@ -1206,6 +1206,23 @@ aside#timeline {
 .hook-tool-entry .hook-connector { background: var(--magenta, #c084fc); }
 .hook-tool-entry .hook-entry-name { color: var(--magenta, #c084fc); }
 .hook-tool-entry.selected .hook-entry-name { color: var(--magenta, #c084fc); }
+/* Images pasted into a prompt, in its UserPromptSubmit detail. */
+.hook-prompt-images { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 12px; }
+.hook-prompt-image { margin: 0; max-width: 100%; }
+.hook-prompt-image button {
+  display: block;
+  padding: 0;
+  border: 1px solid var(--vc-hair);
+  border-radius: 4px;
+  background: var(--vc-glass-2);
+  overflow: hidden;
+  cursor: pointer;
+}
+.hook-prompt-image button:hover, .hook-prompt-image button:focus-visible { border-color: var(--accent); outline: none; }
+.hook-prompt-image img { display: block; max-width: 240px; max-height: 160px; object-fit: contain; }
+.hook-prompt-image figcaption { margin-top: 3px; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); word-break: break-all; }
+.hook-prompt-image.is-gone button { display: none; }
+.hook-prompt-image.is-gone figcaption::after { content: ' (file no longer exists)'; }
 .clamped-hook-entry .hook-connector { background: var(--magenta, #c084fc); }
 .clamped-hook-entry .hook-entry-name { color: var(--magenta, #c084fc); }
 .clamped-hook-entry .hook-arrow { color: var(--magenta, #c084fc); font-size: 12px; }

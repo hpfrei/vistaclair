@@ -49,8 +49,9 @@ class InteractionStore {
     if (broadcaster) this._broadcaster = broadcaster;
     if (this.traceIndexes.has(sessId)) return;
     try {
-      const ti = new TraceIndex(transcriptPath, (kind, key, agentId) => {
-        this.applyResolution(sessId, kind, key, agentId);
+      const ti = new TraceIndex(transcriptPath, (kind, key, value) => {
+        if (kind === 'promptImages') this.applyPromptImages(key, value);
+        else this.applyResolution(sessId, kind, key, value);
       });
       this.traceIndexes.set(sessId, ti);
       // Resolve anything already buffered against the freshly-built index.
@@ -126,6 +127,26 @@ class InteractionStore {
           this._broadcaster.broadcast({ type: 'interaction:enriched', interactionId: hook.id, subagent });
         }
       }
+    }
+  }
+
+  /**
+   * Stamp the images pasted into a prompt (src/prompt-images.js) on its
+   * UserPromptSubmit hook, persist, and broadcast. A hook not saved yet gets
+   * them in save() instead.
+   */
+  applyPromptImages(promptId, paths) {
+    let hook = null;
+    for (const interaction of this.interactions.values()) {
+      if (interaction.isHook && interaction.hookEvent === 'UserPromptSubmit'
+          && interaction.request?.prompt_id === promptId) { hook = interaction; break; }
+    }
+    if (!hook || !this.filePaths.has(hook.id)) return;
+    if (hook.promptImages?.length === paths.length) return;
+    hook.promptImages = paths;
+    this._persist(hook);
+    if (this._broadcaster) {
+      this._broadcaster.broadcast({ type: 'interaction:enriched', interactionId: hook.id, promptImages: paths });
     }
   }
 
@@ -493,6 +514,18 @@ class InteractionStore {
       }
     }
 
+    // A prompt's pasted images: its transcript records are written before the
+    // hook fires, so a rescan has them now; ones landing later come through
+    // applyPromptImages.
+    if (interaction.isHook && interaction.hookEvent === 'UserPromptSubmit' && !interaction.promptImages) {
+      const ti = this.traceIndexes.get(sessId);
+      if (ti) {
+        ti.rescanNow();
+        const images = ti.getPromptImages(interaction.request?.prompt_id);
+        if (images) interaction.promptImages = images;
+      }
+    }
+
     const fileContent = this._buildFileContent(interaction);
 
     this.filePaths.set(id, filePath);
@@ -639,6 +672,7 @@ class InteractionStore {
       interaction.toolName = data.toolName || null;
       interaction.toolUseId = data.toolUseId || null;
       interaction.hookAgentId = data.hookAgentId || null;
+      if (Array.isArray(data.promptImages) && data.promptImages.length) interaction.promptImages = data.promptImages;
     }
     if (data.isMcp) {
       interaction.isMcp = true;
@@ -790,6 +824,7 @@ class InteractionStore {
       out.toolName = interaction.toolName || undefined;
       out.toolUseId = interaction.toolUseId || undefined;
       out.hookAgentId = interaction.hookAgentId || undefined;
+      out.promptImages = interaction.promptImages?.length ? interaction.promptImages : undefined;
     }
     if (interaction.isMcp) {
       out.isMcp = true;

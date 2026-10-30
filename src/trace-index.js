@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { promptImagesInRecord } = require('./prompt-images');
 
 /**
  * TraceIndex — authoritative subagent attribution from Claude's own trace files.
@@ -22,7 +23,8 @@ const path = require('path');
 class TraceIndex {
   /**
    * @param {string} transcriptPath absolute path to <sessionId>.jsonl
-   * @param {(kind:'request'|'tool', key:string, agentId:string)=>void} onResolve
+   * @param {(kind:'request'|'tool'|'promptImages', key:string, value:string|string[])=>void} onResolve
+   *   value is the owning agentId, or for 'promptImages' (key: promptId) the image paths
    */
   constructor(transcriptPath, onResolve) {
     this.transcriptPath = transcriptPath;
@@ -36,6 +38,7 @@ class TraceIndex {
     this.requestIdToAgent = new Map(); // reqId -> agentId | 'main'
     this.toolUseIdToAgent = new Map();  // toolUseId -> agentId | 'main'
     this.agentMeta = new Map();         // agentId -> {agentType, description, toolUseId}
+    this.promptImages = new Map();      // promptId -> [image path] (src/prompt-images.js)
 
     this._offsets = new Map();          // filePath -> bytes already parsed
     this._watchers = [];
@@ -57,6 +60,10 @@ class TraceIndex {
 
   getAgentMeta(agentId) {
     return this.agentMeta.get(agentId) || null;
+  }
+
+  getPromptImages(promptId) {
+    return promptId ? (this.promptImages.get(promptId) || null) : null;
   }
 
   /** Full (re)scan: main file + every subagent file + meta files. */
@@ -142,6 +149,18 @@ class TraceIndex {
           this.toolUseIdToAgent.set(block.id, agentId);
           this.onResolve('tool', block.id, agentId);
         }
+      }
+    }
+    // The images pasted into a main-thread prompt — the meta record naming
+    // them can trail the prompt's record, so a promptId may gain paths.
+    const images = agentId === 'main' ? promptImagesInRecord(rec) : null;
+    if (images) {
+      const known = this.promptImages.get(rec.promptId) || [];
+      const fresh = images.filter(p => !known.includes(p));
+      if (fresh.length) {
+        const all = [...known, ...fresh];
+        this.promptImages.set(rec.promptId, all);
+        this.onResolve('promptImages', rec.promptId, all);
       }
     }
   }
