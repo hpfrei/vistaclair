@@ -226,3 +226,36 @@ test('a call line links the file it names, never half a cut path', () => {
   assert.ok(long.arg.startsWith(long.linkable));
   assert.ok(long.linkable.includes('/home/u/one.txt') && !long.linkable.includes('/home/u/very'));
 });
+
+test('a click in a result body opens the modal, unless it has its own click', () => {
+  // A stand-in element: the selectors its closest() answers to.
+  const el = (...matches) => ({ closest: sel => sel.split(',').some(x => matches.includes(x.trim())) ? {} : null });
+  assert.strictEqual(L.bodyClickOpens(el('.ln-result-body'), ''), true);
+  assert.strictEqual(L.bodyClickOpens(el('.ln-result-body', '.file-link', 'a'), ''), false);
+  assert.strictEqual(L.bodyClickOpens(el('.ln-result-body', '.ln-thumbs', 'button'), ''), false);
+  assert.strictEqual(L.bodyClickOpens(el('.ln-result-body', 'button'), ''), false);  // … N more lines
+  assert.strictEqual(L.bodyClickOpens(el('button'), ''), false);                     // the result's line
+  assert.strictEqual(L.bodyClickOpens(el('.ln-result-body'), 'dragged text'), false);
+  assert.strictEqual(L.bodyClickOpens(null, ''), false);
+});
+
+test('only clearly markdown output renders as markdown', () => {
+  assert.strictEqual(L.looksLikeMarkdown('# Report\n\n- one\n- two\n'), true);
+  assert.strictEqual(L.looksLikeMarkdown('Some **bold** and a [link](http://x)'), true);
+  assert.strictEqual(L.looksLikeMarkdown('| a | b |\n|---|---|\n| 1 | 2 |\n\n## Totals'), true);
+  assert.strictEqual(L.looksLikeMarkdown('# only a heading, or a shell comment'), false);
+  assert.strictEqual(L.looksLikeMarkdown('total 8\n-rw-r--r-- 1 u u 0 a.txt\n'), false);
+  assert.strictEqual(L.looksLikeMarkdown('     1\u2192# Title\n     2\u2192\n     3\u2192- a\n     4\u2192- b'), false);
+  assert.strictEqual(L.looksLikeMarkdown(''), false);
+});
+
+test('the turn holding a call\'s result', () => {
+  const items = [
+    turn('t1'),
+    turn('t2', { request: { _toolResults: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'x' }] } }),
+    turn('t3', { request: { messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu2', content: 'y' }] }] } }),
+  ];
+  assert.strictEqual(L.resultHolder(items, 'tu1'), 't2');
+  assert.strictEqual(L.resultHolder(items, 'tu2'), 't3');
+  assert.strictEqual(L.resultHolder(items, 'nope'), null);
+});

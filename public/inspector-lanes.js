@@ -204,6 +204,43 @@
     return { text, error: false, preview };
   }
 
+  /* Does a click in an open result's body open the result in the big
+     modal? Not on what has a click of its own — a file link, a thumbnail,
+     "… N more lines", the result's line — and not at the end of a drag
+     that selected text. `target` is the clicked element. */
+  const BODY_OWN_CLICKS = '.file-link, a, button, .ln-thumbs';
+  function bodyClickOpens(target, selectedText) {
+    if (!target?.closest?.('.ln-result-body')) return false;
+    if (target.closest(BODY_OWN_CLICKS)) return false;
+    return !String(selectedText ?? '');
+  }
+
+  /* Is a result clearly markdown, to be rendered rather than shown raw? Two
+     kinds of markdown structure at least, and no line-numbered dump (Read's
+     "  12→"), which stays as it is. */
+  function looksLikeMarkdown(text) {
+    const s = String(text ?? '').slice(0, 20000);
+    if (!s.trim() || /^\s*\d+\u2192/m.test(s)) return false;
+    const kinds = [
+      /^#{1,6} \S/m,                                 // heading
+      /^\s*(?:[-*+]|\d+\.) \S[^\n]*\n\s*(?:[-*+]|\d+\.) \S/m,  // a list of two items
+      /^```/m,                                        // fenced code
+      /\[[^\]\n]+\]\([^)\s]+\)/,                       // link
+      /\*\*[^*\n]+\*\*/,                               // bold
+      /^\|.*\|\s*\n\|\s*:?-{3,}/m,                      // table
+    ];
+    return kinds.filter(re => re.test(s)).length >= 2;
+  }
+
+  // The turn whose request carries the result of a call: its detail holds
+  // the whole output when the summary cut it.
+  function resultHolder(interactions, toolUseId) {
+    for (const i of interactions) {
+      if (toolResultsOf(i).some(b => b.tool_use_id === toolUseId)) return i.id;
+    }
+    return null;
+  }
+
   // 1234 -> "1.2k", 2500000 -> "2.5M".
   const fmtTok = n => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n || 0));
 
@@ -349,7 +386,7 @@
 
   const api = {
     LIMITS, LANE_MAIN, isLaneTurn, laneKeyOf, groupLanes, newUserText, turnUserText,
-    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, mediaPaths, fmtTok, usageLine, agentLinks, laneDone,
+    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, mediaPaths, fmtTok, usageLine, bodyClickOpens, looksLikeMarkdown, resultHolder, agentLinks, laneDone,
     laneWindow, pageOlder,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

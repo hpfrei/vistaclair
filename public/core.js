@@ -197,26 +197,20 @@ function closeFilePreview() {
   _activePreview = null;
 }
 
-function openFilePreview(filePath) {
-  if (!filePath) return;
+// The modal itself: a title, a size, a path or subtitle, the header's
+// buttons (HTML), and the close button, backdrop and Esc that close it.
+function _previewShell(title, sub, buttons) {
   closeFilePreview();
-
-  const name = _fileName(filePath);
-  const ext = _fileExt(filePath);
-  const rawUrl = '/api/raw-file?path=' + encodeURIComponent(filePath);
-
   const overlay = document.createElement('div');
   overlay.className = 'dir-overlay file-preview-overlay';
   overlay.innerHTML = `
     <div class="dir-overlay-backdrop"></div>
     <div class="dir-overlay-panel">
       <div class="dir-overlay-header">
-        <span class="dir-filename">${escHtml(name)}</span>
+        <span class="dir-filename">${escHtml(title)}</span>
         <span class="dir-viewer-size file-preview-size"></span>
-        <span class="file-preview-path" title="${escHtml(filePath)}">${escHtml(filePath)}</span>
-        <button class="dir-download-btn file-preview-reload" title="Reload from disk">⟳</button>
-        <a class="dir-download-btn" href="${rawUrl}" target="_blank" rel="noopener" title="Open in new tab">↗</a>
-        <a class="dir-download-btn" href="${rawUrl}" download="${escHtml(name)}" title="Download">⬇</a>
+        <span class="file-preview-path" title="${escHtml(sub)}">${escHtml(sub)}</span>
+        ${buttons}
         <button class="dir-overlay-close" title="Close (Esc)">✕</button>
       </div>
       <div class="dir-overlay-content"></div>
@@ -230,8 +224,24 @@ function openFilePreview(filePath) {
   const keyHandler = e => { if (e.key === 'Escape') { e.preventDefault(); closeFilePreview(); } };
   document.addEventListener('keydown', keyHandler);
 
-  const preview = { el: overlay, editor: null, keyHandler, filePath, token: 0, asText: false, scrollTop: null };
+  const preview = { el: overlay, editor: null, keyHandler, filePath: null, token: 0, asText: false, scrollTop: null };
   _activePreview = preview;
+  return preview;
+}
+
+function openFilePreview(filePath) {
+  if (!filePath) return;
+
+  const name = _fileName(filePath);
+  const ext = _fileExt(filePath);
+  const rawUrl = '/api/raw-file?path=' + encodeURIComponent(filePath);
+
+  const preview = _previewShell(name, filePath, `
+        <button class="dir-download-btn file-preview-reload" title="Reload from disk">⟳</button>
+        <a class="dir-download-btn" href="${rawUrl}" target="_blank" rel="noopener" title="Open in new tab">↗</a>
+        <a class="dir-download-btn" href="${rawUrl}" download="${escHtml(name)}" title="Download">⬇</a>`);
+  preview.filePath = filePath;
+  const overlay = preview.el;
 
   const content = overlay.querySelector('.dir-overlay-content');
   const sizeEl = overlay.querySelector('.file-preview-size');
@@ -275,6 +285,43 @@ function openFilePreview(filePath) {
   });
 
   load(0);
+  return overlay;
+}
+
+/* Text that is no file — a tool's output, say — in the same modal: whole,
+   monospace with its whitespace kept, or rendered when it is markdown; its
+   file paths are links. opts: { title, subtitle, text, markdown, note,
+   before } — note follows the line count, before (an element) goes above
+   the text. Returns the overlay. */
+function openTextPreview(opts) {
+  const text = String(opts.text ?? '');
+  const preview = _previewShell(opts.title || 'Output', opts.subtitle || '',
+    '<button class="dir-download-btn file-preview-copy" title="Copy">⧉</button>');
+  const overlay = preview.el;
+  const lines = text ? text.split('\n').length : 0;
+  overlay.querySelector('.file-preview-size').textContent =
+    `${lines} line${lines === 1 ? '' : 's'}` + (opts.note ? ` \u00B7 ${opts.note}` : '');
+  const copy = overlay.querySelector('.file-preview-copy');
+  copy.addEventListener('click', () => {
+    navigator.clipboard?.writeText(text).then(() => {
+      copy.textContent = '✓';
+      setTimeout(() => { copy.textContent = '⧉'; }, 1500);
+    }, () => {});
+  });
+  const content = overlay.querySelector('.dir-overlay-content');
+  if (opts.before) content.appendChild(opts.before);
+  if (opts.markdown) {
+    const md = document.createElement('div');
+    md.className = 'dir-md-rendered markdown-body';
+    content.appendChild(md);
+    renderMarkdown(text, md, { file: true });
+  } else {
+    const pre = document.createElement('pre');
+    pre.className = 'file-preview-plain';
+    pre.textContent = text;
+    content.appendChild(pre);
+    linkifyFilePaths(pre, { includePre: true });
+  }
   return overlay;
 }
 
@@ -1702,6 +1749,7 @@ window.dashboard = {
   renderMarkdownDebounced,
   cancelRenderDebounce,
   linkifyFilePaths,
+  openTextPreview,
   openFilePreview,
   closeFilePreview,
   fileCategory,
