@@ -458,18 +458,31 @@
   border-radius: 50%;
   background: var(--magenta);
 }
+/* The activity rows: one line, or (in a turn, or with a background task) a
+   fixed three, so the box keeps its height as calls come and go. */
 .sdk-now {
+  --now-row: 15px;
   flex: 1;
   min-width: 0;
+  height: var(--now-row);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   font-family: var(--vc-mono, ui-monospace, monospace);
   font-size: 11px;
+  line-height: var(--now-row);
   color: var(--text-dim);
 }
-.sdk-now-busy { color: var(--busy); }
-.sdk-now-awaiting { color: var(--orange); font-weight: 600; }
+.sdk-now.tall { height: calc(3 * var(--now-row)); }
+.sdk-bar:has(.sdk-now.tall) { align-items: flex-start; }
+.sdk-now-row { display: flex; gap: 5px; min-width: 0; height: var(--now-row); white-space: nowrap; }
+.sdk-now-row.head { display: block; overflow: hidden; text-overflow: ellipsis; }
+.sdk-now-ico { flex-shrink: 0; opacity: 0.8; }
+.sdk-now-bg { flex-shrink: 0; color: var(--text-dim); font-size: 10px; }
+.sdk-now-age { flex-shrink: 0; min-width: 4ch; font-variant-numeric: tabular-nums; }
+.sdk-now-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sdk-now-more { flex-shrink: 0; color: var(--text-dim); font-size: 10px; cursor: default; }
+.sdk-now-busy .sdk-now-row:not(.bg) { color: var(--busy); }
+.sdk-now-row.bg { color: var(--text-dim); }
+.sdk-now-awaiting .sdk-now-row.head { color: var(--orange); font-weight: 600; }
 
 .sdk-area-awaiting {
   margin: 0 10px 6px;
