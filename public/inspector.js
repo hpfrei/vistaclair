@@ -1376,7 +1376,7 @@
   const _laneLabel = lane => lane.key === LANE_MAIN ? 'main'
     : (getSubagentLabel(lane.subagent) || lane.subagent?.agentType || 'subagent');
   const _shortModel = m => (m || '').replace('claude-', '').split('-202')[0];
-  const _fmtTok = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+  const _fmtTok = LANES.fmtTok;
 
   function _setText(el, text) { if (el && el.textContent !== text) el.textContent = text; }
 
@@ -1585,7 +1585,10 @@
     const el = document.createElement('article');
     el.className = 'ln-turn' + (animate ? ' ln-in' : '');
     el.dataset.id = i.id;
-    el.innerHTML = `<div class="ln-sep"><span class="ln-sep-cap"></span></div>`;
+    // The header line; on a desktop it also carries the turn's thinking (one
+    // chip per block), its token usage and its busy spinner (style.css).
+    el.innerHTML = `<div class="ln-sep"><span class="ln-sep-cap"></span><span class="ln-sep-think"></span>`
+      + `<span class="ln-sep-use"></span><span class="ln-spin"></span></div>`;
     const tv = { id: i.id, el, lane, blocks: new Map(), body: null, live: false, streamed: false, calls: [], waitEl: null };
     const text = LANES.turnUserText(i);
     if (text) {
@@ -1627,7 +1630,7 @@
     }
   }
 
-  // "#12 · 14:02:33 · 4.2s"
+  // "#12 · 14:02:33 · 4.2s", and the usage "↑2 ⟳72.9k ↓1.3k".
   function _turnCaption(tv, i) {
     if (!i) return;
     const parts = [];
@@ -1639,6 +1642,11 @@
     else if (i.timing?.duration != null) parts.push(formatDuration(i.timing.duration));
     if (i.status === 'error') parts.push('error');
     _setText(tv.el.querySelector('.ln-sep-cap'), parts.join(' \u00B7 '));
+    const use = tv.el.querySelector('.ln-sep-use');
+    const u = LANES.usageLine(i.usage);
+    const html = u ? u.parts.map(p => `<span class="ln-use-${p.kind}">${escHtml(p.text)}</span>`).join('') : '';
+    if (use.innerHTML !== html) use.innerHTML = html;
+    use.title = u ? u.title : '';
   }
 
   // A finished turn, from its response body.
@@ -1683,14 +1691,33 @@
   function _thinkBlock(tv, animate) {
     const el = _blockEl(tv, 'ln-think', animate);
     el.innerHTML = `<button class="ln-think-sum">\u2234 thinking</button><div class="ln-think-body"></div>`;
+    // Its chip on the header line, which stands in for the summary on a desktop.
+    const chip = document.createElement('button');
+    chip.className = 'ln-sep-chip';
+    chip.textContent = '\u2234 thinking\u2026';
+    chip._box = el;
+    el._chip = chip;
+    tv.el.querySelector('.ln-sep-think').appendChild(chip);
     return { kind: 'thinking', el, text: el.querySelector('.ln-think-body'), tokens: 0 };
   }
 
   function _thinkFold(b, tokens) {
     b.el.classList.remove('is-live');
+    b.el._chip?.classList.remove('is-live');
     b.el.classList.add('is-folded');
     const tok = tokens == null ? ' (redacted)' : ` \u00B7 ${_fmtTok(tokens)} tok`;
     _setText(b.el.querySelector('.ln-think-sum'), `\u2234 thinking${tok} \u25B8`);
+    _setText(b.el._chip, `\u2234 thinking ${tokens == null ? '(redacted)' : _fmtTok(tokens) + ' tok'} \u25B8`);
+  }
+
+  // Open or fold a thinking block, from its summary or its header chip.
+  function _thinkToggle(box) {
+    if (box.classList.contains('is-live')) return;
+    const open = box.classList.toggle('is-folded') === false;
+    for (const el of [box.querySelector('.ln-think-sum'), box._chip]) {
+      if (el) el.textContent = el.textContent.replace(/[\u25B8\u25BE]$/, open ? '\u25BE' : '\u25B8');
+    }
+    box._chip?.classList.toggle('is-open', open);
   }
 
   function _textBlock(tv, animate) {
@@ -1935,6 +1962,7 @@
       if (cb.type === 'thinking' || cb.type === 'redacted_thinking') {
         b = _thinkBlock(tv, animate);
         b.el.classList.add('is-live');
+        b.el._chip.classList.add('is-live');
         b.redacted = cb.type === 'redacted_thinking';
       } else if (cb.type === 'text') {
         b = _textBlock(tv, animate);
@@ -1999,7 +2027,11 @@
     // A turn without its element yet gets it (with the events so far) on sync.
     if (!tv) { _lanesQueueSync(); return; }
     _turnApply(tv, interaction, event, true);
-    if (event.eventType === 'message_delta' && event.data?.usage) _laneHeader(tv.lane);
+    if (event.eventType === 'message_start') _turnCaption(tv, interaction);
+    if (event.eventType === 'message_delta' && event.data?.usage) {
+      _turnCaption(tv, interaction);
+      _laneHeader(tv.lane);
+    }
     _laneFollow(tv.lane);
   }
 
@@ -2035,13 +2067,9 @@
       return;
     }
     const think = e.target.closest('.ln-think-sum');
-    if (think) {
-      const box = think.parentElement;
-      if (box.classList.contains('is-live')) return;
-      const open = box.classList.toggle('is-folded') === false;
-      think.textContent = think.textContent.replace(/[\u25B8\u25BE]$/, open ? '\u25BE' : '\u25B8');
-      return;
-    }
+    if (think) { _thinkToggle(think.parentElement); return; }
+    const chip = e.target.closest('.ln-sep-chip');
+    if (chip) { _thinkToggle(chip._box); return; }
     // A result opened or folded by hand stays that way.
     const res = e.target.closest('.ln-result');
     if (res) {
