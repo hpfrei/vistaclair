@@ -1,9 +1,10 @@
 // The lines between an orchestrator's box and its workers' boxes in the SDK
 // run panel: which lines a piece of traffic lights and which way it moves on
-// each, which workers an [orchestration] delivery speaks for, and the guard
+// each, when it flies on an arc between two workers instead and that arc's
+// shape, which workers an [orchestration] delivery speaks for, and the guard
 // that lets the two copies of one message light the lines once. Kept free of
 // the DOM so test/sdk-links.test.js can run them. The view is in
-// public/sdk-panel.js (drawLinks, flashLink).
+// public/sdk-panel.js (drawLinks, flashLink, flashArc).
 (function (root) {
   // Every line runs from the orchestrator's box (its start) down to a
   // worker's box (its end). Data leaving a worker moves up its line, data
@@ -16,6 +17,43 @@
     if (from?.role === 'worker') out.push({ at: from, dir: 'up' });
     if (to?.role === 'worker') out.push({ at: to, dir: 'down' });
     return out;
+  }
+
+  // Where a piece of traffic is drawn. Between two workers whose boxes are
+  // both in the row it flies straight from the sender's box to the
+  // receiver's, on an arc of its own, and lights no line; otherwise it lights
+  // the lines linkFlashes names. inRow(end): the end has a box in the row.
+  // { arc: { from, to } | null, lines: [{ at, dir }] }.
+  function messageRoute(from, to, inRow) {
+    if (from?.role === 'worker' && to?.role === 'worker' && from !== to && inRow(from) && inRow(to)) {
+      return { arc: { from, to }, lines: [] };
+    }
+    return { arc: null, lines: linkFlashes(from, to) };
+  }
+
+  const ARC_HEAD = 7;    // the arrowhead's length
+  const ARC_SHIFT = 6;   // both ends move this far the way the arc goes
+
+  // The arc between two workers' name tags: from the top of the sender's
+  // (x1, y1) to the top of the receiver's (x2, y2), drawn in that order so a
+  // flash's dashes and pulse run sender → receiver. It bows up by a height
+  // that grows with the distance, its top never above ceiling (the head's
+  // bottom edge: above it the boxes would hide it), and falls straight onto
+  // the receiver's tag under an arrowhead. Both ends shift toward the
+  // receiver, so A → B and B → A lie side by side. { d, head }: path data.
+  function arcPath(x1, y1, x2, y2, ceiling) {
+    const shift = x2 >= x1 ? ARC_SHIFT : -ARC_SHIFT;
+    x1 += shift; x2 += shift;
+    const base = Math.min(y1, y2);
+    const rise = Math.min(Math.max(Math.abs(x2 - x1) * 0.35, 16), Math.max(base - ceiling, 6));
+    // A cubic whose two handles sit level peaks 3/4 of the way up to them.
+    const c = base - rise / 0.75;
+    const tip = y2 - ARC_HEAD;
+    const r = (n) => Math.round(n * 10) / 10;
+    return {
+      d: `M${r(x1)},${r(y1)} C${r(x1)},${r(c)} ${r(x2)},${r(c)} ${r(x2)},${r(tip)}`,
+      head: `M${r(x2 - 4)},${r(tip)} L${r(x2)},${r(y2)} L${r(x2 + 4)},${r(tip)} Z`,
+    };
   }
 
   // Event kinds of an [orchestration] delivery that carry a worker's own
@@ -51,7 +89,7 @@
     };
   }
 
-  const api = { linkFlashes, DELIVERY_KINDS, deliveryWorkers, onceWithin };
+  const api = { linkFlashes, messageRoute, arcPath, DELIVERY_KINDS, deliveryWorkers, onceWithin };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.sdkLinks = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -63,6 +63,7 @@
   const USER_SCROLL_MS = 800;      // a scroll this soon after the reader's input is theirs
   const LINK_FLASH_MS = 4500;      // a line lit by a message or report (three pulses)
   const MSG_ONCE_MS = 10000;       // the two copies of one SendMessage light the lines once
+  const ARC_FADE_MS = 400;         // a worker → worker arc fading out (.sdk-arc-out)
   const VIEWS = ['live', 'notes'];
   const VIEW_STORE = 'sdkPanelViews';
   const VIEW_STORE_MAX = 200;
@@ -2059,7 +2060,9 @@
     // One curve per box in the row, from the orchestrator's bottom edge down
     // onto the worker's name tag (the caption on its top border); the shelf,
     // beside the orchestrator, has none. Redrawn on every resize of the stage.
-    // Paths are updated in place, so a redraw never cuts a flash short.
+    // Paths are updated in place, so a redraw never cuts a flash short; the
+    // worker → worker arcs, in their own layer above the curves, move with
+    // their boxes (placeArcs).
     drawLinks() {
       const svg = this.linksEl;
       const list = this.rowList;
@@ -2086,7 +2089,7 @@
             const pulse = document.createElementNS(NS, 'path');
             pulse.setAttribute('class', 'sdk-link-pulse');
             g.append(document.createElementNS(NS, 'path'), pulse, document.createElementNS(NS, 'circle'));
-            svg.appendChild(g);
+            svg.insertBefore(g, svg.querySelector(':scope > .sdk-arcs'));
           }
           g.setAttribute('class', `sdk-link sdk-link-${st}`);
           const d = `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
@@ -2100,15 +2103,19 @@
           keep.add(g);
         });
       }
-      for (const g of [...svg.children]) if (!keep.has(g)) g.remove();
+      for (const g of svg.querySelectorAll(':scope > g[data-sess]')) if (!keep.has(g)) g.remove();
+      this.placeArcs();
     }
 
     // A message or report travelling between two boxes: the worker's line
     // lights for LINK_FLASH_MS, its dashes and a pulse moving down (from the
     // orchestrator) or up (toward it), see sdkLinks.linkFlashes. A new flash
-    // on a lit line starts over.
+    // on a lit line starts over. Between two workers both in the row it
+    // takes an arc of its own instead (flashArc, sdkLinks.messageRoute).
     flashLink(from, to) {
-      for (const { at: w, dir } of Links.linkFlashes(this.areaByName(from), this.areaByName(to))) {
+      const route = Links.messageRoute(this.areaByName(from), this.areaByName(to), (a) => this.rowList.includes(a));
+      if (route.arc) return this.flashArc(route.arc.from, route.arc.to);
+      for (const { at: w, dir } of route.lines) {
         // A shelved worker whose box is not open has no curve.
         if (!this.rowList.includes(w)) continue;
         const sel = `g[data-sess="${CSS.escape(w.sessId)}"]`;
@@ -2126,14 +2133,84 @@
       }
     }
 
-    // A SendMessage lights the lines from whichever of its two copies (the
-    // sender's, the receiver's) comes first live: a released box, or one
-    // still loading its history, holds its copy back or never gets it.
+    // A SendMessage lights the lines, or flies its arc, from whichever of its
+    // two copies (the sender's, the receiver's) comes first live: a released
+    // box, or one still loading its history, holds its copy back or never
+    // gets it.
     flashMessage(p) {
       const a = this.areaByName(p.from);
       const b = this.areaByName(p.to);
       if (!this._msgOnce) this._msgOnce = Links.onceWithin(MSG_ONCE_MS);
       if (this._msgOnce(`${a?.sessId || p.from}>${b?.sessId || p.to}>${p.text || ''}`)) this.flashLink(p.from, p.to);
+    }
+
+    // A message from one worker's box to another's: a temporary arc from the
+    // sender's name tag to the receiver's, lit like a line (the same dashes
+    // and pulse, sender → receiver) for LINK_FLASH_MS, then faded out and
+    // removed. One arc per sender and receiver: a new message on a lit arc
+    // starts it over; the reply, the other way, has its own.
+    flashArc(from, to) {
+      const NS = 'http://www.w3.org/2000/svg';
+      let layer = this.linksEl.querySelector(':scope > .sdk-arcs');
+      if (!layer) {
+        layer = document.createElementNS(NS, 'g');
+        layer.setAttribute('class', 'sdk-arcs');
+        this.linksEl.appendChild(layer);
+      }
+      const key = `${from.sessId}>${to.sessId}`;
+      let g = layer.querySelector(`g[data-arc="${CSS.escape(key)}"]`);
+      if (!g) {
+        g = document.createElementNS(NS, 'g');
+        g.dataset.arc = key;
+        g.setAttribute('class', 'sdk-link sdk-arc');
+        const [line, pulse, head] = [0, 1, 2].map(() => document.createElementNS(NS, 'path'));
+        pulse.setAttribute('class', 'sdk-link-pulse');
+        head.setAttribute('class', 'sdk-arc-head');
+        g.append(line, pulse, head);
+        g._ends = { from, to };
+        layer.appendChild(g);
+      }
+      this.placeArcs();
+      // A hidden stage has nowhere to draw it.
+      if (!g.isConnected) return;
+      const [line, pulse] = g.childNodes;
+      clearTimeout(g._flashT);
+      clearTimeout(g._dropT);
+      g.classList.remove('sdk-arc-out');
+      line.classList.remove('flash-down');
+      pulse.classList.remove('pulse-down');
+      void g.getBoundingClientRect();
+      line.classList.add('flash-down');
+      pulse.classList.add('pulse-down');
+      g._flashT = setTimeout(() => {
+        pulse.classList.remove('pulse-down');
+        g.classList.add('sdk-arc-out');
+        g._dropT = setTimeout(() => g.remove(), ARC_FADE_MS);
+      }, LINK_FLASH_MS);
+    }
+
+    // Each live arc onto its boxes' name tags where they are now, kept in the
+    // gap under the head (sdkLinks.arcPath). An arc whose box left the row,
+    // or on a hidden stage, goes.
+    placeArcs() {
+      const layer = this.linksEl.querySelector(':scope > .sdk-arcs');
+      if (!layer?.firstChild) return;
+      const s = this.stage.offsetParent && this.stage.getBoundingClientRect();
+      if (s) this.linksEl.setAttribute('viewBox', `0 0 ${s.width} ${s.height}`);
+      const ceiling = s && this.mainSlot.parentElement.getBoundingClientRect().bottom - s.top + 8;
+      for (const g of [...layer.children]) {
+        const { from, to } = g._ends;
+        if (!s || !this.rowList.includes(from) || !this.rowList.includes(to)) { g.remove(); continue; }
+        const a = from.el.querySelector('.sdk-cap').getBoundingClientRect();
+        const b = to.el.querySelector('.sdk-cap').getBoundingClientRect();
+        const { d, head } = Links.arcPath(a.left - s.left + a.width / 2, a.top - s.top,
+          b.left - s.left + b.width / 2, b.top - s.top, ceiling);
+        const [line, pulse, tip] = g.childNodes;
+        line.setAttribute('d', d);
+        pulse.setAttribute('d', d);
+        pulse.style.setProperty('--len', `${Math.ceil(line.getTotalLength())}px`);
+        tip.setAttribute('d', head);
+      }
     }
 
     // An [orchestration] delivery reaching the orchestrator: each worker

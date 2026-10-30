@@ -163,6 +163,12 @@
 .sdk-link path.pulse-up { animation: sdk-pulse-up 1.5s linear 3; }
 @keyframes sdk-pulse-down { from { stroke-dashoffset: 28px; } to { stroke-dashoffset: calc(-1 * var(--len)); } }
 @keyframes sdk-pulse-up { from { stroke-dashoffset: calc(-1 * var(--len)); } to { stroke-dashoffset: 28px; } }
+/* A worker → worker arc (flashArc) is lit the same way. It runs from the
+   sender to the receiver, so the "down" pair moves along it that way; an
+   arrowhead marks the receiver. At the end it fades (ARC_FADE_MS) and goes. */
+.sdk-arc { transition: opacity .4s; }
+.sdk-arc.sdk-arc-out { opacity: 0; }
+.sdk-link path.sdk-arc-head { fill: var(--magenta); stroke: none; }
 
 /* The top: the shelf, then the orchestrator's box; alone, it fills the stage. */
 .sdk-head { position: relative; z-index: 1; display: flex; gap: 14px; flex: 1; min-height: 0; }
