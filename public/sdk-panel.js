@@ -61,7 +61,8 @@
   const RELEASE_MS = 60000;        // hidden this long, a box drops its feed
   const FOLLOW_SLACK_PX = 48;
   const USER_SCROLL_MS = 800;      // a scroll this soon after the reader's input is theirs
-  const LINK_FLASH_MS = 1600;
+  const LINK_FLASH_MS = 4500;      // a line lit by a message or report (three pulses)
+  const MSG_ONCE_MS = 10000;       // the two copies of one SendMessage light the lines once
   const VIEWS = ['live', 'notes'];
   const VIEW_STORE = 'sdkPanelViews';
   const VIEW_STORE_MAX = 200;
@@ -78,6 +79,7 @@
   // envelopes' ts: a replay ages a call from its own record. The browser's
   // offset from it is the latest live envelope's.
   const Activity = window.sdkActivity;
+  const Links = window.sdkLinks;
   let clockSkew = 0;
   const serverNow = () => Date.now() - clockSkew;
 
@@ -1019,6 +1021,7 @@
       if (p.kind === 'message') return this.applyPeerMessage(p, live);
       if (p.kind === 'notice') {
         if (/^Model not changed/.test(p.text || '')) this.modelRefused();
+        if (live) this.panel.flashDelivery(this, p.text);
         return this.notice(p.text, p.level === 'warning' ? 'warn' : p.level);
       }
       if (p.kind === 'files') { if (live) this.requestTodo(); return; }
@@ -1461,14 +1464,13 @@
     }
 
     // One per SendMessage, emitted on both the sender's and the receiver's
-    // session. The receiver's Live shows the text; the sender's side only
-    // lights the line between the two boxes. A message neither end of which
-    // is recognised yet (membership not fetched) is shown as `a → b`.
+    // session (a worker's brief only on the receiver's). The receiver's Live
+    // shows the text; either copy lights the line between the two boxes,
+    // once. A message neither end of which is recognised yet (membership not
+    // fetched) is shown as `a → b`.
     applyPeerMessage(p, live) {
-      if (this.isMe(p.from) && !this.isMe(p.to)) {
-        if (live) this.panel.flashLink(p.from, p.to);
-        return;
-      }
+      if (live) this.panel.flashMessage(p);
+      if (this.isMe(p.from) && !this.isMe(p.to)) return;
       const from = shortName(p.from, this.panel.run);
       const card = el('div', 'sdk-peer in');
       card.appendChild(el('div', 'sdk-peer-head', this.isMe(p.to) ? `from ${from}` : `${from} → ${shortName(p.to, this.panel.run)}`));
@@ -2081,11 +2083,18 @@
           if (!g) {
             g = document.createElementNS(NS, 'g');
             g.dataset.sess = a.sessId;
-            g.append(document.createElementNS(NS, 'path'), document.createElementNS(NS, 'circle'));
+            const pulse = document.createElementNS(NS, 'path');
+            pulse.setAttribute('class', 'sdk-link-pulse');
+            g.append(document.createElementNS(NS, 'path'), pulse, document.createElementNS(NS, 'circle'));
             svg.appendChild(g);
           }
           g.setAttribute('class', `sdk-link sdk-link-${st}`);
-          g.firstChild.setAttribute('d', `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`);
+          const d = `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`;
+          g.firstChild.setAttribute('d', d);
+          // The pulse's dash pattern spans the line's length.
+          const pulse = g.childNodes[1];
+          pulse.setAttribute('d', d);
+          pulse.style.setProperty('--len', `${Math.ceil(g.firstChild.getTotalLength())}px`);
           const dot = g.lastChild;
           dot.setAttribute('cx', x1); dot.setAttribute('cy', y1); dot.setAttribute('r', 3);
           keep.add(g);
@@ -2095,27 +2104,43 @@
     }
 
     // A message or report travelling between two boxes: the worker's line
-    // lights up, moving down (from the orchestrator) or up (to it).
+    // lights for LINK_FLASH_MS, its dashes and a pulse moving down (from the
+    // orchestrator) or up (toward it), see sdkLinks.linkFlashes. A new flash
+    // on a lit line starts over.
     flashLink(from, to) {
-      const a = this.areaByName(from);
-      const b = this.areaByName(to);
-      const hit = [];
-      if (a && a.role === 'worker') hit.push([a, 'up']);
-      if (b && b.role === 'worker') hit.push([b, 'down']);
-      for (const [w, dir] of hit) {
+      for (const { at: w, dir } of Links.linkFlashes(this.areaByName(from), this.areaByName(to))) {
         // A shelved worker whose box is not open has no curve.
         if (!this.rowList.includes(w)) continue;
-        const sel = `g[data-sess="${CSS.escape(w.sessId)}"] path`;
+        const sel = `g[data-sess="${CSS.escape(w.sessId)}"]`;
         // A curve not drawn yet (a box just added): draw now.
-        let path = this.linksEl.querySelector(sel);
-        if (!path) { this.drawLinks(); path = this.linksEl.querySelector(sel); }
-        if (!path) continue;
-        path.classList.remove('flash-up', 'flash-down');
-        void path.getBoundingClientRect();
-        path.classList.add(`flash-${dir}`);
-        clearTimeout(path._flashT);
-        path._flashT = setTimeout(() => path.classList.remove(`flash-${dir}`), LINK_FLASH_MS);
+        let g = this.linksEl.querySelector(sel);
+        if (!g) { this.drawLinks(); g = this.linksEl.querySelector(sel); }
+        if (!g) continue;
+        for (const [path, cls] of [[g.firstChild, 'flash'], [g.querySelector('.sdk-link-pulse'), 'pulse']]) {
+          path.classList.remove(`${cls}-up`, `${cls}-down`);
+          void path.getBoundingClientRect();
+          path.classList.add(`${cls}-${dir}`);
+          clearTimeout(path._flashT);
+          path._flashT = setTimeout(() => path.classList.remove(`${cls}-${dir}`), LINK_FLASH_MS);
+        }
       }
+    }
+
+    // A SendMessage lights the lines from whichever of its two copies (the
+    // sender's, the receiver's) comes first live: a released box, or one
+    // still loading its history, holds its copy back or never gets it.
+    flashMessage(p) {
+      const a = this.areaByName(p.from);
+      const b = this.areaByName(p.to);
+      if (!this._msgOnce) this._msgOnce = Links.onceWithin(MSG_ONCE_MS);
+      if (this._msgOnce(`${a?.sessId || p.from}>${b?.sessId || p.to}>${p.text || ''}`)) this.flashLink(p.from, p.to);
+    }
+
+    // An [orchestration] delivery reaching the orchestrator: each worker
+    // whose report, idle or exit it carries has its line light up.
+    flashDelivery(area, text) {
+      if (area !== this.main) return;
+      for (const name of Links.deliveryWorkers(text)) this.flashLink(name, area.name);
     }
 
     // ---- sending ----
