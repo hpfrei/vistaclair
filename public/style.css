@@ -220,56 +220,9 @@ body.nav-loading .view-nav {
   border-right: 7px solid rgb(30 32 48 / 72%);
   transition: border-right-color 0.2s;
 }
-.view-tab-action.autoclear-switch { cursor: pointer; }
-.view-tab-action:not(.autoclear-on):hover {
+.view-tab-action:hover {
   color: rgba(255, 255, 255, 0.85);
   border-color: rgba(255, 255, 255, 0.25);
-}
-/* Autoclear toggle icon inside button */
-.autoclear-toggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  color: rgba(255, 255, 255, 0.3);
-  transition: color 0.2s, background 0.2s, filter 0.2s;
-  flex-shrink: 0;
-  cursor: pointer;
-}
-.autoclear-toggle:hover {
-  color: rgba(255, 255, 255, 0.75);
-  background: rgba(255, 255, 255, 0.08);
-}
-.autoclear-toggle.active {
-  color: #34d399;
-  filter: drop-shadow(0 0 3px rgba(52, 211, 153, 0.45));
-}
-.autoclear-toggle.active:hover {
-  color: #6ee7b7;
-  background: rgba(52, 211, 153, 0.12);
-  filter: drop-shadow(0 0 5px rgba(52, 211, 153, 0.6));
-}
-.autoclear-label-text {
-  pointer-events: none;
-}
-/* Button highlight when autoclear is on */
-.view-tab-action.autoclear-on {
-  border-color: rgba(52, 211, 153, 0.3);
-  background: rgb(22 34 32 / 82%);
-  color: rgba(180, 240, 220, 0.75);
-}
-.view-tab-action.autoclear-on::before {
-  border-right-color: rgb(22 34 32 / 82%);
-}
-.view-tab-action.autoclear-on:hover {
-  background: rgb(28 42 38 / 88%);
-  border-color: rgba(52, 211, 153, 0.45);
-  color: rgba(210, 255, 240, 0.9);
-}
-.view-tab-action.autoclear-on:hover::before {
-  border-right-color: rgb(28 42 38 / 88%);
 }
 .view-nav-action {
   margin-left: auto;

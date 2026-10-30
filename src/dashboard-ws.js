@@ -314,8 +314,6 @@ class DashboardBroadcaster {
             ws.inspectorSubs.delete(msg.instanceId);
           } else if (msg.type === 'inspector:clearKind') {
             if (['cli', 'app', 'ext'].includes(msg.kind)) this.sessions.clearKind(msg.kind);
-          } else if (msg.type === 'inspector:setAutoClear') {
-            this.sessions.setAutoClear(!!msg.value);
           } else if (msg.type === 'inspector:getSessionTotals') {
             // CLI tab ids are cli-<session dir>. Later progress and every new
             // turn arrive as inspector:sessionTotals while the tab is open.
