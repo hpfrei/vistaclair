@@ -1746,7 +1746,7 @@
     call.el.querySelector('.ln-call-ico').textContent = line.icon;
     _setText(call.el.querySelector('.ln-call-name'), line.name);
     const arg = call.el.querySelector('.ln-call-arg');
-    _setText(arg, line.arg);
+    _callArg(arg, line);
     arg.title = line.title;
     // What the call is for, under its line.
     let desc = call.el.querySelector('.ln-call-desc');
@@ -1762,6 +1762,34 @@
     }
     if (call.id && v) v.calls.set(call.id, call);
     _callRefresh(call);
+  }
+
+  /* The call's argument, its paths file links as elsewhere in the inspector:
+     a file it names shortened links the whole file; in other text, what
+     linkifyFilePaths finds, short of a cut argument's last word. */
+  function _callArg(arg, line) {
+    if (arg.textContent === line.arg && arg.dataset.filepath === (line.path || undefined)) return;
+    arg.textContent = '';
+    delete arg.dataset.filepath;
+    if (line.path) {
+      arg.dataset.filepath = line.path;
+      const a = document.createElement('a');
+      a.className = 'file-link';
+      a.href = '#';
+      a.title = 'Preview ' + line.path;
+      a.dataset.filepath = line.path;
+      a.textContent = line.arg;
+      arg.appendChild(a);
+      return;
+    }
+    arg.appendChild(document.createTextNode(line.linkable));
+    if (line.linkable !== line.arg) {
+      const tail = document.createElement('span');
+      tail.className = 'no-linkify';
+      tail.textContent = line.arg.slice(line.linkable.length);
+      arg.appendChild(tail);
+    }
+    linkifyDetail(arg);
   }
 
   // Attach the call's result once the next turn brought it — open, when it
@@ -1802,6 +1830,7 @@
     body._call = call;
     body.innerHTML = '<pre class="ln-result-pre"></pre>';
     body.firstChild.textContent = rows.head;
+    linkifyDetail(body.firstChild);
     if (rows.more) {
       const more = document.createElement('button');
       more.className = 'ln-result-more';
@@ -2085,11 +2114,15 @@
       if (!call) return;
       call.manual = true;
       call.lane.io.unobserve(call.body);
-      call.body.firstChild.textContent += '\n' + (call.rest || '');
+      // Appended, so the links made so far stay; linkify skips them.
+      call.body.firstChild.appendChild(document.createTextNode('\n' + (call.rest || '')));
+      linkifyDetail(call.body.firstChild);
       call.rest = '';
       more.remove();
       return;
     }
+    const link = e.target.closest('.file-link');
+    if (link) { e.preventDefault(); openFilePreview(link.dataset.filepath); return; }
     const thumb = e.target.closest('.ln-thumb');
     if (thumb) { openFilePreview(thumb.dataset.filepath); return; }
     if (e.target.closest('.ln-result-body')) return;

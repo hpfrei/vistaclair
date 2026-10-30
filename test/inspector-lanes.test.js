@@ -209,3 +209,20 @@ test('a turn\'s usage reads compactly, the full numbers in its title', () => {
   assert.strictEqual(L.usageLine({}), null);
   assert.strictEqual(L.usageLine(null), null);
 });
+
+test('a call line links the file it names, never half a cut path', () => {
+  const read = L.toolLine('Read', { file_path: '/home/u/proj/src/lib/file.js' });
+  assert.strictEqual(read.path, '/home/u/proj/src/lib/file.js');
+  assert.strictEqual(read.linkable, '');
+  // Only what linkifyFilePaths would link: absolute, with an extension.
+  assert.strictEqual(L.toolLine('Read', { file_path: 'src/file.js' }).path, '');
+  assert.strictEqual(L.toolLine('Read', { file_path: '/home/u/Makefile' }).path, '');
+  assert.strictEqual(L.toolLine('Read', { file_path: '/home/u/a b.js' }).path, '');
+  const ls = L.toolLine('Bash', { command: 'ls /home/u/a.png' });
+  assert.strictEqual(ls.path, '');
+  assert.strictEqual(ls.linkable, 'ls /home/u/a.png');
+  const long = L.toolLine('Bash', { command: 'cat /home/u/one.txt ' + 'x'.repeat(130) + ' /home/u/very/long/two.txt' });
+  assert.ok(long.arg.endsWith('\u2026'));
+  assert.ok(long.arg.startsWith(long.linkable));
+  assert.ok(long.linkable.includes('/home/u/one.txt') && !long.linkable.includes('/home/u/very'));
+});
