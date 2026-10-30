@@ -1,5 +1,6 @@
 // The SDK run panel's lines (public/sdk-links.js): which lines a message or
-// report lights and which way it moves on each, which workers an
+// report lights and which way it moves on each, when it takes an arc between
+// two workers and that arc's shape, which workers an
 // [orchestration] delivery speaks for, and the guard that keeps the two
 // copies of one message from lighting the lines twice.
 //
@@ -32,6 +33,66 @@ test('an end the panel does not show lights nothing on its side', () => {
   assert.deepStrictEqual(L.linkFlashes(null, orch), []);
   assert.deepStrictEqual(L.linkFlashes(null, null), []);
   assert.deepStrictEqual(L.linkFlashes(w1, w1), []);
+});
+
+test('worker → worker, both boxes in the row: one arc, no line', () => {
+  const r = L.messageRoute(w1, w2, () => true);
+  assert.deepStrictEqual(r.arc, { from: w1, to: w2 });
+  assert.deepStrictEqual(r.lines, []);
+  assert.deepStrictEqual(L.messageRoute(w2, w1, () => true).arc, { from: w2, to: w1 });
+});
+
+test('worker → worker with a box not in the row lights the lines as before', () => {
+  const only = (...shown) => (a) => shown.includes(a);
+  for (const inRow of [only(w1), only(w2), only()]) {
+    const r = L.messageRoute(w1, w2, inRow);
+    assert.strictEqual(r.arc, null);
+    assert.deepStrictEqual(dirs(r.lines), [[w1.name, 'up'], [w2.name, 'down']]);
+  }
+});
+
+test('traffic with the orchestrator, or with an end not shown, never takes an arc', () => {
+  const all = () => true;
+  assert.strictEqual(L.messageRoute(orch, w1, all).arc, null);
+  assert.deepStrictEqual(dirs(L.messageRoute(orch, w1, all).lines), [[w1.name, 'down']]);
+  assert.strictEqual(L.messageRoute(w1, orch, all).arc, null);
+  assert.deepStrictEqual(dirs(L.messageRoute(w1, orch, all).lines), [[w1.name, 'up']]);
+  assert.strictEqual(L.messageRoute(w1, null, all).arc, null);
+  assert.deepStrictEqual(L.messageRoute(w1, w1, all), { arc: null, lines: [] });
+});
+
+// The numbers of a path's data, in order.
+const nums = (d) => d.match(/-?\d+(\.\d+)?/g).map(Number);
+
+test('an arc runs from the sender\'s tag to the receiver\'s and bows up', () => {
+  // Rightward: starts left (the sender), ends right under the arrowhead.
+  const right = L.arcPath(100, 200, 400, 200, 120);
+  const [sx, sy, c1x, c1y, c2x, c2y, ex, ey] = nums(right.d);
+  assert.deepStrictEqual([sx, sy], [106, 200]);
+  assert.deepStrictEqual([ex, ey], [406, 193]);
+  assert.ok(c1y < sy && c2y === c1y && c1x === sx && c2x === ex);
+  // The arrowhead's tip is on the receiver's tag, its base where the arc ends.
+  const [hx1, hy1, tx, ty, hx2, hy2] = nums(right.head);
+  assert.deepStrictEqual([tx, ty], [406, 200]);
+  assert.deepStrictEqual([hx1, hy1, hx2, hy2], [402, 193, 410, 193]);
+  // Leftward: drawn from the right, and beside the rightward one.
+  const left = L.arcPath(400, 200, 100, 200, 120);
+  const l = nums(left.d);
+  assert.deepStrictEqual([l[0], l[1], l[6]], [394, 200, 94]);
+  assert.notStrictEqual(left.d, right.d);
+});
+
+test('an arc rises with the distance but never above the ceiling', () => {
+  // A cubic with level handles at c peaks at base + 3/4 (c - base).
+  const peak = (a) => { const n = nums(a.d); return n[1] + 0.75 * (n[3] - n[1]); };
+  const near = L.arcPath(100, 200, 200, 200, 0);
+  const far = L.arcPath(100, 200, 500, 200, 0);
+  assert.ok(peak(far) < peak(near));
+  assert.ok(Math.abs(peak(far) - (200 - 400 * 0.35)) < 0.2);
+  const capped = L.arcPath(100, 200, 900, 200, 150);
+  assert.ok(Math.abs(peak(capped) - 150) < 0.2);
+  // No room at all: still a small bow.
+  assert.ok(peak(L.arcPath(100, 200, 900, 200, 199)) < 200);
 });
 
 test('a delivery names the workers whose report, idle or exit it carries', () => {
