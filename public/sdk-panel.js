@@ -50,7 +50,8 @@
   const { sendWs, state, escHtml, renderMarkdown, renderMarkdownDebounced, cancelRenderDebounce, showConfirm } = D;
 
   const POLL_MS = 15000;           // backstop: TODO/NOTES edits normally arrive as platform.files
-  const TICK_MS = 1000;            // the "now:" line's elapsed time
+  const TICK_MS = 1000;            // the activity rows' elapsed times
+  const NOW_ROWS = 3;              // activity rows shown; the rest are "+N more"
   const HISTORY_WAIT_MS = 10000;
   const PAGE = 500;                // envelopes per sdk:history page
   const FEED_MAX = 500;            // feed entries a box keeps while following
@@ -73,6 +74,12 @@
   const panels = new Map();   // tabId -> Panel
   const areas = new Map();    // sessId -> Area (across panels: workers have no tab)
   let _lastWs = null;
+  // The activity rows (public/sdk-activity.js) run on the server's clock, the
+  // envelopes' ts: a replay ages a call from its own record. The browser's
+  // offset from it is the latest live envelope's.
+  const Activity = window.sdkActivity;
+  let clockSkew = 0;
+  const serverNow = () => Date.now() - clockSkew;
 
   // ---- small helpers -------------------------------------------------------
 
@@ -83,7 +90,6 @@
   const fmtSecs = (ms) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : `${(ms / 1000).toFixed(1)}s`;
   const fmtAgo = (ms) => ms < 60000 ? `${Math.max(0, Math.floor(ms / 1000))}s` : ms < 3600000 ? `${Math.floor(ms / 60000)}m`
     : ms < 86400000 ? `${Math.floor(ms / 3600000)}h` : `${Math.floor(ms / 86400000)}d`;
-  const fmtAge = (ms) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}s` : `${Math.floor(ms / 1000)}s`;
   const costOf = (c) => typeof c === 'number' ? c
     : c && typeof c === 'object' ? (c.usd ?? c.costUsd ?? c.totalUsd ?? c.total ?? null) : null;
   const isDone = (s) => /^(done|complete|completed|finished|dropped|✓|✔)/i.test(String(s || '').trim());
@@ -314,6 +320,7 @@
       this.shown = false;            // see setShown
       this.stale = true;             // no feed loaded: it loads when shown
       this.compactions = 0;
+      this.act = Activity.createActivity();   // the activity rows' calls and tasks (reset() renews it)
       // A stored view this panel no longer has (the old TODO) opens Live.
       this.view = storedKey(VIEW_STORE, sessId) || 'live';
       this._build();
@@ -508,7 +515,9 @@
     setState(s) {
       if (!s || s === this.state) return;
       this.state = s;
-      if (s !== 'busy' && s !== 'awaiting') this.nowTool = null;
+      // Out of its turn, no call of it runs; ended, nothing of it does.
+      if (ENDED.has(s)) this.act.clear();
+      else if (s !== 'busy' && s !== 'awaiting' && s !== 'pausing') this.act.turnEnd();
       // A session that ended will take nothing more in.
       if (ENDED.has(s)) for (const id of [...this.pending.keys()]) this.cancelPending(id, 'ended');
       this.renderHeader();
@@ -653,27 +662,50 @@
       ].filter(Boolean).join('\n');
     }
 
-    // One line under the caption: what the agent is doing right now.
+    // Under the caption: what the agent is running right now, one row each
+    // (its age first), at most NOW_ROWS, the rest "+N more". In a turn, or
+    // with a background task, the block keeps the rows' height, so the box
+    // does not jump as calls come and go.
     renderNow() {
       const s = this.state || 'idle';
-      let text = '';
+      const ended = this.ended();
+      const inTurn = !ended && (s === 'busy' || s === 'awaiting' || s === 'pausing');
+      const items = ended ? [] : this.act.items().filter(x => inTurn || x.bg);
+      const now = serverNow();
+      const rows = items.map(x => ({ ...Activity.describe(x, now, prettyTool), bg: x.bg }));
+      let head = null;
       let cls = 'idle';
-      if (this.ended()) text = 'ended';
-      else if (s === 'awaiting') { text = 'waiting for your answer'; cls = 'awaiting'; }
-      else if (s === 'pausing') { text = 'pausing: writing its resume note'; cls = 'busy'; }
-      else if (s === 'paused') text = 'paused';
-      else if (s === 'busy') {
-        cls = 'busy';
-        const t = this.nowTool;
-        if (t) {
-          const age = t.startedAt ? ` · ${fmtAge(Date.now() - t.startedAt)}` : '';
-          text = `now: ${prettyTool(t.name)} ${t.input?.gist || ''}`.trim() + age;
-        } else {
-          text = 'now: thinking…';
+      if (ended) head = 'ended';
+      else if (s === 'awaiting') { head = 'waiting for your answer'; cls = 'awaiting'; }
+      else if (s === 'pausing') { head = 'pausing: writing its resume note'; cls = 'busy'; }
+      else if (s === 'busy') { cls = 'busy'; if (!items.some(x => !x.bg)) head = 'thinking…'; }
+      else {
+        const n = items.length;
+        head = `${s === 'paused' ? 'paused' : 'idle'}${n ? ` · ${n} background task${n === 1 ? '' : 's'}` : ''}`;
+      }
+      const lines = head ? [{ head, text: head, tip: head }, ...rows] : rows;
+      const shown = lines.slice(0, NOW_ROWS);
+      const more = lines.length - shown.length;
+      const tall = inTurn || rows.length > 0;
+      this._nowTicks = rows.some(r => r.age);
+      const sig = JSON.stringify([cls, tall, more, shown.map(l => [l.head ? 'h' : l.bg ? 'b' : 'f', l.text])]);
+      if (sig === this._nowSig) return;
+      this._nowSig = sig;
+      this.nowEl.className = `sdk-now sdk-now-${cls}${tall ? ' tall' : ''}`;
+      const all = lines.map(l => l.text).join('\n');
+      this.nowEl.replaceChildren(...shown.map((l, i) => {
+        const row = el('div', `sdk-now-row${l.head ? ' head' : l.bg ? ' bg' : ''}`);
+        row.title = l.tip;
+        if (l.head) row.textContent = l.text;
+        else {
+          row.append(el('span', 'sdk-now-ico', l.bg ? '◌' : '⏵'));
+          if (l.bg) row.append(el('span', 'sdk-now-bg', 'bg'));
+          row.append(el('span', 'sdk-now-age', l.age), el('span', 'sdk-now-what', l.what));
         }
-      } else text = 'idle';
-      if (text !== this._nowText) { this._nowText = text; this.nowEl.textContent = text; this.nowEl.title = text; }
-      this.nowEl.className = `sdk-now sdk-now-${cls}`;
+        if (more && i === shown.length - 1) row.appendChild(el('span', 'sdk-now-more', `+${more} more`)).title = all;
+        return row;
+      }));
+      this.nowEl.title = rows.length > 1 || more ? all : '';
     }
 
     // ---- TODO.md / NOTES.md ----
@@ -733,11 +765,12 @@
       this.feed.replaceChildren(this.moreEl);
       this.msgs = new Map();      // message.id -> {id, pk, blocks}
       this.streams = new Map();   // parent_tool_use_id|'' -> {rec, byIndex}
-      this.tools = new Map();     // tool_use_id -> {id, name, input, done, startedAt}
+      this.tools = new Map();     // tool_use_id -> {id, name, input, done, sub}
       this.subs = new Map();      // Agent tool_use_id -> {label, color, description}
       this.subCounts = new Map(); // subagent type -> runs so far
       this.subRuns = 0;
-      this.nowTool = null;
+      this.act = Activity.createActivity();
+      this._nowSig = null;
       this.seen = new Set();      // the newest SEEN_MAX message uuids
       this.pending = new Map();   // user turn id -> its "waiting" chip
       this.pendingEl.innerHTML = '';
@@ -812,6 +845,7 @@
     // ts: the envelope's server time (ms), off: its transcript offset, when
     // it has them. A released box only keeps its caption up to date.
     receive(ev, ts, off) {
+      if (typeof ts === 'number' && ts > 0) clockSkew = Date.now() - ts;
       if (this.stale) { try { this.applyCaption(ev); } catch (e) { console.warn('sdk-panel: event', e, ev); } return; }
       if (this.historyPending) { this.queue.push({ ev, ts, off }); return; }
       this._off = typeof off === 'number' ? off : null;
@@ -862,7 +896,7 @@
       }
       const t = node.vcTool ? this.tools.get(node.vcTool) : null;
       if (t && t.lineEl === node) {
-        // A call still running keeps its record (the "now:" line, its result).
+        // A call still running keeps its record (its result).
         t.lineEl = t.lineName = t.lineText = t.chipEl = null;
         if (t.done) this.forgetTool(t);
       }
@@ -921,14 +955,14 @@
 
     // Draws an older page: this box's methods and fields by inheritance, its
     // own maps and a detached feed, and nothing that reaches the caption, the
-    // "now:" line, the pending chips or the window.
+    // activity rows, the pending chips or the window.
     shadow() {
       const sh = Object.create(this);
       Object.assign(sh, {
         feed: document.createDocumentFragment(),
         msgs: new Map(), streams: new Map(), tools: new Map(), subs: new Map(), subCounts: new Map(), subRuns: 0,
         seen: new Set(), pending: new Map(), pendingEl: el('div'),
-        nowTool: null, gotStatus: true, initModel: null, _quietInit: true, _replaying: true,
+        act: Activity.createActivity(), gotStatus: true, initModel: null, _quietInit: true, _replaying: true,
       });
       for (const k of ['setState', 'setCost', 'renderHeader', 'renderContext', 'renderNow', 'markUnread', 'requestTodo', 'applyStatus', 'modelRefused', 'trim']) sh[k] = () => {};
       return sh;
@@ -976,6 +1010,8 @@
 
     apply(ev, live, ts) {
       if (!ev || typeof ev !== 'object') return;
+      // When it happened, on the server's clock (unknown: a seeded record).
+      this._at = typeof ts === 'number' && ts > 0 ? ts : live ? serverNow() : null;
       if (ev.sdk) return this.applySdk(ev.sdk, live, ts);
       if (ev.user) return this.applyUser(ev.user, live);
       const p = ev.platform;
@@ -1034,14 +1070,9 @@
         case 'user': return this.applySdkUser(m);
         case 'result': return this.applyResult(m, ts);
         case 'system': return this.applySystem(m);
-        case 'tool_progress': {
-          const t = this.tools.get(m.tool_use_id);
-          if (t && !t.done && live) {
-            t.startedAt = Date.now() - (m.elapsed_time_seconds || 0) * 1000;
-            if (t === this.nowTool) this.renderNow();
-          }
+        case 'tool_progress':
+          if (this.act.progress(m, this._at)) this.renderNow();
           return;
-        }
       }
     }
 
@@ -1124,14 +1155,14 @@
     toolStarted(id, name, pk) {
       let t = id ? this.tools.get(id) : null;
       if (!t) {
-        t = { id, name, input: null, done: false, startedAt: this._replaying ? null : Date.now(), sub: !!pk };
+        t = { id, name, input: null, done: false, sub: !!pk };
         if (id) { this.tools.set(id, t); capOldest(this.tools, MAP_MAX, (x) => x.done); }
       }
-      if (!t.sub && !t.done) { this.nowTool = t; this.renderNow(); }
+      if (!t.sub && !t.done && this.act.toolStart(id, name, this._at)) this.renderNow();
       return t;
     }
 
-    // A call keeps what its line and the "now:" line show, not its whole
+    // A call keeps what its line and its activity row show, not its whole
     // input (a Write's file, an Edit's strings).
     setToolInput(t, input) {
       if (!t) return;
@@ -1147,7 +1178,7 @@
         t.chipEl = t.lineEl.insertBefore(this.subChip(t.id), t.lineName);
       }
       this.renderToolLine(t);
-      if (t === this.nowTool) this.renderNow();
+      if (!t.sub && this.act.toolInput(t.id, t.input)) this.renderNow();
     }
 
     renderToolLine(t) {
@@ -1287,11 +1318,7 @@
           // A subagent's stream ends with its call.
           this.streams.delete(t.id);
         }
-        if (t && t === this.nowTool) {
-          // The newest main-agent call still running, if any.
-          this.nowTool = [...this.tools.values()].reverse().find(x => !x.done && !x.sub) || null;
-          this.renderNow();
-        }
+        if (this.act.toolDone(b.tool_use_id)) this.renderNow();
         // A line already out of the window takes its record along.
         if (t && !t.lineEl) this.forgetTool(t);
       }
@@ -1320,7 +1347,7 @@
       this.streams.clear();
       // The caption's cost is not total_cost_usd (this query's own, not the
       // session folder's): the status that follows every result carries it.
-      this.nowTool = null;
+      this.act.turnEnd();
       if (!this.gotStatus) this.setState('idle');
       this.renderNow();
     }
@@ -1353,6 +1380,9 @@
           return;
         case 'local_command_output':
           if (m.content) this.notice(m.content);
+          return;
+        case 'task_started': case 'task_notification': case 'task_updated': case 'background_tasks_changed':
+          if (this.act.system(m, this._at)) this.renderNow();
           return;
       }
     }
@@ -2397,7 +2427,7 @@
     }
 
     tick() {
-      for (const a of this.allAreas()) if (a.nowTool?.startedAt && a.state === 'busy') a.renderNow();
+      for (const a of this.allAreas()) if (a._nowTicks) a.renderNow();
       if (this.cards.size) this.renderShelfAges();
     }
 
