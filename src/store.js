@@ -3,6 +3,7 @@ const path = require('path');
 const { DATA_HOME } = require('./utils');
 const { getModelPricing } = require('./capabilities');
 const { TraceIndex } = require('./trace-index');
+const { TurnAttributor } = require('./turn-attribution');
 const { SessionTotals } = require('./session-totals');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
@@ -24,6 +25,8 @@ class InteractionStore {
     // Authoritative subagent attribution from Claude's trace files.
     this.traceIndexes = new Map();   // sessId → TraceIndex
     this.pendingRequestEnrich = new Map(); // request-id → true (awaiting trace resolution)
+    // Request-time attribution, provisional until the trace confirms it.
+    this.attributors = new Map();    // instanceId → TurnAttributor
     this._broadcaster = null;
 
     // Whole-session figures for the inspector footer; memory holds only the
@@ -108,19 +111,37 @@ class InteractionStore {
       : this._findHookByToolUseId(key);
     if (!target) return;
 
-    const subagent = this._subagentFor(sessId, agentId);
-    // 'main' resolution: leave subagent unset (interaction belongs on main).
-    if (!subagent) return;
-    // Don't clobber an existing, equal stamp.
-    if (target.subagent?.agentId === subagent.agentId) return;
+    let subagent = this._subagentFor(sessId, agentId);
+    const provisional = !!target.subagentProvisional;
+    if (kind === 'request') this._learnOwner(target, subagent);
+    if (!subagent) {
+      // 'main' resolution: leave subagent unset (interaction belongs on main),
+      // unless the request-time guess put it on a subagent.
+      if (!provisional) return;
+      delete target.subagent;
+      subagent = null;
+    } else if (target.subagent?.agentId === subagent.agentId) {
+      // Don't clobber an existing, equal stamp; a guess just becomes certain.
+      if (!provisional) return;
+      const meta = this.traceIndexes.get(sessId)?.getAgentMeta(subagent.agentId);
+      subagent = {
+        ...subagent,
+        agentType: meta?.agentType || target.subagent.agentType || subagent.agentType,
+        description: subagent.description || target.subagent.description || null,
+        toolUseId: subagent.toolUseId || target.subagent.toolUseId || null,
+      };
+      target.subagent = subagent;
+    } else {
+      target.subagent = subagent;
+    }
+    delete target.subagentProvisional;
 
-    target.subagent = subagent;
     this._persist(target);
     if (this._broadcaster && target.id) {
       this._broadcaster.broadcast({ type: 'interaction:enriched', interactionId: target.id, subagent });
     }
     // A tool_use resolution also pins any hooks sharing that tool_use_id.
-    if (kind === 'request') {
+    if (kind === 'request' && subagent) {
       const enrichedHooks = this._enrichRelatedHooks(target, subagent);
       if (this._broadcaster) {
         for (const hook of enrichedHooks) {
@@ -128,6 +149,53 @@ class InteractionStore {
         }
       }
     }
+  }
+
+  _attributor(instanceId) {
+    let att = this.attributors.get(instanceId);
+    if (!att) { att = new TurnAttributor(); this.attributors.set(instanceId, att); }
+    return att;
+  }
+
+  /**
+   * Stamp an LLM turn with its owner the moment its request arrives
+   * (src/turn-attribution.js), so its interaction:start already names the
+   * lane. Marked subagentProvisional until applyResolution confirms or
+   * corrects it from the transcript. A main-thread turn stays unstamped.
+   */
+  attributeTurn(interaction) {
+    if (!interaction?.instanceId || interaction.isHook || interaction.isMcp || interaction.subagent) return;
+    const sessId = this.sessionMap.get(interaction.instanceId);
+    const ti = sessId ? this.traceIndexes.get(sessId) : null;
+    const subagent = this._attributor(interaction.instanceId).attribute(interaction.request?.messages, {
+      resolveToolUseId: id => ti?.resolveToolUseId(id) || null,
+      // An agent's meta file lands as it starts; the watcher may not have run yet.
+      agentForCall: tuid => (ti ? ti.agentForToolUse(tuid) || (ti.rescanNow(), ti.agentForToolUse(tuid)) : null),
+      subagentFor: agentId => ti?.getAgentMeta(agentId) || null,
+    });
+    if (!subagent) return;
+    interaction.subagent = subagent;
+    interaction.subagentProvisional = true;
+  }
+
+  /**
+   * A tool_use block of a streaming turn, the moment it is complete: Claude
+   * Code runs the tool (an Agent call: its subagent) before the response ends.
+   */
+  noteToolUse(interaction, block) {
+    if (!interaction?.instanceId || !block?.id) return;
+    this._attributor(interaction.instanceId).noteResponse(interaction.subagent?.agentId, [block], interaction.subagent);
+  }
+
+  // A transcript resolution of a turn: its blocks belong to that owner, and a
+  // guessed 'pending-<call>' agent now has its real id.
+  _learnOwner(turn, subagent) {
+    const att = turn.instanceId ? this.attributors.get(turn.instanceId) : null;
+    if (!att) return;
+    const guessed = turn.subagent?.agentId;
+    if (subagent && guessed?.startsWith('pending-')) att.noteSpawn(guessed.slice('pending-'.length), subagent.agentId);
+    if (subagent?.toolUseId) att.noteSpawn(subagent.toolUseId, subagent.agentId);
+    att.noteResponse(subagent?.agentId, turn.response?.body?.content, subagent);
   }
 
   /**
@@ -539,7 +607,18 @@ class InteractionStore {
     // transcript line isn't written yet, this queues the request-id for the
     // watcher. Idempotent across the multiple save() calls per interaction.
     if (!interaction.isHook && !interaction.isMcp && interaction.status === 'complete') {
+      if (interaction.instanceId) {
+        this._attributor(interaction.instanceId).noteResponse(interaction.subagent?.agentId, interaction.response?.body?.content, interaction.subagent);
+      }
       this.tryEnrichLlmTurn(interaction);
+    }
+    // The hooks that name the agent an Agent call ran, for its turns' lane.
+    if (interaction.isHook && interaction.instanceId) {
+      if (interaction.hookEvent === 'SubagentStart' && interaction.hookAgentId) {
+        this._attributor(interaction.instanceId).noteSpawn(interaction.subagent?.toolUseId, interaction.hookAgentId);
+      } else if (/PostToolUse/.test(interaction.hookEvent || '') && interaction.toolName === 'Agent') {
+        this._attributor(interaction.instanceId).noteSpawn(interaction.toolUseId, interaction.request?.tool_response?.agentId);
+      }
     }
   }
 
@@ -663,6 +742,7 @@ class InteractionStore {
       bare: req.bare || false,
       disableAutoMemory: req.disableAutoMemory !== false,
       subagent: subagent || undefined,
+      subagentProvisional: (subagent && data.subagentProvisional) || undefined,
       pricing: data.pricing || (req.model ? getModelPricing(DATA_HOME, req.model) : undefined),
       rules: Array.isArray(data.rules) ? data.rules : undefined,
     };
@@ -705,6 +785,7 @@ class InteractionStore {
   // (src/inspector-sessions.js, confined to the interactions root).
   forgetSession(instanceId, sessId) {
     this.removeFromMemory([instanceId]);
+    this.attributors.delete(instanceId);
     if (!sessId) return;
     this._evictSweptFromMemory([sessId]);
     this.sessionSeqs.delete(sessId);
@@ -815,6 +896,7 @@ class InteractionStore {
         result: interaction.status,
       },
       subagent: interaction.subagent || undefined,
+      subagentProvisional: (interaction.subagent && interaction.subagentProvisional) || undefined,
       pricing: interaction.pricing || undefined,
       rules: interaction.rules?.length ? interaction.rules : undefined,
     };
