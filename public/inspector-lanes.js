@@ -197,6 +197,33 @@
     return { text, error: false, preview };
   }
 
+  // 1234 -> "1.2k", 2500000 -> "2.5M".
+  const fmtTok = n => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n || 0));
+
+  /* A turn's token usage for its header: ↑ fresh input, ✎ cache write,
+     ⟳ cache read, ↓ output — the ones it has — and the full numbers for a
+     tooltip. { parts: [{ kind, text }], title }, or null without usage. */
+  function usageLine(usage) {
+    if (!usage || typeof usage !== 'object') return null;
+    const kinds = [
+      ['in', '\u2191', usage.input_tokens, 'input'],
+      ['cw', '\u270E', usage.cache_creation_input_tokens, 'cache write'],
+      ['cr', '\u27F3', usage.cache_read_input_tokens, 'cache read'],
+      ['out', '\u2193', usage.output_tokens, 'output'],
+    ];
+    const parts = [];
+    const title = [];
+    for (const [kind, icon, n, what] of kinds) {
+      if (typeof n !== 'number' || (!n && (kind === 'cw' || kind === 'cr'))) continue;
+      parts.push({ kind, text: icon + fmtTok(n) });
+      title.push(`${n.toLocaleString()} ${what}`);
+    }
+    if (!parts.length) return null;
+    const input = (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0);
+    if (input !== (usage.input_tokens || 0)) title.push(`${input.toLocaleString()} input in all`);
+    return { parts, title: title.join(' \u00B7 ') };
+  }
+
   /* A result's text split for the inline view: the first `max` rows, and
      what is left behind "… N more lines". { head, rest, more } */
   function resultRows(text, max = LIMITS.RESULT_ROWS) {
@@ -314,7 +341,7 @@
 
   const api = {
     LIMITS, LANE_MAIN, isLaneTurn, laneKeyOf, groupLanes, newUserText, turnUserText,
-    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, mediaPaths, agentLinks, laneDone,
+    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, mediaPaths, fmtTok, usageLine, agentLinks, laneDone,
     laneWindow, pageOlder,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -189,3 +189,23 @@ test('media path detection matches linkifyFilePaths in public/core.js', () => {
   const lanes = read('inspector-lanes.js').match(/const FILE_PATH_RE = (\/.+\/g);/)[1];
   assert.strictEqual(lanes, core);
 });
+
+test('a turn\'s usage reads compactly, the full numbers in its title', () => {
+  assert.strictEqual(L.fmtTok(456), '456');
+  assert.strictEqual(L.fmtTok(12345), '12.3k');
+  assert.strictEqual(L.fmtTok(2500000), '2.5M');
+  assert.strictEqual(L.fmtTok(undefined), '0');
+  const u = L.usageLine({ input_tokens: 2, cache_creation_input_tokens: 584, cache_read_input_tokens: 72931, output_tokens: 1300 });
+  assert.deepStrictEqual(u.parts, [
+    { kind: 'in', text: '\u21912' }, { kind: 'cw', text: '\u270E584' },
+    { kind: 'cr', text: '\u27F372.9k' }, { kind: 'out', text: '\u21931.3k' },
+  ]);
+  const n = x => x.toLocaleString();
+  assert.strictEqual(u.title, `2 input \u00B7 584 cache write \u00B7 ${n(72931)} cache read \u00B7 ${n(1300)} output \u00B7 ${n(73517)} input in all`);
+  // No cache: no cache parts, no total. A turn still streaming has input only.
+  assert.deepStrictEqual(L.usageLine({ input_tokens: 900, output_tokens: 0, cache_read_input_tokens: 0 }),
+    { parts: [{ kind: 'in', text: '\u2191900' }, { kind: 'out', text: '\u21930' }], title: '900 input \u00B7 0 output' });
+  assert.deepStrictEqual(L.usageLine({ input_tokens: 5 }).parts, [{ kind: 'in', text: '\u21915' }]);
+  assert.strictEqual(L.usageLine({}), null);
+  assert.strictEqual(L.usageLine(null), null);
+});
