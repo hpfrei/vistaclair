@@ -119,7 +119,6 @@
   ];
   const _sessions = new Map();          // instanceId → card from the summary feed
   let _runs = {};                       // runId → { status, orchestrator, workers } from the feed
-  let _sessionsAutoClear = false;
   const _openTabs = new Map();          // instanceId → { loading }, in opening order
   let activeInstanceTab = SESSIONS_TAB;
   const inspectorTabStrip = document.getElementById('inspectorTabStrip');
@@ -206,24 +205,6 @@
       close.title = 'Close this tab';
       btn.appendChild(close);
       inspectorTabStrip.appendChild(btn);
-    }
-
-    // Autoclear: one switch for the whole server — every session is removed
-    // as soon as it is inactive, here and in every other browser.
-    const pinned = document.getElementById('inspectorTabPinned');
-    if (pinned) {
-      const btn = document.createElement('button');
-      btn.className = 'view-tab-action autoclear-switch' + (_sessionsAutoClear ? ' autoclear-on' : '');
-      btn.title = _sessionsAutoClear
-        ? 'Autoclear on: inactive sessions are removed as soon as they stop. Click to turn off.'
-        : 'Autoclear off: each group keeps its 20 newest inactive sessions. Click to remove every inactive session as soon as it stops.';
-      btn.innerHTML = `<span class="autoclear-toggle${_sessionsAutoClear ? ' active' : ''}">${_sessionsAutoClear
-        ? '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.5"/><polyline points="5 8.2 7.2 10.5 11 5.5"/></svg>'
-        : '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 8a5.5 5.5 0 0 1 9.3-4"/><path d="M13.5 8a5.5 5.5 0 0 1-9.3 4"/><polyline points="12 1.5 12 4.5 9 4.5"/><polyline points="4 11.5 4 14.5 7 14.5"/></svg>'
-      }</span><span class="autoclear-label-text">Autoclear</span>`;
-      btn.addEventListener('click', () => sendWs({ type: 'inspector:setAutoClear', value: !_sessionsAutoClear }));
-      pinned.innerHTML = '';
-      pinned.appendChild(btn);
     }
 
     updateStreamingState();
@@ -520,15 +501,14 @@
     }
   }
 
-  // The summary feed: cards, the autoclear switch, and every busy indicator.
+  // The summary feed: cards and every busy indicator.
   let _stripSig = '';
   function _applySessions(msg) {
     _sessions.clear();
     for (const s of msg.sessions || []) _sessions.set(s.instanceId, s);
     _runs = msg.runs || {};
-    _sessionsAutoClear = msg.autoClear === true;
     // The strip is rebuilt only when an open tab's label or state moved.
-    const sig = JSON.stringify([_sessionsAutoClear, ...[..._openTabs.keys()].map(id => [id, _sessions.get(id)?.status === 'inactive', _sessions.get(id)?.label])]);
+    const sig = JSON.stringify([...[..._openTabs.keys()].map(id => [id, _sessions.get(id)?.status === 'inactive', _sessions.get(id)?.label])]);
     if (sig !== _stripSig) { _stripSig = sig; renderInspectorTabStrip(); } else updateStreamingState();
     if (activeInstanceTab === SESSIONS_TAB && !document.getElementById('view-dashboard')?.classList.contains('hidden')) {
       renderSessionsGrid();
@@ -6049,12 +6029,6 @@
   function handleMessage(msg) {
     switch (msg.type) {
       case 'init': {
-        // The toggle used to live in this browser only; it is the server's now.
-        const legacyAutoClear = localStorage.getItem('inspectorAutoClear');
-        if (legacyAutoClear !== null) {
-          localStorage.removeItem('inspectorAutoClear');
-          if (legacyAutoClear === '1' && !msg.autoClear) sendWs({ type: 'inspector:setAutoClear', value: true });
-        }
         // A new connection may be a restarted server; ask again.
         _sessionTotals.clear();
         _sessionTotalsAsked.clear();
@@ -6074,7 +6048,7 @@
         break;
 
       case 'inspector:sessionsRemoved':
-        // Pruned, cleared or autocleared on the server: gone everywhere.
+        // Pruned or cleared on the server: gone everywhere.
         for (const id of msg.instanceIds || []) {
           _sessions.delete(id);
           closeSessionTab(id);

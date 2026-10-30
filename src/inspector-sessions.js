@@ -6,7 +6,7 @@
 //
 // Removal lives here too, so it is the same for every browser and also happens
 // with none open: each group (cli, app, ext) keeps at most `limit` inactive
-// sessions, the oldest going first, and autoclear removes every inactive one.
+// sessions, the oldest going first.
 // A running session is never counted and never removed. Removing a session
 // drops it from memory and deletes its interactions/<sessId> dir (turn files,
 // totals cache, uploads, SDK feed) confined to that root; Claude Code's own
@@ -14,12 +14,11 @@
 // touched.
 const fs = require('fs');
 const path = require('path');
-const { readJSON, writeJSON, removeInside, DATA_HOME } = require('./utils');
+const { removeInside, DATA_HOME } = require('./utils');
 const { toEntry } = require('./session-totals');
 const { readRun, runStatus } = require('./run-summary');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
-const PREFS_FILE = path.join(DATA_HOME, 'data', 'inspector-prefs.json');
 const GROUP_LIMIT = 20;
 // An external client has no process to watch: it counts as running while a
 // request is in flight and for this long after its last one.
@@ -74,7 +73,7 @@ class InspectorSessions {
    */
   constructor({ store, broadcaster, getInstances, removeInstances, cliSessionManager = null,
     getPricing = null, limit = GROUP_LIMIT, extIdleMs = EXT_IDLE_MS, throttleMs = 1000,
-    prefsFile = PREFS_FILE, interactionsDir = INTERACTIONS_DIR, tickMs = 15000 } = {}) {
+    interactionsDir = INTERACTIONS_DIR, tickMs = 15000 } = {}) {
     this.store = store;
     this.broadcaster = broadcaster;
     this.getInstances = getInstances || (() => []);
@@ -84,7 +83,6 @@ class InspectorSessions {
     this.limit = limit;
     this.extIdleMs = extIdleMs;
     this.throttleMs = throttleMs;
-    this.prefsFile = prefsFile;
     this.interactionsDir = interactionsDir;
 
     this.sessions = new Map();    // instanceId → record
@@ -92,7 +90,6 @@ class InspectorSessions {
     this._timer = null;
     this._lastSent = 0;
     this._pendingDeletes = new Set(); // promises, for tests and shutdown
-    this.autoClear = readJSON(prefsFile, {})?.autoClear === true;
 
     // Every process the server already knows (tabs restored at boot).
     for (const inst of this.getInstances()) this._noteInstance(inst);
@@ -360,7 +357,7 @@ class InspectorSessions {
   }
 
   summaryMessage(sessions = this.list()) {
-    return { type: 'inspector:sessions', sessions, runs: this._runs(sessions), autoClear: this.autoClear, limit: this.limit };
+    return { type: 'inspector:sessions', sessions, runs: this._runs(sessions), limit: this.limit };
   }
 
   // Throttled push: at most one summary per throttleMs, the last change always
@@ -372,7 +369,7 @@ class InspectorSessions {
     if (this._timer.unref) this._timer.unref();
   }
 
-  /** Apply pruning / autoclear, then push the summary to every browser. */
+  /** Apply pruning, then push the summary to every browser. */
   flush() {
     if (this._timer) { clearTimeout(this._timer); this._timer = null; }
     let sessions = this.list();
@@ -391,7 +388,7 @@ class InspectorSessions {
     // Newest first, so whatever passes the limit is the oldest.
     for (const s of sessions) {
       if (s.status !== 'inactive') continue;
-      if (this.autoClear || ++kept[s.kind] > this.limit) doomed.push(s.instanceId);
+      if (++kept[s.kind] > this.limit) doomed.push(s.instanceId);
     }
     return doomed;
   }
@@ -402,14 +399,6 @@ class InspectorSessions {
     if (doomed.length) this._remove(doomed);
     this.flush();
     return doomed;
-  }
-
-  setAutoClear(on) {
-    this.autoClear = !!on;
-    const prefs = readJSON(this.prefsFile, {}) || {};
-    prefs.autoClear = this.autoClear;
-    try { writeJSON(this.prefsFile, prefs); } catch {}
-    this.flush();
   }
 
   // Drop sessions from memory and disk. Callers only pass inactive ones; a dir

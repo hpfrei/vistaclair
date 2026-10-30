@@ -1,6 +1,6 @@
 // The inspector's session list (src/inspector-sessions.js): the light summary
 // the Sessions tab draws its cards from, and removal — at most 20 inactive
-// sessions per group, Clear per kind, autoclear — which deletes a session's
+// sessions per group, Clear per kind — which deletes a session's
 // interactions/<sessId> dir and nothing outside it.
 //
 //   node --test test/
@@ -41,7 +41,7 @@ function setup(opts = {}) {
     store, broadcaster,
     getInstances: () => [...procs].map(([instanceId, status]) => ({ instanceId, status, spawnedAt: 1 })),
     removeInstances: (ids) => { for (const id of ids) if (procs.get(id) !== 'running') procs.delete(id); },
-    throttleMs: 0, prefsFile: path.join(home, 'data', 'inspector-prefs.json'),
+    throttleMs: 0,
     ...opts,
   });
   // Ahead of the clock, so activity order is the order of the calls.
@@ -124,26 +124,6 @@ test('Clear removes the inactive sessions of one kind only', () => {
   const removed = sent.filter(m => m.type === 'inspector:sessionsRemoved');
   assert.deepStrictEqual(removed.at(-1).instanceIds, ['cli-' + uuid(2)], 'browsers are told so they close the tab');
   done();
-});
-
-test('autoclear removes every session as soon as it is inactive, and persists', () => {
-  const { reg, turn, spawn, exit, ids, home, mods, done } = setup();
-  spawn('cli-' + uuid(1)); turn('cli-' + uuid(1));
-  turn('app-x-ai-0001');
-  reg.setAutoClear(true);
-  assert.deepStrictEqual(ids(), ['cli-' + uuid(1)], 'app AI follows the same rule');
-  exit('cli-' + uuid(1));
-  reg.flush();
-  assert.deepStrictEqual(ids(), []);
-  const prefs = JSON.parse(fs.readFileSync(path.join(home, 'data', 'inspector-prefs.json'), 'utf8'));
-  assert.strictEqual(prefs.autoClear, true);
-  done();
-  const again = new mods.InspectorSessions({
-    store: reg.store, broadcaster: { broadcast() {}, onBroadcast: () => () => {} },
-    prefsFile: path.join(home, 'data', 'inspector-prefs.json'),
-  });
-  assert.strictEqual(again.autoClear, true, 'the toggle survives a restart');
-  again.close();
 });
 
 test('removal deletes interactions/<sessId> and stays inside it', async () => {
