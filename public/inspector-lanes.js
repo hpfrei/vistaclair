@@ -241,6 +241,25 @@
     return null;
   }
 
+  // The keys of a tool's input that name a file; kept in step with
+  // _TOOL_PATH_KEYS in public/inspector.js.
+  const INPUT_PATH_KEYS = ['file_path', 'filePath', 'path', 'notebook_path',
+                           'image_path', 'video_path', 'audio_path', 'output_path'];
+
+  /* The media file a tool call names in its input (a Read of a screenshot),
+     for a thumbnail on the call's line: the first absolute path that
+     `categoryOf(path)` calls image, video or audio. { path, category } or null. */
+  function callMedia(input, categoryOf) {
+    if (!input || typeof input !== 'object') return null;
+    for (const key of INPUT_PATH_KEYS) {
+      const path = input[key];
+      if (typeof path !== 'string' || !path.startsWith('/')) continue;
+      const category = categoryOf(path);
+      if (category === 'image' || category === 'video' || category === 'audio') return { path, category };
+    }
+    return null;
+  }
+
   // 1234 -> "1.2k", 2500000 -> "2.5M".
   const fmtTok = n => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n || 0));
 
@@ -285,10 +304,11 @@
   /* The media files a result's text names, for its thumbnail strip: each path
      once, in order of first mention, `categoryOf(path)` deciding its kind
      ('image', 'video', 'audio'; anything else is skipped). { items: [{ path,
-     category }], more } — `more` counts the media paths past `max`. */
-  function mediaPaths(text, categoryOf, max = LIMITS.RESULT_THUMBS) {
+     category }], more } — `more` counts the media paths past `max`. Paths
+     in `skip` are left out (the call's own thumbnail shows that one). */
+  function mediaPaths(text, categoryOf, max = LIMITS.RESULT_THUMBS, skip = []) {
     const items = [];
-    const seen = new Set();
+    const seen = new Set(skip);
     let more = 0;
     const s = String(text ?? '').slice(0, MEDIA_SCAN_CHARS);
     for (const m of s.matchAll(FILE_PATH_RE)) {
@@ -386,7 +406,7 @@
 
   const api = {
     LIMITS, LANE_MAIN, isLaneTurn, laneKeyOf, groupLanes, newUserText, turnUserText,
-    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, mediaPaths, fmtTok, usageLine, bodyClickOpens, looksLikeMarkdown, resultHolder, agentLinks, laneDone,
+    toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, mediaPaths, callMedia, fmtTok, usageLine, bodyClickOpens, looksLikeMarkdown, resultHolder, agentLinks, laneDone,
     laneWindow, pageOlder,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -1728,6 +1728,30 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
   text-shadow: 0 0 3px rgba(0, 0, 0, .8);
   pointer-events: none;
 }
+/* On a call's line, beside the file's name: no taller than the line. */
+.ln-call-thumb.ln-thumb {
+  align-self: center;
+  width: 22px;
+  height: 14px;
+  margin: -2px 0;
+  border-radius: 2px;
+  font-size: 10px;
+  line-height: 12px;
+}
+.ln-call-thumb .ln-thumb-play { font-size: 7px; }
+.ln-thumb-pop {
+  position: fixed;
+  z-index: 1000;
+  width: 180px;
+  height: 180px;
+  object-fit: contain;
+  border: 1px solid var(--vc-hair-strong);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
+  pointer-events: none;
+}
+.ln-thumb-pop[hidden] { display: none; }
 .ln-thumbs-more { flex: none; align-self: center; padding: 0 4px 8px; font-size: 10.5px; color: var(--text-dim); }
 .ln-error { font-family: var(--font-mono); font-size: 11.5px; color: var(--red); }
 .ln-wait { display: flex; gap: 4px; padding: 4px 0; }

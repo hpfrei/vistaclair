@@ -259,3 +259,26 @@ test('the turn holding a call\'s result', () => {
   assert.strictEqual(L.resultHolder(items, 'tu2'), 't3');
   assert.strictEqual(L.resultHolder(items, 'nope'), null);
 });
+
+test('the media file a call names, for a thumbnail on its line', () => {
+  const kinds = { png: 'image', mp4: 'video', mp3: 'audio', js: 'text' };
+  const categoryOf = p => kinds[p.split('.').pop().toLowerCase()] || 'unknown';
+  const shot = '/tmp/claude-1000/77c5675a-7a85-4084-991b-841fa7584523/images/1.png';
+  assert.deepStrictEqual(L.callMedia({ file_path: shot }, categoryOf), { path: shot, category: 'image' });
+  assert.deepStrictEqual(L.callMedia({ path: '/home/u/a.js', video_path: '/home/u/b.MP4' }, categoryOf),
+    { path: '/home/u/b.MP4', category: 'video' });
+  assert.deepStrictEqual(L.callMedia({ audio_path: '/home/u/c.mp3' }, categoryOf), { path: '/home/u/c.mp3', category: 'audio' });
+  assert.strictEqual(L.callMedia({ file_path: 'rel/1.png' }, categoryOf), null);
+  assert.strictEqual(L.callMedia({ file_path: '/home/u/a.js' }, categoryOf), null);
+  assert.strictEqual(L.callMedia({ command: 'cat /home/u/1.png' }, categoryOf), null);
+  assert.strictEqual(L.callMedia(null, categoryOf), null);
+  // The result's strip leaves out what the call's line already shows.
+  const r = L.mediaPaths(`saved ${shot} and /home/u/2.png`, categoryOf, 8, [shot]);
+  assert.deepStrictEqual(r.items.map(m => m.path), ['/home/u/2.png']);
+});
+
+test('a call\'s media keys match the tool detail\'s in public/inspector.js', () => {
+  const read = f => fs.readFileSync(path.join(__dirname, '../public', f), 'utf8');
+  const keys = (src, name) => src.match(new RegExp(`const ${name} = \\[([^\\]]+)\\]`))[1].replace(/\\s+/g, '');
+  assert.strictEqual(keys(read('inspector-lanes.js'), 'INPUT_PATH_KEYS'), keys(read('inspector.js'), '_TOOL_PATH_KEYS'));
+});
