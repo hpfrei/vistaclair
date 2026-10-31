@@ -155,7 +155,19 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // run. pauseRun(runId), resumeRun(runId, { fresh }) and
       // refreshOrchestrator(runId) are the run board's own actions (WS
       // cli:pauseRun / cli:resumeRun / cli:refreshOrchestrator): same results,
-      // and they throw what the board shows as an error. Dashboard profile only.
+      // and they throw what the board shows as an error.
+      // setRunAuth(runId, auth ('apikey' | 'subscription'), { continueTurn })
+      // and setRunModel(runId, model) switch a whole run: run.json (so workers
+      // launched or restarted later, fresh or continued, inherit it), every
+      // stopped member's saved entry, and every live member as its own tab's
+      // switch would (setAuth with continueTurn, setModel; an external
+      // member through its adapter; a live terminal cannot change its model
+      // and is named in failed, starting on it at its next launch). Each
+      // resolves { runId, auth | model, switched: [member name], failed:
+      // [{ member, error }] } (setRunAuth also sessions, applied); it rejects,
+      // having changed nothing, for an unknown run, an invalid auth or model,
+      // a terminal run's billing and a missing credential (setAuth's message).
+      // Dashboard profile only.
       ...(orchestration ? {
         orchestration: Object.freeze({
           listRuns: () => orchestration.listRuns(),
@@ -163,6 +175,8 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
           pauseRun: (runId) => orchestration.pauseRun(String(runId || '')),
           resumeRun: (runId, { fresh = false } = {}) => orchestration.resumeRun(String(runId || ''), { fresh: fresh === true }),
           refreshOrchestrator: (runId) => orchestration.refreshOrchestrator(String(runId || '')),
+          setRunAuth: (runId, auth, { continueTurn = false } = {}) => orchestration.setRunAuth(String(runId || ''), auth, { continueTurn: continueTurn === true }),
+          setRunModel: (runId, model) => orchestration.setRunModel(String(runId || ''), model),
         }),
       } : {}),
       // Whether external (Telegram) login is configured — one of the signals

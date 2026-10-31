@@ -71,7 +71,7 @@ const folders = require('./session-folders');
 const toolPacks = require('./tool-packs');
 const landing = require('./worktree-landing');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
-const { transcriptTotals } = require('./sdk-session');
+const { transcriptTotals, MODEL_RE } = require('./sdk-session');
 
 const MAX_WORKERS = 5;
 // The model a worker may be launched on (launch_cli `model`), as Claude Code's
@@ -804,7 +804,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       appendSystemPrompt: run.base.appendSystemPrompt ? `${run.base.appendSystemPrompt}\n\n${card}` : card,
       settingsFile: write ? writeSessionSettings(run, worker.name, run.base.settingsFile) : path.join(run.runDir, 'sessions', `${worker.name}.json`),
       agents: WORKER_AGENTS,
-      ...(worker.model ? { model: worker.model } : {}),
+      ...(worker.model || run.model ? { model: worker.model || run.model } : {}),
       ...(run.maxBudgetUsd ? { maxBudgetUsd: run.maxBudgetUsd } : {}),
       ...(worker.grants ? { grants: worker.grants } : {}),
     };
@@ -1492,22 +1492,64 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       session.updateSettings({ modelMap });
       mgr.noteSettingsChanged?.(session);
     }
-    const liveIds = new Set(live.map(m => m.session.sessId).filter(Boolean));
-    for (const e of savedEntries()) {
-      if (e.settings?.orchestration?.runId !== run.runId || liveIds.has(e.id)) continue;
-      mgr.patchSavedSettings?.(e.id, (st) => ({ ...st, modelMap }));
-    }
+    patchSavedMembers(run, new Set(live.map(m => m.session.sessId).filter(Boolean)), { modelMap });
     return { runId: run.runId, modelMap, sessions: live.length };
   }
 
+  // Every saved entry of the run's members but `liveIds` takes `patch`: a
+  // resume reads it.
+  function patchSavedMembers(run, liveIds, patch) {
+    for (const e of savedEntries()) {
+      if (e.settings?.orchestration?.runId !== run.runId || liveIds.has(e.id)) continue;
+      mgr.patchSavedSettings?.(e.id, (st) => ({ ...st, ...patch }));
+    }
+  }
+
+  // A run-wide switch's sessions: the run's tabs and the external sessions
+  // (an add-on's, src/external-session.js) stamped with it. `live`: those
+  // running; the rest only carry the setting (`patch`) to their next launch,
+  // as the saved entries of the members without a tab do.
+  function switchTargets(run, patch) {
+    const sessions = findByStamp(st => st.runId === run.runId).map(m => m.session);
+    const ext = mgr.external instanceof Map ? [...mgr.external.values()] : [];
+    for (const s of ext) if (stampOf(s)?.runId === run.runId) sessions.push(s);
+    const live = sessions.filter(s => s.running);
+    for (const s of sessions) {
+      if (s.running || s.external) continue;
+      s.updateSettings(patch);
+      mgr.noteSettingsChanged?.(s);
+    }
+    patchSavedMembers(run, new Set(live.map(s => s.sessId).filter(Boolean)), patch);
+    return live;
+  }
+
+  // `fn(session)` on every live member, as its tab's own switch would: one
+  // that throws or rejects is named in out.failed and the others go on.
+  async function switchMembers(live, fn, out, what) {
+    await Promise.all(live.map(async (session) => {
+      const member = session.getSettings().name || session.tabId;
+      try {
+        await fn(session);
+        out.switched.push(member);
+      } catch (e) {
+        out.failed.push({ member, error: String(e?.message || e) });
+        console.error(`[orchestration] ${what} of ${member}: ${e?.message || e}`);
+      }
+    }));
+  }
+
   // The billing for the whole run (the SDK toolbar's toggle, a usage-limit
-  // notice's "Continue on API credits"): every live member switches
-  // (SdkSession.setAuth: at once when idle, after its turn when busy, a
-  // pausing one only in its settings), every stopped member's saved entry
-  // follows (a resume reads it), and run.auth, so a worker launched or
-  // restarted later and a fresh orchestrator inherit it. continueTurn: a
-  // member the usage limit stopped goes on after its switch.
-  function setRunAuth(runId, auth, { continueTurn = false } = {}) {
+  // notice's "Continue on API credits", ctx.orchestration.setRunAuth): every
+  // live member switches (SdkSession.setAuth: at once when idle, after its
+  // turn when busy, a pausing one only in its settings; an external one
+  // through its adapter), every stopped member's saved entry follows (a
+  // resume reads it), and run.auth, so a worker launched or restarted later
+  // and a fresh orchestrator inherit it. continueTurn: a member the usage
+  // limit stopped goes on after its switch. A refusal (bad auth, unknown or
+  // terminal run, missing credential) changes nothing. Resolves { runId,
+  // auth, switched: [name], failed: [{ member, error }], sessions (live
+  // members), applied: { now | pending | already | saved | failed: n } }.
+  async function setRunAuth(runId, auth, { continueTurn = false } = {}) {
     if (auth !== 'apikey' && auth !== 'subscription') throw new Error('auth must be "apikey" or "subscription"');
     const run = getRun(runId);
     if (!run) throw new Error('run not found');
@@ -1517,24 +1559,60 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (auth === 'subscription' && !creds.subscription) throw new Error('No Claude subscription is signed in: Sign in to Claude, in the dashboard header.');
     run.auth = auth;
     saveRun(run);
-    const live = findByStamp(st => st.runId === run.runId);
-    const applied = {};
-    for (const { session } of live) {
-      let how = 'saved';
-      if (typeof session.setAuth === 'function') {
-        try { how = session.setAuth(auth, { continueTurn }).applied; } catch (e) { how = 'failed'; console.error(`[orchestration] billing switch of ${session.getSettings().name}: ${e.message}`); }
-      } else {
-        session.updateSettings({ auth });
-        mgr.noteSettingsChanged?.(session);
+    const live = switchTargets(run, { auth });
+    const out = { runId: run.runId, auth, switched: [], failed: [], sessions: live.length, applied: {} };
+    const count = (how) => { out.applied[how] = (out.applied[how] || 0) + 1; };
+    await switchMembers(live, async (session) => {
+      try {
+        if (session.external) {
+          const r = await session.call('setAuth', auth, { continueTurn });
+          count(typeof r?.applied === 'string' ? r.applied.slice(0, 40) : 'now');
+        } else if (typeof session.setAuth === 'function') {
+          count(session.setAuth(auth, { continueTurn }).applied);
+        } else {
+          // A terminal bills to the claude CLI's own login: its settings
+          // carry the billing to its next launch.
+          session.updateSettings({ auth });
+          mgr.noteSettingsChanged?.(session);
+          count('saved');
+        }
+      } catch (e) {
+        count('failed');
+        throw e;
       }
-      applied[how] = (applied[how] || 0) + 1;
-    }
-    const liveIds = new Set(live.map(m => m.session.sessId).filter(Boolean));
-    for (const e of savedEntries()) {
-      if (e.settings?.orchestration?.runId !== run.runId || liveIds.has(e.id)) continue;
-      mgr.patchSavedSettings?.(e.id, (st) => ({ ...st, auth }));
-    }
-    return { runId: run.runId, auth, sessions: live.length, applied };
+    }, out, 'billing switch');
+    return out;
+  }
+
+  // The model for the whole run (ctx.orchestration.setRunModel): every live
+  // member switches as from its tab (SdkSession.setModel: its next turn; an
+  // external one through its adapter), every stopped member's saved entry
+  // follows, and run.json (run.model, the orchestrator's and every worker's
+  // model), so a worker launched later without its own model, a restarted one
+  // and a fresh orchestrator start on it. A live terminal cannot change its
+  // model mid-session: it is named in failed, and its settings carry the
+  // model to its next launch. A refusal (bad model, unknown run) changes
+  // nothing. Resolves { runId, model, switched: [name], failed: [{ member,
+  // error }] }.
+  async function setRunModel(runId, model) {
+    if (typeof model !== 'string' || !model.trim()) throw new Error('model must be a non-empty string');
+    if (!MODEL_RE.test(model)) throw new Error(`invalid model ${JSON.stringify(model)}`);
+    const run = getRun(runId);
+    if (!run) throw new Error('run not found');
+    run.model = model;
+    run.orchestratorModel = model;
+    for (const w of run.workers) w.model = model;
+    saveRun(run);
+    const live = switchTargets(run, { model });
+    const out = { runId: run.runId, model, switched: [], failed: [] };
+    await switchMembers(live, async (session) => {
+      if (session.external) return session.call('setModel', model);
+      if (session.kind === 'sdk' && typeof session.setModel === 'function') return session.setModel(model);
+      session.updateSettings({ model });
+      mgr.noteSettingsChanged?.(session);
+      throw new Error('a terminal cannot change its model mid-session: it starts on it when resumed or restarted');
+    }, out, 'model switch');
+    return out;
   }
 
   // A member resumed with its own transcript carries its recorded cost on.
@@ -2403,7 +2481,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
-    memberModelChanged, setRunModelMap, setRunAuth,
+    memberModelChanged, setRunModelMap, setRunAuth, setRunModel,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
 }
