@@ -314,8 +314,12 @@ function handleMessage(ws, msg, bc) {
       }
       const saved = session ? null : mgr.findSaved(sessId);
       const st = (session ? session.getSettings() : saved?.settings)?.orchestration;
+      if (st?.runId) {
+        settle(Promise.resolve().then(() => bc.orchestration.setRunAuth(st.runId, auth, { continueTurn })),
+          (r) => actionReply(sendLater, 'auth', msg, r), (e) => actionReply(sendLater, 'auth', msg, { error: e.message }));
+        break;
+      }
       actionResult(send, 'auth', msg, () => {
-        if (st?.runId) return bc.orchestration.setRunAuth(st.runId, auth, { continueTurn });
         if (session?.kind === 'sdk') {
           const { applied } = session.setAuth(auth, { continueTurn });
           return { auth, sessions: 1, applied: { [applied]: 1 } };
