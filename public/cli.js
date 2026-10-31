@@ -766,6 +766,7 @@
       r.model ? `<span class="sc-chip">${escHtml(r.model)}</span>` : '',
       r.engine === 'sdk' ? '<span class="sc-chip">SDK</span>' : '',
       r.isolation ? `<span class="sc-chip">${escHtml(r.isolation)}</span>` : '',
+      r.cost != null ? `<span class="sc-cost" title="Cost so far, orchestrator and workers">${SC.formatCost(r.cost)}</span>` : '',
     ].filter(Boolean).join('');
     const prefix = r.orchestrator ? `${r.orchestrator}-` : '';
     const workers = SC.workerList(w.list.map(x => {
@@ -811,6 +812,7 @@
       s.kind === 'sdk' ? '<span class="sc-chip">SDK</span>' : '',
       s.autoMemory === true ? '<span class="sc-chip">memory</span>' : '',
       mappings ? `<span class="sc-chip" title="${escHtml(mappings)}">${escHtml(mappings)}</span>` : '',
+      s.costUsd != null ? `<span class="sc-cost" title="Cost so far">${SC.formatCost(s.costUsd)}</span>` : '',
     ].filter(Boolean).join('');
     // TODO.md progress from the session folder: 3/5 · doing 2: <item>.
     const p = s.progress;

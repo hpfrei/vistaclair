@@ -469,6 +469,13 @@ button.sc-worker-main:hover { background: var(--bg-hover); }
 .sc-worker-name { flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .sc-worker-detail { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
 .sc-worker-aside { flex-shrink: 0; margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text); }
+/* Sessions tab: a card's worker list shows five rows and scrolls past them,
+   so every card is as tall as the rest of its grid row (its actions sit at the
+   bottom). Rows have a fixed height so five of them are exactly the cap. */
+#cliSessions .sc-grid { align-items: stretch; }
+#cliSessions .sc-workers ul { max-height: calc(5 * 24px + 4 * 2px); overflow-y: auto; overflow-x: hidden; margin: 0 -6px; padding: 0 6px; }
+#cliSessions .sc-worker { height: 24px; flex-shrink: 0; }
+#cliSessions .sc-actions { margin-top: auto; }
 .sc-actions { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--vc-hair); }
 .sc-action { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .sc-action .vc-btn { flex-shrink: 0; min-width: 132px; }

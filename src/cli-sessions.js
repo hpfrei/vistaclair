@@ -6,7 +6,7 @@ const CliSession = require('./cli-session');
 const SdkSession = require('./sdk-session');
 const caps = require('./capabilities');
 const folders = require('./session-folders');
-const { summarizeRuns, tailOf } = require('./run-summary');
+const { summarizeRuns, costOf, tailOf } = require('./run-summary');
 const { readJSON, writeJSON, tryRm, DATA_HOME, PACKAGE_ROOT } = require('./utils');
 
 const HISTORY_FILE = path.join(DATA_HOME, 'data', 'cli-history.json');
@@ -423,7 +423,7 @@ class CliSessionManager {
     const { history, runs } = this._savedSessions();
     const live = new Map();
     for (const [tabId, session] of this.sessions) {
-      if (session.sessId) live.set(session.sessId, { tabId, running: session.running, busy: session.busy, state: session.state });
+      if (session.sessId) live.set(session.sessId, { tabId, running: session.running, busy: session.busy, state: session.state, costUsd: session.costUsd });
     }
     return { type: 'cli:savedSessions', sessions: history, runs: summarizeRuns(history, { runs, liveOf: id => live.get(id) || null }) };
   }
@@ -435,6 +435,8 @@ class CliSessionManager {
       if (session.sessId && session.running) runningIds.add(session.sessId);
     }
     const runs = new Map();   // runDir -> run.json, read once per call
+    const live = new Map();   // sessId -> live session, for its running cost
+    for (const session of this.sessions.values()) if (session.sessId) live.set(session.sessId, session);
     for (const entry of history) {
       const stat = this._getJsonlStat(entry);
       entry.jsonlSize = stat.size;
@@ -449,6 +451,7 @@ class CliSessionManager {
       // the Sessions tab, which shows the orchestrator's last TODO rows; a
       // worker's own close/delete rules need its last report.
       const st = entry.settings?.orchestration;
+      if (entry.kind === 'sdk' && dir && !st?.runId) entry.costUsd = costOf(live.get(entry.id), null, dir);
       if (folder && st?.role === 'orchestrator') entry.todoTail = tailOf(folder.items);
       if (st?.runId) {
         if (!runs.has(st.runDir)) runs.set(st.runDir, readJSON(path.join(st.runDir || '', 'run.json'), null));
