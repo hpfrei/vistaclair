@@ -5803,13 +5803,7 @@
     return cost;
   }
 
-  function formatCost(cost) {
-    if (cost == null) return '';
-    if (cost < 0.001) return '$' + cost.toFixed(6);
-    if (cost < 0.01) return '$' + cost.toFixed(4);
-    if (cost < 1) return '$' + cost.toFixed(3);
-    return '$' + cost.toFixed(2);
-  }
+  function formatCost(cost) { return window.sessionCards.formatCost(cost); }
 
   function renderUsage(usage, pricing) {
     let html = '';

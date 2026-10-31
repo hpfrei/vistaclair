@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const folders = require('./session-folders');
+const { transcriptTotals } = require('./sdk-session');
 
 // How many of the orchestrator's TODO rows a card shows.
 const TODO_TAIL = 5;
@@ -19,6 +20,15 @@ function readRun(runDir) {
 
 const ms = (v) => (typeof v === 'number' ? v : Date.parse(v || '') || 0);
 const finished = (w) => !!w && (w.abandoned || ['done', 'failed'].includes(w.lastReport?.status));
+
+// What a session has cost so far: the highest of its live total, the one
+// recorded in run.json and (an SDK session) its folder's transcript total,
+// which transcriptTotals caches per file. null when none of them is known.
+function costOf(live, stored, dir) {
+  const known = [live?.costUsd, stored, dir ? transcriptTotals(dir).costUsd || null : null]
+    .filter(c => typeof c === 'number' && Number.isFinite(c));
+  return known.length ? Math.max(...known) : null;
+}
 
 // A live session's state word: busy / idle / awaiting (SDK) while it runs.
 function liveState(session) {
@@ -78,6 +88,7 @@ function summarizeRuns(entries, { runs = new Map(), liveOf = () => null } = {}) 
     const recorded = run?.workers || list.filter(e => e.group.role === 'worker' && e.group.workerId)
       .filter((e, i, a) => a.findIndex(x => x.group.workerId === e.group.workerId) === i)
       .map(e => ({ id: e.group.workerId, name: e.settings?.name || e.group.workerId, title: e.title }));
+    const sdk = (run?.engine || orchEntry?.kind) === 'sdk';
     const workers = recorded.map(w => {
       const entry = workerEntry(w.id);
       const live = entry ? liveOf(entry.id) : null;
@@ -93,8 +104,11 @@ function summarizeRuns(entries, { runs = new Map(), liveOf = () => null } = {}) 
         lastReport: r ? { status: r.status, summary: String(r.summary || '').slice(0, 200), at: r.at || null } : null,
         lastActivityAt: Math.max(entry?.lastInteractionAt || 0, ms(r?.at), ms(w.exitedAt), ms(w.launchedAt)) || null,
         completed: finished(w),
+        cost: costOf(live, w.costUsd, sdk ? w.sessionDir || entry?.settings?.sessionDir : null),
       };
     });
+    const orchestratorCost = costOf(orchLive, run?.orchestratorCost, sdk ? run?.orchestratorDir || run?.runDir || orchEntry?.settings?.sessionDir : null);
+    const costs = [orchestratorCost, ...workers.map(w => w.cost)].filter(c => c !== null);
 
     // The orchestrator's TODO: its saved entry carries the tail; a run whose
     // orchestrator entry is gone reads the folder from the record.
@@ -130,6 +144,8 @@ function summarizeRuns(entries, { runs = new Map(), liveOf = () => null } = {}) 
       orchestratorState: orchLive?.running ? liveState(orchLive) : (orchEntry?.paused ? 'paused' : orchEntry?.interrupted ? 'interrupted' : 'stopped'),
       startedAt: Math.min(...list.map(e => e.startedAt || e.savedAt || Infinity)) || null,
       lastActivityAt,
+      orchestratorCost,
+      cost: costs.length ? costs.reduce((a, b) => a + b, 0) : null,
       workers: { total: workers.length, running, list: workers },
       todo,
     });
@@ -141,4 +157,4 @@ function tailOf(items) {
   return items.slice(-TODO_TAIL).map(i => ({ id: i.id, description: i.description, status: i.status }));
 }
 
-module.exports = { summarizeRuns, runStatus, workerState, readRun, tailOf, TODO_TAIL };
+module.exports = { summarizeRuns, costOf, runStatus, workerState, readRun, tailOf, TODO_TAIL };

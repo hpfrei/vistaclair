@@ -130,3 +130,46 @@ test('cli:savedSessions carries the runs; the orchestrator entry has its TODO ta
   assert.deepStrictEqual(run.todo.rows.map(x => x.id), ['3', '4', '5', '6', '7']);
   assert.strictEqual(run.todo.total, 7);
 });
+
+test('run cost: orchestrator plus every worker; none known stays null', (t) => {
+  const d = runOnDisk();
+  t.after(d.cleanup);
+  const [bare] = summarizeRuns(d.entries);
+  assert.strictEqual(bare.cost, null, 'no priced data: no total, not $0');
+  assert.strictEqual(bare.workers.list[0].cost, null);
+
+  // Recorded costs, a live total ahead of the record, and a worker nothing is known of.
+  const d2 = runOnDisk({ orchestratorCost: 1.5, workers: [
+    { id: 'w1', name: 'orch-r1-w1-a', costUsd: 0.25 },
+    { id: 'w2', name: 'orch-r1-w2-b', costUsd: 0.5 },
+    { id: 'w3', name: 'orch-r1-w3-c' },
+  ] });
+  t.after(d2.cleanup);
+  const live = { s2: { running: true, costUsd: 0.75 } };
+  const [r] = summarizeRuns(d2.entries, { liveOf: id => live[id] || null });
+  assert.deepStrictEqual(r.workers.list.map(w => w.cost), [0.25, 0.75, null]);
+  assert.strictEqual(r.orchestratorCost, 1.5);
+  assert.strictEqual(r.cost, 2.5);
+});
+
+test('run cost: an SDK run reads each folder\'s transcript total', (t) => {
+  const d = runOnDisk({ engine: 'sdk', orchestratorCost: 0.1, workers: [
+    { id: 'w1', name: 'orch-r1-w1-a', sessionDir: null },
+    { id: 'w2', name: 'orch-r1-w2-b', sessionDir: null },
+  ] });
+  t.after(d.cleanup);
+  const status = (sessId, costUsd) => JSON.stringify({ sessId, ev: { platform: { kind: 'status', costUsd } } });
+  const wDir = path.join(d.home, 'sessions', 'w1');
+  fs.mkdirSync(wDir, { recursive: true });
+  fs.writeFileSync(path.join(wDir, 'transcript.jsonl'), [status('x', 0.5), status('x', 2)].join('\n') + '\n');
+  const run = JSON.parse(fs.readFileSync(path.join(d.runDir, 'run.json'), 'utf8'));
+  run.workers[0].sessionDir = wDir;
+  fs.writeFileSync(path.join(d.runDir, 'run.json'), JSON.stringify(run));
+  // The orchestrator's folder holds more than run.json recorded.
+  fs.writeFileSync(path.join(d.orchDir, 'transcript.jsonl'), status('o', 0.4) + '\n');
+  const [r] = summarizeRuns(d.entries);
+  assert.strictEqual(r.workers.list[0].cost, 2);
+  assert.strictEqual(r.workers.list[1].cost, null);
+  assert.strictEqual(r.orchestratorCost, 0.4);
+  assert.strictEqual(r.cost, 2.4);
+});

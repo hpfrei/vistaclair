@@ -6,6 +6,15 @@
 (function () {
   const esc = (s) => window.dashboard.escHtml(String(s ?? ''));
 
+  // A dollar amount at the precision its size needs; '' for none.
+  function formatCost(cost) {
+    if (cost == null) return '';
+    if (cost < 0.001) return '$' + cost.toFixed(6);
+    if (cost < 0.01) return '$' + cost.toFixed(4);
+    if (cost < 1) return '$' + cost.toFixed(3);
+    return '$' + cost.toFixed(2);
+  }
+
   // "just now", "3 min ago", "2 h ago", "4 d ago"; a date after a month.
   function relTime(ms) {
     if (!ms) return '';
@@ -145,7 +154,7 @@
     return `<div class="sc-workers">${heading ? `<div class="sc-section-head">${esc(heading)}</div>` : ''}<ul>${rows}</ul></div>`;
   }
 
-  const api = { relTime, timeHtml, toneOf, accentOf, pill, dot, head, dirName, projectNames, dirHtml, tokens, todoKind, todoList, workerList };
+  const api = { relTime, timeHtml, toneOf, accentOf, pill, dot, head, dirName, projectNames, dirHtml, tokens, todoKind, todoList, workerList, formatCost };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else window.sessionCards = api;
 })();
