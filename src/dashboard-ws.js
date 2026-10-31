@@ -4,6 +4,7 @@ const createProxyRouter = require('./proxy');
 const { pendingQuestions } = createProxyRouter;
 const caps = require('./capabilities');
 const { InspectorSessions } = require('./inspector-sessions');
+const { askOwner, answerRefusal } = require('./external-session');
 
 const PROJECT_ROOT = DATA_HOME;
 
@@ -296,7 +297,9 @@ class DashboardBroadcaster {
       // Questions still waiting for an answer (a new-CLI mode choice, an MCP
       // AskUserQuestion): a reloaded or newly opened dashboard shows them again
       // instead of leaving the asker waiting on a form nobody can see.
+      // An external tab's entry is marked (external, tabId, sessId) on the way.
       for (const pending of pendingQuestions.values()) {
+        askOwner(pending, this.cliSessionManager);
         if (pending.message) ws.send(JSON.stringify(pending.message));
       }
 
@@ -342,9 +345,14 @@ class DashboardBroadcaster {
               }));
             }
           } else if (msg.type === 'ask:answer') {
-            // Resolve a pending AskUserQuestion
-            const pending = pendingQuestions.get(msg.toolUseId);
-            if (pending?.resolve) {
+            // Resolve a pending AskUserQuestion: an external tab's only when
+            // the answer names that tab (external-session.js answerRefusal).
+            // A refusal goes back to the sender alone and resolves nothing.
+            const pending = typeof msg.toolUseId === 'string' ? pendingQuestions.get(msg.toolUseId) : null;
+            const refusal = !pending?.resolve ? 'that question is no longer waiting' : answerRefusal(pending, msg, this.cliSessionManager);
+            if (refusal) {
+              ws.send(JSON.stringify({ type: 'ask:answerError', toolUseId: typeof msg.toolUseId === 'string' ? msg.toolUseId.slice(0, 200) : null, error: refusal }));
+            } else {
               let answer = msg.answer;
               // Process file uploads if present
               if (msg.files?.length && Array.isArray(answer)) {

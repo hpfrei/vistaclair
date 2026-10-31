@@ -32,6 +32,7 @@ const claudeAuth = require('../src/claude-auth');
 
 const SESS = '0e0e0e0e-1111-2222-3333-444444444444';
 const OTHER = '0f0f0f0f-1111-2222-3333-444444444444';
+const THIRD = '0d0d0d0d-1111-2222-3333-444444444444';
 const DATA = path.join(HOME, 'data');
 const tick = () => new Promise((r) => setImmediate(r));
 
@@ -136,12 +137,11 @@ test('hidden sessions are found but not listed; untrusted strings are capped', (
   assert.strictEqual(mgr.getBySessId(SESS).tabId, 'remote-h');
 
   const long = fakeAdapter({ title: 'T'.repeat(5000) }, OTHER).adapter;
-  long.settings.externalHost = { toString: () => 'h'.repeat(5000) };
+  long.settings.externalHost = 'h'.repeat(5000);
   mgr.registerExternal('remote-l', long);
   const e = mgr.list().find(t => t.tabId === 'remote-l');
   assert.strictEqual(e.title.length, 200);
-  assert.strictEqual(typeof e.settings.externalHost, 'string');
-  assert.ok(e.settings.externalHost.length <= 100);
+  assert.strictEqual(e.settings.externalHost, 'h'.repeat(100));
   done();
 });
 
@@ -355,11 +355,12 @@ test('unregister removes the tab and broadcasts its removal, once', () => {
   assert.deepStrictEqual(browser.sent.map(m => m.type), ['cli:exit', 'cli:tabs']);
 
   // Idempotent, and it never drops a later registration under the same id.
-  mgr.registerExternal('remote-a', fakeAdapter({}, OTHER).adapter);
+  // (Not OTHER: the test above left it a saved session.)
+  mgr.registerExternal('remote-a', fakeAdapter({}, THIRD).adapter);
   seen.length = 0;
   unregister();
   assert.deepStrictEqual(seen, []);
-  assert.strictEqual(mgr.list()[0].sessId, OTHER);
+  assert.strictEqual(mgr.list()[0].sessId, THIRD);
   done();
 });
 
@@ -385,7 +386,7 @@ test('GET /api/orchestration/run answers an external orchestrator\'s run from it
   done();
 });
 
-test('an ask carrying host and remote is replayed verbatim and still answered', () => {
+test('an ask carrying host and remote is replayed verbatim and answered when the answer names its tab', () => {
   const { wss, bc, done } = setup();
   const message = {
     type: 'ask:question', askId: 'ask-ext-1', formData: { questions: [{ question: 'Proceed?' }] },
@@ -399,7 +400,9 @@ test('an ask carrying host and remote is replayed verbatim and still answered', 
     const live = connect(wss);
     bc.broadcast(message);
     assert.deepStrictEqual(live.sent.filter(m => m.type === 'ask:question').at(-1), message);
-    browser.send({ type: 'ask:answer', toolUseId: 'ask-ext-1', answer: ['yes'] });
+    browser.send({ type: 'ask:answer', toolUseId: 'ask-ext-1', answer: ['no'] });
+    assert.strictEqual(answered, null, 'not by its id alone');
+    browser.send({ type: 'ask:answer', toolUseId: 'ask-ext-1', tabId: 'remote-a', answer: ['yes'] });
     assert.deepStrictEqual(answered, ['yes']);
     assert.ok(browser.sent.some(m => m.type === 'ask:answered' && m.askId === 'ask-ext-1'));
   } finally {
