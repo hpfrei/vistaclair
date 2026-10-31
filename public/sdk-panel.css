@@ -331,6 +331,21 @@
 }
 .sdk-model:hover:not(:disabled) { border-color: color-mix(in srgb, var(--purple) 50%, var(--border)); background: var(--bg-hover); }
 .sdk-model:disabled { color: var(--text-dim); cursor: default; }
+/* The thinking toggle: dim when off, lit when the summaries are shown. */
+.sdk-think {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 7px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.sdk-think:hover:not(:disabled) { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 55%, var(--border)); }
+.sdk-think.on { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 55%, var(--border)); background: color-mix(in srgb, var(--purple) 14%, var(--bg)); }
+.sdk-think:disabled { opacity: .45; cursor: default; }
 /* ■ on a busy box: stop its current turn. */
 .sdk-stop {
   border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border));
@@ -401,6 +416,9 @@
   .sdk-cap-right { gap: 4px; }
   .sdk-cap { padding: 0 4px; }
   .sdk-model { padding: 0 2px; }
+  .sdk-think { padding: 0 5px; }
+  .sdk-think-l { display: none; }
+  .sdk-think::before { content: '\1F4AD'; font-size: 9px; }
 }
 .sdk-insp {
   padding: 0 8px;
@@ -644,20 +662,26 @@
 .sdk-text > :last-child { margin-bottom: 0; }
 
 .sdk-thinking { color: var(--text-dim); font-size: 12px; border-left: 2px solid var(--border); padding-left: 8px; }
-.sdk-thinking-head { cursor: pointer; font-style: italic; user-select: none; opacity: .8; }
-.sdk-thinking-head::before { content: '▸ '; font-style: normal; }
-.sdk-thinking.open .sdk-thinking-head::before { content: '▾ '; }
+/* A block with no text (thinking display off) is not shown at all. */
+.sdk-thinking.sdk-thinking-empty { display: none; }
+.sdk-thinking-head { display: flex; align-items: baseline; min-width: 0; white-space: nowrap; cursor: pointer; font-style: italic; user-select: none; opacity: .8; }
+.sdk-thinking-head::before { content: '▸\00a0'; flex-shrink: 0; font-style: normal; }
+.sdk-thinking.open .sdk-thinking-head::before { content: '▾\00a0'; }
+.sdk-thinking-label { flex-shrink: 0; }
+/* Collapsed: "▸ Thinking — its first words…" on one line. */
+.sdk-thinking-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sdk-thinking-preview:not(:empty)::before { content: '\00a0— '; }
+.sdk-thinking.open .sdk-thinking-preview { display: none; }
 .sdk-thinking-body { display: none; white-space: pre-wrap; font-style: italic; max-height: 260px; overflow-y: auto; margin-top: 2px; }
 .sdk-thinking.open .sdk-thinking-body { display: block; }
-.sdk-thinking-empty .sdk-thinking-body { display: none !important; }
 .sdk-toolline { color: var(--text-dim); font-size: 12px; font-family: var(--vc-mono, ui-monospace, monospace); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sdk-toolline::before { content: '⋯ '; color: var(--accent); }
 .sdk-toolline.done::before { content: '✓ '; color: var(--green); }
 .sdk-toolline.error::before { content: '✗ '; color: var(--red); }
 
-/* The feed (under the TODO table): the agent's own text and the descriptions
-   of its tool calls, and the same of its subagents behind their chips; no
-   thinking, notices or messages, but a usage-limit card (it needs a click). */
+/* The feed (under the TODO table): the agent's own text, its thinking and the
+   descriptions of its tool calls, and the same of its subagents behind their
+   chips; no notices or messages, but a usage-limit card (it needs a click). */
 .sdk-feed.lite { font-size: 12px; gap: 4px; padding: 6px 12px 10px; }
 /* The output text reads first; a description is a quiet aside between it,
    in its own colour (a muted cyan), so the two never blend. */

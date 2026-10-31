@@ -151,6 +151,16 @@ function modelFamily(model) {
     : null;
 }
 
+// Tab-level "show thinking": newer models omit the thinking text by default,
+// so a tab that opted in asks for summarized reasoning. Only a thinking
+// config that takes `display` gets it (adaptive, enabled; never disabled or
+// between_tools), none is ever added, and a display already chosen stays.
+function applyShowThinking(body, cliSettings) {
+  const t = body && body.thinking;
+  if (!cliSettings || !cliSettings.showThinking || !t || typeof t !== 'object') return;
+  if ((t.type === 'adaptive' || t.type === 'enabled') && t.display === undefined) t.display = 'summarized';
+}
+
 // Resolve a CLI tab's per-session model override (modelMap, family-substring
 // match fable/opus/sonnet/haiku). Anthropic targets are applied in-place to
 // body.model; non-Anthropic targets are returned as tabModelDef for the
@@ -399,12 +409,8 @@ function createProxyRouter(store, broadcaster, targetUrl) {
     // --- Tab-level model override (applies before global proxy rules) ---
     const { tabModelDef } = resolveTabModel(body, cliSettings);
 
-    // --- Tab-level "show thinking" (Opus 4.7/4.8 omit thinking text by
-    // default; opt in to summarized reasoning so the CLI can render it) ---
-    if (cliSettings && cliSettings.showThinking && body.thinking && typeof body.thinking === 'object'
-        && body.thinking.type !== 'disabled' && !body.thinking.display) {
-      body.thinking.display = 'summarized';
-    }
+    // --- Tab-level "show thinking" ---
+    applyShowThinking(body, cliSettings);
 
     const instCtx = getInstanceContext(req.instanceId);
     const interaction = {
@@ -974,5 +980,6 @@ createProxyRouter._showSensitiveHeaders = false;
 
 module.exports = createProxyRouter;
 module.exports.pendingQuestions = pendingQuestions;
+module.exports.applyShowThinking = applyShowThinking;
 module.exports.clearPendingQuestionsForTab = clearPendingQuestionsForTab;
 module.exports.modelFamily = modelFamily;
