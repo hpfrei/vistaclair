@@ -1,3 +1,9 @@
+// Dashboard core: shared state, utilities, markdown rendering, question forms.
+// Renderer rule: session text may be hostile HTML. Markdown reaches the page
+// only through renderMarkdown / inlineMd (DOMPurify, then public/render-safe.js
+// or public/ask-safe.js); any other data in an HTML string goes through
+// escHtml inside double-quoted attributes. See CONTRIBUTING.md.
+
 // --- State ---
 const state = {
   interactions: [],
@@ -28,7 +34,7 @@ const state = {
 // --- Utilities ---
 function escHtml(str) {
   if (typeof str !== 'string') str = String(str);
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // --- File path linkification ---
@@ -449,14 +455,15 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
 }
 
 // --- Markdown rendering (with HTML/SVG pass-through and MathJax) ---
+// Every caller's HTML, live html/svg fences included, goes through DOMPurify
+// (renderSafe.PURIFY_BLOCK) and renderSafe.cleanHtml before it reaches the
+// page: session output may be hostile. Without DOMPurify the text shows as is.
 // opts.file: render a markdown file from disk — keep its blank lines (they
-// separate paragraphs), use GFM line breaks, and sanitize, since the file's raw
-// HTML can come from anywhere.
+// separate paragraphs) and use GFM line breaks.
 function renderMarkdown(text, targetEl, opts = {}) {
   if (!text) { targetEl.innerHTML = ''; return; }
   if (!opts.file) text = text.replace(/\n{2,}/g, '\n');
-  if (opts.file && typeof DOMPurify === 'undefined') { targetEl.textContent = text; return; }
-  if (typeof marked === 'undefined') { targetEl.textContent = text; return; }
+  if (typeof DOMPurify === 'undefined' || typeof marked === 'undefined') { targetEl.textContent = text; return; }
 
   // Configure marked to pass through HTML/SVG blocks and render fenced code
   const renderer = new marked.Renderer();
@@ -466,18 +473,14 @@ function renderMarkdown(text, targetEl, opts = {}) {
     const lang = (typeof args === 'object' ? args.lang : arguments[1]) || '';
     // Render html and svg fenced blocks as live content
     if (lang === 'html' || lang === 'svg') {
-      const clean = typeof DOMPurify !== 'undefined'
-        ? DOMPurify.sanitize(code, { ADD_TAGS: ['svg', 'circle', 'rect', 'line', 'polyline', 'polygon', 'path', 'text', 'g', 'defs', 'use', 'symbol', 'clipPath', 'mask', 'pattern', 'image', 'ellipse', 'tspan', 'textPath', 'linearGradient', 'radialGradient', 'stop', 'filter', 'feGaussianBlur', 'feOffset', 'feMerge', 'feMergeNode', 'feBlend', 'feColorMatrix', 'feComposite', 'animate', 'animateTransform', 'marker'], ADD_ATTR: ['viewBox', 'xmlns', 'fill', 'stroke', 'stroke-width', 'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'd', 'points', 'transform', 'opacity', 'font-size', 'text-anchor', 'dominant-baseline', 'stroke-dasharray', 'stroke-linecap', 'stroke-linejoin', 'clip-path', 'mask', 'filter', 'gradientUnits', 'offset', 'stop-color', 'stop-opacity', 'preserveAspectRatio', 'markerWidth', 'markerHeight', 'refX', 'refY', 'orient', 'stdDeviation', 'dx', 'dy', 'result', 'in', 'in2', 'mode', 'values', 'type', 'begin', 'dur', 'repeatCount', 'attributeName', 'from', 'to'] })
-        : escHtml(code);
-      return `<div class="rendered-block rendered-${lang}">${clean}</div>`;
+      return `<div class="rendered-block rendered-${lang}">${renderSafe.sanitizeHtml(code, DOMPurify)}</div>`;
     }
     // Default code block rendering with copy button
     return `<div class="code-block-wrap"><button class="code-copy-btn" title="Copy">Copy</button><pre><code class="language-${escHtml(lang)}">${escHtml(code)}</code></pre></div>`;
   };
 
   marked.setOptions({ renderer, breaks: !opts.file, gfm: true });
-  const html = marked.parse(text);
-  targetEl.innerHTML = opts.file ? DOMPurify.sanitize(html) : html;
+  targetEl.innerHTML = renderSafe.sanitizeHtml(marked.parse(text), DOMPurify);
 
   // Wire up copy buttons on code blocks
   targetEl.querySelectorAll('.code-copy-btn').forEach(btn => {
@@ -1137,6 +1140,16 @@ function askResolveMdImages(html, cwd, remote) {
   return t.innerHTML;
 }
 
+// An option's preview: block markdown through the renderer's sanitizer, or
+// for a remote ask the inline allow-list of askInlineMd (no lists, tables,
+// styles or forms from another machine).
+function askPreviewHtml(text, remote) {
+  if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') return escHtml(text);
+  const html = marked.parse(text);
+  if (remote) return askSafe.cleanInlineHtml(DOMPurify.sanitize(html, askSafe.PURIFY_INLINE));
+  return renderSafe.sanitizeHtml(html, DOMPurify);
+}
+
 function askInlineMd(text, cwd, remote) {
   return askResolveMdImages(inlineMd(text), cwd, remote);
 }
@@ -1194,7 +1207,7 @@ function askFormBuildHTML(formData, opts = {}) {
     if (qi > 0) html += '<div class="ask-divider"></div>';
 
     // Question container (showIf makes it hideable)
-    const showIfAttr = q.showIf ? ` data-showif='${escHtml(JSON.stringify(q.showIf))}'` : '';
+    const showIfAttr = q.showIf ? ` data-showif="${escHtml(JSON.stringify(q.showIf))}"` : '';
     const hiddenClass = q.showIf ? ' ask-q-hidden' : '';
     html += `<div class="ask-question${hiddenClass}" data-qid="${escHtml(qId)}" data-qtype="${escHtml(qType)}" data-qi="${qi}" data-required="${isRequired}"${showIfAttr}>`;
 
@@ -1578,8 +1591,7 @@ function askFormBind(container, formData, callbacks, opts = {}) {
     if (opt?.preview || image) {
       let safe = '';
       if (opt.preview) {
-        const rendered = typeof marked !== 'undefined' ? marked.parse(opt.preview) : escHtml(opt.preview);
-        safe = askResolveMdImages(typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(rendered) : rendered, cwd, remote);
+        safe = askResolveMdImages(askPreviewHtml(opt.preview, remote), cwd, remote);
       }
       const imgHtml = image ? `<div class="ask-preview-image">${askImgHTML(image, cwd, opt.label, remote)}${askZoomHTML(image, opt.label, remote)}</div>` : '';
       previewEl.innerHTML = `${imgHtml}${safe ? `<div class="ask-preview-content markdown-body">${safe}</div>` : ''}`;
@@ -1866,6 +1878,7 @@ function handleMessage(msg) {
     case 'ask:question':
     case 'ask:answered':
     case 'ask:timeout':
+    case 'ask:answerError':
       window.cliModule?.handleAskMessage(msg);
       break;
     case 'chat:settings':

@@ -1011,7 +1011,7 @@
           thinkingTokens.set(data.index, total);
           const headerEl = _scopeFind(scope, `block-header-${data.index}`);
           if (headerEl) {
-            const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+            const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : escHtml(n);
             headerEl.innerHTML = `Thinking <span class="thinking-tokens">${fmt(total)} tokens</span>`;
           }
         }
@@ -3820,7 +3820,7 @@
     }
 
     let tokens = '';
-    const n = v => (v || 0).toLocaleString();
+    const n = v => escHtml((v || 0).toLocaleString());
     if (u.input_tokens != null || u.output_tokens != null || u.cache_read_input_tokens) {
       const cached = u.cache_read_input_tokens || 0;
       const context = (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + cached;
@@ -4776,8 +4776,8 @@
 
     let infoBody = `<div class="info-grid">
       <span class="info-label">Model</span><span class="info-value">${escHtml(req.model || 'unknown')}</span>
-      <span class="info-label">Max tokens</span><span class="info-value">${req.max_tokens || '--'}</span>
-      <span class="info-label">Temperature</span><span class="info-value">${req.temperature !== undefined ? req.temperature : '--'}</span>
+      <span class="info-label">Max tokens</span><span class="info-value">${escHtml(req.max_tokens || '--')}</span>
+      <span class="info-label">Temperature</span><span class="info-value">${escHtml(req.temperature !== undefined ? req.temperature : '--')}</span>
       <span class="info-label">Stream</span><span class="info-value">${interaction.isStreaming ? 'yes' : 'no'}</span>
       <span class="info-label">Endpoint</span><span class="info-value">${escHtml(interaction.originalEndpoint || interaction.endpoint || '/v1/messages')}</span>
       <span class="info-label">Bare</span><span class="info-value">${interaction.bare ? 'yes' : 'no'}</span>
@@ -5567,7 +5567,7 @@
     const mergedBlocks = mergeConsecutiveTextBlocks(blocks);
     return mergedBlocks.map(b => {
       if (b.type === 'thinking') {
-        const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+        const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : escHtml(n);
         const tkn = b.estimatedTokens ? ` <span class="thinking-tokens">${fmt(b.estimatedTokens)} tokens</span>` : '';
         return `<div class="content-block">
           <div class="content-block-header">Thinking${tkn}</div>
@@ -5606,7 +5606,7 @@
       return `<div class="content-block-body markdown-body" data-md-pending="${escHtml(block.text || '')}">${escHtml(block.text || '')}</div>`;
     }
     if (block.type === 'thinking') {
-      const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+      const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : escHtml(n);
       const tkn = block.estimated_tokens ? ` <span class="thinking-tokens">${fmt(block.estimated_tokens)} tokens</span>` : '';
       return `<div class="content-block">
         <div class="content-block-header">Thinking${tkn}</div>
@@ -5743,11 +5743,11 @@
 
   function compactTokens(usage) {
     if (!usage) return '';
-    const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+    const fmt = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : escHtml(n);
     const arrowUp = '<svg width="7" height="7" viewBox="0 0 8 8"><path d="M4 1L7 5H1Z" fill="currentColor"/></svg>';
     const arrowDn = '<svg width="7" height="7" viewBox="0 0 8 8"><path d="M4 7L1 3H7Z" fill="currentColor"/></svg>';
     const cacheIcon = '<svg width="8" height="8" viewBox="0 0 10 10"><ellipse cx="5" cy="2.5" rx="4" ry="1.8" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 2.5v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V2.5" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 4.7v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V4.7" fill="none" stroke="currentColor" stroke-width="0.9"/></svg>';
-    const exact = (n, what) => ` title="${n.toLocaleString()} ${what}"`;
+    const exact = (n, what) => ` title="${escHtml(n.toLocaleString())} ${what}"`;
     let html = '';
     if (usage.input_tokens != null) html += `<span class="et-in"${exact(usage.input_tokens, 'input')}>${arrowUp} ${fmt(usage.input_tokens)}</span>`;
     if (usage.output_tokens != null) html += `<span class="et-out"${exact(usage.output_tokens, 'output')}>${arrowDn} ${fmt(usage.output_tokens)}</span>`;
@@ -5808,15 +5808,15 @@
   function renderUsage(usage, pricing) {
     let html = '';
     if (usage.input_tokens !== undefined)
-      html += `<div class="usage-item"><span class="usage-dot input"></span>${usage.input_tokens.toLocaleString()} input</div>`;
+      html += `<div class="usage-item"><span class="usage-dot input"></span>${escHtml(usage.input_tokens.toLocaleString())} input</div>`;
     if (usage.cache_creation_input_tokens)
-      html += `<div class="usage-item"><span class="usage-dot cache-create"></span>${usage.cache_creation_input_tokens.toLocaleString()} cache create</div>`;
+      html += `<div class="usage-item"><span class="usage-dot cache-create"></span>${escHtml(usage.cache_creation_input_tokens.toLocaleString())} cache create</div>`;
     if (usage.cache_read_input_tokens)
-      html += `<div class="usage-item"><span class="usage-dot cache-read"></span>${usage.cache_read_input_tokens.toLocaleString()} cache read</div>`;
+      html += `<div class="usage-item"><span class="usage-dot cache-read"></span>${escHtml(usage.cache_read_input_tokens.toLocaleString())} cache read</div>`;
     if (usage.output_tokens !== undefined)
-      html += `<div class="usage-item"><span class="usage-dot output"></span>${usage.output_tokens.toLocaleString()} output</div>`;
+      html += `<div class="usage-item"><span class="usage-dot output"></span>${escHtml(usage.output_tokens.toLocaleString())} output</div>`;
     if (usage.reasoning_tokens)
-      html += `<div class="usage-item"><span class="usage-dot reasoning"></span>${usage.reasoning_tokens.toLocaleString()} reasoning</div>`;
+      html += `<div class="usage-item"><span class="usage-dot reasoning"></span>${escHtml(usage.reasoning_tokens.toLocaleString())} reasoning</div>`;
     const cost = computeCost(usage, pricing);
     if (cost != null)
       html += `<div class="usage-item usage-cost">${formatCost(cost)}</div>`;
@@ -5938,8 +5938,8 @@
     if (tokensEl) {
       if (inputTokens || outputTokens) {
         tokensEl.innerHTML =
-          `<span class="ft-in"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M4 1L7 5H1Z" fill="currentColor"/></svg> ${inputTokens.toLocaleString()}</span>` +
-          `<span class="ft-out"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M4 7L1 3H7Z" fill="currentColor"/></svg> ${outputTokens.toLocaleString()}</span>`;
+          `<span class="ft-in"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M4 1L7 5H1Z" fill="currentColor"/></svg> ${escHtml(inputTokens.toLocaleString())}</span>` +
+          `<span class="ft-out"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M4 7L1 3H7Z" fill="currentColor"/></svg> ${escHtml(outputTokens.toLocaleString())}</span>`;
       } else {
         tokensEl.innerHTML = '<span class="footer-placeholder">tokens</span>';
       }
@@ -5951,8 +5951,8 @@
       if (cacheRead || cacheCreate) {
         const icon = '<svg class="ft-cache-icon" width="10" height="10" viewBox="0 0 10 10"><ellipse cx="5" cy="2.5" rx="4" ry="1.8" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 2.5v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V2.5" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 4.7v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V4.7" fill="none" stroke="currentColor" stroke-width="0.9"/></svg>';
         let parts = '';
-        if (cacheCreate) parts += `<span class="ft-cache-w">${icon} ${cacheCreate.toLocaleString()} w</span>`;
-        if (cacheRead) parts += `<span class="ft-cache-r">${icon} ${cacheRead.toLocaleString()} r</span>`;
+        if (cacheCreate) parts += `<span class="ft-cache-w">${icon} ${escHtml(cacheCreate.toLocaleString())} w</span>`;
+        if (cacheRead) parts += `<span class="ft-cache-r">${icon} ${escHtml(cacheRead.toLocaleString())} r</span>`;
         cacheEl.innerHTML = parts;
       } else {
         cacheEl.innerHTML = '<span class="footer-placeholder">cache</span>';

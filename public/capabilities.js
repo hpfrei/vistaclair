@@ -100,8 +100,8 @@ Available templates in this skill directory:
         item.innerHTML = `<span class="cap-item-name">${escHtml(skill.name)}</span>
           <span class="cap-item-desc">${escHtml(skill.description)}</span>
           <span class="cap-list-actions">
-            <button class="cap-edit-btn" data-name="${skill.name}" data-kind="skill" title="Edit">&#9998;</button>
-            <button class="cap-del-btn" data-name="${skill.name}" data-kind="skill" title="Delete">&#10005;</button>
+            <button class="cap-edit-btn" data-name="${escHtml(skill.name)}" data-kind="skill" title="Edit">&#9998;</button>
+            <button class="cap-del-btn" data-name="${escHtml(skill.name)}" data-kind="skill" title="Delete">&#10005;</button>
           </span>`;
         list.appendChild(item);
       }
@@ -114,7 +114,7 @@ Available templates in this skill directory:
         const card = document.createElement('div');
         card.className = 'ref-card';
         card.innerHTML = `<div class="ref-card-header" onclick="toggleRef(this)">
-            <span><span class="ref-name">/${skill.name}</span> <span class="ref-tag tag-sk">skill</span></span>
+            <span><span class="ref-name">/${escHtml(skill.name)}</span> <span class="ref-tag tag-sk">skill</span></span>
             <span class="ref-brief">${escHtml(skill.description)}</span>
             <span class="ref-chevron">&#9654;</span>
           </div>
@@ -190,8 +190,8 @@ Available templates in this skill directory:
       item.innerHTML = `<span class="cap-item-name">${escHtml(agent.name)}</span>
         <span class="cap-item-desc">${escHtml(agent.description)}</span>
         <span class="cap-list-actions">
-          <button class="cap-edit-btn" data-name="${agent.name}" data-kind="agent" title="Edit">&#9998;</button>
-          <button class="cap-del-btn" data-name="${agent.name}" data-kind="agent" title="Delete">&#10005;</button>
+          <button class="cap-edit-btn" data-name="${escHtml(agent.name)}" data-kind="agent" title="Edit">&#9998;</button>
+          <button class="cap-del-btn" data-name="${escHtml(agent.name)}" data-kind="agent" title="Delete">&#10005;</button>
         </span>`;
       list.appendChild(item);
     }
@@ -248,8 +248,8 @@ Available templates in this skill directory:
       item.innerHTML = `<span class="cap-item-name">${escHtml(hook.event)}${escHtml(matcherText)}</span>
         <span class="cap-item-desc">${escHtml(cmdPreview)}</span>
         <span class="cap-list-actions">
-          <button class="cap-edit-btn" data-event="${hook.event}" data-entry="${hook.entryIndex}" data-hook="${hook.hookIndex}" data-kind="hook" title="Edit">&#9998;</button>
-          <button class="cap-del-btn" data-event="${hook.event}" data-entry="${hook.entryIndex}" data-kind="hook" title="Delete">&#10005;</button>
+          <button class="cap-edit-btn" data-event="${escHtml(hook.event)}" data-entry="${hook.entryIndex}" data-hook="${hook.hookIndex}" data-kind="hook" title="Edit">&#9998;</button>
+          <button class="cap-del-btn" data-event="${escHtml(hook.event)}" data-entry="${hook.entryIndex}" data-kind="hook" title="Delete">&#10005;</button>
         </span>`;
       list.appendChild(item);
     }
@@ -430,7 +430,7 @@ Available templates in this skill directory:
 
     // Provider key bar
     const hasKey = !!prov.apiKey;
-    const keyId = `provKey_${prov.key}`;
+    const keyId = escHtml(`provKey_${prov.key}`);
     let html = `<div class="provider-header">
       <span class="provider-url">${escHtml(prov.apiBaseUrl || '')}</span>
       <span class="provider-key-area">

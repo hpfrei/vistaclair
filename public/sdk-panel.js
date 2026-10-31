@@ -1458,10 +1458,14 @@
       if (imgs.length) {
         const strip = el('div', 'sdk-user-imgs');
         for (const im of imgs) {
+          // Only data:image/ URIs and this dashboard's uploads load
+          // (renderSafe.userImageUrl); any other src shows its name.
+          const url = window.renderSafe?.userImageUrl(im?.url);
+          if (!url) { strip.appendChild(el('span', 'sdk-user-img-blocked', `[image: ${im?.name || 'not shown'}]`)); continue; }
           const a = el('a');
-          a.href = im.url; a.target = '_blank'; a.rel = 'noopener'; a.title = im.name || '';
+          a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.title = im.name || '';
           const img = el('img');
-          img.src = im.url; img.alt = im.name || 'image'; img.loading = 'lazy';
+          img.src = url; img.alt = im.name || 'image'; img.loading = 'lazy';
           a.appendChild(img);
           strip.appendChild(a);
         }
