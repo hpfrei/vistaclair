@@ -8,10 +8,11 @@
 // secret store) is a pure function of DATA_HOME and the environment and is
 // built once for both. The dashboard profile adds the in-process services
 // (store, cliSessionManager, live broadcaster, pending questions, restart,
-// the owner check, orchestration runs). The headless profile reaches the
-// dashboard's broadcaster best-effort over loopback and stubs what only exists
-// in the dashboard process: the runner keeps serving when core is down, it
-// just loses live dashboard events and inspector timelines.
+// the owner checks, orchestration runs, external sessions). The headless
+// profile reaches the dashboard's broadcaster best-effort over loopback and
+// stubs what only exists in the dashboard process: the runner keeps serving
+// when core is down, it just loses live dashboard events and inspector
+// timelines.
 //
 // Every field here is contract (Pro spreads the whole object). Add fields
 // additively; removing or reshaping one is a CONTRACT_VERSION bump. The table
@@ -32,6 +33,7 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
   const utils = require('./utils');
   const caps = require('./capabilities');
   const secretStore = require('./secret-store');
+  const claudeAuth = require('./claude-auth');
   const home = dataHome || utils.DATA_HOME;
 
   const shared = {
@@ -65,10 +67,20 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     // catalog), for Pro's daily model review. Resolves { scan, catalog, catalogError }.
     refreshModels: () => caps.refreshModelRegistry(home),
     resolveAuth: (authMode) => caps.resolveAuth(home, { authMode }),
-    claudeAuthInfo: () => ({
-      hasSubscription: caps.hasClaudeSubscription(),
-      pref: caps.getClaudeAuthPref(home),
-    }),
+    // The `claude` CLI's login: hasSubscription, the dashboard's auth pref, and
+    // the account `claude auth status` names (email, orgName: strings or null,
+    // null while signed out) — for Pro to tell whether two machines share a
+    // Claude account. No other field of the status, and never a credential.
+    claudeAuthInfo: () => {
+      const st = claudeAuth.authStatus.get();
+      const account = (k) => (st?.loggedIn === true && typeof st[k] === 'string' && st[k] ? st[k] : null);
+      return {
+        hasSubscription: caps.hasClaudeSubscription(),
+        pref: caps.getClaudeAuthPref(home),
+        email: account('email'),
+        orgName: account('orgName'),
+      };
+    },
   };
 
   if (dashboard) {
@@ -83,6 +95,28 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       ...shared,
       broadcaster, store, cliSessionManager, scheduleRestart, pendingQuestions, clearPendingQuestionsForTab,
       isOwnerRequest,
+      // isOwnerConnection(ws), for an add-on's WS message handler: true for an
+      // open dashboard socket (each passed the owner check at its upgrade),
+      // false for anything else (a closed or unknown socket, a non-object).
+      isOwnerConnection: (ws) => (typeof broadcaster?.isOwnerConnection === 'function' ? broadcaster.isOwnerConnection(ws) : false),
+      // External sessions (src/external-session.js): registerExternalSession(
+      // tabId, adapter) shows a session running elsewhere (Pro's remote
+      // sessions) as an Agent SDK tab — listed in cli:tabs with `external:
+      // true`, announced as cli:spawned — and returns an idempotent
+      // unregister() (cli:exit, then cli:tabs without it). adapter = { sessId,
+      // kind: 'sdk', hidden?, title, settings (engine 'sdk', auth, sessionDir
+      // for sdk:todo, externalHost), running, busy, state (read live), submit(
+      // text, { images }), interrupt(), setModel(m), setShowThinking(on),
+      // setAuth(auth, { continueTurn }), historyPage({ limit, before }) → an
+      // sdk:history page, kill(), close() (the tab's ×; the add-on
+      // unregisters), orchestration?() → the run members GET
+      // /api/orchestration/run answers for its settings.orchestration.runId }.
+      // The tab's sdk:* / cli:* messages go to the adapter; any method may
+      // return a promise, and its throw or rejection reaches only the
+      // requesting browser. The add-on broadcasts the session's sdk:event
+      // itself. Throws on a malformed adapter or a tabId already in use. Never
+      // persisted, restored, paused or killed by core. Dashboard profile only.
+      registerExternalSession: (tabId, adapter) => cliSessionManager.registerExternal(tabId, adapter),
       // Tool packs (src/tool-packs.js): MCP servers, disallowed tools and
       // prompt text an add-on adds to dashboard sessions — every session of a
       // pack's roles when `default`, else those whose settings.toolPacks names
@@ -169,6 +203,7 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     // Nothing served by a runner is an owner request: the dashboard already
     // authenticated what it reverse-proxies, and standalone apps are public.
     isOwnerRequest: () => false,
+    isOwnerConnection: () => false,
     tgLoginConfigured: () => false,
     // Inspector session registration is dashboard-process state; headless
     // spawns still work (the proxy tags them by instanceId), they just don't

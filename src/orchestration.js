@@ -2386,6 +2386,13 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     r.post('/delete-run', call(b => deleteRun(String(b.runId || ''), { force: b.force === true })));
     r.get('/run', (req, res) => {
       const run = getRun(String(req.query.runId || ''));
+      // A run whose orchestrator is an external session (another machine's):
+      // its members as that session's adapter describes them.
+      const ext = run ? null : mgr.externalOrchestration?.(String(req.query.runId || ''));
+      if (ext) {
+        return ext.then((d) => res.json(d && typeof d === 'object' ? d : {}))
+          .catch((e) => { if (!res.headersSent) res.status(502).json({ error: e.message }); });
+      }
       if (!run) return res.status(404).json({ error: 'run not found' });
       res.json({ ...describeRun(run), todoText: readTodo(run), events: run.events.slice(-30) });
     });

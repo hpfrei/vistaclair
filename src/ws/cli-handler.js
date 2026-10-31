@@ -2,7 +2,9 @@
 // file upload, resize, settings, scrollback, and saved-session management.
 // Registered on the dashboard broadcaster under the 'cli:' prefix, and 'sdk:'
 // for the Agent SDK panel (src/sdk-session.js): send, interrupt, setModel, setThinking,
-// history, todo.
+// history, todo. An external session's tab (src/external-session.js) takes the
+// same messages through its add-on's adapter: same replies, the adapter's
+// errors in the reply's own error shape.
 
 const fs = require('fs');
 const path = require('path');
@@ -39,6 +41,8 @@ function sendScrollbackChunked(ws, tabId, data) {
 
 function handleMessage(ws, msg, bc) {
   const send = (data) => ws.send(JSON.stringify(data));
+  // A reply after an await: the requester may have gone meanwhile.
+  const sendLater = (data) => { try { if (ws.readyState === WebSocket.OPEN) send(data); } catch {} };
   const mgr = bc.cliSessionManager;
   if (!mgr) return;
 
@@ -73,6 +77,12 @@ function handleMessage(ws, msg, bc) {
       break;
     }
     case 'cli:closeTab':
+      if (msg.tabId && mgr.getExternal?.(msg.tabId)) {
+        // The add-on closes it, and unregisters the tab when it goes.
+        clearPendingQuestionsForTab(msg.tabId);
+        settle(mgr.getExternal(msg.tabId).call('close'), null, (e) => actionReply(sendLater, 'close', msg, { error: e.message }));
+        break;
+      }
       if (msg.tabId) {
         // A run member closes only when orchestration allows it: a worker once
         // its work is complete (or force-closed: abandoned), an orchestrator
@@ -174,7 +184,9 @@ function handleMessage(ws, msg, bc) {
     case 'cli:kill':
       if (msg.tabId) {
         clearPendingQuestionsForTab(msg.tabId);
-        mgr.kill(msg.tabId);
+        const ext = mgr.getExternal?.(msg.tabId);
+        if (ext) settle(ext.call('kill'), null, (e) => actionReply(sendLater, 'kill', msg, { error: e.message }));
+        else mgr.kill(msg.tabId);
       }
       break;
     case 'cli:settings':
@@ -188,11 +200,11 @@ function handleMessage(ws, msg, bc) {
       break;
     case 'cli:getSettings':
       if (msg.tabId) {
-        const session = mgr.get(msg.tabId);
+        const session = mgr.get(msg.tabId) || mgr.getExternal?.(msg.tabId) || null;
         // Carries the credential join, so the picker reads `usable` instead of
         // deciding for itself what an absent API key means.
         const models = caps.listModelsWithAvailability(PROJECT_ROOT);
-        const sessId = session && session.sessId;
+        const sessId = session && !session.external && session.sessId;
         send({
           type: 'cli:settingsData',
           tabId: msg.tabId,
@@ -254,9 +266,12 @@ function handleMessage(ws, msg, bc) {
     case 'cli:pauseRun':
       actionResult(send, 'pause', msg, () => bc.orchestration.pauseRun(String(msg.runId || '')));
       break;
-    case 'cli:interrupt':
-      actionResult(send, 'interrupt', msg, () => bc.sessionControl.interrupt(msg.tabId));
+    case 'cli:interrupt': {
+      const ext = msg.tabId ? mgr.getExternal?.(msg.tabId) : null;
+      if (ext) settle(ext.call('interrupt'), () => actionReply(sendLater, 'interrupt', msg, { ok: true }), (e) => actionReply(sendLater, 'interrupt', msg, { error: e.message }));
+      else actionResult(send, 'interrupt', msg, () => bc.sessionControl.interrupt(msg.tabId));
       break;
+    }
     case 'cli:sessionModelMap': {
       // The SDK toolbar's Models dialog: a run member's tab routes the whole
       // run (orchestration.setRunModelMap: every member, and the workers
@@ -282,11 +297,23 @@ function handleMessage(ws, msg, bc) {
       // An ended session is no longer live: its saved entry takes it, so
       // its resume runs on the new billing.
       const sessId = String(msg.sessId || '');
-      const session = (msg.tabId && mgr.get(msg.tabId)) || mgr.getBySessId(sessId);
-      const saved = session ? null : mgr.findSaved(sessId);
-      const st = (session ? session.getSettings() : saved?.settings)?.orchestration;
+      const session = (msg.tabId && (mgr.get(msg.tabId) || mgr.getExternal?.(msg.tabId))) || mgr.getBySessId(sessId);
       const auth = String(msg.auth || '');
       const continueTurn = msg.continue === true;
+      if (session?.external) {
+        // The add-on switches it (a remote run member: its whole run).
+        if (auth !== 'apikey' && auth !== 'subscription') {
+          actionReply(send, 'auth', msg, { error: 'auth must be "apikey" or "subscription"' });
+          break;
+        }
+        settle(session.call('setAuth', auth, { continueTurn }), (r) => {
+          const applied = typeof r?.applied === 'string' ? r.applied.slice(0, 40) : 'now';
+          actionReply(sendLater, 'auth', msg, { auth, sessions: 1, applied: { [applied]: 1 } });
+        }, (e) => actionReply(sendLater, 'auth', msg, { error: e.message }));
+        break;
+      }
+      const saved = session ? null : mgr.findSaved(sessId);
+      const st = (session ? session.getSettings() : saved?.settings)?.orchestration;
       actionResult(send, 'auth', msg, () => {
         if (st?.runId) return bc.orchestration.setRunAuth(st.runId, auth, { continueTurn });
         if (session?.kind === 'sdk') {
@@ -329,6 +356,11 @@ function handleMessage(ws, msg, bc) {
       // A refusal (not running, an image too large) comes back as an error
       // notice in the session's own event stream.
       const session = sdkSession(mgr, msg.sessId);
+      if (session?.external) {
+        settle(session.call('submit', String(msg.text || ''), { images: Array.isArray(msg.images) ? msg.images : [] }), null,
+          (e) => sendNotice(sendLater, msg.sessId, `Not sent: ${e.message}`));
+        break;
+      }
       try {
         if (!session) throw new Error('that Agent SDK session is not running');
         session.submit(String(msg.text || ''), { images: Array.isArray(msg.images) ? msg.images : [] });
@@ -339,7 +371,8 @@ function handleMessage(ws, msg, bc) {
     }
     case 'sdk:interrupt': {
       const session = sdkSession(mgr, msg.sessId);
-      if (session) session.interrupt();
+      if (session?.external) settle(session.call('interrupt'), null, (e) => sendNotice(sendLater, msg.sessId, `Not interrupted: ${e.message}`));
+      else if (session) session.interrupt();
       break;
     }
     case 'sdk:setModel': {
@@ -348,6 +381,10 @@ function handleMessage(ws, msg, bc) {
       // reaches the panel as a status event; a refusal as an error notice.
       const live = msg.sessId ? mgr.getBySessId(String(msg.sessId)) : null;
       const session = sdkSession(mgr, msg.sessId);
+      if (session?.external) {
+        settle(session.call('setModel', msg.model), null, (e) => sendNotice(sendLater, msg.sessId, `Model not changed: ${e.message}`));
+        break;
+      }
       (async () => {
         try {
           if (!session) throw new Error(live ? 'not an Agent SDK session' : 'that Agent SDK session is not running');
@@ -366,6 +403,10 @@ function handleMessage(ws, msg, bc) {
       // The box's Thinking toggle: persisted by the session (settings), shown
       // back as its status; a refusal as an error notice.
       const session = sdkSession(mgr, msg.sessId);
+      if (session?.external) {
+        settle(session.call('setShowThinking', msg.on === true), null, (e) => sendNotice(sendLater, msg.sessId, `Thinking not switched: ${e.message}`));
+        break;
+      }
       try {
         if (!session) throw new Error('that Agent SDK session is not running');
         session.setShowThinking(msg.on === true);
@@ -397,6 +438,15 @@ function handleMessage(ws, msg, bc) {
       }
       if (!UUID_RE.test(String(msg.sessId || ''))) break;
       const before = cursorOf(msg.before);
+      const ext = sdkSession(mgr, msg.sessId);
+      if (ext?.external) {
+        // The adapter's page (awaited); its error as an empty page with `error`.
+        const lim = Number(msg.limit);
+        settle(ext.call('historyPage', { limit: Number.isFinite(lim) && lim > 0 ? Math.floor(lim) : undefined, before }),
+          (page) => sendLater({ type: 'sdk:history', sessId: msg.sessId, from: before, ...pageOf(page) }),
+          (e) => sendLater({ type: 'sdk:history', sessId: msg.sessId, from: before, events: [], hasMore: false, before: null, totals: null, error: e.message }));
+        break;
+      }
       send({ type: 'sdk:history', sessId: msg.sessId, from: before, ...historyOf(mgr, msg.sessId, { limit, before }) });
       break;
     }
@@ -426,10 +476,29 @@ function sdkSession(mgr, sessId) {
 // compactions }) covers the folder's whole transcript, every page.
 function historyOf(mgr, sessId, { limit, before } = {}) {
   const live = sdkSession(mgr, sessId);
-  if (live) return live.historyPage({ limit, before });
+  if (live && !live.external) return live.historyPage({ limit, before });
   const dir = mgr.sessionDirOf(sessId);
   return dir ? { ...readTranscriptPage(dir, { sessId, limit, before }), totals: historyTotals(dir) }
     : { events: [], hasMore: false, before: null, totals: null };
+}
+
+// An external adapter's history page in the sdk:history reply's fields.
+function pageOf(page) {
+  return {
+    events: Array.isArray(page?.events) ? page.events : [],
+    hasMore: page?.hasMore === true,
+    before: cursorOf(page?.before),
+    totals: page?.totals && typeof page.totals === 'object' ? page.totals : null,
+  };
+}
+
+// An external session's adapter call (a promise that also carries its sync
+// throws): `ok` with the result, `fail` with an error, `ok` throwing included.
+// Nothing escapes as an unhandled rejection.
+function settle(promise, ok, fail) {
+  promise.then((r) => { if (ok) ok(r); }).catch((e) => {
+    try { fail(e); } catch (e2) { console.error(`[external session] reply failed: ${e2.message}`); }
+  });
 }
 
 // A page cursor: a byte offset into the transcript, or null (the newest page).
@@ -446,6 +515,10 @@ function sendNotice(send, sessId, text) {
 function actionResult(send, action, msg, fn) {
   let out;
   try { out = { ...(fn() || {}) }; } catch (e) { out = { error: e.message }; }
+  actionReply(send, action, msg, out);
+}
+
+function actionReply(send, action, msg, out) {
   send({ type: 'cli:actionResult', action, reqId: msg.reqId || null, tabId: msg.tabId || null, runId: msg.runId || null, sessionId: msg.sessionId || null, ...out });
 }
 
