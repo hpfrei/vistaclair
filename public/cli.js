@@ -1783,7 +1783,9 @@
         panel.classList.add('ask-external-submit');
       }
       if (isSingle && !f.formData.cancelLabel) f.formData.cancelLabel = 'Cancel';
-      panel.innerHTML = askFormBuildHTML(f.formData, { cwd: meta.cwd });
+      // A remote ask may not load this machine's files or outside URLs.
+      const formOpts = { cwd: meta.cwd, remote: meta.remote === true };
+      panel.innerHTML = askFormBuildHTML(f.formData, formOpts);
 
       const binder = askFormBind(panel, f.formData, isSingle ? {
         onSubmit: (answer, files) => {
@@ -1797,7 +1799,7 @@
       } : {
         onSubmit: () => {},
         onCancel: () => {},
-      }, { cwd: meta.cwd });
+      }, formOpts);
       binders.push({ binder, form: f });
       body.appendChild(panel);
     });
@@ -1880,6 +1882,7 @@
         showAskModal(askId, msg.forms || [], {
           title: msg.title, cwd: msg.cwd, tabId: msg.tabId,
           remoteLabel: window.remoteAsk?.remoteAskLabel(msg) || null,
+          remote: msg.host != null,
         });
         break;
       }

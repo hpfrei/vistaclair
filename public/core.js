@@ -532,8 +532,13 @@ function cancelRenderDebounce(targetEl) {
   }
 }
 
+// Inline markdown for question forms: DOMPurify keeps only inline formatting,
+// then askSafe.cleanInlineHtml re-checks it without a DOM (public/ask-safe.js).
 function inlineMd(text) {
-  return typeof marked !== 'undefined' ? marked.parseInline(text || '') : escHtml(text || '');
+  if (typeof marked === 'undefined') return escHtml(text || '');
+  const html = marked.parseInline(text || '');
+  const purified = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(html, askSafe.PURIFY_INLINE) : html;
+  return askSafe.cleanInlineHtml(purified);
 }
 
 function highlightJSON(obj) {
@@ -1090,51 +1095,40 @@ document.querySelectorAll('#empty-state .empty-state-link').forEach(el => {
 // --- Expose API for modules ---
 // --- AskUserQuestion: shared form rendering ---
 
-// Image src from a form → { url, path } or null when it can't be shown.
-// Accepts http(s) URLs, data:image/ URIs, absolute paths and paths relative to
-// the asking session's cwd; local files load through /api/raw-file. Any other
-// scheme (javascript:, file: aside) is refused.
-function askImageSrc(src, cwd) {
-  src = typeof src === 'string' ? src.trim() : '';
-  if (!src) return null;
-  if (/^https?:\/\//i.test(src)) return { url: src, path: null };
-  if (/^data:image\//i.test(src)) return { url: src, path: null };
-  let p = src;
-  if (/^file:\/\//i.test(p)) { try { p = decodeURIComponent(p.slice(7)); } catch { return null; } }
-  else if (!/^[a-zA-Z]:[\\/]/.test(p) && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(p)) return null;
-  if (!p.startsWith('/') && !/^[a-zA-Z]:[\\/]/.test(p)) {
-    if (!cwd) return null;
-    p = cwd.replace(/[\\/]+$/, '') + '/' + p.replace(/^\.\//, '');
-  }
-  return { url: '/api/raw-file?path=' + encodeURIComponent(p), path: p };
-}
+// Image src from a form → { url, path } or null (public/ask-safe.js). With
+// `remote` (an ask from another machine) only data:image/ URIs load.
+const askImageSrc = askSafe.askImageSrc;
 
 function askImgBrokenHTML(src) {
   return `<span class="ask-img-broken" title="${escHtml(src || '')}"><span class="ask-img-broken-icon">&#128444;</span><span class="ask-img-broken-src">${escHtml(src || '(no image)')}</span></span>`;
 }
 
-// <img> for a form image, or the broken placeholder when the src is refused.
+// <img> for a form image, or the broken placeholder when the src is refused
+// (nothing for a remote ask: its caption or label says what it was).
 // data-ask-src keeps the original src for the placeholder (askFormBind).
-function askImgHTML(src, cwd, alt) {
-  const r = askImageSrc(src, cwd);
-  if (!r) return askImgBrokenHTML(src);
+function askImgHTML(src, cwd, alt, remote) {
+  const r = askImageSrc(src, cwd, remote);
+  if (!r) return remote ? '' : askImgBrokenHTML(src);
   return `<img class="ask-img" src="${escHtml(r.url)}" alt="${escHtml(alt || '')}" data-ask-src="${escHtml(src)}">`;
 }
 
 // Zoom button for a form image; the click opens it large (askFormBind).
-function askZoomHTML(src, caption) {
+function askZoomHTML(src, caption, remote) {
+  if (remote && !askImageSrc(src, null, true)) return '';
   return `<button type="button" class="ask-img-zoom" data-zoom-src="${escHtml(src || '')}" data-zoom-caption="${escHtml(caption || '')}" title="View larger">&#10530;</button>`;
 }
 
 // Markdown images: resolve their src the same way (relative to cwd) without
-// letting the browser fetch the raw src first — a <template> is inert.
-function askResolveMdImages(html, cwd) {
+// letting the browser fetch the raw src first — a <template> is inert. A
+// remote ask's refused image becomes its alt text.
+function askResolveMdImages(html, cwd, remote) {
   if (!html || !/<img\b/i.test(html)) return html;
   const t = document.createElement('template');
   t.innerHTML = html;
   t.content.querySelectorAll('img').forEach(img => {
     const src = img.getAttribute('src') || '';
-    const r = askImageSrc(src, cwd);
+    const r = askImageSrc(src, cwd, remote);
+    if (!r && remote) { img.replaceWith(document.createTextNode(img.getAttribute('alt') || '')); return; }
     img.classList.add('ask-img', 'ask-md-img');
     img.setAttribute('data-ask-src', src);
     if (r) img.setAttribute('src', r.url);
@@ -1143,14 +1137,14 @@ function askResolveMdImages(html, cwd) {
   return t.innerHTML;
 }
 
-function askInlineMd(text, cwd) {
-  return askResolveMdImages(inlineMd(text), cwd);
+function askInlineMd(text, cwd, remote) {
+  return askResolveMdImages(inlineMd(text), cwd, remote);
 }
 
 // Large view of a form image: local files open in the file preview modal,
 // URLs in a minimal overlay built on the same chrome.
-function askOpenImage(src, caption, cwd) {
-  const r = askImageSrc(src, cwd);
+function askOpenImage(src, caption, cwd, remote) {
+  const r = askImageSrc(src, cwd, remote);
   if (!r) return;
   if (r.path) { openFilePreview(r.path); return; }
   closeFilePreview();
@@ -1176,9 +1170,11 @@ function askOpenImage(src, caption, cwd) {
 }
 
 // opts.cwd: the asking session's working directory (relative image paths).
+// opts.remote: the ask comes from another machine (only data:image/ images).
 function askFormBuildHTML(formData, opts = {}) {
   const questions = formData.questions || [];
   const cwd = opts.cwd || null;
+  const remote = opts.remote === true;
   let html = '';
 
   // Form chrome
@@ -1186,7 +1182,7 @@ function askFormBuildHTML(formData, opts = {}) {
     html += `<div class="ask-form-title">${escHtml(formData.title)}</div>`;
   }
   if (formData.description) {
-    html += `<div class="ask-form-desc markdown-body">${askInlineMd(formData.description, cwd)}</div>`;
+    html += `<div class="ask-form-desc markdown-body">${askInlineMd(formData.description, cwd, remote)}</div>`;
   }
 
   for (let qi = 0; qi < questions.length; qi++) {
@@ -1210,7 +1206,7 @@ function askFormBuildHTML(formData, opts = {}) {
     }
 
     // Question text
-    html += `<div class="ask-text markdown-body">${askInlineMd(q.question, cwd)}</div>`;
+    html += `<div class="ask-text markdown-body">${askInlineMd(q.question, cwd, remote)}</div>`;
 
     // Pictures to look at / comment on
     if (Array.isArray(q.images) && q.images.length) {
@@ -1219,7 +1215,7 @@ function askFormBuildHTML(formData, opts = {}) {
         const src = typeof im === 'string' ? im : im?.src;
         const caption = (im && typeof im === 'object' && im.caption) || `#${ii + 1}`;
         html += '<figure class="ask-image">';
-        html += `<div class="ask-image-frame">${askImgHTML(src, cwd, caption)}${askZoomHTML(src, caption)}</div>`;
+        html += `<div class="ask-image-frame">${askImgHTML(src, cwd, caption, remote)}${askZoomHTML(src, caption, remote)}</div>`;
         html += `<figcaption class="ask-image-caption">${escHtml(caption)}</figcaption>`;
         html += '</figure>';
       });
@@ -1227,7 +1223,7 @@ function askFormBuildHTML(formData, opts = {}) {
     }
 
     // Render by type
-    html += askFieldHTML(q, qi, qType, qId, cwd);
+    html += askFieldHTML(q, qi, qType, qId, cwd, remote);
 
     html += '</div>'; // .ask-question
   }
@@ -1245,23 +1241,23 @@ function askFormBuildHTML(formData, opts = {}) {
 
 // One select/multiselect option. With images the options become cards: the
 // button (thumbnail + label) selects, the zoom button beside it only views.
-function askOptionHTML(opt, qId, isSel, multi, grid, cwd) {
+function askOptionHTML(opt, qId, isSel, multi, grid, cwd, remote) {
   let html = '';
   if (grid) html += '<div class="ask-option-card">';
   html += `<button class="ask-option-btn${grid ? ' ask-option-btn-img' : ''}${isSel ? ' selected' : ''}" data-qid="${escHtml(qId)}" data-label="${escHtml(opt.label)}">`;
-  if (grid) html += `<span class="ask-option-thumb">${opt.image ? askImgHTML(opt.image, cwd, opt.label) : ''}</span>`;
+  if (grid) html += `<span class="ask-option-thumb">${opt.image ? askImgHTML(opt.image, cwd, opt.label, remote) : ''}</span>`;
   if (grid) html += '<span class="ask-option-text">';
   if (multi) html += '<span class="ask-option-check"></span>';
   html += `<span class="ask-option-label">${escHtml(opt.label)}</span>`;
   if (grid) html += '</span>';
-  if (opt.description) html += `<span class="ask-option-desc">${askInlineMd(opt.description, cwd)}</span>`;
+  if (opt.description) html += `<span class="ask-option-desc">${askInlineMd(opt.description, cwd, remote)}</span>`;
   html += '</button>';
-  if (grid && opt.image) html += askZoomHTML(opt.image, opt.label);
+  if (grid && opt.image) html += askZoomHTML(opt.image, opt.label, remote);
   if (grid) html += '</div>';
   return html;
 }
 
-function askFieldHTML(q, qi, qType, qId, cwd) {
+function askFieldHTML(q, qi, qType, qId, cwd, remote) {
   let html = '';
   const grid = (q.options || []).some(o => o && o.image);
 
@@ -1269,7 +1265,7 @@ function askFieldHTML(q, qi, qType, qId, cwd) {
     case 'select': {
       html += `<div class="ask-options${grid ? ' ask-options-grid' : ''}" data-qid="${escHtml(qId)}" data-multi="false">`;
       for (const opt of (q.options || [])) {
-        html += askOptionHTML(opt, qId, q.defaultValue === opt.label, false, grid, cwd);
+        html += askOptionHTML(opt, qId, q.defaultValue === opt.label, false, grid, cwd, remote);
       }
       html += '</div>';
       // Preview panel
@@ -1284,7 +1280,7 @@ function askFieldHTML(q, qi, qType, qId, cwd) {
       html += `<div class="ask-options${grid ? ' ask-options-grid' : ''}" data-qid="${escHtml(qId)}" data-multi="true">`;
       const defaults = Array.isArray(q.defaultValue) ? q.defaultValue : [];
       for (const opt of (q.options || [])) {
-        html += askOptionHTML(opt, qId, defaults.includes(opt.label), true, grid, cwd);
+        html += askOptionHTML(opt, qId, defaults.includes(opt.label), true, grid, cwd, remote);
       }
       html += '</div>';
       html += `<div class="ask-preview" data-qid="${escHtml(qId)}"></div>`;
@@ -1319,10 +1315,10 @@ function askFieldHTML(q, qi, qType, qId, cwd) {
 
     case 'number': {
       const attrs = [];
-      if (q.min != null) attrs.push(`min="${q.min}"`);
-      if (q.max != null) attrs.push(`max="${q.max}"`);
-      if (q.step != null) attrs.push(`step="${q.step}"`);
-      const val = q.defaultValue != null ? ` value="${q.defaultValue}"` : '';
+      if (q.min != null) attrs.push(`min="${escHtml(String(q.min))}"`);
+      if (q.max != null) attrs.push(`max="${escHtml(String(q.max))}"`);
+      if (q.step != null) attrs.push(`step="${escHtml(String(q.step))}"`);
+      const val = q.defaultValue != null ? ` value="${escHtml(String(q.defaultValue))}"` : '';
       html += `<input type="number" class="ask-number-input" data-qid="${escHtml(qId)}"${val} ${attrs.join(' ')} placeholder="${escHtml(q.placeholder || '')}">`;
       break;
     }
@@ -1364,10 +1360,11 @@ function askFieldHTML(q, qi, qType, qId, cwd) {
   return html;
 }
 
-// opts.cwd: as for askFormBuildHTML.
+// opts.cwd, opts.remote: as for askFormBuildHTML.
 function askFormBind(container, formData, callbacks, opts = {}) {
   const questions = formData.questions || [];
   const cwd = opts.cwd || null;
+  const remote = opts.remote === true;
   const submitBtn = container.querySelector('.ask-submit-btn');
   const cancelBtn = container.querySelector('.ask-cancel-btn');
 
@@ -1417,7 +1414,7 @@ function askFormBind(container, formData, callbacks, opts = {}) {
     if (!zoom || !container.contains(zoom)) return;
     e.preventDefault();
     e.stopPropagation();
-    askOpenImage(zoom.dataset.zoomSrc, zoom.dataset.zoomCaption, cwd);
+    askOpenImage(zoom.dataset.zoomSrc, zoom.dataset.zoomCaption, cwd, remote);
   });
   bindImages(container);
 
@@ -1582,9 +1579,9 @@ function askFormBind(container, formData, callbacks, opts = {}) {
       let safe = '';
       if (opt.preview) {
         const rendered = typeof marked !== 'undefined' ? marked.parse(opt.preview) : escHtml(opt.preview);
-        safe = askResolveMdImages(typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(rendered) : rendered, cwd);
+        safe = askResolveMdImages(typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(rendered) : rendered, cwd, remote);
       }
-      const imgHtml = image ? `<div class="ask-preview-image">${askImgHTML(image, cwd, opt.label)}${askZoomHTML(image, opt.label)}</div>` : '';
+      const imgHtml = image ? `<div class="ask-preview-image">${askImgHTML(image, cwd, opt.label, remote)}${askZoomHTML(image, opt.label, remote)}</div>` : '';
       previewEl.innerHTML = `${imgHtml}${safe ? `<div class="ask-preview-content markdown-body">${safe}</div>` : ''}`;
       previewEl.classList.add('visible');
       bindImages(previewEl);
