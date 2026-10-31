@@ -31,7 +31,23 @@ https://github.com/user-attachments/assets/3d82bb12-87e1-4e20-aa98-52d4f3512062
 
 ## Getting started
 
-**Requires:** Node.js 18+ and [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (authenticated).
+### Prerequisites
+
+- **Node.js** — 18+ for the free core, **22.12+ for vistaclair Pro** (its `puppeteer@25` dependency needs it). Node 22 LTS is recommended. Distro packages are often too old (Debian 12 ships Node 18, Debian 13 ships Node 20), so on Debian/Ubuntu use NodeSource:
+  ```bash
+  curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+  sudo apt install -y nodejs
+  ```
+  Or use [nvm](https://github.com/nvm-sh/nvm): `nvm install 22`.
+- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — must be on your `PATH`, vistaclair runs the `claude` it finds there:
+  ```bash
+  curl -fsSL https://claude.ai/install.sh | bash   # or: npm install -g @anthropic-ai/claude-code
+  claude --version
+  ```
+  No need to sign in beforehand — the sign-in pill in the dashboard header runs `claude auth login`.
+- **git**, plus a C/C++ toolchain for the in-browser terminal (optional dependency `node-pty`; without it the terminal falls back to one command at a time): `sudo apt install -y git build-essential python3`
+
+Then install:
 
 ```bash
 npm install -g vistaclair
