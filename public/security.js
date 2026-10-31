@@ -5,7 +5,7 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const { showConfirm } = window.dashboard;
+  const { showConfirm, escHtml: esc } = window.dashboard;
   let loaded = false;
 
   async function api(path, opts = {}) {
@@ -50,14 +50,14 @@
         <div style="display:flex;align-items:center;gap:12px;padding:8px 12px;border:1px solid var(--border,#414868);border-radius:4px;margin-bottom:6px;font-size:12px">
           <div style="flex:1">
             <div>${s.via === 'telegram' ? 'Telegram login' : 'One-time link'}${s.current ? ' <b>(this session)</b>' : ''}</div>
-            <div style="color:var(--dim,#565f89)">${s.ip || 'unknown ip'} · ${(s.ua || '').slice(0, 60)}</div>
+            <div style="color:var(--dim,#565f89)">${esc(s.ip || 'unknown ip')} · ${esc(String(s.ua || '').slice(0, 60))}</div>
             <div style="color:var(--dim,#565f89)">created ${fmtTime(s.createdAt)} · expires ${fmtTime(s.expiresAt)}</div>
           </div>
-          <button class="cap-action-btn" data-revoke="${s.id}">Revoke</button>
+          <button class="cap-action-btn" data-revoke="${esc(s.id)}">Revoke</button>
         </div>`).join('');
       list.querySelectorAll('[data-revoke]').forEach(btn => {
         btn.onclick = async () => {
-          await api(`api/sessions/${btn.dataset.revoke}`, { method: 'DELETE' });
+          await api(`api/sessions/${encodeURIComponent(btn.dataset.revoke)}`, { method: 'DELETE' });
           loadSessions();
         };
       });

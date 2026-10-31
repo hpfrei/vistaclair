@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { capText, hostBadgeLabel, remoteAskLabel, remoteLabelEl, HOST_MAX, TITLE_MAX } = require('../public/remote-ask.js');
+const { capText, hostBadgeLabel, remoteAskLabel, remoteLabelEl, askAnswerMsg, HOST_MAX, TITLE_MAX } = require('../public/remote-ask.js');
 
 // Just enough document for remoteLabelEl: text nodes stay text, and an
 // element's innerHTML is the escaped serialisation a browser would give.
@@ -94,4 +94,35 @@ test('the page loads the helper before the modules that use it, and they set it 
   assert.match(cli, /t\?\.external === true/, 'an external tab is an SDK tab');
   const sdk = fs.readFileSync(path.join(__dirname, '../public/sdk-panel.js'), 'utf8');
   assert.match(sdk, /remoteAsk\?\.hostBadgeLabel\(info\.settings\)/);
+});
+
+test('ask:answer: an external ask names its tab, a local one is unchanged', () => {
+  const answer = [{ id: 'q0', question: 'Q', answer: 'A' }];
+  const files = [{ name: 'f.txt', data: 'data:text/plain;base64,QQ==' }];
+  // Relayed by an add-on: the tab from msg.remote when msg.tabId is absent.
+  const relayed = { type: 'ask:question', askId: 't1', host: 'box', remote: { tabId: 'ext-7', sessionTitle: 'S' }, forms: [] };
+  assert.deepStrictEqual(askAnswerMsg(relayed, false, 't1', answer, files),
+    { type: 'ask:answer', toolUseId: 't1', answer, files, tabId: 'ext-7' });
+  // msg.tabId wins over msg.remote.tabId.
+  assert.strictEqual(askAnswerMsg({ ...relayed, tabId: 'tab-3' }, false, 't1', answer).tabId, 'tab-3');
+  // host alone, or a local-looking ask raised in an external session's tab.
+  assert.strictEqual(askAnswerMsg({ host: 'box', tabId: 'tab-4' }, false, 't2', answer).tabId, 'tab-4');
+  assert.strictEqual(askAnswerMsg({ tabId: 'tab-5' }, true, 't3', answer).tabId, 'tab-5');
+  // A local ask: exactly what the dashboard always sent.
+  assert.deepStrictEqual(askAnswerMsg({ type: 'ask:question', askId: 't4', tabId: 'tab-1', cwd: '/w' }, false, 't4', answer, files),
+    { type: 'ask:answer', toolUseId: 't4', answer, files });
+  assert.deepStrictEqual(askAnswerMsg({ askId: 't5' }, false, 't5', answer), { type: 'ask:answer', toolUseId: 't5', answer });
+  // Never the active tab: nothing to name means none named.
+  assert.ok(!('tabId' in askAnswerMsg({ host: 'box' }, false, 't6', answer)));
+});
+
+test('cli.js sends every answer through askAnswerMsg and shows a refused one again', () => {
+  const cli = fs.readFileSync(path.join(__dirname, '../public/cli.js'), 'utf8');
+  assert.ok(!/type: 'ask:answer'/.test(cli), 'no hand-built ask:answer left');
+  assert.match(cli, /sendWs\(window\.remoteAsk\.askAnswerMsg\(meta\.ask, meta\.externalTab, toolUseId, answer, files\)\)/);
+  assert.match(cli, /ask: msg, externalTab: tab\?\.external === true \|\| !!tab\?\.settings\?\.externalHost/);
+  assert.match(cli, /case 'ask:answerError': \{[\s\S]*?showAskModal\(sent\.askId, sent\.forms, \{ \.\.\.sent\.meta, error \}\)/);
+  assert.match(cli, /errEl\.textContent = `Answer not accepted: \$\{meta\.error\}`/);
+  const core = fs.readFileSync(path.join(__dirname, '../public/core.js'), 'utf8');
+  assert.match(core, /case 'ask:answerError':\n\s+window\.cliModule\?\.handleAskMessage\(msg\);/);
 });

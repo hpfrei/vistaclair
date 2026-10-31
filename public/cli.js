@@ -15,6 +15,9 @@
   let _sessionsReqTimer = null;
   let _sessionsHtml = '';
   const pendingAskOverlays = new Map(); // askId -> { overlayEl, tabId }
+  // Answers sent and not yet confirmed: toolUseId -> { askId, forms, meta }, so
+  // a refused one (ask:answerError) shows its form again.
+  const _sentAnswers = new Map();
   let _askCascade = 0;
   const _scrollbackLoaded = new Set();
   const _pendingRemoval = new Map();
@@ -1046,7 +1049,7 @@
         const resp = await fetch('/api/browse-dirs?path=' + encodeURIComponent(dirPath));
         const data = await resp.json();
         if (data.error) {
-          listEl.innerHTML = '<div class="dir-picker-empty">' + data.error + '</div>';
+          listEl.innerHTML = '<div class="dir-picker-empty">' + escHtml(data.error) + '</div>';
           return;
         }
         currentDir = data.current;
@@ -1723,6 +1726,20 @@
       header.insertBefore(window.remoteAsk.remoteLabelEl(document, meta.remoteLabel, 'cli-ask-header-remote'), titleEl);
     }
     modal.appendChild(header);
+    // The server refused the last answer to this ask (ask:answerError).
+    if (meta.error) {
+      const errEl = document.createElement('div');
+      errEl.className = 'cli-ask-error';
+      errEl.textContent = `Answer not accepted: ${meta.error}`;
+      modal.appendChild(errEl);
+    }
+
+    // An external ask's answer names its tab (remoteAsk.askAnswerMsg).
+    const sendAnswer = (toolUseId, answer, files) => {
+      sendWs(window.remoteAsk.askAnswerMsg(meta.ask, meta.externalTab, toolUseId, answer, files));
+      _sentAnswers.set(toolUseId, { askId, forms, meta });
+    };
+    const CANCELLED = [{ id: '_cancelled', question: '', answer: 'cancelled' }];
 
     // The New CLI ask (orchestration.askMode) draws its own dialog (new-cli.js).
     const nc = forms.length === 1 && forms[0].formData?.kind === 'new-cli' && window.newCliDialog;
@@ -1733,11 +1750,11 @@
       const dlg = window.newCliDialog.render(f.formData.newCli, {
         uid: askId,
         onSubmit: (answer) => {
-          sendWs({ type: 'ask:answer', toolUseId: f.toolUseId, answer });
+          sendAnswer(f.toolUseId, answer);
           dismissAskModal(askId);
         },
         onCancel: () => {
-          sendWs({ type: 'ask:answer', toolUseId: f.toolUseId, answer: [{ id: '_cancelled', question: '', answer: 'cancelled' }] });
+          sendAnswer(f.toolUseId, CANCELLED);
           dismissAskModal(askId);
         },
       });
@@ -1789,11 +1806,11 @@
 
       const binder = askFormBind(panel, f.formData, isSingle ? {
         onSubmit: (answer, files) => {
-          sendWs({ type: 'ask:answer', toolUseId: f.toolUseId, answer, files });
+          sendAnswer(f.toolUseId, answer, files);
           dismissAskModal(askId);
         },
         onCancel: () => {
-          sendWs({ type: 'ask:answer', toolUseId: f.toolUseId, answer: [{ id: '_cancelled', question: '', answer: 'cancelled' }] });
+          sendAnswer(f.toolUseId, CANCELLED);
           dismissAskModal(askId);
         },
       } : {
@@ -1815,7 +1832,7 @@
       cancelBtn.addEventListener('click', () => {
         for (const { binder, form } of binders) {
           binder.disableForm();
-          sendWs({ type: 'ask:answer', toolUseId: form.toolUseId, answer: [{ id: '_cancelled', question: '', answer: 'cancelled' }] });
+          sendAnswer(form.toolUseId, CANCELLED);
         }
         dismissAskModal(askId);
       });
@@ -1840,7 +1857,7 @@
         for (const { binder, form } of binders) {
           const answer = binder.collectAnswers();
           const files = binder.getFileData();
-          sendWs({ type: 'ask:answer', toolUseId: form.toolUseId, answer, files });
+          sendAnswer(form.toolUseId, answer, files);
           binder.disableForm();
         }
         dismissAskModal(askId);
@@ -1879,16 +1896,29 @@
       case 'ask:question': {
         const askId = msg.askId || (msg.toolUseIds && msg.toolUseIds[0]);
         if (!askId) return;
+        const tab = tabs.get(msg.tabId ?? msg.remote?.tabId);
         showAskModal(askId, msg.forms || [], {
           title: msg.title, cwd: msg.cwd, tabId: msg.tabId,
           remoteLabel: window.remoteAsk?.remoteAskLabel(msg) || null,
           remote: msg.host != null,
+          ask: msg, externalTab: tab?.external === true || !!tab?.settings?.externalHost,
         });
         break;
       }
       case 'ask:answered':
       case 'ask:timeout': {
         if (msg.askId) dismissAskModal(msg.askId);
+        for (const [id, sent] of _sentAnswers) if (id === msg.askId || sent.askId === msg.askId) _sentAnswers.delete(id);
+        break;
+      }
+      case 'ask:answerError': {
+        // Not answered after all: the form comes back with the server's reason.
+        const sent = _sentAnswers.get(msg.toolUseId);
+        const error = String(msg.error || 'refused');
+        if (!sent) { window.dashboard.showToast?.({ message: `Answer not accepted: ${error}`, level: 'error' }); break; }
+        _sentAnswers.delete(msg.toolUseId);
+        // A multi-form ask is refused form by form: show it once.
+        if (!pendingAskOverlays.has(sent.askId)) showAskModal(sent.askId, sent.forms, { ...sent.meta, error });
         break;
       }
     }

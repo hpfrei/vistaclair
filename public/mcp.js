@@ -512,11 +512,11 @@
       paramInputs += `<div class="mcp-test-param">
         <label>${escHtml(name)}${req ? ' *' : ''}: `;
       if (type === 'boolean') {
-        paramInputs += `<input type="checkbox" data-param="${name}" data-type="boolean">`;
+        paramInputs += `<input type="checkbox" data-param="${escHtml(name)}" data-type="boolean">`;
       } else if (type === 'number') {
-        paramInputs += `<input type="number" data-param="${name}" data-type="number" placeholder="0">`;
+        paramInputs += `<input type="number" data-param="${escHtml(name)}" data-type="number" placeholder="0">`;
       } else {
-        paramInputs += `<input type="text" data-param="${name}" data-type="${type}" placeholder="${escHtml(prop.description || '')}">`;
+        paramInputs += `<input type="text" data-param="${escHtml(name)}" data-type="${escHtml(type)}" placeholder="${escHtml(prop.description || '')}">`;
       }
       paramInputs += '</label></div>';
     }

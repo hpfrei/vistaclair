@@ -2925,6 +2925,14 @@ footer {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The server refused an answer (ask:answerError): the form is shown again. */
+.cli-ask-error {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 10%, var(--bg-surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--red) 30%, var(--border));
+}
 
 .cli-ask-tabs {
   display: flex;
