@@ -127,9 +127,20 @@
   color: var(--text-dim);
   white-space: nowrap;
 }
+.sdk-toolbar-ext { display: inline-flex; gap: 4px; }
 .sdk-toolbar-ext .tab-ext-badge { margin-left: 0; }
 .tab-ext-badge.clickable { cursor: pointer; }
 .tab-ext-badge.clickable:hover { color: var(--text); background: var(--bg-hover); }
+/* A session running on another machine (settings.externalHost). */
+.tab-remote-badge {
+  border-color: color-mix(in srgb, var(--cyan) 55%, var(--border));
+  background: color-mix(in srgb, var(--cyan) 12%, var(--bg-surface));
+  color: var(--cyan);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
 
 /* --- stage: the diagram --- */
 .sdk-stage {

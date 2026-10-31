@@ -2512,9 +2512,12 @@
         b.addEventListener('click', () => window.dashboard._tabHooks.runAction(action, tabInfo));
         return b;
       }));
-      // An add-on's badge for this session (dashboard.setTabBadge).
+      // A session on another machine shows its host; an add-on's badge for
+      // this session (dashboard.setTabBadge) follows.
+      const hostLabel = window.remoteAsk?.hostBadgeLabel(info.settings);
+      const hostBadge = hostLabel ? window.remoteAsk.remoteLabelEl(document, hostLabel, 'tab-ext-badge tab-remote-badge') : null;
       const extBadge = window.dashboard._tabBadgeEl(info.settings?.name, 'sdk-toolbar-ext-badge');
-      this.extBadgeEl.replaceChildren(...(extBadge ? [extBadge] : []));
+      this.extBadgeEl.replaceChildren(...[hostBadge, extBadge].filter(Boolean));
       // A run's orchestrator can hand over to a fresh one, from its box's
       // caption; the control lights up once it has compacted a few times.
       const run = this.run;
