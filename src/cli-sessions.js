@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const CliSession = require('./cli-session');
 const SdkSession = require('./sdk-session');
+const { ExternalSession } = require('./external-session');
 const caps = require('./capabilities');
 const folders = require('./session-folders');
 const { summarizeRuns, costOf, tailOf } = require('./run-summary');
@@ -83,6 +84,11 @@ class CliSessionManager {
     this.store = store;
     this.opts = opts;
     this.sessions = new Map();
+    // External sessions (src/external-session.js): tabs an add-on shows for a
+    // session running elsewhere. Kept out of `sessions`, so persistence,
+    // shutdown, restore and every spawn/kill/pause loop skip them; only
+    // list(), getBySessId() and getExternal() see them.
+    this.external = new Map();
     this._exitCallbacks = new Map();
     // Listeners for every tab's exit (addExitListener), unlike the one-shot
     // per-tab onExit callback. Called with the session before it is dropped.
@@ -289,6 +295,7 @@ class CliSessionManager {
   // A live session's settings changed in place (an SDK model switch): the
   // manifest and its saved entry follow, so a restart or a resume keeps it.
   noteSettingsChanged(session) {
+    if (session?.external) return;
     if (session?.sessId && session.cwd) this.saveToHistory(this._historyEntry(session));
     this._persistOpenTabs();
     this.broadcastTabs();
@@ -564,6 +571,7 @@ class CliSessionManager {
 
   getOrCreate(tabId) {
     if (!tabId) return null;
+    if (this.external.has(tabId)) throw new Error(`tab ${tabId} is an external session`);
     let session = this.sessions.get(tabId);
     if (!session) {
       session = this._createSession(tabId);
@@ -717,7 +725,49 @@ class CliSessionManager {
         ...(sdk ? { state: session.state, costUsd: session.costUsd } : {}),
       });
     }
+    // An add-on's getter that throws drops that one tab, never the list.
+    for (const ext of this.external.values()) {
+      try {
+        if (!ext.hidden) tabs.push(ext.entry());
+      } catch (e) { console.error(`[external session] ${ext.tabId}: ${e.message}`); }
+    }
     return tabs;
+  }
+
+  // --- External sessions (ctx.registerExternalSession) ---
+
+  // Show `adapter` as the SDK tab `tabId`: listed and broadcast like a
+  // spawned SDK tab. Throws on a malformed adapter or a tabId already taken.
+  // Returns the idempotent unregister().
+  registerExternal(tabId, adapter) {
+    const ext = new ExternalSession(tabId, adapter);
+    if (this.sessions.has(tabId) || this.external.has(tabId)) throw new Error(`tab ${tabId} already exists`);
+    this.external.set(tabId, ext);
+    try { this.broadcaster.broadcast(ext.spawnedMessage()); } catch (e) { console.error(`[external session] ${tabId}: ${e.message}`); }
+    this.broadcastTabs();
+    return () => this._unregisterExternal(tabId, ext);
+  }
+
+  // What a closed tab broadcasts: its exit, then the tab list without it.
+  _unregisterExternal(tabId, ext) {
+    if (this.external.get(tabId) !== ext) return;
+    this.external.delete(tabId);
+    this.broadcaster.broadcast({ type: 'cli:exit', tabId, exitCode: null, external: true });
+    this.broadcastTabs();
+  }
+
+  getExternal(tabId) {
+    return (tabId && this.external.get(tabId)) || null;
+  }
+
+  // The run members of an external orchestrator stamped with `runId`, from
+  // its adapter's orchestration(); null when no external session has one.
+  externalOrchestration(runId) {
+    if (!runId) return null;
+    for (const ext of this.external.values()) {
+      if (ext.getSettings().orchestration?.runId === runId && ext.hasOrchestration()) return ext.call('orchestration');
+    }
+    return null;
   }
 
   nextTabId() {
@@ -727,7 +777,7 @@ class CliSessionManager {
     let id;
     do {
       id = `tab-${this.bootId}-${++this._tabSeq}`;
-    } while (this.sessions.has(id));
+    } while (this.sessions.has(id) || this.external.has(id));
     return id;
   }
 
@@ -796,11 +846,15 @@ class CliSessionManager {
     return null;
   }
 
-  // The live session with this id (hidden ones included), or null.
+  // The live session with this id (hidden ones included), or null. An
+  // external session (`external: true`) only when no own session has the id.
   getBySessId(sessId) {
     if (!sessId) return null;
     for (const session of this.sessions.values()) {
       if (session.sessId === sessId) return session;
+    }
+    for (const ext of this.external.values()) {
+      if (ext.sessId === sessId) return ext;
     }
     return null;
   }

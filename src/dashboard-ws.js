@@ -369,6 +369,12 @@ class DashboardBroadcaster {
     });
   }
 
+  // A socket reaches this server only through the owner check at the upgrade
+  // (server.js, auth.isOwnerUpgrade): one of its open clients is the owner's.
+  isOwnerConnection(ws) {
+    return !!ws && typeof ws === 'object' && this.wss?.clients?.has(ws) === true;
+  }
+
   registerHandler(prefix, handler) {
     const prefixes = Array.isArray(prefix) ? prefix : [prefix];
     for (const p of prefixes) this._pluginHandlers.push({ prefix: p, handler });
