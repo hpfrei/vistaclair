@@ -25,8 +25,9 @@
   const _pendingNewTabs = new Map();
   let _reqSeq = 0;
 
-  // A tab is an xterm terminal ('cli') or an Agent SDK panel ('sdk').
-  const kindOf = (t) => (t?.kind === 'sdk' || t?.settings?.engine === 'sdk') ? 'sdk' : 'cli';
+  // A tab is an xterm terminal ('cli') or an Agent SDK panel ('sdk'). A
+  // remote session (external: true, settings.externalHost) is an SDK tab.
+  const kindOf = (t) => (t?.kind === 'sdk' || t?.settings?.engine === 'sdk' || t?.external === true) ? 'sdk' : 'cli';
   const isSdk = (tab) => tab?.kind === 'sdk';
   function _requestNewTab(intent) {
     const reqId = `req-${++_reqSeq}`;
@@ -424,6 +425,9 @@
       const orchRole = tab.settings?.orchestration?.role;
       const roleBadge = orchRole === 'worker' ? '⚙️ ' : '';
       label.textContent = roleBadge + (isAppCli ? '\u{1F528} ' : '') + computeTabLabel(tabId);
+      // A session running on another machine (settings.externalHost).
+      const hostLabel = window.remoteAsk?.hostBadgeLabel(tab.settings);
+      if (hostLabel) label.appendChild(window.remoteAsk.remoteLabelEl(document, hostLabel, 'tab-ext-badge tab-remote-badge'));
       // An add-on's badge for this session (dashboard.setTabBadge).
       const extBadge = window.dashboard._tabBadgeEl(tab.settings?.name, 'cli-tab-ext-badge');
       if (extBadge) label.appendChild(extBadge);
@@ -1712,6 +1716,12 @@
       pathEl.textContent = meta.cwd;
       header.appendChild(pathEl);
     }
+    // An ask from a session on another machine: its own colour and a
+    // "Remote · host · session" line (meta.remoteLabel, capped, text only).
+    if (meta.remoteLabel) {
+      modal.classList.add('cli-ask-remote');
+      header.insertBefore(window.remoteAsk.remoteLabelEl(document, meta.remoteLabel, 'cli-ask-header-remote'), titleEl);
+    }
     modal.appendChild(header);
 
     // The New CLI ask (orchestration.askMode) draws its own dialog (new-cli.js).
@@ -1867,7 +1877,10 @@
       case 'ask:question': {
         const askId = msg.askId || (msg.toolUseIds && msg.toolUseIds[0]);
         if (!askId) return;
-        showAskModal(askId, msg.forms || [], { title: msg.title, cwd: msg.cwd, tabId: msg.tabId });
+        showAskModal(askId, msg.forms || [], {
+          title: msg.title, cwd: msg.cwd, tabId: msg.tabId,
+          remoteLabel: window.remoteAsk?.remoteAskLabel(msg) || null,
+        });
         break;
       }
       case 'ask:answered':

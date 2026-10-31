@@ -2908,6 +2908,23 @@ footer {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* An ask from a session on another machine (cli.js, msg.host). */
+.cli-ask-modal.cli-ask-remote {
+  border: 2px solid var(--cyan);
+}
+.cli-ask-remote .cli-ask-header {
+  background: color-mix(in srgb, var(--cyan) 12%, var(--bg-surface));
+  border-bottom-color: color-mix(in srgb, var(--cyan) 45%, var(--border));
+  border-radius: 8px 8px 0 0;
+}
+.cli-ask-header-remote {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--cyan);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .cli-ask-tabs {
   display: flex;
