@@ -737,11 +737,15 @@ class CliSessionManager {
   // --- External sessions (ctx.registerExternalSession) ---
 
   // Show `adapter` as the SDK tab `tabId`: listed and broadcast like a
-  // spawned SDK tab. Throws on a malformed adapter or a tabId already taken.
-  // Returns the idempotent unregister().
+  // spawned SDK tab. Throws on a malformed adapter, a tabId already taken or
+  // a sessId any live, saved or external session has. Returns the idempotent
+  // unregister().
   registerExternal(tabId, adapter) {
     const ext = new ExternalSession(tabId, adapter);
     if (this.sessions.has(tabId) || this.external.has(tabId)) throw new Error(`tab ${tabId} already exists`);
+    if (this._ownSessId(ext.sessId) || [...this.external.values()].some(e => e.sessId === ext.sessId)) {
+      throw new Error(`session ${ext.sessId} already exists`);
+    }
     this.external.set(tabId, ext);
     try { this.broadcaster.broadcast(ext.spawnedMessage()); } catch (e) { console.error(`[external session] ${tabId}: ${e.message}`); }
     this.broadcastTabs();
@@ -760,14 +764,57 @@ class CliSessionManager {
     return (tabId && this.external.get(tabId)) || null;
   }
 
+  // Whether one of the manager's own sessions, live or saved, has `sessId`.
+  _ownSessId(sessId) {
+    for (const s of this.sessions.values()) if (s.sessId === sessId) return true;
+    return !!this.findSaved(sessId);
+  }
+
   // The run members of an external orchestrator stamped with `runId`, from
-  // its adapter's orchestration(); null when no external session has one.
+  // its adapter's orchestration(); null when no external session has one, or
+  // when one of the manager's own sessions is stamped with it (a real run is
+  // never answered by an adapter). The adapter's answer is trusted only for
+  // its own run's tabs (externalRunScope).
   externalOrchestration(runId) {
     if (!runId) return null;
-    for (const ext of this.external.values()) {
-      if (ext.getSettings().orchestration?.runId === runId && ext.hasOrchestration()) return ext.call('orchestration');
+    const stamped = (st) => st?.orchestration?.runId === runId;
+    for (const s of this.sessions.values()) if (stamped(s.getSettings?.())) return null;
+    if (this.listSaved().some(e => stamped(e.settings))) return null;
+    const exts = [...this.external.values()].filter(e => stamped(e.getSettings()) && e.hasOrchestration());
+    const ext = exts.find(e => e.getSettings().orchestration.role === 'orchestrator') || exts[0];
+    return ext ? ext.call('orchestration').then((d) => this.externalRunScope(ext, runId, d)) : null;
+  }
+
+  // An adapter's run description (`d`), kept to what it may speak for: the
+  // run asked for (another runId rejects), and members that are its run's
+  // external tabs (stamped with runId, from the same externalHost) or no
+  // session of this machine. A member naming one of the manager's own
+  // sessions or another external tab is dropped; such an orchestrator is
+  // nulled.
+  externalRunScope(ext, runId, d) {
+    let out;
+    try { out = JSON.parse(JSON.stringify(d ?? {})); } catch { throw new Error('the external session described its run unreadably'); }
+    if (!out || typeof out !== 'object' || Array.isArray(out)) return {};
+    if (out.runId != null && out.runId !== runId) throw new Error('the external session described another run');
+    out.runId = runId;
+    const host = ext.getSettings().externalHost || null;
+    const runTabs = [...this.external.values()].filter((e) => {
+      const st = e.getSettings();
+      return e === ext || (st.orchestration?.runId === runId && (st.externalHost || null) === host);
+    });
+    const sessOk = (id) => id == null || runTabs.some(e => e.sessId === id)
+      || (!this._ownSessId(id) && ![...this.external.values()].some(e => e.sessId === id));
+    const tabOk = (id) => id == null || runTabs.some(e => e.tabId === id);
+    const tabFree = (id) => id == null || (!this.sessions.has(id) && !this.external.has(id));
+    if (!sessOk(out.orchestratorSessId)) out.orchestratorSessId = null;
+    if (!tabOk(out.orchestratorTabId)) out.orchestratorTabId = null;
+    if (Array.isArray(out.workers)) {
+      out.workers = out.workers.filter(w => w && typeof w === 'object' && sessOk(w.sessId) && (tabOk(w.tabId) || tabFree(w.tabId)));
+      for (const w of out.workers) if (!tabOk(w.tabId)) w.tabId = null;
+    } else {
+      delete out.workers;
     }
-    return null;
+    return out;
   }
 
   nextTabId() {

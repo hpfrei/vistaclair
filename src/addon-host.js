@@ -104,17 +104,34 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // sessions) as an Agent SDK tab — listed in cli:tabs with `external:
       // true`, announced as cli:spawned — and returns an idempotent
       // unregister() (cli:exit, then cli:tabs without it). adapter = { sessId,
-      // kind: 'sdk', hidden?, title, settings (engine 'sdk', auth, sessionDir
-      // for sdk:todo, externalHost), running, busy, state (read live), submit(
-      // text, { images }), interrupt(), setModel(m), setShowThinking(on),
-      // setAuth(auth, { continueTurn }), historyPage({ limit, before }) → an
-      // sdk:history page, kill(), close() (the tab's ×; the add-on
-      // unregisters), orchestration?() → the run members GET
+      // kind: 'sdk', hidden?, title, settings, running, busy, state (read
+      // live), submit(text, { images }), interrupt(), setModel(m),
+      // setShowThinking(on), setAuth(auth, { continueTurn }), historyPage({
+      // limit, before }) → an sdk:history page, kill(), close() (the tab's ×;
+      // the add-on unregisters), orchestration?() → the run members GET
       // /api/orchestration/run answers for its settings.orchestration.runId }.
+      // settings is untrusted: at most 16 KB as JSON, and only engine (always
+      // 'sdk'), auth ('apikey' | 'subscription'), sessionDir (for sdk:todo;
+      // kept only when it resolves, symlinks included, strictly inside
+      // DATA_HOME), externalHost, model, showThinking (boolean), name,
+      // modelMap ({ fable, opus, sonnet, haiku }) and orchestration ({ runId,
+      // role, workerId, orchestrator, name }) survive, type-checked and capped.
+      // orchestration() is consulted only for a runId none of core's own
+      // sessions (live or saved) is stamped with; its answer must be that
+      // run's (another runId is a 502), and members naming one of core's
+      // sessions or an external tab outside the run (stamped with another
+      // runId, or another externalHost) are dropped.
       // The tab's sdk:* / cli:* messages go to the adapter; any method may
-      // return a promise, and its throw or rejection reaches only the
-      // requesting browser. The add-on broadcasts the session's sdk:event
-      // itself. Throws on a malformed adapter or a tabId already in use. Never
+      // return a promise, and its throw, rejection or silence past 30 s
+      // (external-session.js CALL_TIMEOUT_MS; a late result is ignored)
+      // reaches only the requesting browser. The add-on broadcasts the
+      // session's sdk:event itself. Throws on a malformed adapter, a tabId
+      // already in use or a sessId any live, saved or external session has.
+      // A pendingQuestions entry for an external tab is tagged `external:
+      // true, tabId` (sessId optional); core also counts as external an entry
+      // carrying host / remote, or whose ctx.tabId is an external tab. Such an
+      // ask is resolved only by an ask:answer naming its tabId (or sessId);
+      // anything else gets ask:answerError, to the sender alone. Never
       // persisted, restored, paused or killed by core. Dashboard profile only.
       registerExternalSession: (tabId, adapter) => cliSessionManager.registerExternal(tabId, adapter),
       // Tool packs (src/tool-packs.js): MCP servers, disallowed tools and
