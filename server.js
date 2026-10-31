@@ -24,6 +24,7 @@ const { createOrchestration } = require('./src/orchestration');
 const { createSessionControl } = require('./src/session-control');
 const { createCliIsolation } = require('./src/cli-isolation');
 const { createAuth } = require('./src/auth');
+const csp = require('./src/csp');
 const { killStalePortListeners } = require('./src/port-cleanup');
 let proModule = null;   // the loaded ./vistaclair-pro module (for licensing/update)
 let proAddon = null;    // its registered descriptor (null until init succeeds)
@@ -144,6 +145,9 @@ const proxyServer = http.createServer(proxyApp);
 // --- Dashboard server (port 3457) ---
 const dashboardApp = express();
 dashboardApp.set('trust proxy', 'loopback')  // proxies (nginx/ngrok/cloudflared) all run on localhost
+// CSP on every dashboard page and asset, before any route answers (src/csp.js).
+// Report-only while an add-on that is not cspReady is loaded.
+dashboardApp.use(csp.middleware({ reportOnlyWhen: () => addons.cspBlockers().length > 0 }));
 // verify stashes the raw bytes so HMAC-authenticated webhooks (e.g. WhatsApp's
 // X-Hub-Signature-256) can validate against exactly what was sent, since this
 // global parser consumes the stream before per-route express.raw() can run.
@@ -170,6 +174,10 @@ const authLimiter = rateLimit({
 // Login routes (no auth required)
 dashboardApp.get('/login', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+// The login page's script (no inline script under the CSP).
+dashboardApp.get('/login.js', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'login.js'));
 });
 
 dashboardApp.post('/login', authLimiter, (req, res) => {
@@ -504,6 +512,8 @@ if (proModule) {
 }
 // Mount add-on routers AFTER the auth middleware (declared above) so add-on
 // routes are auth-gated by construction, except their declared authExemptPaths.
+// The core CSP stops here: an add-on's responses carry its own headers.
+dashboardApp.use(csp.dropForAddons);
 addons.mountRouters(dashboardApp);
 
 ruleHandler.init({ broadcaster, store, proxyPort: PROXY_PORT, dashboardPort: DASHBOARD_PORT, authToken: AUTH_TOKEN });

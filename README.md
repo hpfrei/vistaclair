@@ -66,6 +66,7 @@ Open **http://localhost:3457** and log in with the auth token printed to the con
 | `DASHBOARD_PORT` | `3457` | Web dashboard port (all interfaces) |
 | `ANTHROPIC_TARGET_URL` | `https://api.anthropic.com` | Upstream API URL |
 | `MAX_HISTORY` | `200` | Max interactions kept in memory |
+| `VISTACLAIR_CSP` | on | `off` drops the dashboard's Content-Security-Policy header (emergency off-switch), `report-only` sends it as `Content-Security-Policy-Report-Only`; see [SECURITY.md](SECURITY.md#content-security-policy) |
 
 > [!WARNING]
 > The dashboard binds to `0.0.0.0` for remote access. It is protected by the auth token, but do not expose it to untrusted networks without TLS/VPN.
@@ -126,6 +127,8 @@ Two servers, one process:
 | **Dashboard** | `:3457` | `0.0.0.0` | Web UI, REST API, WebSocket (auth-protected) |
 
 Every `claude` process gets a unique instance ID in its base URL (`http://localhost:3456/i/{id}`), so concurrent sessions are fully isolated.
+
+The dashboard's browser libraries (xterm, marked, DOMPurify, d3, Monaco, MathJax) are vendored at pinned versions in [`public/vendor/`](public/vendor/README.md), and every dashboard page is served with a Content-Security-Policy that only runs script from the dashboard itself ([SECURITY.md](SECURITY.md#content-security-policy)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/request-flow-dark.svg">
