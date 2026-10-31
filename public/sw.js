@@ -1,10 +1,11 @@
-// Service worker: makes the dashboard installable and keeps the CDN
-// libraries (xterm, marked, d3, monaco, fonts) in a local cache so a
-// phone launch is not gated on jsDelivr. Same-origin requests — the
-// app's own HTML/JS/CSS, /api, SSE — always go to the network untouched,
-// so a server deploy is never masked by a stale copy.
-const CDN_CACHE = 'vistaclair-cdn-v1';
-const CDN_HOSTS = ['cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'];
+// Service worker: makes the dashboard installable and keeps the web fonts
+// in a local cache so a phone launch is not gated on Google Fonts. The
+// script libraries are vendored (public/vendor/) and come from the server
+// itself. Same-origin requests — the app's own HTML/JS/CSS, /api, SSE —
+// always go to the network untouched, so a server deploy is never masked
+// by a stale copy. v2 drops the jsDelivr entries v1 cached.
+const CDN_CACHE = 'vistaclair-cdn-v2';
+const CDN_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 
 self.addEventListener('install', () => self.skipWaiting());
 

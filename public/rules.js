@@ -30,7 +30,7 @@
         return;
       }
       window.require.config({
-        paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' }
+        paths: { vs: location.origin + '/vendor/monaco-editor-0.52.2/min/vs' }
       });
       window.require(['vs/editor/editor.main'], function () {
         monacoReady = true;

@@ -65,3 +65,8 @@ Text shown in the dashboard can come from an untrusted source (a remote session 
 - Any other data in an HTML string goes through `escHtml` (it escapes `& < > " '`), and attributes are double-quoted.
 - Image URLs from a session are checked first (`renderSafe.userImageUrl`, `askSafe.askImageSrc`).
 - Prefer `textContent` and DOM nodes over HTML strings. No inline `on*` handlers or inline `<script>`.
+
+The Content-Security-Policy (`src/csp.js`, [SECURITY.md](SECURITY.md#content-security-policy)) is the second layer: the dashboard runs only script files from its own origin. So:
+
+- No inline `<script>` in a served page, no `on*=` attribute in a page or in generated HTML (attach listeners with `addEventListener`, or one delegated listener for rendered lists), no `javascript:` URLs, no `eval` / `new Function` / string `setTimeout`. `test/csp.test.js` checks the pages and `public/*.js`.
+- Browser libraries are vendored in `public/vendor/<lib>-<version>/` at exact versions, verified against the npm registry's integrity; never load script from a CDN. [`public/vendor/README.md`](public/vendor/README.md) has the update steps, `VERSIONS.json` the record.

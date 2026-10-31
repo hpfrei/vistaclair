@@ -11,6 +11,9 @@
 //     contractVersion, id, productSlug,
 //     router,                 // express.Router mounted after auth
 //     clientModules: [{ styles, scripts }],
+//     cspReady: true,         // optional; the client modules run under the
+//                             // dashboard CSP (no inline handlers, no eval).
+//                             // Until then the policy is report-only (src/csp.js).
 //     authExemptPaths: [...],     // public route prefixes (e.g. OAuth callbacks)
 //     authExemptPatterns: [...],  // public route RegExps (e.g. per-app telegram mini-app assets)
 //     handleUpgrade(req, socket, head) -> bool,
@@ -58,6 +61,12 @@ function removeAddon(id) {
 // Concatenated client asset modules across all add-ons (order = registration).
 function getClientModules() {
   return addons.flatMap(a => a.clientModules || []);
+}
+
+// Ids of add-ons whose client modules run in the dashboard page but are not
+// declared cspReady; while any is loaded the dashboard CSP is report-only.
+function cspBlockers() {
+  return addons.filter(a => (a.clientModules || []).length && a.cspReady !== true).map(a => a.id);
 }
 
 // True if a request path is declared public by any add-on. Matches the exact
@@ -124,6 +133,7 @@ module.exports = {
   registerAddon,
   removeAddon,
   getClientModules,
+  cspBlockers,
   isAuthExempt,
   handleUpgrade,
   mountRouters,

@@ -113,7 +113,7 @@ Available templates in this skill directory:
       for (const skill of (state.knownSkills || [])) {
         const card = document.createElement('div');
         card.className = 'ref-card';
-        card.innerHTML = `<div class="ref-card-header" onclick="toggleRef(this)">
+        card.innerHTML = `<div class="ref-card-header">
             <span><span class="ref-name">/${escHtml(skill.name)}</span> <span class="ref-tag tag-sk">skill</span></span>
             <span class="ref-brief">${escHtml(skill.description)}</span>
             <span class="ref-chevron">&#9654;</span>

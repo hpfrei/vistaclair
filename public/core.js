@@ -151,7 +151,7 @@ function _ensureMonaco() {
   if (_monacoReadyPromiseCore) return _monacoReadyPromiseCore;
   _monacoReadyPromiseCore = new Promise(resolve => {
     if (typeof window.require === 'undefined' || !window.require.config) { resolve(); return; }
-    window.require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+    window.require.config({ paths: { vs: location.origin + '/vendor/monaco-editor-0.52.2/min/vs' } });
     window.require(['vs/editor/editor.main'], () => { _monacoReadyCore = true; resolve(); });
   });
   return _monacoReadyPromiseCore;
@@ -2002,10 +2002,12 @@ document.getElementById('brandBtn')?.addEventListener('click', () => switchView(
 // REFERENCE PANEL LOGIC
 // ============================================================
 
-// Global — called from inline onclick in HTML
-function toggleRef(header) {
-  header.closest('.ref-card').classList.toggle('open');
-}
+// One delegated listener for every reference card, static or rendered later
+// (capabilities.js skill cards). No inline onclick: CSP script-src 'self'.
+document.addEventListener('click', e => {
+  const header = e.target instanceof Element && e.target.closest('.ref-card-header');
+  if (header) header.closest('.ref-card')?.classList.toggle('open');
+});
 
 document.getElementById('refNav').addEventListener('click', e => {
   const btn = e.target.closest('.view-tab');
