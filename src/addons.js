@@ -17,6 +17,12 @@
 //     authExemptPaths: [...],     // public route prefixes (e.g. OAuth callbacks)
 //     authExemptPatterns: [...],  // public route RegExps (e.g. per-app telegram mini-app assets)
 //     handleUpgrade(req, socket, head) -> bool,
+//     authExemptUpgradePaths: [...],  // optional; EXACT pathnames (query ignored,
+//                             // no prefix match) whose WS upgrades skip the
+//                             // owner gate and go to this add-on's handleUpgrade
+//                             // only — it must authenticate them itself (e.g.
+//                             // Pro's '/api/peer/channel' peer token). Falsy
+//                             // return or throw → 401; never reaches the dashboard.
 //     pinnedSessions() -> iterable of sessId,  // optional; exempt from the
 //                                              // interactions TTL sweep
 //     toolPacks: [pack, ...],  // optional; MCP servers / tool restrictions /
@@ -97,6 +103,53 @@ function handleUpgrade(req, socket, head) {
   return false;
 }
 
+// The add-on that declared this upgrade's exact pathname in
+// authExemptUpgradePaths (first registered wins), or null. A malformed URL is
+// never exempt.
+function exemptUpgradeOwner(req) {
+  let pathname;
+  try { pathname = new URL(req.url, 'http://x').pathname; } catch { return null; }
+  for (const a of addons) {
+    const paths = a.authExemptUpgradePaths;
+    if (Array.isArray(paths) && paths.includes(pathname)) return a;
+  }
+  return null;
+}
+
+function rejectUpgrade(socket) {
+  try { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); } catch {}
+  socket.destroy();
+}
+
+// The dashboard server's 'upgrade' listener. An auth-exempt upgrade path goes
+// to the add-on that declared it and nowhere else (no owner gate; that add-on
+// authenticates it). Everything else: owner gate → add-ons → dashboard wss.
+function createUpgradeHandler({ isOwnerUpgrade, wss }) {
+  return (req, socket, head) => {
+    const owner = exemptUpgradeOwner(req);
+    if (owner) {
+      let claimed = false;
+      try {
+        claimed = typeof owner.handleUpgrade === 'function' && !!owner.handleUpgrade(req, socket, head);
+      } catch (e) {
+        console.error(`  Addon "${owner.id}" handleUpgrade error:`, e.message);
+      }
+      if (!claimed) rejectUpgrade(socket);
+      return;
+    }
+
+    // Same owner decision as the HTTP middleware, against the upgrade socket.
+    if (!isOwnerUpgrade(req, socket)) return rejectUpgrade(socket);
+
+    // Offer the upgrade to add-ons (e.g. Pro's VNC websockify proxy) first.
+    if (handleUpgrade(req, socket, head)) return;
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  };
+}
+
 // Mount every add-on's router on the host app (call after the auth middleware).
 function mountRouters(app) {
   for (const a of addons) {
@@ -136,6 +189,8 @@ module.exports = {
   cspBlockers,
   isAuthExempt,
   handleUpgrade,
+  exemptUpgradeOwner,
+  createUpgradeHandler,
   mountRouters,
   collectPinnedSessions,
   shutdownAll,
