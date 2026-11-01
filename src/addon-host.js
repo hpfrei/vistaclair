@@ -196,9 +196,25 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
           setRunModel: (runId, model) => orchestration.setRunModel(String(runId || ''), model),
         }),
       } : {}),
-      // Whether external (Telegram) login is configured — one of the signals
-      // Pro's deployment-mode detection reads (spend policies differ by mode).
-      tgLoginConfigured: typeof dashboard.tgLoginConfigured === 'function' ? dashboard.tgLoginConfigured : () => false,
+      // Dashboard login (src/login.js), frozen. Dashboard profile only: the
+      // member is ABSENT in the headless profile.
+      // registerProvider({ id, label, link(code) }) → unregister(): id matches
+      // /^[a-z0-9-]{1,32}$/ (else throws); link(code) returns an https URL the
+      // login page shows (as a QR code) next to the challenge code, or null
+      // while the provider isn't ready (a throw counts as null).
+      // describe(code) → { code, createdAt, expiresAt, ip, ua, status:
+      // 'pending'|'approved'|'denied' } or null (unknown, expired or used).
+      // approve(code, { via, who }) → { ok: true } | { ok: false, reason:
+      // 'unknown'|'expired'|'used'|'denied' }: via matches /^[a-z0-9-]{1,32}$/,
+      // who is free text (≤100 chars); both land on the session the browser
+      // then redeems. deny(code) → boolean (the browser's poll gets 'denied').
+      // listSessions() → [{ id, createdAt, expiresAt, ip, ua, via, who }],
+      // revokeSession(id) → boolean, revokeAll().
+      // onLogin(fn) → unsubscribe(): fn({ via, ip, ua, sessionId, code,
+      // external }) after every successful login — via 'token' (sessionId
+      // null), 'login-link', or the approver's via (code set only then);
+      // external: not a truly-local caller. Listener errors are logged only.
+      ...(dashboard.login ? { login: dashboard.login } : {}),
       // Inspector session lifecycle for headless ai.prompt spawns: registering an
       // instanceId gives its interactions a persistent per-session timeline on
       // disk (data/interactions/<sessId>/), exactly like CLI tabs.
@@ -235,7 +251,6 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     // authenticated what it reverse-proxies, and standalone apps are public.
     isOwnerRequest: () => false,
     isOwnerConnection: () => false,
-    tgLoginConfigured: () => false,
     // Inspector session registration is dashboard-process state; headless
     // spawns still work (the proxy tags them by instanceId), they just don't
     // get a persistent per-session timeline.

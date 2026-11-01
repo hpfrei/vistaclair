@@ -6,9 +6,10 @@
 // Signals, in order:
 //   1. loopback socket + x-vistaclair-internal header == AUTH_TOKEN (MCP tools,
 //      hook reporter, app-runners)
-//   2. a Telegram-issued session (sid cookie)
-//   3. the static token (token cookie or Bearer) — only where tokenLoginAllowed:
-//      truly-local callers, or any caller while TG login is not configured
+//   2. a dashboard session (sid cookie; src/login.js — login links and
+//      add-on-approved login challenges)
+//   3. the static token (token cookie or Bearer), from any caller, local or
+//      external (proxied)
 
 const crypto = require('crypto');
 
@@ -38,7 +39,7 @@ function isLoopback(req) {
   return isLoopbackSocket(req.socket, req);
 }
 
-function createAuth({ authToken, tgLogin }) {
+function createAuth({ authToken, login }) {
   function isInternalSocket(socket, req) {
     return isLoopbackSocket(socket, req) && safeEqual(req.headers['x-vistaclair-internal'], authToken);
   }
@@ -47,16 +48,7 @@ function createAuth({ authToken, tgLogin }) {
   }
 
   function sessionFromReq(req) {
-    return tgLogin.getSession(getSidFromCookies(req.headers.cookie));
-  }
-
-  // The static token is only a credential for truly-local callers once TG login
-  // is configured; externally, TG-issued sessions are the only way in.
-  function tokenLoginAllowedSocket(socket, req) {
-    return isLoopbackSocket(socket, req) || !tgLogin.configured();
-  }
-  function tokenLoginAllowed(req) {
-    return tokenLoginAllowedSocket(req.socket, req);
+    return login.getSession(getSidFromCookies(req.headers.cookie));
   }
 
   function staticTokenOk(req) {
@@ -70,7 +62,7 @@ function createAuth({ authToken, tgLogin }) {
   function isOwnerSocket(socket, req) {
     if (isInternalSocket(socket, req)) return true;
     if (sessionFromReq(req)) return true;
-    return tokenLoginAllowedSocket(socket, req) && staticTokenOk(req);
+    return staticTokenOk(req);
   }
   function isOwnerRequest(req) {
     return isOwnerSocket(req.socket, req);
@@ -81,7 +73,7 @@ function createAuth({ authToken, tgLogin }) {
 
   return {
     isLoopback, isLoopbackSocket, safeEqual, getTokenFromCookies, getSidFromCookies,
-    isInternal, sessionFromReq, tokenLoginAllowed, isOwnerRequest, isOwnerUpgrade,
+    isInternal, sessionFromReq, isOwnerRequest, isOwnerUpgrade,
   };
 }
 

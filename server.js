@@ -129,10 +129,11 @@ const DASHBOARD_HOST = process.env.DASHBOARD_HOST || (SERVER_MODE ? '127.0.0.1' 
 // Shared store
 const store = new InteractionStore(MAX_HISTORY);
 
-// Telegram device-code login + dashboard sessions
-const { createTgLogin } = require('./src/tg-login');
-const tgLogin = createTgLogin({ dataHome: DATA_HOME });
-tgLogin.start();
+// Dashboard login: sessions, one-time links, add-on login providers (src/login.js)
+const { createLogin } = require('./src/login');
+const { mountLoginRoutes, mountLoginApi } = require('./src/login-routes');
+const login = createLogin({ dataHome: DATA_HOME });
+if (fs.existsSync(path.join(DATA_HOME, 'tg-login.enc'))) console.log('  Login: core Telegram login was removed; it is provided by Vistaclair Pro (tg-login.enc left untouched)');
 
 // --- Proxy server (port 3456) ---
 const proxyApp = express();
@@ -156,8 +157,8 @@ dashboardApp.use(express.urlencoded({ extended: false }));
 
 // Owner authentication — one definition (src/auth.js) shared by the HTTP
 // middleware, the WS upgrade, host-local endpoints, and the addon ctx.
-const auth = createAuth({ authToken: AUTH_TOKEN, tgLogin });
-const { isLoopback, safeEqual, getSidFromCookies, tokenLoginAllowed, isInternal } = auth;
+const auth = createAuth({ authToken: AUTH_TOKEN, login });
+const { isLoopback, safeEqual, getSidFromCookies, isInternal } = auth;
 
 function authCookie(name, value, extra = '') {
   return `${name}=${value}; HttpOnly; SameSite=Lax; Path=/${SERVER_MODE ? '; Secure' : ''}${extra}`;
@@ -171,60 +172,13 @@ const authLimiter = rateLimit({
   message: { error: 'Too many attempts, try again in a minute' },
 });
 
-// Login routes (no auth required)
-dashboardApp.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
-});
-// The login page's script (no inline script under the CSP).
-dashboardApp.get('/login.js', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.js'));
-});
-
-dashboardApp.post('/login', authLimiter, (req, res) => {
-  if (tokenLoginAllowed(req) && safeEqual(req.body.token, AUTH_TOKEN)) {
-    res.setHeader('Set-Cookie', authCookie('token', AUTH_TOKEN));
-    res.redirect('/');
-  } else {
-    res.redirect('/login?error=1');
-  }
-});
-
-dashboardApp.get('/login/auto', authLimiter, (req, res) => {
-  if (!isLoopback(req)) return res.redirect('/login');
-  if (safeEqual(req.query.token, AUTH_TOKEN)) {
-    res.setHeader('Set-Cookie', authCookie('token', AUTH_TOKEN));
-    return res.redirect('/');
-  }
-  res.redirect('/login');
-});
-
-// Telegram device-code login (unauthenticated challenge endpoints)
-dashboardApp.get('/login/tg/info', (req, res) => {
-  res.json({ configured: tgLogin.configured(), tokenLoginAllowed: tokenLoginAllowed(req) });
-});
-
-dashboardApp.post('/login/tg/start', authLimiter, (req, res) => {
-  if (!tgLogin.configured()) return res.status(404).json({ error: 'Telegram login not configured' });
-  const challenge = tgLogin.startChallenge({ ip: req.ip, ua: req.headers['user-agent'] });
-  if (!challenge) return res.status(429).json({ error: 'Too many pending logins' });
-  res.json(challenge);
-});
-
-dashboardApp.post('/login/tg/poll', (req, res) => {
-  const result = tgLogin.pollChallenge(req.body?.nonce);
-  if (result === 'pending') return res.json({ status: 'pending' });
-  if (result === 'expired') return res.json({ status: 'expired' });
-  res.setHeader('Set-Cookie', authCookie('sid', result.sid));
-  res.json({ status: 'ok' });
-});
-
-// One-time login link redemption (minted host-locally via `vistaclair login-link`)
-dashboardApp.get('/login/once', authLimiter, (req, res) => {
-  const sid = tgLogin.redeemOneTimeLink(req.query.k, { ip: req.ip, ua: req.headers['user-agent'] });
-  if (!sid) return res.redirect('/login');
-  res.setHeader('Set-Cookie', authCookie('sid', sid));
-  res.redirect('/');
-});
+// Login routes (no auth required): the token form, /login/auto, one-time
+// links and the provider-neutral challenge endpoints (src/login-routes.js).
+const loginDeps = {
+  login, authToken: AUTH_TOKEN, authCookie, authLimiter, isLoopback, isInternal,
+  getSidFromCookies, safeEqual, publicDir: path.join(__dirname, 'public'),
+};
+mountLoginRoutes(dashboardApp, loginDeps);
 
 // Hook reporter endpoint (auth via body token, no cookie needed)
 let hookSeq = 0;
@@ -369,8 +323,8 @@ dashboardApp.use((req, res, next) => {
   if (req.path === '/manifest.webmanifest' || /^\/(icon-\d+|apple-touch-icon)\.png$/.test(req.path)) return next();
   // App-tool-call uses ephemeral per-session tokens validated by its own handler
   if (isLoopback(req) && req.path === '/api/app-tool-call') return next();
-  // Internal header (MCP tools), Telegram session, or the static token where
-  // tokenLoginAllowed — see src/auth.js.
+  // Internal header (MCP tools), a dashboard session, or the static token —
+  // see src/auth.js.
   if (auth.isOwnerRequest(req)) return next();
   // API routes get 401 JSON; browser routes get redirect
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
@@ -488,7 +442,8 @@ const addonCtx = createAddonCtx({
     pendingQuestions,
     clearPendingQuestionsForTab: createProxyRouter.clearPendingQuestionsForTab,
     isOwnerRequest: auth.isOwnerRequest,
-    tgLoginConfigured: () => tgLogin.configured(),
+    // ctx.login: login providers, challenge approval, sessions (src/login.js)
+    login: login.api,
   },
 });
 if (proModule) {
@@ -582,57 +537,9 @@ dashboardApp.post('/api/internal/broadcast', (req, res) => {
   res.json({ ok: true });
 });
 
-// --- TG login management (auth handled by middleware) ---
-dashboardApp.get('/api/tg-login/config', (req, res) => {
-  res.json(tgLogin.getConfigInfo());
-});
-
-dashboardApp.post('/api/tg-login/config', (req, res) => {
-  const { botToken, ownerUserId, sessionTtlDays } = req.body || {};
-  if (botToken !== undefined && botToken !== '' && !/^\d+:[\w-]+$/.test(String(botToken).trim())) {
-    return res.status(400).json({ error: 'Invalid bot token format' });
-  }
-  if (ownerUserId !== undefined && ownerUserId !== '' && !/^\d+$/.test(String(ownerUserId).trim())) {
-    return res.status(400).json({ error: 'Owner user id must be numeric' });
-  }
-  tgLogin.setConfig({ botToken, ownerUserId, sessionTtlDays });
-  res.json(tgLogin.getConfigInfo());
-});
-
-dashboardApp.get('/api/sessions', (req, res) => {
-  res.json({ sessions: tgLogin.listSessions(getSidFromCookies(req.headers.cookie)) });
-});
-
-dashboardApp.delete('/api/sessions/:id', (req, res) => {
-  res.json({ ok: tgLogin.revokeSession(req.params.id) });
-});
-
-dashboardApp.delete('/api/sessions', (req, res) => {
-  // "Log out everywhere" keeps the caller's own session unless ?all=1
-  tgLogin.revokeAll(req.query.all === '1' ? {} : { exceptSid: getSidFromCookies(req.headers.cookie) });
-  res.json({ ok: true });
-});
-
-dashboardApp.post('/api/logout', (req, res) => {
-  const sid = getSidFromCookies(req.headers.cookie);
-  const s = sid && tgLogin.getSession(sid);
-  if (s) tgLogin.revokeSession(s.id);
-  res.setHeader('Set-Cookie', [
-    authCookie('sid', '', '; Max-Age=0'),
-    authCookie('token', '', '; Max-Age=0'),
-  ]);
-  res.json({ ok: true });
-});
-
-// Break-glass: mint a one-time login URL. Loopback+internal-header only, so it
-// is reachable exclusively from the host itself (`vistaclair login-link`).
-dashboardApp.post('/api/tg-login/login-link', (req, res) => {
-  if (!isInternal(req)) {
-    return res.status(403).json({ error: 'Host-local only' });
-  }
-  const key = tgLogin.createOneTimeLink();
-  res.json({ path: `/login/once?k=${key}`, expiresInMs: 5 * 60 * 1000 });
-});
+// Dashboard sessions, logout and the host-local login-link (auth handled by
+// middleware; src/login-routes.js).
+mountLoginApi(dashboardApp, loginDeps);
 
 // Restart endpoint (auth handled by middleware)
 dashboardApp.post('/api/restart', (req, res) => {
@@ -738,7 +645,6 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
 
 // Clean shutdown: unregister MCP servers and stop running apps
 function gracefulShutdown() {
-  tgLogin.stop();
   claudeAuth.loginProcess.cancel('shutdown');
   cliSessionManager.saveAllToHistory();
   cliSessionManager.killAll();

@@ -7,8 +7,8 @@
 //
 // Deliberately frozen-simple and independent: nothing from src/ or server.js is
 // required, so a broken merge there cannot break the rescue path. The owner
-// decision mirrors src/auth.js; the Telegram session store mirrors
-// src/tg-login.js (read-only).
+// decision mirrors src/auth.js; the dashboard session store mirrors
+// src/login.js (read-only).
 //
 // Server mode (VISTACLAIR_SERVER=1, pm2) is never wrapped.
 
@@ -275,25 +275,7 @@ function isLoopbackSocket(socket, req) {
   return LOOPBACK.has(socket?.remoteAddress) && !req?.headers?.['x-forwarded-for'];
 }
 
-// tg-login's configured(): botToken && ownerUserId in the encrypted
-// <DATA_HOME>/tg-login.enc (src/secret-store.js format). No file → not
-// configured; a file we cannot read → assume configured (fail closed).
-function tgConfigured() {
-  let raw;
-  try { raw = fs.readFileSync(path.join(DATA_HOME, 'tg-login.enc'), 'utf-8'); } catch { return false; }
-  try {
-    const keyHex = process.env.VISTA_SECRETS_KEY || fs.readFileSync(path.join(DATA_HOME, '.secrets_key'), 'utf-8').trim();
-    const { iv, tag, data } = JSON.parse(raw);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', Buffer.from(keyHex, 'hex'), Buffer.from(iv, 'hex'));
-    decipher.setAuthTag(Buffer.from(tag, 'hex'));
-    const config = JSON.parse(decipher.update(data, 'hex', 'utf-8') + decipher.final('utf-8'));
-    return !!(config.botToken && config.ownerUserId);
-  } catch {
-    return true;
-  }
-}
-
-// tg-login's getSession(): sha256(sid) matches an unexpired entry.
+// src/login.js getSession(): sha256(sid) matches an unexpired entry.
 function validSid(sid) {
   if (!sid || typeof sid !== 'string') return false;
   try {
@@ -305,10 +287,6 @@ function validSid(sid) {
   }
 }
 
-function tokenLoginAllowed(socket, req) {
-  return isLoopbackSocket(socket, req) || !tgConfigured();
-}
-
 function staticTokenOk(req) {
   if (safeEqual(cookieValue(req.headers.cookie, 'token'), AUTH_TOKEN)) return true;
   const authHeader = req.headers.authorization;
@@ -318,7 +296,7 @@ function staticTokenOk(req) {
 function isOwner(socket, req) {
   if (isLoopbackSocket(socket, req) && safeEqual(req.headers['x-vistaclair-internal'], AUTH_TOKEN)) return true;
   if (validSid(cookieValue(req.headers.cookie, 'sid'))) return true;
-  return tokenLoginAllowed(socket, req) && staticTokenOk(req);
+  return staticTokenOk(req);
 }
 
 // A browser always sends Origin on a WebSocket; it must name this host.
@@ -411,7 +389,7 @@ function handleHttp(req, res) {
   if (p === '/login' && req.method === 'POST') {
     if (rateLimited(req)) return sendJson(res, 429, { error: 'Too many attempts, try again in a minute' });
     return readBody(req, (params) => {
-      if (tokenLoginAllowed(req.socket, req) && safeEqual(params.get('token'), AUTH_TOKEN)) {
+      if (safeEqual(params.get('token'), AUTH_TOKEN)) {
         return redirect(res, '/', { 'set-cookie': authCookie(AUTH_TOKEN) });
       }
       redirect(res, '/login?error=1');
@@ -426,7 +404,7 @@ function handleHttp(req, res) {
   }
   if (p === '/login') {
     if (isOwner(req.socket, req)) return redirect(res, '/');
-    return send(res, 200, 'text/html; charset=utf-8', loginPage(tokenLoginAllowed(req.socket, req), url.searchParams.has('error')));
+    return send(res, 200, 'text/html; charset=utf-8', loginPage(url.searchParams.has('error')));
   }
 
   if (!isOwner(req.socket, req)) {
@@ -541,18 +519,15 @@ const STYLE = `
   .box input { width: 100%; } .box button { width: 100%; margin-top: 12px; } .err { color: #f7768e; margin-top: 8px; }
 `;
 
-function loginPage(tokenAllowed, error) {
-  const body = tokenAllowed ? `
+function loginPage(error) {
+  const body = `
     <form method="POST" action="/login">
       <p class="muted">Enter the dashboard access token (AUTH_TOKEN, printed in the server's terminal).</p>
       <input type="password" name="token" placeholder="Access token" autofocus>
       ${error ? '<div class="err">Invalid token.</div>' : ''}
       <button type="submit">Log in</button>
-    </form>` : `
-    <p>Telegram login is configured, so the access token only works from the host itself — and Telegram login
-    is unavailable while the server is down.</p>
-    <p class="muted">If this browser already has a Telegram session it is accepted here; otherwise open
-    <code>http://localhost:${PORT}/</code> on the host machine to reach the rescue page.</p>`;
+    </form>
+    <p class="muted">A dashboard session already in this browser is accepted too.</p>`;
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vistaclair — rescue login</title><style>${STYLE}</style></head><body>
 <div class="box"><h1>vistaclair — server is down</h1><p class="muted">Rescue mode: log in to see why and fix it.</p>${body}</div></body></html>`;
