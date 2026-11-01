@@ -184,6 +184,22 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // [{ member, error }] } (setRunAuth also sessions, applied); it rejects,
       // having changed nothing, for an unknown run, an invalid auth or model,
       // a terminal run's billing and a missing credential (setAuth's message).
+      // registerHostProvider({ hosts, launch, kill }) → { deliver(msg),
+      // unregister() }: the machines a run's worker may run on (launch_cli
+      // `host`). hosts() → [{ name, label, available, reason? }];
+      // launch({ runId, address, title, task, host, app, model?, auth?,
+      // orchestrator: { address, title } }) → { tabId } of a
+      // registerExternalSession tab once the owner approved, or rejects with
+      // .code 'declined' | 'refused' | 'unavailable' | 'invalid' | 'failed' |
+      // 'cancelled' (any other: 'failed'); `auth` 'apikey' only when the run
+      // bills the API key. kill({ runId, address }) stops a member, a pending
+      // launch too. deliver({ runId, address, kind: 'report', status,
+      // summary } | { runId, address, kind: 'message', text }) → true, or
+      // false for an unknown run or member: the member's report / message to
+      // its orchestrator, as a local worker's. SendMessage to the member is
+      // its tab adapter's submit(text, { from }). One provider at a time: a
+      // second registration replaces the first, whose handle goes inert;
+      // unregister() is idempotent.
       // Dashboard profile only.
       ...(orchestration ? {
         orchestration: Object.freeze({
@@ -194,6 +210,8 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
           refreshOrchestrator: (runId) => orchestration.refreshOrchestrator(String(runId || '')),
           setRunAuth: (runId, auth, { continueTurn = false } = {}) => orchestration.setRunAuth(String(runId || ''), auth, { continueTurn: continueTurn === true }),
           setRunModel: (runId, model) => orchestration.setRunModel(String(runId || ''), model),
+          ...(typeof orchestration.registerHostProvider === 'function'
+            ? { registerHostProvider: (provider) => orchestration.registerHostProvider(provider) } : {}),
         }),
       } : {}),
       // Dashboard login (src/login.js), frozen. Dashboard profile only: the
