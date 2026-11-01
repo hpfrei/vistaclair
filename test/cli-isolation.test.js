@@ -338,3 +338,80 @@ test('openCli: a simple session passes isolation through; unasked, none', async 
   const plain = await orch.openCli({ cwd: repo, mode: 'simple', engine: 'cli' });
   assert.ok(!mgr.get(plain.tabId).getSettings().worktree, 'not asked: not isolated');
 });
+
+test('land: a manifest on the base that is not valid JSON refuses the landing (no unchecked merge), with the file and the error', async () => {
+  const { mgr, iso, broadcasts, saved } = setup();
+  const { repo, g } = repoWith({ check: 'true' });
+  const { tabId, session, wt } = start(mgr, repo);
+  commitAll(wt.path, { 'a.txt': 'a' });
+  commitAll(repo, { '.vistaclair-worktree.json': '{ "check": ' }, 'break the manifest');
+  const before = g('rev-parse', 'main');
+  const r = await iso.land({ tabId });
+  assert.strictEqual(r.outcome, 'manifest-unreadable');
+  assert.strictEqual(r.file, path.join(repo, '.vistaclair-worktree.json'));
+  assert.match(r.error, /not valid JSON/);
+  assert.match(r.text, /^not landed: the manifest .*\.vistaclair-worktree\.json is unreadable \(not valid JSON/);
+  assert.strictEqual(g('rev-parse', 'main'), before, 'nothing merged');
+  assert.strictEqual(saved(session.sessId).settings.worktree.lastLanding.outcome, 'manifest-unreadable');
+  assert.strictEqual(broadcasts.find(m => m.type === 'cli:landing').outcome, 'manifest-unreadable');
+});
+
+test('land: the manifest as committed on the base decides, not the owner\'s half-edited working copy', async () => {
+  const { mgr, iso } = setup();
+  const { repo } = repoWith({ check: 'touch .check-ran' });
+  const { tabId, wt } = start(mgr, repo);
+  commitAll(wt.path, { 'a.txt': 'a' });
+  fs.writeFileSync(path.join(repo, '.vistaclair-worktree.json'), '{ half edited');
+  const r = await iso.land({ tabId });
+  assert.strictEqual(r.outcome, 'landed', r.text);
+  assert.ok(fs.existsSync(path.join(wt.path, '.check-ran')), 'the committed check ran');
+});
+
+test('copy: a private copy in the worktree, recorded, excluded, not a change; removed at teardown, the original kept', async () => {
+  const { mgr, iso, settled, saved } = setup();
+  const { repo, g } = repoWith();
+  fs.writeFileSync(path.join(repo, '.vistaclair-worktree.json'), JSON.stringify({ links: ['.data'], copy: ['.settings.json'] }));
+  g('add', '.'); g('commit', '-qm', 'copy');
+  fs.appendFileSync(path.join(repo, '.gitignore'), '.settings.json\n');
+  g('add', '.'); g('commit', '-qm', 'ignore');
+  fs.writeFileSync(path.join(repo, '.settings.json'), 'secret');
+  const { tabId, session, wt } = start(mgr, repo);
+  const copy = path.join(wt.path, '.settings.json');
+  assert.ok(!fs.lstatSync(copy).isSymbolicLink());
+  assert.deepStrictEqual(wt.links.map(l => !!l.copy), [false, true]);
+  fs.writeFileSync(copy, 'worker edit');
+  assert.strictEqual(fs.readFileSync(path.join(repo, '.settings.json'), 'utf8'), 'secret');
+  assert.strictEqual(execFileSync('git', ['-C', wt.path, 'status', '--porcelain']).toString(), '');
+  commitAll(wt.path, { 'a.txt': 'a' });
+  assert.strictEqual((await iso.land({ tabId })).outcome, 'landed');
+  session.kill();
+  await settled();
+  assert.ok(!fs.existsSync(wt.path), 'the worktree and its copy are gone');
+  assert.strictEqual(fs.readFileSync(path.join(repo, '.settings.json'), 'utf8'), 'secret');
+  assert.ok(saved(session.sessId).settings.worktree.removed);
+});
+
+test('the card names the gitignored paths a worktree lacks (noise left out, capped), one sentence; none when nothing is missing', () => {
+  const { mgr } = setup();
+  const { repo } = repoWith();
+  fs.appendFileSync(path.join(repo, '.gitignore'), '.settings.json\n.venv/\ndist/\n*.log\n');
+  fs.writeFileSync(path.join(repo, '.settings.json'), 's');
+  fs.mkdirSync(path.join(repo, '.venv')); fs.writeFileSync(path.join(repo, '.venv', 'x'), 'x');
+  fs.mkdirSync(path.join(repo, 'dist')); fs.writeFileSync(path.join(repo, 'dist', 'x'), 'x');
+  fs.writeFileSync(path.join(repo, 'app.log'), 'x');
+  const { session } = start(mgr, repo);
+  const card = session.getSettings().appendSystemPrompt;
+  assert.match(card, /Not available here \(gitignored in the main checkout\): \.settings\.json, \.venv; they can be added to "links" or "copy" in \.vistaclair-worktree\.json \(tell your orchestrator\/owner\)\./);
+  assert.ok(!/dist|app\.log|\.data/.test(card.split('Not available here')[1]), 'noise and linked paths left out');
+
+  const clean = repoWith();
+  assert.ok(!/Not available here/.test(start(mgr, clean.repo).session.getSettings().appendSystemPrompt));
+
+  const many = repoWith();
+  const names = Array.from({ length: 13 }, (_, i) => `s${String(i).padStart(2, '0')}.env`);
+  fs.appendFileSync(path.join(many.repo, '.gitignore'), names.join('\n') + '\n');
+  for (const n of names) fs.writeFileSync(path.join(many.repo, n), 'x');
+  const c = start(mgr, many.repo).session.getSettings().appendSystemPrompt;
+  assert.match(c, /s09\.env, \+3 more;/);
+  assert.ok(!/s10\.env/.test(c));
+});

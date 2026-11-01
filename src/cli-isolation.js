@@ -5,11 +5,12 @@
 //   start                launchSession({ isolation: 'worktree', landOnClose })
 //                        (openCli's simple mode, cli:open): a worktree under
 //                        data/worktrees/cli/<id> on branch cli/<id> from the
-//                        main checkout's HEAD, its dependency links made; the
+//                        main checkout's HEAD, its dependency links and copies made; the
 //                        session runs there. settings.worktree records it
 //                        (persists with the tab and its saved entry):
 //                          { id, path, repo, branch, base, cwd (the directory
-//                            asked for, in the main checkout), links?,
+//                            asked for, in the main checkout), links? (copies too:
+//                            { copy: true }),
 //                            landOnClose?, lastLanding?, landings?, kept?,
 //                            removed? }
 //   land                 land({ tabId | sessId }): rebase onto the base, the
@@ -51,8 +52,11 @@ const clip = (s, n) => (s.length > n ? s.slice(0, n) + '…' : s);
 const list = (files = []) => files.slice(0, 10).join(', ') + (files.length > 10 ? `, … (${files.length} in all)` : '');
 
 // What a session in a worktree is told (appended to its system prompt).
-function card(wt, cwd) {
-  return `You work in a git worktree at ${cwd} on branch \`${wt.branch}\`, isolated from the main checkout (${wt.repo}). Commit your work on this branch; links the server made to the main checkout's dependencies are not yours to commit. The owner lands it into \`${wt.base}\` (rebase, the repo's check, merge --no-ff)${wt.landOnClose ? ', also when this session closes' : ''}. Never merge into ${wt.base}, rebase it or reset branches yourself.`;
+function card(wt, cwd, gap = null) {
+  const missing = gap?.paths.length
+    ? ` Not available here (gitignored in the main checkout): ${gap.paths.join(', ')}${gap.more ? `, +${gap.more} more` : ''}; they can be added to "links" or "copy" in .vistaclair-worktree.json (tell your orchestrator/owner).`
+    : '';
+  return `You work in a git worktree at ${cwd} on branch \`${wt.branch}\`, isolated from the main checkout (${wt.repo}). Commit your work on this branch; links the server made to the main checkout's dependencies are not yours to commit. The owner lands it into \`${wt.base}\` (rebase, the repo's check, merge --no-ff)${wt.landOnClose ? ', also when this session closes' : ''}. Never merge into ${wt.base}, rebase it or reset branches yourself.${missing}`;
 }
 
 // A landing's outcome as one line for the owner.
@@ -64,6 +68,7 @@ function describe(r, wt) {
     case 'dirty': return `not landed: uncommitted changes in the worktree${files}; commit or discard them`;
     case 'link-committed': return `not landed: the branch commits dependency links${files}`;
     case 'conflict': return `not landed: ${wt.branch} conflicts with ${wt.base}${files}; the rebase was aborted, ${wt.base} is untouched`;
+    case 'manifest-unreadable': return `not landed: the manifest ${r.file} is unreadable (${r.error}); fix it on ${wt.base}, then land again`;
     case 'check-failed': return `not landed: the check failed${r.code != null ? ` (exit ${r.code})` : ''}`;
     case 'owner-dirty': return `not landed: ${r.message || `uncommitted changes in ${r.checkout} to files this landing changes${files}`}; nothing changed`;
     default: return `not landed: ${r.message || r.outcome}`;
@@ -93,11 +98,13 @@ function createCliIsolation({ mgr, broadcaster, dataHome }) {
     git(repo, ['worktree', 'add', '-b', branch, wtPath, 'HEAD']);
     const links = landing.createLinks({ repo, worktree: wtPath, dir: source });
     const wt = { id, path: wtPath, repo, branch, base, cwd: source, ...(links.length ? { links } : {}), ...(opts.landOnClose ? { landOnClose: true } : {}) };
+    const cfg = landing.readConfig(repo, source);
+    const gap = landing.gapList({ repo, worktree: wtPath, dir: cfg ? cfg.dir : source, records: links });
     const cwd = path.join(wtPath, path.relative(repo, source));
     const prior = opts.settings?.appendSystemPrompt;
     return {
       ...opts, cwd,
-      settings: { ...opts.settings, worktree: wt, appendSystemPrompt: (prior ? prior + '\n\n' : '') + card(wt, cwd) },
+      settings: { ...opts.settings, worktree: wt, appendSystemPrompt: (prior ? prior + '\n\n' : '') + card(wt, cwd, gap) },
     };
   }
 
@@ -183,7 +190,7 @@ function createCliIsolation({ mgr, broadcaster, dataHome }) {
   }
 
   async function landNow({ sessId, title }, wt, message) {
-    const cfg = landing.readConfig(wt.repo, wt.cwd);
+    const cfg = landing.readConfig(wt.repo, wt.cwd, { base: wt.base });
     mark(wt, sessId);
     let r;
     try {
@@ -192,6 +199,7 @@ function createCliIsolation({ mgr, broadcaster, dataHome }) {
         message: `Merge ${wt.branch}: ${clip(firstLine(message) || title || wt.id, 120)}`,
         check: cfg?.check || null,
         checkDir: cfg ? path.join(wt.path, path.relative(wt.repo, cfg.dir)) : null,
+        manifest: cfg?.error ? cfg : null,
       });
     } catch (e) {
       r = { outcome: 'error', message: firstLine(e.message || e) };

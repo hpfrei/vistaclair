@@ -1,0 +1,4 @@
+{
+  "links": ["node_modules"],
+  "check": "npm test"
+}

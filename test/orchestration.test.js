@@ -1883,6 +1883,19 @@ test('landing: a failing check goes back to the worker with its output; nothing 
   assert.match(events('not landed')[0], /the check failed .*boom-output/);
 });
 
+test('landing: an unreadable manifest on the base refuses it, with the file and the JSON error; the check is not skipped', async (t) => {
+  const { repo, g, launch, done, events, toWorker } = await landingRun(t, { check: 'true' });
+  fs.writeFileSync(path.join(repo, '.vistaclair-worktree.json'), '{ "check": ');
+  g('add', '.'); g('commit', '-qm', 'break the manifest');
+  const w = launch();
+  commitAll(w.cwd, { 'a.txt': 'a' });
+  const base = g('rev-parse', 'main');
+  await done(w);
+  assert.strictEqual(g('rev-parse', 'main'), base, 'nothing merged');
+  assert.match(events('not landed')[0], /its manifest .*\.vistaclair-worktree\.json is unreadable \(not valid JSON: .*\).*Nothing changed/);
+  assert.ok(!/not landed/.test(toWorker(w)), 'not the worker\'s to fix');
+});
+
 test('landing: real uncommitted changes stop it in the report\'s answer; the links do not count', async (t) => {
   const { repo, g, launch, done, events, run } = await landingRun(t);
   const w = launch();

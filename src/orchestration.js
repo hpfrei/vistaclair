@@ -1103,6 +1103,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         worker: `Your branch was not landed: the repo's check failed after rebasing onto ${w.base}. Fix it, commit, and report done again. Output (tail):\n${clip(r.output, 2500)}`,
         event: `the check failed after rebasing onto ${w.base}: ${clip(String(r.output || '').trim().split('\n').slice(-3).join(' / '), 300)}`,
       };
+      case 'manifest-unreadable': return {
+        worker: null,
+        event: `its manifest ${r.file} is unreadable (${r.error}), so the check would be skipped. Nothing changed: once the manifest is fixed (committed on ${w.base}), have ${w.name} report done again`,
+      };
       case 'owner-dirty': return {
         worker: null,
         event: r.files.length
@@ -1161,7 +1165,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       return n.worker || `not landed: ${n.event}`;
     }
     const summary = w.lastReport?.summary || '';
-    const cfg = landing.readConfig(repo, path.join(repo, path.relative(wt, w.cwd)));
+    const cfg = landing.readConfig(repo, path.join(repo, path.relative(wt, w.cwd)), { base: w.base });
     const job = (landingJobs.get(key) || Promise.resolve()).then(async () => {
       const fresh = loadRun(run.runDir);
       const fw = fresh?.workers.find(x => x.id === w.id);
@@ -1175,6 +1179,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           message: `Merge ${fw.branch}: ${clip(String(summary).split('\n')[0], 120)}`,
           check: cfg?.check || null,
           checkDir: cfg ? path.join(wt, path.relative(repo, cfg.dir)) : null,
+          manifest: cfg?.error ? cfg : null,
         });
       } catch (e) {
         r = { outcome: 'error', message: String(e.message || e).split('\n')[0] };
