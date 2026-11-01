@@ -5,20 +5,29 @@
 //
 //   .vistaclair-worktree.json  versioned in the target repo, the nearest one
 //                        from the worktree's directory up to the repo root:
-//                          { "links": [".data", "node_modules"], "check": "npm test" }
+//                          { "links": [".data", "node_modules"], "copy": [".settings.json"], "check": "npm test" }
 //                        links: gitignored paths, relative to the file's
 //                        directory, symlinked from the main checkout into a new
-//                        worktree. check: a shell command run there (same
-//                        directory) before a landing; exit 0 passes.
+//                        worktree. copy: the same, but copied (a private copy
+//                        the worker may change; teardown removes it, and only
+//                        logs one that differs). check: a shell command run
+//                        there (same directory) before a landing; exit 0 passes.
+//                        A landing reads the file as committed on the base branch
+//                        when it is tracked there (else the working file), so the
+//                        owner's half-edited copy changes nothing. A file that is
+//                        not a JSON object is { file, error }: the landing stops
+//                        as `manifest-unreadable`.
+//   gapList()            gitignored entries of the main checkout that a new
+//                        worktree lacks and no link or copy covers (noise left out).
 //   changes()            the one cleanliness check: `git status --porcelain -z`.
-//                        A recorded link is not a change; anything else is (an
+//                        A recorded link or copy is not a change; anything else is (an
 //                        untracked directory is one entry, never recursed).
 //   changedFiles()       what a branch changes against its base, committed or not.
 //   land()               in the worktree `git rebase <base>`, the check, then
 //                        `git merge --no-ff` into the base. One landing per repo
 //                        at a time. Never --force, never reset.
 //   teardown()           merged into the base and nothing real left: unlink the
-//                        links (never following one), `git worktree remove`,
+//                        links (never following one) and copies, `git worktree remove`,
 //                        `git branch -d`.
 //   undo()               `git revert -m 1 <merge>` on the base: a new commit.
 
@@ -91,62 +100,170 @@ function checkoutOf(repo, branch) {
   return null;
 }
 
-// --- Dependency links ---
+// --- Dependency links and copies ---
+
+// The manifest at `d`: { file, text, source: 'base' | 'file' } or null. With a
+// `base` branch, the content committed there wins over the working file.
+function manifestAt(top, d, base) {
+  const file = path.join(d, CONFIG_FILE);
+  if (base && branchExists(top, base)) {
+    const rel = posix(path.relative(top, file));
+    try { return { file, text: gitRaw(top, ['show', `refs/heads/${base}:${rel}`]), source: 'base' }; } catch {}
+  }
+  if (!fs.existsSync(file)) return null;
+  try { return { file, text: fs.readFileSync(file, 'utf8'), source: 'file' }; } catch (e) { return { file, error: firstLine(e) }; }
+}
+
+// Relative paths of a manifest key under `d`: strings inside it, never `d` itself.
+function pathList(value, d) {
+  return (Array.isArray(value) ? value : [])
+    .filter(l => typeof l === 'string' && l.trim())
+    .map(l => l.trim().replace(/\/+$/, ''))
+    .filter(l => !path.isAbsolute(l) && path.resolve(d, l) !== d && isInside(path.resolve(d, l), d));
+}
 
 // The declaration nearest to `dir` (inside the repo `top`), or null:
-// { file, dir, links: [relative path], check }.
-function readConfig(top, dir) {
+// { file, dir, links, copy: [relative path], check, source } — or { file, dir,
+// error } when the file is not a JSON object. `base`: read it as committed there.
+function readConfig(top, dir, { base = null } = {}) {
   if (!isInside(path.resolve(dir), top)) return null;
   for (let d = path.resolve(dir); ; d = path.dirname(d)) {
-    const file = path.join(d, CONFIG_FILE);
-    if (fs.existsSync(file)) {
-      let raw = {};
-      try { raw = JSON.parse(fs.readFileSync(file, 'utf8')) || {}; } catch { raw = {}; }
-      const links = (Array.isArray(raw.links) ? raw.links : [])
-        .filter(l => typeof l === 'string' && l.trim())
-        .map(l => l.trim().replace(/\/+$/, ''))
-        .filter(l => !path.isAbsolute(l) && path.resolve(d, l) !== d && isInside(path.resolve(d, l), d));
-      return { file, dir: d, links, check: typeof raw.check === 'string' && raw.check.trim() ? raw.check.trim() : null };
+    const m = manifestAt(top, d, base);
+    if (m) {
+      if (m.error) return { file: m.file, dir: d, error: m.error };
+      let raw;
+      try { raw = JSON.parse(m.text); } catch (e) { return { file: m.file, dir: d, error: `not valid JSON: ${e.message}` }; }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { file: m.file, dir: d, error: 'not a JSON object' };
+      return {
+        file: m.file, dir: d, source: m.source, links: pathList(raw.links, d), copy: pathList(raw.copy, d),
+        check: typeof raw.check === 'string' && raw.check.trim() ? raw.check.trim() : null,
+      };
     }
     if (d === path.resolve(top) || path.dirname(d) === d) return null;
   }
 }
 
-// Link the declared paths of the main checkout `repo` into `worktree`, for a
-// worktree serving `dir` (a directory of the main checkout). Only a path that
-// exists in the main checkout and not in the worktree, under a directory the
-// worktree has. Each link is also added to the repo's info/exclude (a
-// trailing-slash .gitignore pattern does not match a symlink), so `git add -A`
-// leaves it out. Returns [{ path, target }] — what to record.
+// Link (links) or copy (copy) the declared paths of the main checkout `repo`
+// into `worktree`, for a worktree serving `dir` (a directory of the main
+// checkout). Only a path that exists in the main checkout and not in the
+// worktree, under a directory the worktree has. Each one is also added to the
+// repo's info/exclude (a trailing-slash .gitignore pattern does not match a
+// symlink), so `git add -A` leaves it out. A manifest that cannot be read
+// makes none. Returns [{ path, target, copy? }] — what to record.
 function createLinks({ repo, worktree, dir }) {
   const cfg = readConfig(repo, dir);
-  if (!cfg) return [];
+  if (!cfg || cfg.error) return [];
   const out = [];
-  for (const rel of cfg.links) {
-    const target = path.join(cfg.dir, rel);
-    const link = path.join(worktree, path.relative(repo, target));
-    if (!fs.existsSync(target) || lexists(link) || !fs.existsSync(path.dirname(link))) continue;
-    try { fs.symlinkSync(target, link); out.push({ path: link, target }); } catch {}
+  for (const [rels, copy] of [[cfg.links, false], [cfg.copy, true]]) {
+    for (const rel of rels) {
+      const target = path.join(cfg.dir, rel);
+      const link = path.join(worktree, path.relative(repo, target));
+      if (!fs.existsSync(target) || lexists(link) || !fs.existsSync(path.dirname(link))) continue;
+      try {
+        if (copy) fs.cpSync(target, link, { recursive: true, errorOnExist: true });
+        else fs.symlinkSync(target, link);
+        out.push({ path: link, target, ...(copy ? { copy: true } : {}) });
+      } catch {}
+    }
   }
   if (out.length) addExcludes(repo, out.map(l => '/' + posix(path.relative(worktree, l.path))));
   return out;
 }
 
-// Recreate recorded links that are missing (a teardown that git refused).
+// Recreate recorded links and copies that are missing (a teardown that git
+// refused, a resume).
 function relink(links = []) {
   for (const l of links) {
-    if (!lexists(l.path) && fs.existsSync(path.dirname(l.path))) { try { fs.symlinkSync(l.target, l.path); } catch {} }
+    if (lexists(l.path) || !fs.existsSync(path.dirname(l.path))) continue;
+    try {
+      if (l.copy) { if (fs.existsSync(l.target)) fs.cpSync(l.target, l.path, { recursive: true, errorOnExist: true }); }
+      else fs.symlinkSync(l.target, l.path);
+    } catch {}
   }
 }
 
-// Remove recorded links: only a symlink still pointing at its recorded target.
-// unlink never follows it; the target is untouched.
+// Does the copy at `a` hold what `b` holds (a file's bytes, a directory's tree)?
+function sameContent(a, b) {
+  try {
+    const sa = fs.lstatSync(a);
+    const sb = fs.lstatSync(b);
+    if (sa.isDirectory() && sb.isDirectory()) {
+      const na = fs.readdirSync(a).sort();
+      const nb = fs.readdirSync(b).sort();
+      return na.length === nb.length && na.every((n, i) => n === nb[i] && sameContent(path.join(a, n), path.join(b, n)));
+    }
+    if (sa.isSymbolicLink() || sb.isSymbolicLink()) return sa.isSymbolicLink() && sb.isSymbolicLink() && fs.readlinkSync(a) === fs.readlinkSync(b);
+    return sa.isFile() && sb.isFile() && sa.size === sb.size && fs.readFileSync(a).equals(fs.readFileSync(b));
+  } catch { return false; }
+}
+
+// Remove recorded links and copies. A link: only a symlink still pointing at
+// its recorded target; unlink never follows it, the target is untouched. A copy
+// is the worker's own: removed whatever it holds, a difference from the main
+// checkout's only logged.
 function unlinkLinks(links = []) {
   for (const l of links) {
     try {
-      if (fs.lstatSync(l.path).isSymbolicLink() && fs.readlinkSync(l.path) === l.target) fs.unlinkSync(l.path);
+      const st = fs.lstatSync(l.path);
+      if (l.copy) {
+        if (!st.isSymbolicLink() && lexists(l.target) && !sameContent(l.path, l.target)) {
+          console.log(`[worktree-landing] the copy ${l.path} differs from ${l.target}; removed with the worktree`);
+        }
+        fs.rmSync(l.path, { recursive: true, force: true });
+      } else if (st.isSymbolicLink() && fs.readlinkSync(l.path) === l.target) fs.unlinkSync(l.path);
     } catch {}
   }
+}
+
+// --- The gap list ---
+
+// Names no one misses in a worktree: build output, caches, logs.
+const NOISE_NAMES = new Set([
+  '__pycache__', 'dist', 'build', 'target', '.cache', 'coverage', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox',
+  '.DS_Store', '.next', '.nuxt', '.turbo', '.parcel-cache', '.gradle', '.nyc_output', 'Thumbs.db',
+]);
+const NOISE_FILE = /\.(pyc|pyo|log|swp|tmp)$/;
+const GAP_CAP = 10;
+const isNoise = (n) => NOISE_NAMES.has(n) || NOISE_FILE.test(n);
+
+// Does the directory hold anything but noise? A directory git reports whole
+// (everything in it ignored) may be only a __pycache__. Bounded: a big tree is
+// taken to hold something.
+function hasSignal(dir, budget = { left: 5000 }) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return true; }
+  for (const e of entries) {
+    if (isNoise(e.name)) continue;
+    if (!e.isDirectory() || --budget.left < 0 || hasSignal(path.join(dir, e.name), budget)) return true;
+  }
+  return false;
+}
+
+// Gitignored entries of the main checkout under `dir` that `worktree` lacks and
+// that nothing links or copies (`records`: createLinks' result): { paths, more },
+// paths relative to `dir` (what "links" / "copy" take), `more` the number cut off.
+// `dir`: the manifest's directory, or the session's when there is none.
+function gapList({ repo, worktree, dir, records = [] }) {
+  let out = '';
+  try {
+    out = execFileSync('git', ['-C', dir, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000, maxBuffer: 16 * 1024 * 1024 });
+  } catch { return { paths: [], more: 0 }; }
+  const have = records.map(r => posix(path.relative(dir, path.join(repo, path.relative(worktree, r.path)))));
+  const inWorktree = path.join(worktree, path.relative(repo, dir));
+  const found = [];
+  for (const e of out.split('\0')) {
+    const rel = e.replace(/\/+$/, '');
+    if (!rel) continue;
+    const parts = rel.split('/');
+    if (parts.some(isNoise)) continue;
+    if (have.some(h => rel === h || rel.startsWith(h + '/'))) continue;
+    if (lexists(path.join(inWorktree, rel))) continue;
+    if (e.endsWith('/') && !hasSignal(path.join(dir, rel))) continue;
+    found.push(rel);
+  }
+  found.sort();
+  return { paths: found.slice(0, GAP_CAP), more: Math.max(0, found.length - GAP_CAP) };
 }
 
 function addExcludes(repo, patterns) {
@@ -176,7 +293,7 @@ function changes(dir, links = []) {
     const file = e.slice(3);
     // A rename or copy: its original path follows as its own field.
     const from = code[0] === 'R' || code[0] === 'C' ? parts[++i] : null;
-    if (code === '??' && own.has(file)) continue;
+    if (code === '??' && own.has(file.replace(/\/+$/, ''))) continue;
     list.push({ code, path: file, ...(from ? { from } : {}) });
   }
   return list;
@@ -296,6 +413,8 @@ function precheck({ repo, worktree, branch, base, links = [] }) {
 //   link-committed  { files }   the branch commits a dependency link
 //   conflict        { files }   the rebase conflicted; aborted, base untouched
 //   check-failed    { output }  the check's output tail
+//   manifest-unreadable  { file, error }  `manifest` (readConfig's { file, error })
+//                   was passed: the landing would run without its check; nothing changed
 //   owner-dirty     { files, checkout }  uncommitted changes where the base is
 //                   checked out, to files the landing changes; nothing changed
 //   busy / error    { message }
@@ -303,11 +422,12 @@ function land(opts) {
   return withRepoLock(opts.repo, () => landNow(opts));
 }
 
-async function landNow({ repo, worktree, branch, base, links = [], message, check = null, checkDir = null }) {
+async function landNow({ repo, worktree, branch, base, links = [], message, check = null, checkDir = null, manifest = null }) {
   // The base can move while the check runs (the owner commits): rebase again.
   for (let attempt = 0; attempt < 3; attempt++) {
     const stop = precheck({ repo, worktree, branch, base, links });
     if (stop) return stop;
+    if (manifest?.error) return { outcome: 'manifest-unreadable', file: manifest.file, error: manifest.error };
     try {
       git(worktree, ['rebase', '--no-autostash', base]);
     } catch (e) {
@@ -459,6 +579,6 @@ function abortInterrupted({ repo, worktree, branch, base }) {
 }
 
 module.exports = {
-  CONFIG_FILE, readConfig, createLinks, unlinkLinks, changes, changedFiles, currentBranch, branchExists,
+  CONFIG_FILE, readConfig, createLinks, relink, unlinkLinks, gapList, changes, changedFiles, currentBranch, branchExists,
   hasNew, precheck, land, teardown, undo, abortInterrupted, withRepoLock,
 };
