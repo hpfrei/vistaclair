@@ -150,11 +150,13 @@ test('options: the same append prompt, settings file, MCP servers and model as t
   assert.strictEqual(o.title, 'orch-abc123-w1-x');
 
   // MCP: the CLI's --mcp-config entries, but for this session's instance and engine.
-  const sdkMcp = JSON.parse(JSON.stringify(o.mcpServers).split(s.instanceId).join(cli.instanceId));
+  assert.strictEqual(o.mcpServers, undefined, 'the config goes by file, not inline (argv)');
+  const sdkServers = JSON.parse(fs.readFileSync(o.extraArgs['mcp-config'], 'utf8')).mcpServers;
+  const sdkMcp = JSON.parse(JSON.stringify(sdkServers).split(s.instanceId).join(cli.instanceId));
   cliMcp.orchestrator.env.VISTACLAIR_ORCH_ENGINE = 'sdk';
   assert.deepStrictEqual(sdkMcp, cliMcp);
-  assert.strictEqual(o.mcpServers.orchestrator.env.VISTACLAIR_ORCH_ROLE, 'worker');
-  assert.strictEqual(o.mcpServers.orchestrator.env.VISTACLAIR_INSTANCE_ID, s.instanceId);
+  assert.strictEqual(sdkServers.orchestrator.env.VISTACLAIR_ORCH_ROLE, 'worker');
+  assert.strictEqual(sdkServers.orchestrator.env.VISTACLAIR_INSTANCE_ID, s.instanceId);
 
   assert.strictEqual(o.permissionMode, 'bypassPermissions');
   assert.strictEqual(o.allowDangerouslySkipPermissions, true);

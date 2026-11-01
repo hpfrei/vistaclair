@@ -14,17 +14,28 @@ function readConfig(filePath) {
   return readJSON(filePath, {});
 }
 
+// These files may still hold an owner token an older version wrote, and
+// ~/.claude.json holds Claude's own credentials: owner-only (0600), the backup
+// too (a copy keeps no mode of an existing .bak, so it is replaced).
 function writeConfig(filePath, data) {
   // Backup before writing
   if (fs.existsSync(filePath)) {
-    try { fs.copyFileSync(filePath, filePath + '.bak'); } catch {}
+    try {
+      fs.rmSync(filePath + '.bak', { force: true });
+      fs.copyFileSync(filePath, filePath + '.bak');
+      fs.chmodSync(filePath + '.bak', 0o600);
+    } catch {}
   }
   // Atomic write: tmp then rename
   const tmp = filePath + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
   fs.renameSync(tmp, filePath);
 }
 
+// The owner token is NOT written: the bridge reads VISTACLAIR_AUTH_TOKEN from
+// the environment of the session that starts it (set for every dashboard
+// session). `authToken` stays a parameter for callers; it is unused.
 function register(slug, meta, bridgePath, authToken, dashboardPort, projectDir) {
   const scope = meta.scope || 'user';
   const filePath = resolveConfigPath(scope, projectDir);
@@ -34,8 +45,6 @@ function register(slug, meta, bridgePath, authToken, dashboardPort, projectDir) 
 
   const env = {
     MCP_DASHBOARD_URL: `ws://localhost:${dashboardPort}`,
-    MCP_AUTH_TOKEN: authToken,
-    VISTACLAIR_AUTH_TOKEN: authToken,
     VISTACLAIR_DASHBOARD_PORT: String(dashboardPort),
     // The bridge decrypts secrets.enc itself at spawn — secrets never land in
     // this (plaintext) config file. Only the locator + slug are passed.
@@ -44,6 +53,8 @@ function register(slug, meta, bridgePath, authToken, dashboardPort, projectDir) 
   };
   // Merge user env vars (non-secret)
   if (meta.env) Object.assign(env, meta.env);
+  delete env.MCP_AUTH_TOKEN;
+  delete env.VISTACLAIR_AUTH_TOKEN;
 
   config.mcpServers[slug] = {
     command: 'node',
