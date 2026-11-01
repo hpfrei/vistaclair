@@ -12,6 +12,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync, spawnSync } = require('child_process');
+const { waitFor } = require('./wait-for');
 
 const CORE = path.join(__dirname, '..');
 
@@ -596,7 +597,7 @@ test('events reach a busy orchestrator through its hooks and wake an idle one', 
 
   // Idle: an exit is typed into its tab as a one-line notice, once.
   orch.onSessionExit(w.tabId, wSession);
-  await wait(60);
+  await waitFor(() => mgr.writes.filter(x => x.tabId === orchSession.tabId).length >= 2, { what: 'the exit notice typed into the orchestrator' });
   const typed = mgr.writes.filter(x => x.tabId === orchSession.tabId);
   assert.strictEqual(typed.length, 2);
   assert.match(typed[0].data, /\[orchestration\] 1 worker event/);
@@ -677,13 +678,13 @@ test('pausing a run: the orchestrator relays, workers write notes and close, the
   // The orchestrator relays to w1 only; w2 hears it from the server.
   hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: '[vistaclair pause] …' });
   hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'SendMessage', tool_input: { to: w1.worker } });
-  await wait(80);
+  await waitFor(() => /\[vistaclair pause\]/.test(typedInto(mgr, s2.tabId)), { what: 'the fallback reaching the unrelayed worker' });
   assert.ok(!/\[vistaclair pause\]/.test(typedInto(mgr, s1.tabId)), 'a relayed worker gets no fallback');
   assert.match(typedInto(mgr, s2.tabId), /\[vistaclair pause\].*report status "paused"/s, 'the fallback reaches an unrelayed worker');
 
   // The orchestrator idles while its workers pause.
   assert.deepStrictEqual(hook(orch, orchSession, { hook_event_name: 'Stop' }), {});
-  await wait(20);
+  await wait(20);   // nothing is expected to happen: let a (wrong) close show
   assert.ok(mgr.sessions.has(orchSession.tabId), 'held open while workers pause');
 
   // A worker stops: no note → asked once; with a note → closed and marked paused.
@@ -691,7 +692,7 @@ test('pausing a run: the orchestrator relays, workers write notes and close, the
   assert.match(blockOf(hook(orch, s1, { hook_event_name: 'Stop' })), /## Resume/);
   writeResume(s1);
   hook(orch, s1, { hook_event_name: 'Stop', stop_hook_active: true });
-  await wait(20);
+  await waitFor(() => !mgr.sessions.has(s1.tabId) && run().workers[0].paused, { what: 'w1 closed and marked paused' });
   assert.ok(!mgr.sessions.has(s1.tabId));
   assert.ok(run().workers[0].paused);
   assert.ok(mgr.findSaved(s1.sessId).paused);
@@ -701,7 +702,7 @@ test('pausing a run: the orchestrator relays, workers write notes and close, the
   hook(orch, s2, { hook_event_name: 'UserPromptSubmit' });
   writeResume(s2);
   hook(orch, s2, { hook_event_name: 'Stop' });
-  await wait(20);
+  await waitFor(() => /Every worker of run .* is paused/.test(typedInto(mgr, orchSession.tabId)), { what: 'the orchestrator woken' });
   assert.match(typedInto(mgr, orchSession.tabId), /Every worker of run .* is paused/, 'the last worker wakes the orchestrator');
 
   // Its note predates that message: asked again, then closed.
@@ -711,7 +712,7 @@ test('pausing a run: the orchestrator relays, workers write notes and close, the
   assert.ok(blockOf(hook(orch, orchSession, { hook_event_name: 'Stop' })));
   writeResume(orchSession, 'run note');
   hook(orch, orchSession, { hook_event_name: 'Stop', stop_hook_active: true });
-  await wait(20);
+  await waitFor(() => !mgr.sessions.has(orchSession.tabId) && run().pausing === null && run().paused, { what: 'the orchestrator closed and the run paused' });
   assert.ok(!mgr.sessions.has(orchSession.tabId));
   assert.strictEqual(run().pausing, null);
   assert.deepStrictEqual(run().paused.workers, [w1.worker, w2.worker]);
@@ -729,10 +730,10 @@ test('resuming a run: the orchestrator warms up its paused workers with resume_w
     writeResume(s);
     hook(orch, s, { hook_event_name: 'Stop' });
   }
-  await wait(20);
+  await waitFor(() => run().workers.every(w => w.paused), { what: 'both workers paused' });
   writeResume(orchSession);
   hook(orch, orchSession, { hook_event_name: 'Stop' });
-  await wait(20);
+  await waitFor(() => run().paused, { what: 'the run paused' });
   assert.ok(run().paused);
   const oldW2 = mgr.history.find(h => h.settings.orchestration?.workerId === 'w2').id;
 
@@ -788,10 +789,10 @@ test('listRuns: a live run and a paused one, each once; describeRun by id, null 
   const s1 = mgr.sessions.get(w1.tabId);
   writeResume(s1);
   hook(orch, s1, { hook_event_name: 'Stop' });
-  await wait(20);
+  await waitFor(() => run().workers[0].paused, { what: 'w1 paused' });
   writeResume(orchSession);
   hook(orch, orchSession, { hook_event_name: 'Stop' });
-  await wait(20);
+  await waitFor(() => run().paused && mgr.sessions.size === 0, { what: 'the run paused, nothing live' });
   assert.strictEqual(mgr.sessions.size, 0, 'nothing of the run is live');
   [r] = orch.listRuns();
   assert.strictEqual(r.runId, runId, 'a paused run is known by its saved sessions');
@@ -814,10 +815,10 @@ test('a lost transcript: resuming the run and its worker falls back to fresh ses
   const s1 = mgr.sessions.get(w1.tabId);
   writeResume(s1, 'parser half done');
   hook(orch, s1, { hook_event_name: 'Stop' });
-  await wait(20);
+  await waitFor(() => run().workers[0].paused, { what: 'the worker is paused' });
   writeResume(orchSession, 'w1 paused mid-parser');
   hook(orch, orchSession, { hook_event_name: 'Stop' });
-  await wait(20);
+  await waitFor(() => run().paused, { what: 'the run is paused' });
   mgr.lost.add(orchSession.sessId);
   mgr.lost.add(s1.sessId);
 
@@ -878,7 +879,8 @@ test('refreshing the orchestrator: notes, then a fresh session seeded from the r
   writeResume(orchSession, 'w1 is parsing');
   hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: '[vistaclair pause]' });
   hook(orch, orchSession, { hook_event_name: 'Stop' });
-  await wait(20);
+  const freshOne = () => [...mgr.sessions.values()].find(s => s.settings.orchestration?.role === 'orchestrator' && s !== orchSession);
+  await waitFor(() => freshOne() && typedInto(mgr, freshOne().tabId).includes('RESTART.md'), { what: 'the fresh orchestrator seeded' });
 
   const fresh = [...mgr.sessions.values()].find(s => s.settings.orchestration?.role === 'orchestrator');
   assert.ok(fresh && fresh !== orchSession);
@@ -1069,7 +1071,7 @@ test('an orchestrator SendMessage to a worker is kept as a follow-up: in its rec
   writeResume(orchSession, 'w1 closed');
   hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: '[vistaclair pause]' });
   hook(orch, orchSession, { hook_event_name: 'Stop' });
-  await wait(20);
+  await waitFor(() => fs.existsSync(path.join(orchSession.settings.sessionDir, 'RESTART.md')), { what: 'RESTART.md written' });
   const seed = fs.readFileSync(path.join(orchSession.settings.sessionDir, 'RESTART.md'), 'utf8');
   assert.match(seed, /THE ORIGINAL BRIEF[\s\S]*Follow-ups you sent it[\s\S]*do the exporter/);
 });
@@ -2148,7 +2150,8 @@ test('events: a done worktree worker is one event with its landing — landed (n
   assert.notStrictEqual(merge, before);
   assert.deepStrictEqual(run().events.filter(e => e.worker === a.worker).map(e => e.kind), ['landed'], 'no separate report event');
   assert.strictEqual(events('landed')[0], `${a.worker} reported done: added a — landed ${merge} (${a.branch} merged into main); running workers changing the same files: ${b.worker} (a.txt) — they meet these changes when they land — files: a.txt — verified: npm test`);
-  await wait(60);
+  await waitFor(() => mgr.submits.some(x => x.tabId === orchSession.tabId), { what: 'the wake' });
+  await wait(60);   // "exactly one": let a (wrong) second wake show
   assert.strictEqual(mgr.submits.filter(x => x.tabId === orchSession.tabId).length, 1, 'one wake for the report and its landing');
 
   // In the background: a conflict.
@@ -2179,7 +2182,7 @@ test('events: a started report is quiet — no wake for an idle orchestrator, de
   assert.strictEqual(orch.describeRun(run()).pendingEvents, 1, 'shown as pending on the board');
 
   orch.report(wSession.instanceId, { status: 'failed', summary: 'tests red' });
-  await wait(60);
+  await waitFor(() => orchSubmits().length >= 1, { what: 'the wake' });
   assert.strictEqual(orchSubmits().length, 1);
   assert.match(orchSubmits()[0].data, /2 worker event\(s\) pending/);
   const ctx = ctxOf(hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit' }));
@@ -2202,9 +2205,9 @@ test('events: the safety valve pushes quiet events once after its time, and is r
   const notices = () => mgr.submits.filter(x => x.tabId === orchSession.tabId && /\[orchestration\]/.test(x.data));
 
   orch.report(wSession.instanceId, { status: 'started', summary: 'on it' });
-  await wait(40);
+  await wait(40);   // nothing is expected to happen before the valve's time
   assert.strictEqual(notices().length, 0);
-  await wait(150);
+  await waitFor(() => notices().length >= 1, { what: 'the valve push' });
   assert.strictEqual(notices().length, 1, 'pushed once');
   assert.match(notices()[0].data, /1 worker event\(s\) pending/);
   assert.strictEqual(run().quietValve.fired, true);
@@ -2222,7 +2225,7 @@ test('events: the safety valve pushes quiet events once after its time, and is r
   fs.writeFileSync(file, JSON.stringify(saved));
   const { orch: orch3 } = setup({ mgr, quietValveMs: 600000 });
   orch3.getRun(stamp.runId);
-  await wait(150);
+  await waitFor(() => notices().length >= 2, { what: 'the re-armed valve push' });
   assert.strictEqual(notices().length, 2, 'the restarted server pushed it');
 });
 
