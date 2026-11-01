@@ -1,9 +1,9 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const caps = require('./capabilities');
 const { conventionNote } = require('./session-folders');
+const { writePrivateJson, removePrivateDir } = require('./private-tmp');
 const { toolPackContributions, releaseToolPacks, mergeMcpServers } = require('./tool-packs');
 const { buildCliArgs, spawnClaudePty, killGracefully, PACKAGE_ROOT, DATA_HOME } = require('./utils');
 
@@ -35,6 +35,7 @@ class CliSession {
     this.settings = { ...DEFAULT_SETTINGS };
     this.status = 'idle';
     this._mcpConfigFile = null;
+    this._mcpConfigDir = null;
     this._scrollback = '';
     this._authToken = opts.authToken || '';
     this._dashboardPort = opts.dashboardPort || 3457;
@@ -292,10 +293,11 @@ class CliSession {
   }
 
   _cleanupMcpConfig() {
-    if (this._mcpConfigFile) {
-      try { fs.unlinkSync(this._mcpConfigFile); } catch {}
-      this._mcpConfigFile = null;
+    if (this._mcpConfigDir) {
+      removePrivateDir(this._mcpConfigDir);
+      this._mcpConfigDir = null;
     }
+    this._mcpConfigFile = null;
   }
 
   _buildMcpConfig(packs) {
@@ -303,12 +305,12 @@ class CliSession {
     if (Object.keys(servers).length === 0) return null;
     const config = { mcpServers: servers };
 
-    // Random part: two tabs spawned in the same millisecond must not share (and
-    // then delete) one config file.
-    const tmpFile = path.join(os.tmpdir(), `vistaclair-cli-mcp-${Date.now()}-${process.pid}-${crypto.randomBytes(3).toString('hex')}.json`);
-    fs.writeFileSync(tmpFile, JSON.stringify(config, null, 2));
-    this._mcpConfigFile = tmpFile;
-    return tmpFile;
+    // The config holds the auth token: a private (0700) dir of its own per spawn
+    // (two tabs never share, then delete, one file), the file 0600.
+    const { dir, file } = writePrivateJson('vistaclair-cli-mcp-', config);
+    this._mcpConfigDir = dir;
+    this._mcpConfigFile = file;
+    return file;
   }
 
   _mcpOpts() {

@@ -83,8 +83,11 @@ function spawnSdk(settings) {
   const s = new SdkSession(9999, { broadcast() {} }, store, { sdk, claudeBin: '/opt/claude', authToken: 'tok', dashboardPort: 4321 });
   s.updateSettings(settings);
   s.spawn(HOME, 80, 24, {});
+  // The MCP servers go by a private file (--mcp-config <path>), removed on kill.
+  const file = calls[0].extraArgs['mcp-config'];
+  const servers = file ? JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers : {};
   s.kill();
-  return { s, o: calls[0] };
+  return { s, o: calls[0], servers };
 }
 
 // --- No pack: as before ---
@@ -104,10 +107,10 @@ test('no pack: buildMcpServers, CLI args and SDK options are what core alone bui
     assert.strictEqual(!!mcp.orchestrator, settings !== PLAIN);
 
     // The SDK session.
-    const { s, o } = spawnSdk(settings);
+    const { s, o, servers } = spawnSdk(settings);
     assert.deepStrictEqual(o.disallowedTools, utils.disallowedToolsFor(settings, ['SendMessage', 'ListAgents']));
     assert.strictEqual(o.systemPrompt.append, buildAppendSystemPrompt(s.settings));
-    assert.deepStrictEqual(o.mcpServers, buildMcpServers({ settings: s.settings, instanceId: s.instanceId, dashboardPort: 4321, authToken: 'tok' }));
+    assert.deepStrictEqual(servers, buildMcpServers({ settings: s.settings, instanceId: s.instanceId, dashboardPort: 4321, authToken: 'tok' }));
   }
   assert.deepStrictEqual(Object.keys(buildMcpServers({ settings: WORKER, instanceId: 'cli-x' })), ['integrated', 'orchestrator']);
 });
@@ -124,7 +127,7 @@ test('a pack that does not apply changes nothing', () => {
   assert.deepStrictEqual(norm(after), norm(before));
   assert.deepStrictEqual(JSON.stringify(after.mcp).split(after.cli.sessId).join('<id>'), JSON.stringify(before.mcp).split(before.cli.sessId).join('<id>'));
   assert.deepStrictEqual(sdkAfter.o.disallowedTools, sdkBefore.o.disallowedTools);
-  assert.deepStrictEqual(Object.keys(sdkAfter.o.mcpServers), Object.keys(sdkBefore.o.mcpServers));
+  assert.deepStrictEqual(Object.keys(sdkAfter.servers), Object.keys(sdkBefore.servers));
   assert.strictEqual(sdkAfter.o.systemPrompt.append.split(sdkAfter.s.sessId).join('<id>'), sdkBefore.o.systemPrompt.append.split(sdkBefore.s.sessId).join('<id>'));
   clearPacks();
 });
@@ -176,11 +179,11 @@ test('a pack\'s servers, disallowed tools and prompt reach the CLI args and the 
   assert.deepStrictEqual(Object.keys(mcp), ['integrated', 'orchestrator', 'packsrv']);
   assert.strictEqual(mcp.packsrv.env.ID, cli.instanceId);
 
-  const { s, o } = spawnSdk(WORKER);
+  const { s, o, servers } = spawnSdk(WORKER);
   assert.deepStrictEqual(o.disallowedTools, ['SendMessage', 'ListAgents', ...ROLE_DISALLOWED_TOOLS.worker, 'Bash', 'Write']);
   assert.strictEqual(o.systemPrompt.append, buildAppendSystemPrompt(s.settings) + '\n\nPACK ONE\n\nPACK TWO');
-  assert.deepStrictEqual(Object.keys(o.mcpServers), ['integrated', 'orchestrator', 'packsrv']);
-  assert.strictEqual(o.mcpServers.packsrv.env.ID, s.instanceId);
+  assert.deepStrictEqual(Object.keys(servers), ['integrated', 'orchestrator', 'packsrv']);
+  assert.strictEqual(servers.packsrv.env.ID, s.instanceId);
   clearPacks();
 });
 

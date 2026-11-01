@@ -82,6 +82,7 @@ const path = require('path');
 const caps = require('./capabilities');
 const { buildClaudeEnv, trackInstance, disallowedToolsFor, modelFamily, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
+const { writePrivateJson, removePrivateDir } = require('./private-tmp');
 const { toolPackContributions, releaseToolPacks } = require('./tool-packs');
 const { notifyAuthFailed } = require('./ws/claude-auth-handler');
 
@@ -678,7 +679,6 @@ class SdkSession {
     };
     if (s.settingsFile) options.settings = s.settingsFile;
     const mcpServers = buildMcpServers(mcpOpts, packs);
-    if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
     if (s.agents && typeof s.agents === 'object') options.agents = s.agents;
     if (s.model) options.model = s.model;
     if (s.effort) options.effort = s.effort;
@@ -691,6 +691,15 @@ class SdkSession {
       // The SDK's display title; --name's messaging address has no equivalent
       // (run members are addressed through orchestration's own registry).
       if (s.name) options.title = String(s.name);
+    }
+    // Last, so nothing after it can fail and leave the file behind. The SDK would
+    // inline options.mcpServers as `--mcp-config '{…}'` (the auth token in every
+    // user's `ps`); a path through extraArgs keeps the token out of argv.
+    this._cleanupMcpConfig();
+    if (Object.keys(mcpServers).length) {
+      const { dir, file } = writePrivateJson('vistaclair-sdk-mcp-', { mcpServers });
+      this._mcpConfigDir = dir;
+      options.extraArgs = { ...options.extraArgs, 'mcp-config': file };
     }
     return options;
   }
@@ -1257,7 +1266,13 @@ class SdkSession {
   }
 
   // The current spawn's tool packs end (once; a later call is a no-op).
+  _cleanupMcpConfig() {
+    removePrivateDir(this._mcpConfigDir);
+    this._mcpConfigDir = null;
+  }
+
   _releasePacks(reason) {
+    this._cleanupMcpConfig();
     const packs = this._packs;
     this._packs = null;
     if (packs) releaseToolPacks(packs, reason);
