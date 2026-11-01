@@ -8,7 +8,8 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      height: 100vh;
+      min-height: 100vh;
+      padding: 24px 0;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -74,44 +75,67 @@
       cursor: pointer;
     }
     button:hover { background: #89b4fa; }
-    #tg-panel { display: none; }
-    .tg-code {
-      font-size: 26px;
-      font-weight: 700;
-      letter-spacing: 3px;
-      text-align: center;
-      color: #7aa2f7;
-      background: #1a1b26;
-      border: 1px solid #414868;
-      border-radius: 4px;
-      padding: 14px 0;
-      margin: 12px 0;
-      user-select: all;
+    [hidden] { display: none !important; }
+    .brand { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .challenge-panel { margin-top: 20px; }
+    .providers { display: flex; flex-direction: column; gap: 16px; }
+    .provider {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      background: #1a1b26; border: 1px solid #414868; border-radius: 6px; padding: 14px;
     }
-    .tg-hint { font-size: 11px; color: #565f89; line-height: 1.5; }
-    .tg-status { font-size: 11px; color: #565f89; margin-top: 12px; text-align: center; }
-    .tg-status.ok { color: #9ece6a; }
-    .spinner {
-      display: inline-block; width: 10px; height: 10px; margin-right: 6px;
+    .provider-label { font-size: 13px; font-weight: 600; }
+    .provider-hint { font-size: 11px; color: #565f89; text-align: center; line-height: 1.5; }
+    .qr {
+      display: block; width: 200px; height: 200px; max-width: 100%;
+      background: #fff; border-radius: 4px; padding: 8px;
+    }
+    .challenge-code { font-size: 12px; color: #565f89; }
+    .challenge-code-value {
+      font-size: 18px; font-weight: 700; letter-spacing: 2px; color: #7aa2f7; user-select: all;
+    }
+    .challenge-code-group + .challenge-code-group { margin-left: 0.6em; }
+    .open-link { font-size: 11px; color: #7aa2f7; }
+    .open-link:hover { color: #89b4fa; }
+    .challenge-status { font-size: 11px; color: #565f89; margin-top: 12px; text-align: center; }
+    .challenge-status.ok { color: #9ece6a; }
+    .challenge-status.error { color: #f7768e; }
+    .challenge-status.wait::before {
+      content: ''; display: inline-block; width: 10px; height: 10px; margin-right: 6px;
       border: 2px solid #414868; border-top-color: #7aa2f7; border-radius: 50%;
       animation: spin 0.9s linear infinite; vertical-align: -1px;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
-    .alt-link { font-size: 11px; color: #565f89; margin-top: 16px; text-align: center; cursor: pointer; text-decoration: underline; }
-    .alt-link:hover { color: #7aa2f7; }
+    .challenge-countdown { font-size: 10px; color: #565f89; margin-top: 4px; text-align: center; }
+    .divider {
+      display: flex; align-items: center; gap: 8px; margin: 20px 0 16px;
+      font-size: 11px; color: #565f89;
+    }
+    .divider::before, .divider::after { content: ''; flex: 1; border-top: 1px solid #414868; }
+    /* Phones: the QR is on the screen you would scan with, so the link to
+       open the app comes first and is a full-width button. */
+    @media (max-width: 600px) {
+      body { align-items: flex-start; padding: 16px 0; }
+      .login-box { width: calc(100% - 32px); max-width: 420px; padding: 24px; }
+      .open-link {
+        order: -1; display: block; width: 100%; padding: 12px; text-align: center;
+        background: #7aa2f7; color: #1a1b26; border-radius: 4px;
+        font-size: 14px; font-weight: 600; text-decoration: none;
+      }
+      .open-link:hover { color: #1a1b26; background: #89b4fa; }
+      .qr { width: 140px; height: 140px; }
+    }
   </style>
 </head>
 <body>
   <div class="login-box">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><svg width="24" height="24" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="vc-g" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#cc3344"/><stop offset="25%" stop-color="#c07020"/><stop offset="50%" stop-color="#1a8a3a"/><stop offset="75%" stop-color="#2255aa"/><stop offset="100%" stop-color="#7744bb"/></linearGradient></defs><ellipse cx="32" cy="32" rx="29" ry="18" fill="#fff" stroke="#aaa" stroke-width="1.5"/><circle cx="32" cy="32" r="13" fill="url(#vc-g)"/><circle cx="32" cy="32" r="5.5" fill="#1a1a2e"/><circle cx="28" cy="28" r="2.5" fill="#fff"/></svg><h1>vistaclair</h1></div>
+    <div class="brand"><svg width="24" height="24" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="vc-g" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#cc3344"/><stop offset="25%" stop-color="#c07020"/><stop offset="50%" stop-color="#1a8a3a"/><stop offset="75%" stop-color="#2255aa"/><stop offset="100%" stop-color="#7744bb"/></linearGradient></defs><ellipse cx="32" cy="32" rx="29" ry="18" fill="#fff" stroke="#aaa" stroke-width="1.5"/><circle cx="32" cy="32" r="13" fill="url(#vc-g)"/><circle cx="32" cy="32" r="5.5" fill="#1a1a2e"/><circle cx="28" cy="28" r="2.5" fill="#fff"/></svg><h1>vistaclair</h1></div>
 
-    <div id="tg-panel">
-      <div class="subtitle">Login via Telegram</div>
-      <div class="tg-hint">Send this code to your vistaclair login bot:</div>
-      <div class="tg-code" id="tg-code">·····</div>
-      <div class="tg-status" id="tg-status"><span class="spinner"></span>Waiting for Telegram…</div>
-      <div class="alt-link" id="show-token">Use auth token instead</div>
+    <div id="challenge-panel" class="challenge-panel" hidden>
+      <div id="challenge-providers" class="providers"></div>
+      <div id="challenge-status" class="challenge-status" role="status" aria-live="polite"></div>
+      <div id="challenge-countdown" class="challenge-countdown"></div>
     </div>
+    <div id="login-divider" class="divider" hidden>or</div>
 
     <form id="token-form" method="POST" action="/login">
       <div class="subtitle">Enter your auth token to continue</div>

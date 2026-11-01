@@ -84,23 +84,10 @@
       <div class="home-section" id="home-security">
         <div class="markdown-body">
           <h1>Security</h1>
-          <h2>Telegram login</h2>
-          <p>Log in to this dashboard from anywhere by sending a one-time code to your personal Telegram bot. Create a dedicated bot with <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> (use it for nothing else), then enter its token and your numeric Telegram user id (ask <a href="https://t.me/userinfobot" target="_blank" rel="noopener">@userinfobot</a>). Once configured, the static auth token is only accepted from this machine.</p>
-          <div id="tgLoginForm" style="max-width:480px">
-            <label style="display:block;font-size:12px;margin:10px 0 4px">Bot token</label>
-            <input type="password" id="tgBotToken" placeholder="123456789:AA..." style="width:100%" autocomplete="off">
-            <label style="display:block;font-size:12px;margin:10px 0 4px">Owner Telegram user id</label>
-            <input type="text" id="tgOwnerId" placeholder="e.g. 123456789" style="width:100%" autocomplete="off">
-            <label style="display:block;font-size:12px;margin:10px 0 4px">Session lifetime (days)</label>
-            <input type="number" id="tgTtlDays" min="1" max="365" style="width:120px">
-            <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
-              <button id="tgSaveBtn" class="cap-action-btn">Save</button>
-              <button id="tgDisableBtn" class="cap-action-btn">Disable</button>
-              <span id="tgStatus" style="font-size:12px"></span>
-            </div>
-          </div>
+          <h2>Login</h2>
+          <p>The auth token always logs you in. Other login methods, such as approving a login on your phone, are provided by add-ons (e.g. Vistaclair Pro).</p>
           <h2 style="margin-top:28px">Active sessions</h2>
-          <p>Sessions issued by Telegram login or one-time links. Revoke any you don't recognize.</p>
+          <p>Sessions issued by add-on logins or one-time links. Revoke any you don't recognize.</p>
           <div id="sessionsList" style="max-width:720px"></div>
           <div style="margin-top:10px">
             <button id="revokeAllBtn" class="cap-action-btn">Log out everywhere else</button>
