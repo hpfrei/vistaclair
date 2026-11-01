@@ -9,6 +9,7 @@ const { pipeline } = require('stream');
 const { spawn } = require('child_process');
 const express = require('express');
 const { MIME_TYPES, DATA_HOME, ensureDir, removeInside } = require('./utils');
+const machineLocks = require('./locks');
 
 const VIDEO_THUMB_DIR = path.join(DATA_HOME, 'data', 'video-thumbs');
 const VIDEO_FASTSTART_DIR = path.join(DATA_HOME, 'data', 'video-faststart');
@@ -146,6 +147,9 @@ function streamFile(req, res, file, mime) {
 function createApiRouter({ broadcaster, store, proxyPort, dashboardPort, authToken, cliSessionManager }) {
   const router = express.Router();
   router.use(express.json());
+
+  // ── GET /api/locks — holders and waiters of the machine-wide resource locks ──
+  router.get('/locks', machineLocks.locksHandler(() => machineLocks.resolveLockDir()));
 
   // ── GET /api/browse-dirs — real filesystem directory browser ────
   const os = require('os');

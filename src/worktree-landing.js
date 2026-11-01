@@ -373,7 +373,7 @@ function runCheck(command, cwd, timeoutMs = CHECK_TIMEOUT_MS) {
     const add = (d) => { out = (out + d).slice(-TAIL_CHARS * 4); };
     let child;
     try {
-      child = spawn('sh', ['-c', command], { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      child = spawn('sh', ['-c', command], { cwd, env: { ...process.env, VISTACLAIR_LANDING: '1' }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     } catch (e) { resolve({ ok: false, output: e.message }); return; }
     child.stdout.on('data', add);
     child.stderr.on('data', add);
