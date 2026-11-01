@@ -4771,7 +4771,6 @@ footer {
 }
 .claude-auth-pill.claude-auth-ok { background: var(--status-connected-bg); color: var(--green); }
 .claude-auth-pill.claude-auth-warn { background: var(--status-disconnected-bg); color: var(--orange); border-color: color-mix(in srgb, var(--orange) 40%, transparent); }
-.claude-auth-pill-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .75; }
 
 /* Sign-in modal */
 .claude-signin-box { max-width: 640px; }

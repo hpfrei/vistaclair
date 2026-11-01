@@ -271,3 +271,14 @@ test('cancel from the dashboard kills the login and is not reported as a sign-in
   assert.equal(exit.reason, 'cancelled');
   assert.equal(exit.ok, false);
 });
+
+test('header pill shows the plan only, never the email; the modal status keeps it', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../public/claude-signin.js'), 'utf8');
+  const pillFn = src.slice(src.indexOf('function renderPill()'), src.indexOf('function renderStatus()'));
+  assert.ok(pillFn.includes('last.subscription'));
+  assert.ok(!/\.email/.test(pillFn), 'renderPill must not read the email');
+  assert.ok(!src.includes('claude-auth-pill-email'));
+  assert.match(src, /const accountText = .*Signed in as \$\{s\.email\}/);
+});
