@@ -220,10 +220,16 @@ function unlinkLinks(links = []) {
 // Names no one misses in a worktree: build output, caches, logs.
 const NOISE_NAMES = new Set([
   '__pycache__', 'dist', 'build', 'target', '.cache', 'coverage', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.tox',
-  '.DS_Store', '.next', '.nuxt', '.turbo', '.parcel-cache', '.gradle', '.nyc_output', 'Thumbs.db',
+  '.DS_Store', '.orchestrator', '.next', '.nuxt', '.turbo', '.parcel-cache', '.gradle', '.nyc_output', 'Thumbs.db',
 ]);
 const NOISE_FILE = /\.(pyc|pyo|log|swp|tmp)$/;
 const GAP_CAP = 10;
+
+// The gap list as the one sentence a session's card carries, or ''.
+function gapSentence(gap) {
+  if (!gap?.paths?.length) return '';
+  return `Not available here (gitignored in the main checkout): ${gap.paths.join(', ')}${gap.more ? `, +${gap.more} more` : ''}; they can be added to "links" or "copy" in .vistaclair-worktree.json (tell your orchestrator/owner).`;
+}
 const isNoise = (n) => NOISE_NAMES.has(n) || NOISE_FILE.test(n);
 
 // Does the directory hold anything but noise? A directory git reports whole
@@ -239,11 +245,14 @@ function hasSignal(dir, budget = { left: 5000 }) {
   return false;
 }
 
-// Gitignored entries of the main checkout under `dir` that `worktree` lacks and
-// that nothing links or copies (`records`: createLinks' result): { paths, more },
-// paths relative to `dir` (what "links" / "copy" take), `more` the number cut off.
-// `dir`: the manifest's directory, or the session's when there is none.
+// Gitignored entries of the main checkout that `worktree` lacks and that nothing
+// links or copies (`records`: createLinks' result): { paths, more }, paths
+// relative to the manifest's directory (what "links" / "copy" take), `more` the
+// number cut off. `dir`: the session's directory in the main checkout; the
+// entries are those under the nearest manifest's directory, else under `dir`.
 function gapList({ repo, worktree, dir, records = [] }) {
+  const cfg = readConfig(repo, dir);
+  if (cfg) dir = cfg.dir;
   let out = '';
   try {
     out = execFileSync('git', ['-C', dir, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'],
@@ -579,6 +588,6 @@ function abortInterrupted({ repo, worktree, branch, base }) {
 }
 
 module.exports = {
-  CONFIG_FILE, readConfig, createLinks, relink, unlinkLinks, gapList, changes, changedFiles, currentBranch, branchExists,
+  CONFIG_FILE, readConfig, createLinks, relink, unlinkLinks, gapList, gapSentence, changes, changedFiles, currentBranch, branchExists,
   hasNew, precheck, land, teardown, undo, abortInterrupted, withRepoLock,
 };
