@@ -449,21 +449,12 @@ broadcaster.sessionControl = sessionControl; // cli:pause / cli:resumeSaved
 setProcessBroadcaster(broadcaster);
 store.setBroadcaster(broadcaster);
 
-dashboardServer.on('upgrade', (req, socket, head) => {
-  // Same owner decision as the HTTP middleware, against the upgrade socket.
-  if (!auth.isOwnerUpgrade(req, socket)) {
-    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-    socket.destroy();
-    return;
-  }
-
-  // Offer the upgrade to add-ons (e.g. Pro's VNC websockify proxy) first.
-  if (addons.handleUpgrade(req, socket, head)) return;
-
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit('connection', ws, req);
-  });
-});
+// Add-on auth-exempt upgrade paths (authExemptUpgradePaths) go to their add-on
+// only; everything else: owner gate → add-ons → dashboard wss.
+dashboardServer.on('upgrade', addons.createUpgradeHandler({
+  isOwnerUpgrade: (req, socket) => auth.isOwnerUpgrade(req, socket),
+  wss,
+}));
 
 cliSessionManager.broadcaster = broadcaster;
 // An SDK session's cost counts up per proxied request (subagents included)
