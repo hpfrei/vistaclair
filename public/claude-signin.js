@@ -63,9 +63,8 @@
     if (last.subscription) {
       const plan = planOf(s);
       pill.classList.add('claude-auth-ok');
-      pill.innerHTML = `<span>Claude${plan ? ` ${escHtml(plan)}` : ''}</span>` +
-        (s.email ? `<span class="claude-auth-pill-email">${escHtml(s.email)}</span>` : '');
-      pill.title = `Signed in to Claude${s.email ? ` as ${s.email}` : ''}${plan ? ` (${plan} plan)` : ''}`;
+      pill.innerHTML = `<span>Claude${plan ? ` ${escHtml(plan)}` : ''}</span>`;
+      pill.title = `Signed in to Claude${plan ? ` (${plan} plan)` : ''} — click for account details`;
     } else if (s.loggedIn) {
       pill.textContent = `Claude: ${s.authMethod || 'signed in'}`;
       pill.title = `Claude Code is signed in via ${s.authMethod || 'an unknown method'}, not a Claude subscription`;
