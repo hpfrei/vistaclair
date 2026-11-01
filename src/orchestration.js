@@ -31,10 +31,14 @@
 //                        lib/orchestration-hook.js, which forwards them here
 //                        (handleHook). Caps, guards, report enforcement and event
 //                        delivery are all decided in this one process.
-//   events               worker exit / idle-without-report / report. Delivered
-//                        into the orchestrator's context by its next hook when it
-//                        is busy, or by typing a one-line notice into its tab when
-//                        it is idle (which starts a turn).
+//   events               worker exit / idle-without-report / report / landing.
+//                        Delivered into the orchestrator's context by its next hook
+//                        when it is busy, or by typing a one-line notice into its
+//                        tab when it is idle (which starts a turn). A done report
+//                        that starts a landing is one event, once it settles.
+//                        Quiet events (started/update reports, overlaps) never
+//                        type the notice: they ride along with the next delivery,
+//                        or push once after QUIET_VALVE_MS (run.quietValve).
 //   tools                lib/orchestrator-mcp.js: launch_cli, resume_worker,
 //                        close_worker, stop_worker, list_workers, end_run,
 //                        undo_landing (orchestrator); report (workers);
@@ -49,7 +53,8 @@
 //                        end_run once merged and clean (src/worktree-landing.js).
 //   areas                launch_cli `area`: overlaps with running workers' areas
 //                        are named in its result; checkOverlaps (a timer) tells
-//                        the orchestrator of a file changed in two live worktrees.
+//                        the workers involved of a file changed in two live
+//                        worktrees, and the orchestrator with a quiet event.
 //   session folders      every member keeps TODO.md / NOTES.md in
 //                        <sessionsRoot>/<name>/ (session-folders.js); the
 //                        orchestrator reads its workers' folders (list_workers
@@ -83,6 +88,12 @@ const RELAY_FALLBACK_MS = 120000;
 const OVERLAP_CHECK_MS = 180000;     // how often files changed in two live worktrees of a repo are looked for    // a worker the orchestrator has not told to pause by then hears it from the server
 const REFRESH_SUGGESTED_AFTER = 3;   // orchestrator compactions
 const CONTEXT_LIMIT = 9000;          // hook additionalContext is capped at 10k chars
+const QUIET_VALVE_MS = 600000;       // quiet events undelivered this long push the orchestrator once
+const QUIET_SHOWN = 15;              // quiet events listed in one delivery (the newest); the rest are counted
+const EVENT_ITEM_LIMIT = 4000;       // one event's text in a delivery (two always fit in CONTEXT_LIMIT)
+// Report statuses that wake the orchestrator; any other (started, update) is
+// quiet: it waits for the next delivery.
+const WAKE_STATUSES = new Set(['done', 'failed', 'blocked', 'paused']);
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const AGENT_TOOLS = new Set(['Agent', 'Task']);
 const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
@@ -212,7 +223,7 @@ function orchestratorCard(run) {
   const dir = orchestratorDir(run);
   const todo = path.join(dir, 'TODO.md');
   const isolation = run.isolation === 'worktree'
-    ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. A worker\'s "done" report lands its branch, by code: rebased onto its base branch, the repo\'s check run, merged with --no-ff. You get a "landed <sha>" or a "not landed" event with the reason; what the worker can fix goes back to it by itself. Never merge, rebase or reset branches yourself. Plan disjoint areas and pass each worker\'s files or directories as `area` in launch_cli; an overlap named in its result, or an "overlap" event (a file changed in two worktrees), means: serialize those workers, or expect a conflict at landing. A conflict of a worker that is no longer running: resume_worker it, or launch a worker to merge its branch into its own and resolve the conflicts. `undo_landing` reverts a landing with a new commit. A closed or exited worker\'s worktree goes once landed and clean; call `end_run` to finish the run: it removes what can go, says what is kept and why, and keeps every worker\'s record, folder and conversation. A worker stays resumable after end_run (resume_worker adds its worktree back at the same path, on its branch or a new one from its base), and launch_cli or resume_worker reopens an ended run.'
+    ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. A worker\'s "done" report lands its branch, by code: rebased onto its base branch, the repo\'s check run, merged with --no-ff. You get one event for the report and its landing ("reported done: … — landed <sha>", or "— not landed: <reason>"); what the worker can fix goes back to it by itself. Never merge, rebase or reset branches yourself. Plan disjoint areas and pass each worker\'s files or directories as `area` in launch_cli; an overlap named in its result, or an "overlap" event (a file changed in two worktrees; the workers are told too), means: serialize those workers, or expect a conflict at landing. A conflict of a worker that is no longer running: resume_worker it, or launch a worker to merge its branch into its own and resolve the conflicts. `undo_landing` reverts a landing with a new commit. A closed or exited worker\'s worktree goes once landed and clean; call `end_run` to finish the run: it removes what can go, says what is kept and why, and keeps every worker\'s record, folder and conversation. A worker stays resumable after end_run (resume_worker adds its worktree back at the same path, on its branch or a new one from its base), and launch_cli or resume_worker reopens an ended run.'
     : 'Workers share one working directory. Give them disjoint files and say so in each brief; never let two running workers touch the same file. Project-wide finishing steps the instructions above this card ask for (a check that rewrites shared files, a docs update) go to one final worker once the others are done.';
   return [
     `# Role: orchestrator — orchestration run ${run.runId}`,
@@ -224,7 +235,7 @@ function orchestratorCard(run) {
     `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${MAX_WORKERS} workers run at once. A follow-up for a running worker goes to it with SendMessage — never relaunch it. A trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none.`,
     '3. A brief must be self-contained: the goal, the files or areas involved, acceptance criteria (how the worker proves it is done), constraints, and what is already ruled out. The worker knows only what you write.',
     `4. For a non-trivial request, write the plan as TODO rows and confirm it with the user (AskUserQuestion) before fanning out to several workers. Keep ${todo} current: update it after every launch, report and event. One row per task in its table (id | description | depends on | status): name the worker in the description; status is queued|running|blocked|done|failed followed by the last report in a few words. It is your memory — after a compaction or resume, read it and NOTES.md first.`,
-    '5. Workers report with the `report` tool and SendMessage. Worker events (report, exited, idle without reporting) arrive in your context automatically, marked "[orchestration]". Act on each one and update the TODO.',
+    '5. Workers report with the `report` tool and SendMessage. Worker events (report, exited, idle without reporting) arrive in your context automatically, marked "[orchestration]". "started" and progress reports and overlaps do not wake you: they come with the next delivery. Act on each one and update the TODO.',
     `6. \`list_workers\` shows every worker's state. ${isolation}`,
     `7. You may run at most ${MAX_SUBAGENTS} subagents at once, for reading only (e.g. Explore). Never use a subagent to edit code.`,
     '8. A worker\'s "done" report is trusted: do not re-run its checks, re-read its diff or launch a reviewer worker. Act on "failed" and "blocked"; launch a review only when the user asks for one. Tell the user what each worker reported and what is open.',
@@ -256,7 +267,7 @@ function workerCard(run, worker) {
   ].join('\n');
 }
 
-function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS, overlapCheckMs = OVERLAP_CHECK_MS }) {
+function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS, overlapCheckMs = OVERLAP_CHECK_MS, quietValveMs = QUIET_VALVE_MS }) {
   // Which Claude credentials exist: { apiKey, subscription }. Read per ask.
   const claudeCredentials = credentials || (() => require('./capabilities').claudeCredentials(dataHome));
   // The engine of a new session nobody named one for: 'sdk' | 'terminal'
@@ -270,7 +281,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   const pushTimers = new Map();    // runId -> timeout
   const pendingAsks = new Map();   // dedupe key -> Promise
   const relayTimers = new Map();   // worker name -> pause fallback timeout
-  const inbox = new Map();         // session name -> messages for a busy CLI member
+  const valveTimers = new Map();   // runId -> quiet-event safety valve timeout (run.quietValve is the state)
   let askSeq = 0;
 
   // --- Ask (the dashboard form, shared with /api/ask) ---
@@ -456,6 +467,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const run = readJsonOr(runFile(runDir), null);
     if (run) runDirs.set(run.runId, runDir);
     if (run?.workers?.some(w => w.landing)) recoverLandings(run);
+    // After a restart the valve's timer is gone; its due time is in run.json.
+    if (run?.quietValve && !run.quietValve.fired) armValve(run);
     return run;
   }
 
@@ -1073,12 +1086,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return r;
   }
 
-  // Into a running worker: a landing that needs its hand. False when it is
-  // not running.
-  function tellWorker(run, w, text) {
+  // Into a running worker: a landing that needs its hand, or an overlap with
+  // another worktree (`tag`). False when it is not running.
+  function tellWorker(run, w, text, tag = 'landing') {
     const live = workerSession(run, w.id);
     if (!live?.session.running) return false;
-    const body = `[vistaclair landing] ${text}`;
+    const body = `[vistaclair ${tag}] ${text}`;
     deliver(live.session, w.name, body, 'vistaclair');
     emitTo(live.session, run, { platform: { kind: 'message', from: 'vistaclair', to: w.name, text: body } });
     return true;
@@ -1120,9 +1133,50 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
   }
 
-  // Record what a landing came to: run.landings and an event; a stop goes
-  // back to the worker when it can act on it.
-  function settleLanding(runDir, workerId, r, summary, key, job) {
+  // A report as its event's parts: [head, files, verified, open] (the empty
+  // ones left out). A landing's outcome goes right after the head.
+  function reportParts(w) {
+    const rep = w.lastReport || {};
+    const parts = [`${w.name} reported ${rep.status || 'update'}: ${clip(rep.summary, 600)}`];
+    if (rep.filesChanged?.length) parts.push(`files: ${rep.filesChanged.join(', ')}`);
+    if (rep.verified) parts.push(`verified: ${clip(rep.verified, 300)}`);
+    if (rep.open) parts.push(`open: ${clip(rep.open, 300)}`);
+    return parts;
+  }
+
+  // The one event of a done report that went to landing: the report with what
+  // the landing came to.
+  function landingEvent(run, w, parts, outcome, kind) {
+    const [head, ...rest] = parts?.length ? parts : reportParts(w);
+    addEvent(run, { worker: w.name, kind, text: [head, outcome, ...rest].join(' — ') });
+  }
+
+  // Record a landing in run.landings.
+  function recordLanding(run, w, r, summary) {
+    run.landings = [...(run.landings || []), {
+      worker: w.name, branch: w.branch, base: w.base, preLandSha: r.preLandSha, mergeSha: r.mergeSha, head: r.head,
+      summary: clip(summary, 300), at: new Date().toISOString(),
+    }];
+  }
+
+  // Running workers of the same repo whose changes touch files a landing just
+  // brought onto the base: they meet them when they land. '' when none.
+  function landedOverlaps(run, w, r) {
+    const repo = w.worktree?.repo || w.removedWorktree?.repo;
+    let landed;
+    try { landed = new Set(git(repo, ['diff', '--name-only', r.preLandSha, r.mergeSha]).split('\n').filter(Boolean)); } catch { return ''; }
+    const hits = [];
+    for (const o of run.workers) {
+      if (o.id === w.id || !o.worktree || o.worktree.repo !== repo || !o.branch || !workerSession(run, o.id)?.session.running) continue;
+      const shared = landing.changedFiles({ repo, worktree: o.worktree.path, branch: o.branch, base: o.base, links: o.worktree.links }).filter(f => landed.has(f));
+      if (shared.length) hits.push(`${o.name} (${clip(shared.join(', '), 300)})`);
+    }
+    return hits.length ? `; running workers changing the same files: ${hits.join(', ')} — they meet these changes when they land` : '';
+  }
+
+  // Record what a landing came to: run.landings and the report's one event; a
+  // stop goes back to the worker when it can act on it.
+  function settleLanding(runDir, workerId, r, { summary, parts }, key, job) {
     const run = loadRun(runDir);
     // Loaded while the job is still listed: loadRun must not take it for one
     // a restart cut off.
@@ -1130,13 +1184,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const w = run?.workers.find(x => x.id === workerId);
     if (!w) return;
     delete w.landing;
-    if (r.outcome === 'nothing') { saveRun(run); return; }
+    if (r.outcome === 'nothing') {
+      // Nothing new on the branch: the report on its own.
+      addEvent(run, { worker: w.name, kind: 'report', text: (parts || reportParts(w)).join(' — ') });
+      return;
+    }
     if (r.outcome === 'landed') {
-      run.landings = [...(run.landings || []), {
-        worker: w.name, branch: w.branch, base: w.base, preLandSha: r.preLandSha, mergeSha: r.mergeSha, head: r.head,
-        summary: clip(summary, 300), at: new Date().toISOString(),
-      }];
-      addEvent(run, { worker: w.name, kind: 'landed', text: `landed ${r.mergeSha} — ${w.name}'s ${w.branch} merged into ${w.base}` });
+      recordLanding(run, w, r, summary);
+      landingEvent(run, w, parts, `landed ${r.mergeSha} (${w.branch} merged into ${w.base})${landedOverlaps(run, w, r)}`, 'landed');
       // Already gone (closed, exited): its worktree goes now.
       if (!workerSession(run, w.id)?.session.running) { teardownWorker(run, w); saveRun(run); }
       return;
@@ -1144,36 +1199,43 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const n = notLanded(w, r);
     let told = '';
     if (n.worker) told = tellWorker(run, w, n.worker) ? ` Sent back to ${w.name}.` : ` ${w.name} is not running: ${n.gone || 'resume_worker it with this'}.`;
-    addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: ${n.event}.${told}` });
+    landingEvent(run, w, parts, `not landed: ${n.event}.${told}`, 'not landed');
   }
 
   // A done report of a worktree worker: land its branch. The quick stops are
   // decided here (the report's answer says them); the rest runs in the
-  // background, one landing per repo at a time. Returns the report's note, or
-  // null.
-  function startLanding(run, w) {
-    if (!w.worktree || !w.branch) return null;
+  // background, one landing per repo at a time. The report and its landing
+  // are one event (`parts`: the report's); `evented` says this took it over.
+  // Returns { note (the report's answer, or null), evented }.
+  function startLanding(run, w, parts) {
+    if (!w.worktree || !w.branch) return { note: null, evented: false };
     if (!w.base) {
-      addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: no base branch was recorded at launch (a detached HEAD, or a worker from before landing); merge ${w.branch} by hand` });
-      return 'not landed: no base branch was recorded at launch; the orchestrator is told';
+      landingEvent(run, w, parts, `not landed: no base branch was recorded at launch (a detached HEAD, or a worker from before landing); merge ${w.branch} by hand`, 'not landed');
+      return { note: 'not landed: no base branch was recorded at launch; the orchestrator is told', evented: true };
     }
     const { repo, path: wt, links = [] } = w.worktree;
     const key = jobKey(run, w);
     // One of its landings still in flight: this one queues behind it.
     const pre = landingJobs.has(key) ? null : landing.precheck({ repo, worktree: wt, branch: w.branch, base: w.base, links });
-    if (pre?.outcome === 'nothing') return null;
+    if (pre?.outcome === 'nothing') return { note: null, evented: false };
     if (pre) {
       const n = notLanded(w, pre);
-      addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: ${n.event}.${n.worker ? ` ${w.name} is told in its report's answer.` : ''}` });
-      return n.worker || `not landed: ${n.event}`;
+      landingEvent(run, w, parts, `not landed: ${n.event}.${n.worker ? ` ${w.name} is told in its report's answer.` : ''}`, 'not landed');
+      return { note: n.worker || `not landed: ${n.event}`, evented: true };
     }
     const summary = w.lastReport?.summary || '';
     const cfg = landing.readConfig(repo, path.join(repo, path.relative(wt, w.cwd)), { base: w.base });
     const job = (landingJobs.get(key) || Promise.resolve()).then(async () => {
       const fresh = loadRun(run.runDir);
       const fw = fresh?.workers.find(x => x.id === w.id);
-      if (!fw?.worktree) return;
-      fw.landing = { at: new Date().toISOString(), branch: fw.branch, base: fw.base };
+      if (!fw?.worktree) {
+        // Its worktree went meanwhile: nothing to land, the report on its own.
+        if (fw) addEvent(fresh, { worker: fw.name, kind: 'report', text: parts.join(' — ') });
+        return;
+      }
+      // The report's parts ride along: a restart that cuts the landing off
+      // still sends the one event (recoverLandings).
+      fw.landing = { at: new Date().toISOString(), branch: fw.branch, base: fw.base, report: parts, summary };
       saveRun(fresh);
       let r;
       try {
@@ -1187,14 +1249,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       } catch (e) {
         r = { outcome: 'error', message: String(e.message || e).split('\n')[0] };
       }
-      settleLanding(run.runDir, w.id, r, summary, key, job);
+      settleLanding(run.runDir, w.id, r, { summary, parts }, key, job);
       return r;
     }).catch((e) => {
       if (landingJobs.get(key) === job) landingJobs.delete(key);
       console.error('[orchestration] landing error:', e.message);
     });
     landingJobs.set(key, job);
-    return 'your branch is being landed: you will hear back only if something stops it';
+    return { note: 'your branch is being landed: you will hear back only if something stops it', evented: true };
   }
 
   // The landing in flight for a worker (by address), or null. For tests and
@@ -1208,17 +1270,49 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return null;
   }
 
+  // The merge of a landing a restart cut off between the merge commit and
+  // saving its result: the branch has nothing beyond its base, and a merge
+  // commit on the base has the branch tip as its second parent. { mergeSha,
+  // preLandSha, head } or null.
+  function mergeMade(w) {
+    const repo = w.worktree?.repo;
+    if (!repo || !w.base || !landing.branchExists(repo, w.branch) || !landing.branchExists(repo, w.base)) return null;
+    if (landing.hasNew(repo, w.branch, w.base)) return null;
+    try {
+      const head = git(repo, ['rev-parse', `refs/heads/${w.branch}`]);
+      for (const line of git(repo, ['log', '--merges', '-n', '200', '--format=%H %P', `refs/heads/${w.base}`]).split('\n')) {
+        const [mergeSha, preLandSha, second] = line.split(' ');
+        if (second === head) return { mergeSha, preLandSha, head };
+      }
+    } catch {}
+    return null;
+  }
+
   // Landings a restart cut off (w.landing set, no job in this process): abort
-  // their rebase (and merge), report them not landed. Called by loadRun.
+  // their rebase (and a half-done merge). A merge already made counts as
+  // landed; anything else is reported not landed. Either way the report's one
+  // event. Called by loadRun.
   function recoverLandings(run) {
     for (const w of run.workers) {
       if (!w.landing || landingJobs.has(jobKey(run, w))) continue;
+      const { report: parts, summary = w.lastReport?.summary || '' } = w.landing;
       let aborted = [];
       if (w.worktree) {
         try { aborted = landing.abortInterrupted({ repo: w.worktree.repo, worktree: w.worktree.path, branch: w.branch, base: w.base }); } catch {}
       }
       delete w.landing;
-      addEvent(run, { worker: w.name, kind: 'not landed', text: `${w.name} not landed: the landing was cut off by a restart${aborted.length ? ` (${aborted.join(' and ')} aborted)` : ''}; ${w.base || 'the base'} is as before. Have ${w.name} report done again` });
+      const made = mergeMade(w);
+      if (made && (run.landings || []).some(l => l.mergeSha === made.mergeSha)) {
+        // An earlier landing's merge: this one had nothing new to land.
+        addEvent(run, { worker: w.name, kind: 'report', text: (parts || reportParts(w)).join(' — ') });
+        continue;
+      }
+      if (made) {
+        recordLanding(run, w, made, summary);
+        landingEvent(run, w, parts, `landed ${made.mergeSha} (${w.branch} merged into ${w.base}; its landing was cut off by a restart after the merge)`, 'landed');
+        continue;
+      }
+      landingEvent(run, w, parts, `not landed: the landing was cut off by a restart${aborted.length ? ` (${aborted.join(' and ')} aborted)` : ''}; ${w.base || 'the base'} is as before. Have ${w.name} report done again`, 'not landed');
     }
   }
 
@@ -1227,8 +1321,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // Files changed in two live worktrees of the same repo: committed on their
   // branches (against their base) or not (the cleanliness check, links
   // excluded). Only runs with two or more live worktree workers in one repo
-  // cost anything. A new (file, worker pair) becomes one orchestrator event
-  // per check; run.overlapsWarned keeps the pairs so none is told twice.
+  // cost anything. The workers of a new (file, worker pair) are told directly
+  // (they can act on it); the orchestrator gets one quiet event per check.
+  // run.overlapsWarned keeps the pairs so none is told twice.
   function checkOverlaps() {
     const dirs = new Set(findByStamp(st => st.role === 'worker').filter(m => m.session.running).map(m => m.stamp.runDir));
     for (const dir of dirs) {
@@ -1242,6 +1337,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       const warned = new Set(run.overlapsWarned || []);
       const found = [];
+      const tell = new Map();   // worker name -> Map(other worker name -> files new to the pair)
+      const note = (a, b, file) => {
+        if (!tell.has(a)) tell.set(a, new Map());
+        const m = tell.get(a);
+        m.set(b, [...(m.get(b) || []), file]);
+      };
       for (const [repo, ws] of byRepo) {
         if (ws.length < 2) continue;
         const touched = new Map();   // file -> worker names
@@ -1254,7 +1355,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           for (let i = 0; i < names.length; i++) {
             for (let j = i + 1; j < names.length; j++) {
               const key = [file, ...[names[i], names[j]].sort()].join('\0');
-              if (!warned.has(key)) { warned.add(key); fresh = true; }
+              if (!warned.has(key)) {
+                warned.add(key);
+                fresh = true;
+                note(names[i], names[j], file);
+                note(names[j], names[i], file);
+              }
             }
           }
           if (fresh) found.push(`${file} (${names.join(', ')})`);
@@ -1262,7 +1368,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       if (!found.length) continue;
       run.overlapsWarned = [...warned].slice(-1000);
-      addEvent(run, { worker: null, kind: 'overlap', text: `files changed in more than one worktree: ${clip(found.join('; '), 1500)}. Serialize those workers, or expect a conflict when the later one lands` });
+      for (const [name, others] of tell) {
+        const w = run.workers.find(x => x.name === name);
+        const shared = [...others].map(([o, files]) => `with ${o}: ${clip(files.join(', '), 600)}`).join('; ');
+        tellWorker(run, w, `Files you change are also changed in another worker's worktree (${shared}). Keep your change to those files minimal, and expect to rebase onto ${w.base || 'your base'} when the other one lands first.`, 'overlap');
+      }
+      addEvent(run, { worker: null, kind: 'overlap', quiet: true, text: `files changed in more than one worktree: ${clip(found.join('; '), 1500)}. The workers involved are told. Serialize them, or expect a conflict when the later one lands` });
     }
   }
 
@@ -1843,7 +1954,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     w.exitedAt = now;
     if (typeof s.costUsd === 'number') w.costUsd = s.costUsd;
     volatile.delete(w.name);
-    inbox.delete(w.name);
+    dropInbox(run.runDir, w.name);
     const td = w.worktree ? teardownWorker(run, w) : null;
     saveRun(run);
     const p = folderSummary(w.sessionDir);
@@ -1922,7 +2033,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       mgr.closeQuiet(tabId, 'delete_run');
       if (s.sessId && !entries.some(e => e.id === s.sessId)) entries.push({ id: s.sessId });
       volatile.delete(nameOf(stamp));
-      inbox.delete(nameOf(stamp));
+      if (run) dropInbox(run.runDir, nameOf(stamp));
     }
     for (const w of run?.workers || []) {
       if (w.worktree && !removeWorktree(w)) keptBranches.push(w.branch);
@@ -2040,13 +2151,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!w) throw new Error('worker not found in run');
     w.lastReport = { status: status || 'update', summary: summary || '', filesChanged: filesChanged || [], verified: verified || '', open: open || '', at: new Date().toISOString() };
     delete w.turnStopped;
-    const parts = [`${w.name} reported ${w.lastReport.status}: ${clip(summary, 600)}`];
-    if (w.lastReport.filesChanged.length) parts.push(`files: ${w.lastReport.filesChanged.join(', ')}`);
-    if (verified) parts.push(`verified: ${clip(verified, 300)}`);
-    if (open) parts.push(`open: ${clip(open, 300)}`);
-    addEvent(run, { worker: w.name, kind: 'report', text: parts.join(' — ') });
     vol(session.getSettings().name).reported = true;
-    const note = w.lastReport.status === 'done' ? startLanding(run, w) : null;
+    const parts = reportParts(w);
+    // A done report that goes to landing is one event, with its outcome.
+    const { note, evented } = w.lastReport.status === 'done' ? startLanding(run, w, parts) : { note: null, evented: false };
+    if (!evented) addEvent(run, { worker: w.name, kind: 'report', text: parts.join(' — '), quiet: !WAKE_STATUSES.has(w.lastReport.status) });
+    else saveRun(run);   // the landing job reads lastReport from run.json
     return { ok: true, ...(note ? { landing: note } : {}) };
   }
 
@@ -2077,12 +2187,44 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     else if (session?.sessId) broadcaster.broadcast({ type: 'sdk:event', sessId: session.sessId, runId: run.runId, ts: Date.now(), ev });
   }
 
-  // Messages waiting for a busy CLI member's next hook, or null.
-  function takeInbox(name) {
-    const q = inbox.get(name);
+  // Messages waiting for a busy CLI member's next hook live in <runDir>/inbox.json
+  // ({ name: [message, …] }, oldest first), so a restart does not lose them:
+  // the restored member's SessionStart or next hook takes them. A file of its
+  // own, not run.json: a caller holding an older run object would save over
+  // them. All access is synchronous, in this one process.
+  function inboxFile(runDir) { return path.join(runDir, 'inbox.json'); }
+
+  function writeInbox(runDir, all) {
+    try {
+      if (Object.keys(all).length) writeJsonAtomic(inboxFile(runDir), all);
+      else fs.rmSync(inboxFile(runDir), { force: true });
+    } catch (e) { console.error('[orchestration] inbox write error:', e.message); }
+  }
+
+  function queueMessage(runDir, name, body) {
+    const all = readJsonOr(inboxFile(runDir), {});
+    all[name] = [...(all[name] || []), body];
+    writeInbox(runDir, all);
+  }
+
+  function dropInbox(runDir, name) {
+    const all = readJsonOr(inboxFile(runDir), {});
+    if (!(name in all)) return;
+    delete all[name];
+    writeInbox(runDir, all);
+  }
+
+  // A member's waiting messages, joined, or null; taken (removed) when
+  // returned. `room`: left waiting when they need more than that.
+  function takeInbox(runDir, name, room = CONTEXT_LIMIT) {
+    const all = readJsonOr(inboxFile(runDir), {});
+    const q = all[name];
     if (!q?.length) return null;
-    inbox.delete(name);
-    return clip(q.join('\n\n'), CONTEXT_LIMIT);
+    const text = q.join('\n\n');
+    if (room < CONTEXT_LIMIT && text.length > room) return null;
+    delete all[name];
+    writeInbox(runDir, all);
+    return clip(text, CONTEXT_LIMIT);
   }
 
   const joinContext = (...parts) => parts.filter(Boolean).join('\n\n') || null;
@@ -2146,12 +2288,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function deliver(ts, name, body, from) {
     if (ts.kind === 'sdk') {
       ts.submit(body, { priority: 'next', from });
-    } else if (!ts.busy) {
+    } else if (!ts.busy || !stampOf(ts)?.runDir) {
       ts.submit(body, { from });
     } else {
-      const q = inbox.get(name) || [];
-      q.push(body);
-      inbox.set(name, q);
+      queueMessage(stampOf(ts).runDir, name, body);
       return 'queued';
     }
     return 'submitted';
@@ -2191,23 +2331,81 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // --- Events and delivery ---
 
   // `delivered`: recorded for the run board only (the orchestrator caused it),
-  // unless older events still wait, which carry it along.
-  function addEvent(run, { worker, kind, text, delivered = false }) {
+  // unless older events still wait, which carry it along. `quiet`: recorded
+  // and shown as any other, but it does not wake an idle orchestrator; it
+  // rides along with the next delivery, or the safety valve pushes once.
+  function addEvent(run, { worker, kind, text, delivered = false, quiet = false }) {
     const seq = (run.events.length ? run.events[run.events.length - 1].seq : 0) + 1;
-    run.events.push({ seq, at: new Date().toISOString(), worker, kind, text });
+    run.events.push({ seq, at: new Date().toISOString(), worker, kind, text, ...(quiet ? { quiet: true } : {}) });
     if (run.events.length > 200) run.events = run.events.slice(-200);
     if (delivered && run.delivered === seq - 1) run.delivered = seq;
+    const pending = run.delivered < seq;
+    if (pending && quiet && !run.quietValve) run.quietValve = { due: new Date(Date.now() + quietValveMs).toISOString() };
     saveRun(run);
-    if (run.delivered < seq) schedulePush(run.runId);
+    if (!pending) return;
+    if (quiet) armValve(run);
+    else schedulePush(run.runId);
   }
 
-  function takeEvents(run) {
+  // The quiet events' safety valve: undelivered past run.quietValve.due, they
+  // push the orchestrator once (fired). The state is in run.json; the timer is
+  // re-armed by loadRun after a restart. Delivery clears it (takeEvents).
+  function armValve(run) {
+    const v = run.quietValve;
+    if (!v || v.fired || valveTimers.has(run.runId)) return;
+    const runId = run.runId;
+    const t = setTimeout(() => {
+      valveTimers.delete(runId);
+      const fresh = getRun(runId);
+      const fv = fresh?.quietValve;
+      if (!fv || fv.fired) return;
+      // A newer valve (the old one was delivered, new quiet events came): wait for its time.
+      if (Date.parse(fv.due) > Date.now() + 50) { armValve(fresh); return; }
+      if (!fresh.events.some(e => e.seq > fresh.delivered)) { delete fresh.quietValve; saveRun(fresh); return; }
+      fv.fired = true;
+      saveRun(fresh);
+      schedulePush(runId);
+    }, Math.max(0, Date.parse(v.due) - Date.now()));
+    t.unref?.();
+    valveTimers.set(runId, t);
+  }
+
+  // The pending events as one context block: wake items first, whole, then the
+  // newest quiet ones as one-liners (at most QUIET_SHOWN, the rest counted).
+  // The limit never cuts a wake item: quiet lines go first, and wake items
+  // that do not fit stay pending (with everything after them) for the next
+  // delivery. `wakeOnly`: null unless a wake item is pending. Null when none.
+  function takeEvents(run, { wakeOnly = false } = {}) {
     const fresh = run.events.filter(e => e.seq > run.delivered);
     if (!fresh.length) return null;
-    run.delivered = fresh[fresh.length - 1].seq;
+    if (wakeOnly && fresh.every(e => e.quiet)) return null;
+    const budget = CONTEXT_LIMIT - 300;   // the heading and the "+N more" line
+    const line = (e, n) => `- [${e.kind}] ${clip(e.quiet ? String(e.text || '').replace(/\s+/g, ' ') : e.text, n)}`;
+    const wake = [];
+    let used = 0;
+    let cut = null;
+    for (const e of fresh) {
+      if (e.quiet) continue;
+      const l = line(e, EVENT_ITEM_LIMIT);
+      if (wake.length && used + l.length + 1 > budget) { cut = e.seq; break; }
+      wake.push(l);
+      used += l.length + 1;
+    }
+    const taken = cut ? fresh.filter(e => e.seq < cut) : fresh;
+    const quiet = taken.filter(e => e.quiet);
+    const shown = [];
+    for (let i = quiet.length - 1; i >= 0 && shown.length < QUIET_SHOWN; i--) {
+      const l = line(quiet[i], 300);
+      if (used + l.length + 1 > budget) break;
+      shown.unshift(l);
+      used += l.length + 1;
+    }
+    const more = quiet.length - shown.length;
+    run.delivered = taken[taken.length - 1].seq;
+    if (!run.events.some(e => e.quiet && e.seq > run.delivered)) delete run.quietValve;
     saveRun(run);
-    const lines = fresh.map(e => `- [${e.kind}] ${e.text}`);
-    const text = clip(`[orchestration] ${fresh.length} worker event(s) — act on them and update TODO.md:\n${lines.join('\n')}`, CONTEXT_LIMIT);
+    const lines = [...wake, ...shown, ...(more ? [`- +${more} more on the run board`] : [])];
+    const text = `[orchestration] ${taken.length} worker event(s) — act on them and update TODO.md:\n${lines.join('\n')}`;
     // Hook context never shows in the SDK stream: the panel gets it as a notice.
     orchestratorSession(run)?.session.emitEvent?.({ platform: { kind: 'notice', text } });
     return text;
@@ -2321,7 +2519,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const tool = input.tool_name || '';
     const isOrch = stamp.role === 'orchestrator';
     // A pausing run delivers no worker events: the resume brings them.
-    const events = () => (run.pausing ? null : takeEvents(run));
+    const events = (opts) => (run.pausing ? null : takeEvents(run, opts));
+    const inboxOf = (room) => takeInbox(run.runDir, name, room);
 
     switch (ev) {
       case 'SessionStart': {
@@ -2340,23 +2539,26 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
             saveRun(run);
           }
         }
-        if (src !== 'compact' && src !== 'resume') return {};
+        // Messages queued before a restart (inbox.json) come with the start.
+        if (src !== 'compact' && src !== 'resume') return ctxOut('SessionStart', inboxOf());
         let text = recap(run, stamp);
         if (isOrch) {
           const ev2 = events();
           if (ev2) text += `\n\n${ev2}`;
         }
-        return ctxOut('SessionStart', clip(text, CONTEXT_LIMIT));
+        text = clip(text, CONTEXT_LIMIT);
+        // Only when they fit whole; else the next hook brings them.
+        return ctxOut('SessionStart', joinContext(text, inboxOf(CONTEXT_LIMIT - text.length - 2)));
       }
       case 'UserPromptSubmit': {
-        if (!isOrch) { v.reported = false; v.nudged = false; v.stopping = false; return ctxOut('UserPromptSubmit', takeInbox(name)); }
+        if (!isOrch) { v.reported = false; v.nudged = false; v.stopping = false; return ctxOut('UserPromptSubmit', inboxOf()); }
         run.busy = true;
         // The run's original request, for a fresh orchestrator's seed: the first
         // prompt that is not one of the dashboard's own notices.
         const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
         if (!run.request && prompt && !prompt.startsWith('[')) run.request = clip(prompt, 8000);
         saveRun(run);
-        return ctxOut('UserPromptSubmit', joinContext(takeInbox(name), events()));
+        return ctxOut('UserPromptSubmit', joinContext(inboxOf(), events()));
       }
       case 'PreToolUse': {
         if (tool === 'Workflow') return deny('Workflows are disabled in orchestration sessions (they would bypass the subagent cap). Use the Agent tool, at most 3 at once.');
@@ -2385,7 +2587,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         if (!isOrch) {
           if (to && (addressed(run.orchestrator) || to === 'orchestrator')) v.reported = true;
           if (/(^|__)report$/.test(tool)) v.reported = true;
-          return ctxOut('PostToolUse', takeInbox(name));
+          return ctxOut('PostToolUse', inboxOf());
         }
         if (to && run.pausing) {
           // The orchestrator relayed the pause to a worker: no server fallback.
@@ -2397,7 +2599,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
             saveRun(run);
           }
         }
-        return ctxOut('PostToolUse', joinContext(takeInbox(name), events()));
+        return ctxOut('PostToolUse', joinContext(inboxOf(), events()));
       }
       case 'PostToolUseFailure': {
         if (AGENT_TOOLS.has(tool)) v.agents = Math.max(0, v.agents - 1);
@@ -2413,7 +2615,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       case 'Stop': {
         if (isOrch) {
-          const pending = joinContext(takeInbox(name), events());
+          // Quiet events alone do not keep it working: they wait for the next delivery.
+          const msgs = inboxOf();
+          const pending = joinContext(msgs, events({ wakeOnly: !msgs }));
           if (pending) return { stdout: JSON.stringify({ decision: 'block', reason: pending }) };
           run.busy = false;
           saveRun(run);
@@ -2422,7 +2626,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         // The orchestrator stopped this turn (stop_worker): it ends here.
         if (v.stopping) { v.stopping = false; return {}; }
         // A message arrived during the turn: it continues with it.
-        const msgs = takeInbox(name);
+        const msgs = inboxOf();
         if (msgs) return { stdout: JSON.stringify({ decision: 'block', reason: msgs }) };
         // Still working in the background (subagents, background shells): not idle.
         if (Array.isArray(input.background_tasks) && input.background_tasks.length) return {};

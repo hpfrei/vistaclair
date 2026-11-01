@@ -104,8 +104,9 @@ function fakeMgr() {
   return mgr;
 }
 
+// `extra.mgr`: another instance on the same sessions, as after a restart.
 function setup(extra = {}) {
-  const mgr = fakeMgr();
+  const mgr = extra.mgr || fakeMgr();
   const broadcasts = [];
   const pendingQuestions = new Map();
   const broadcaster = { broadcast: (m) => broadcasts.push(m) };
@@ -133,8 +134,8 @@ function answer(pendingQuestions, value) {
     : [{ id: 'mode', question: 'x', answer: value }]);
 }
 
-async function openOrchestrator(t, opts = {}) {
-  const ctx = setup();
+async function openOrchestrator(t, { setup: extra, ...opts } = {}) {
+  const ctx = setup(extra);
   const cwd = opts.cwd || tmpDir();
   const r = await ctx.orch.openCli({ cwd, mode: 'orchestrator', engine: 'cli', ...opts });
   const orchSession = ctx.mgr.sessions.get(r.tabId);
@@ -1797,9 +1798,9 @@ const commitAll = (dir, files, msg = 'work') => {
   execFileSync('git', ['-C', dir, 'add', '-A']);
   execFileSync('git', ['-C', dir, 'commit', '-qm', msg]);
 };
-async function landingRun(t, opts) {
+async function landingRun(t, opts = {}) {
   const { repo, g } = landingRepo(opts);
-  const ctx = await openOrchestrator(t, { cwd: repo });
+  const ctx = await openOrchestrator(t, { cwd: repo, setup: opts.setup });
   const launch = (title = 'a') => {
     const w = ctx.orch.launchWorker(ctx.orchSession.instanceId, { title, task: 'x' });
     return { ...w, session: ctx.mgr.sessions.get(w.tabId) };
@@ -1840,7 +1841,8 @@ test('landing: links made and recorded at launch; a done report rebases, checks 
   const rec = run().landings[0];
   assert.deepStrictEqual([rec.worker, rec.preLandSha, rec.mergeSha, rec.base], [w.worker, before, merge, 'main']);
   assert.ok(rec.at);
-  assert.deepStrictEqual(events('landed'), [`landed ${merge} — ${w.worker}'s ${w.branch} merged into main`]);
+  assert.deepStrictEqual(events('landed'), [`${w.worker} reported done: added a\nmore lines — landed ${merge} (${w.branch} merged into main)`]);
+  assert.deepStrictEqual(events('report'), [], 'the report and its landing are one event');
   assert.ok(!run().workers[0].landing, 'nothing in flight');
 
   fs.rmSync(path.join(w.cwd, '.data-check-ran'));
@@ -2049,7 +2051,7 @@ test('launch_cli area: an overlap with a running worker in the same repo is name
 });
 
 test('overlap check: a file changed in two live worktrees is one event, not repeated; isolation none and single workers ignored', async (t) => {
-  const { orch, orchSession, repo, events } = await landingRun(t);
+  const { orch, orchSession, mgr, repo, events, toWorker, run } = await landingRun(t);
   const launch = (title, isolation) => orch.launchWorker(orchSession.instanceId, { title, task: 'x', ...(isolation ? { isolation } : {}) });
   const a = launch('a');
   const n = launch('n', 'none');
@@ -2062,9 +2064,18 @@ test('overlap check: a file changed in two live worktrees is one event, not repe
   fs.writeFileSync(path.join(b.cwd, 'shared.txt'), 'b');   // uncommitted counts too
   fs.writeFileSync(path.join(b.cwd, 'f.txt'), 'b');
   orch.checkOverlaps();
-  assert.deepStrictEqual(events('overlap'), [`files changed in more than one worktree: shared.txt (${a.worker}, ${b.worker}). Serialize those workers, or expect a conflict when the later one lands`]);
+  assert.deepStrictEqual(events('overlap'), [`files changed in more than one worktree: shared.txt (${a.worker}, ${b.worker}). The workers involved are told. Serialize them, or expect a conflict when the later one lands`]);
+  // The workers involved are told directly, each naming the other.
+  assert.match(toWorker(a), new RegExp(`\\[vistaclair overlap\\] Files you change are also changed in another worker's worktree \\(with ${b.worker}: shared\\.txt\\)\\. Keep your change to those files minimal, and expect to rebase onto main`));
+  assert.match(toWorker(b), new RegExp(`with ${a.worker}: shared\\.txt`));
+  assert.ok(!/overlap/.test(toWorker(n)), 'not the isolation-none worker');
+  // The orchestrator's event is quiet: recorded, not typed into its idle tab.
+  assert.strictEqual(run().events.at(-1).quiet, true);
+  await wait(60);
+  assert.ok(!typedInto(mgr, orchSession.tabId).includes('[orchestration]'), 'no wake for an overlap');
   orch.checkOverlaps();
   assert.strictEqual(events('overlap').length, 1, 'the same file and pair is not told again');
+  assert.strictEqual(toWorker(a).match(/\[vistaclair overlap\]/g).length, 1);
 
   commitAll(a.cwd, { 'f.txt': 'a' });
   orch.checkOverlaps();
@@ -2112,4 +2123,169 @@ test('worker worktree: copy entries made and recorded, the gap sentence in its c
   const back = run().workers[0].worktree;
   assert.ok(back.links.some(l => l.copy), 'recorded again');
   assert.deepStrictEqual(back.gap, { paths: ['.venv'], more: 0 });
+});
+
+// --- Event delivery: one event per landing, quiet events, restarts ---
+
+test('events: a done worktree worker is one event with its landing — landed (naming a running worker on the same files), not landed, stopped at once', async (t) => {
+  const { orch, orchSession, mgr, g, launch, events, toWorker, run } = await landingRun(t);
+  const a = launch('a');
+  const b = launch('b');
+  commitAll(b.cwd, { 'a.txt': 'b version' });
+  commitAll(a.cwd, { 'a.txt': 'a' });
+  const before = g('rev-parse', 'main');
+  const r = orch.report(a.session.instanceId, { status: 'done', summary: 'added a', filesChanged: ['a.txt'], verified: 'npm test' });
+  assert.match(r.landing, /being landed/, 'the worker-facing answer is unchanged');
+  await orch.landingOf(a.worker);
+  const merge = g('rev-parse', 'main');
+  assert.notStrictEqual(merge, before);
+  assert.deepStrictEqual(run().events.filter(e => e.worker === a.worker).map(e => e.kind), ['landed'], 'no separate report event');
+  assert.strictEqual(events('landed')[0], `${a.worker} reported done: added a — landed ${merge} (${a.branch} merged into main); running workers changing the same files: ${b.worker} (a.txt) — they meet these changes when they land — files: a.txt — verified: npm test`);
+  await wait(60);
+  assert.strictEqual(mgr.submits.filter(x => x.tabId === orchSession.tabId).length, 1, 'one wake for the report and its landing');
+
+  // In the background: a conflict.
+  orch.report(b.session.instanceId, { status: 'done', summary: 'mine', open: 'docs' });
+  await orch.landingOf(b.worker);
+  assert.strictEqual(events('not landed')[0], `${b.worker} reported done: mine — not landed: its branch conflicts with main in a.txt; main untouched. Sent back to ${b.worker}. — open: docs`);
+  assert.match(toWorker(b), /\[vistaclair landing\] Your branch was not landed: it conflicts/);
+
+  // Stopped at once (precheck): the same one event, the answer to the worker unchanged.
+  fs.writeFileSync(path.join(b.cwd, 'junk.txt'), 'x');
+  const r2 = orch.report(b.session.instanceId, { status: 'done', summary: 'again' });
+  assert.match(r2.landing, /uncommitted changes \(\?\? junk\.txt\)\. Commit them/);
+  assert.strictEqual(events('not landed')[1], `${b.worker} reported done: again — not landed: uncommitted changes in its worktree (?? junk.txt). ${b.worker} is told in its report's answer.`);
+  assert.deepStrictEqual(events('report'), []);
+});
+
+test('events: a started report is quiet — no wake for an idle orchestrator, delivered with the next wake, after it, and not keeping a turn alive', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const wSession = mgr.sessions.get(w.tabId);
+  const orchSubmits = () => mgr.submits.filter(x => x.tabId === orchSession.tabId);
+
+  orch.report(wSession.instanceId, { status: 'started', summary: 'on it' });
+  assert.strictEqual(run().events.at(-1).quiet, true);
+  assert.ok(run().quietValve?.due, 'the safety valve is armed in run.json');
+  await wait(60);
+  assert.strictEqual(orchSubmits().length, 0, 'an idle orchestrator is not woken');
+  assert.strictEqual(orch.describeRun(run()).pendingEvents, 1, 'shown as pending on the board');
+
+  orch.report(wSession.instanceId, { status: 'failed', summary: 'tests red' });
+  await wait(60);
+  assert.strictEqual(orchSubmits().length, 1);
+  assert.match(orchSubmits()[0].data, /2 worker event\(s\) pending/);
+  const ctx = ctxOf(hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit' }));
+  assert.match(ctx, /reported failed: tests red\n- \[report\] .*reported started: on it/, 'wake items first');
+  assert.ok(!run().quietValve, 'delivered: the valve is cleared');
+
+  // Busy: a quiet event alone does not block its Stop; its next hook delivers it.
+  orch.report(wSession.instanceId, { status: 'update', summary: 'half way' });
+  assert.deepStrictEqual(hook(orch, orchSession, { hook_event_name: 'Stop' }), {});
+  assert.strictEqual(run().busy, false);
+  assert.strictEqual(orch.describeRun(run()).pendingEvents, 1, 'still pending');
+  assert.match(ctxOf(hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: 'hello' })), /reported update: half way/, 'taken with the user\'s prompt');
+  assert.strictEqual(orch.describeRun(run()).pendingEvents, 0);
+});
+
+test('events: the safety valve pushes quiet events once after its time, and is re-armed from run.json after a restart', async (t) => {
+  const { orch, orchSession, mgr, run, stamp } = await openOrchestrator(t, { isolation: 'none', setup: { quietValveMs: 80 } });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const wSession = mgr.sessions.get(w.tabId);
+  const notices = () => mgr.submits.filter(x => x.tabId === orchSession.tabId && /\[orchestration\]/.test(x.data));
+
+  orch.report(wSession.instanceId, { status: 'started', summary: 'on it' });
+  await wait(40);
+  assert.strictEqual(notices().length, 0);
+  await wait(150);
+  assert.strictEqual(notices().length, 1, 'pushed once');
+  assert.match(notices()[0].data, /1 worker event\(s\) pending/);
+  assert.strictEqual(run().quietValve.fired, true);
+  assert.match(ctxOf(hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit' })), /reported started: on it/);
+  assert.ok(!run().quietValve);
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+
+  // A restart: the timer is gone, run.json keeps the due time; loading the run arms it again.
+  const { orch: orch2 } = setup({ mgr, quietValveMs: 600000 });
+  orch2.report(wSession.instanceId, { status: 'started', summary: 'again' });
+  const file = path.join(stamp.runDir, 'run.json');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(saved.quietValve && !saved.quietValve.fired);
+  saved.quietValve.due = new Date(Date.now() + 50).toISOString();
+  fs.writeFileSync(file, JSON.stringify(saved));
+  const { orch: orch3 } = setup({ mgr, quietValveMs: 600000 });
+  orch3.getRun(stamp.runId);
+  await wait(150);
+  assert.strictEqual(notices().length, 2, 'the restarted server pushed it');
+});
+
+test('events: the context limit never cuts a wake item — quiet ones are capped first, wake items that do not fit wait for the next delivery', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const wSession = mgr.sessions.get(w.tabId);
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit' });   // busy: nothing is pushed
+
+  for (let i = 1; i <= 30; i++) orch.report(wSession.instanceId, { status: 'update', summary: `step ${i}` });
+  const files = Array.from({ length: 40 }, (_, i) => `src/some/long/path/file-${String(i).padStart(2, '0')}.js`);
+  for (let i = 1; i <= 4; i++) orch.report(wSession.instanceId, { status: 'blocked', summary: `${i}:${'x'.repeat(700)}`, filesChanged: files, verified: 'v'.repeat(300), open: 'o'.repeat(300) });
+  const wake = run().events.filter(e => !e.quiet);
+  assert.strictEqual(wake.length, 4);
+  assert.ok(wake.every(e => e.text.length > 2000));
+
+  const first = ctxOf(hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'Read' }));
+  assert.ok(first.length <= 9000);
+  assert.ok(wake.slice(0, 3).every(e => first.includes(e.text)), 'three wake items, each whole');
+  assert.ok(!first.includes(wake[3].text.slice(0, 40)), 'the fourth waits');
+  assert.match(first, /^\[orchestration\] 33 worker event\(s\)/);
+  const quietLines = first.split('\n').filter(l => /reported update: step/.test(l));
+  assert.ok(quietLines.length <= 15 && quietLines.length > 0);
+  assert.ok(quietLines.at(-1).includes('step 30'), 'the newest quiet ones');
+  assert.match(first, new RegExp(`\\+${30 - quietLines.length} more on the run board`));
+
+  const second = ctxOf(hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'Read' }));
+  assert.ok(second.includes(wake[3].text), 'the next delivery brings it, whole');
+  assert.strictEqual(orch.describeRun(run()).pendingEvents, 0);
+});
+
+test('recovery: a landing cut off after its merge commit is recorded as landed, one event', async (t) => {
+  const { orch, g, launch, events, run } = await landingRun(t);
+  const w = launch();
+  commitAll(w.cwd, { 'a.txt': 'a' });
+  const before = g('rev-parse', 'main');
+  // The merge made, the result never saved: the restart's run.json still has the landing in flight.
+  g('merge', '--no-ff', '-q', '-m', `Merge ${w.branch}: did it`, w.branch);
+  const merge = g('rev-parse', 'main');
+  const file = path.join(run().runDir, 'run.json');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  saved.workers[0].lastReport = { status: 'done', summary: 'did it', filesChanged: [], verified: '', open: '', at: new Date().toISOString() };
+  saved.workers[0].landing = { at: new Date().toISOString(), branch: w.branch, base: 'main', report: [`${w.worker} reported done: did it`, 'files: a.txt'], summary: 'did it' };
+  fs.writeFileSync(file, JSON.stringify(saved));
+
+  const fresh = orch.getRun(run().runId);
+  assert.ok(!fresh.workers[0].landing);
+  assert.strictEqual(g('rev-parse', 'main'), merge, 'nothing undone');
+  assert.deepStrictEqual(events('not landed'), []);
+  assert.deepStrictEqual(events('landed'), [`${w.worker} reported done: did it — landed ${merge} (${w.branch} merged into main; its landing was cut off by a restart after the merge) — files: a.txt`]);
+  const rec = run().landings[0];
+  assert.deepStrictEqual([rec.worker, rec.preLandSha, rec.mergeSha, rec.base, rec.summary], [w.worker, before, merge, 'main', 'did it']);
+});
+
+test('inbox: messages queued for a busy member survive a restart, in order, delivered once', async (t) => {
+  const { orch, orchSession, mgr, stamp } = await openOrchestrator(t, { isolation: 'none' });
+  const orchName = orchSession.settings.name;
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const wSession = mgr.sessions.get(w.tabId);
+  wSession.busy = true;
+  assert.strictEqual(orch.sendMessage(orchSession.instanceId, { to: w.worker, message: 'one' }).delivery, 'queued');
+  orch.sendMessage(orchSession.instanceId, { to: w.worker, message: 'two' });
+  const inboxFile = path.join(stamp.runDir, 'inbox.json');
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(inboxFile, 'utf8')), { [w.worker]: [`[message from ${orchName}] one`, `[message from ${orchName}] two`] });
+
+  // A new instance (the restarted server), the restored worker resumes.
+  const { orch: orch2 } = setup({ mgr });
+  const ctx = ctxOf(hook(orch2, wSession, { hook_event_name: 'SessionStart', source: 'resume' }));
+  assert.match(ctx, /Context restored\. You are WORKER/);
+  assert.ok(ctx.endsWith(`[message from ${orchName}] one\n\n[message from ${orchName}] two`), 'both, in order, after the recap');
+  assert.ok(!fs.existsSync(inboxFile), 'removed once delivered');
+  assert.deepStrictEqual(hook(orch2, wSession, { hook_event_name: 'PostToolUse', tool_name: 'Read' }), {}, 'delivered once');
 });
