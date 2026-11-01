@@ -2289,3 +2289,168 @@ test('inbox: messages queued for a busy member survive a restart, in order, deli
   assert.ok(!fs.existsSync(inboxFile), 'removed once delivered');
   assert.deepStrictEqual(hook(orch2, wSession, { hook_event_name: 'PostToolUse', tool_name: 'Read' }), {}, 'delivered once');
 });
+
+// --- The owner's checklist (run.ownerItems) ---
+
+async function ownerSetup(t) {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const w = ctx.orch.launchWorker(ctx.orchSession.instanceId, { title: 'a', task: 'x' });
+  const wSession = ctx.mgr.sessions.get(w.tabId);
+  const rep = (items, status = 'update') => ctx.orch.report(wSession.instanceId, { status, summary: 's', ownerItems: items });
+  const tool = (args) => ctx.orch.ownerItems(ctx.orchSession.instanceId, args);
+  return { ...ctx, w, wSession, rep, tool, items: () => ctx.run().ownerItems };
+}
+
+test('report ownerItems: stored with id, proposer and state; deduped by key, by normalised what; a resolved one reopens only with a new why', async (t) => {
+  const { rep, run, items, tool } = await ownerSetup(t);
+  const r = rep([
+    { what: 'Stop→Start the server', why: 'new routes', key: 'restart' },
+    { what: 'Choose the port', kind: 'decision', options: ['3457', '3458', ''], recommended: '3458' },
+    { why: 'no what' },
+    'junk',
+  ]);
+  assert.deepStrictEqual(r.ownerItems, { added: 2, updated: 0, ignored: 2 });
+  assert.strictEqual(items().length, 2);
+  const [a, b] = items();
+  assert.deepStrictEqual([a.id, a.kind, a.state, a.worker, a.key], ['o1', 'action', 'open', run().workers[0].name, 'restart']);
+  assert.deepStrictEqual([b.kind, b.options, b.recommended], ['decision', ['3457', '3458'], '3458']);
+  assert.match(run().events.at(-1).text, /for the owner: Stop→Start the server; Choose the port/);
+
+  // Same key (different wording) and same normalised what: updated, not duplicated.
+  assert.deepStrictEqual(rep([{ what: 'Restart the server!', why: 'routes and cards', key: 'RESTART' }]).ownerItems, { added: 0, updated: 1, ignored: 0 });
+  assert.deepStrictEqual(rep([{ what: '  choose   the PORT. ', kind: 'decision', options: ['1'] }]).ownerItems, { added: 0, updated: 1, ignored: 0 });
+  assert.strictEqual(items().length, 2);
+  assert.strictEqual(items()[0].why, 'routes and cards');
+  assert.deepStrictEqual(items()[1].options, ['1']);
+
+  // Resolved: the same why stays resolved, a different why opens a new item.
+  tool({ action: 'resolve', id: 'o1' });
+  assert.deepStrictEqual(rep([{ what: 'x', key: 'restart', why: 'routes and cards' }]).ownerItems, { added: 0, updated: 0, ignored: 1 });
+  assert.deepStrictEqual(rep([{ what: 'Stop→Start the server', key: 'restart', why: 'after the second landing' }]).ownerItems, { added: 1, updated: 0, ignored: 0 });
+  assert.deepStrictEqual(items().map(i => [i.id, i.state]), [['o1', 'done'], ['o2', 'open'], ['o3', 'open']]);
+});
+
+test('owner_items: list, add, resolve, drop and reorder; blocking items first by default', async (t) => {
+  const { rep, tool, items, orch, wSession, orchSession } = await ownerSetup(t);
+  await wait(2);
+  rep([{ what: 'first', key: 'a' }, { what: 'second', key: 'b' }]);
+  assert.deepStrictEqual(tool({ action: 'list' }).ownerItems.map(i => i.what), ['first', 'second']);
+  // Reported while blocked: it blocks the worker, so it goes first.
+  orch.report(wSession.instanceId, { status: 'blocked', summary: 's', ownerItems: [{ what: 'third', key: 'c' }] });
+  assert.deepStrictEqual(tool({}).ownerItems.map(i => [i.what, !!i.blocking]), [['third', true], ['first', false], ['second', false]]);
+
+  const added = tool({ action: 'add', items: [{ what: 'fourth', kind: 'decision', options: ['x', 'y'] }, { what: 'first' }] });
+  assert.deepStrictEqual([added.added, added.updated], [1, 1]);
+  assert.strictEqual(items().find(i => i.what === 'fourth').worker, orchSession.settings.name, 'proposed by the orchestrator');
+  assert.throws(() => tool({ action: 'add' }), /needs `items`/);
+
+  assert.deepStrictEqual(tool({ action: 'reorder', order: ['o2', 'o4'] }).ownerItems.map(i => i.id), ['o2', 'o4', 'o3', 'o1'], 'the rest keep their default order');
+  assert.strictEqual(tool({ action: 'drop', id: 'o2' }).ownerItems.find(i => i.id === 'o2').state, 'dropped');
+  assert.throws(() => tool({ action: 'drop', id: 'o2' }), /already dropped/);
+  assert.throws(() => tool({ action: 'resolve', id: 'o4' }), /needs an answer/);
+  assert.strictEqual(tool({ action: 'resolve', id: 'o4', answer: 'x' }).ownerItems.find(i => i.id === 'o4').answer, 'x');
+  assert.throws(() => tool({ action: 'resolve', id: 'nope' }), /no owner item/);
+  assert.throws(() => tool({ action: 'bogus' }), /action must be/);
+  // A worker cannot use the tool.
+  assert.throws(() => orch.ownerItems(wSession.instanceId, {}), /only an orchestrator/);
+});
+
+test('the owner resolving an item: a wake event for the orchestrator and a message to a running proposer', async (t) => {
+  const { rep, run, mgr, orch, w, wSession, stamp } = await ownerSetup(t);
+  rep([{ what: 'Rebuild the client', key: 'rb' }, { what: 'Pick', kind: 'decision', options: ['a', 'b'] }, { what: 'Old one' }]);
+  const before = mgr.submits.filter(s => s.tabId === w.tabId).length;
+
+  orch.ownerResolve({ runId: stamp.runId, id: 'o1', action: 'done' });
+  let ev = run().events.at(-1);
+  assert.strictEqual(ev.kind, 'owner');
+  assert.strictEqual(ev.text, 'owner did: Rebuild the client');
+  assert.ok(!ev.quiet, 'a wake event');
+  assert.ok(run().delivered < ev.seq, 'waits for delivery');
+  const sent = mgr.submits.filter(s => s.tabId === w.tabId);
+  assert.strictEqual(sent.length, before + 1);
+  assert.match(sent.at(-1).data, /^\[message from the owner\] did: Rebuild the client$/);
+
+  assert.throws(() => orch.ownerResolve({ runId: stamp.runId, id: 'o2', action: 'done' }), /needs an answer/);
+  orch.ownerResolve({ runId: stamp.runId, id: 'o2', action: 'done', answer: 'b' });
+  assert.strictEqual(run().events.at(-1).text, 'owner decided: Pick — b');
+  assert.match(mgr.submits.filter(s => s.tabId === w.tabId).at(-1).data, /decided: Pick — b/);
+  orch.ownerResolve({ runId: stamp.runId, id: 'o3', action: 'drop' });
+  assert.strictEqual(run().events.at(-1).text, 'owner dropped: Old one');
+  assert.deepStrictEqual(run().ownerItems.map(i => [i.state, i.resolvedBy, !!i.resolvedAt]), [['done', 'owner', true], ['done', 'owner', true], ['dropped', 'owner', true]]);
+
+  // A proposer that is not running is not messaged.
+  rep([{ what: 'Later', key: 'l' }]);
+  wSession.running = false;
+  const n = mgr.submits.length;
+  orch.ownerResolve({ runId: stamp.runId, id: 'o4', action: 'done' });
+  assert.strictEqual(mgr.submits.length, n);
+  assert.strictEqual(run().events.at(-1).text, 'owner did: Later');
+  assert.throws(() => orch.ownerResolve({ runId: 'nope', id: 'o1', action: 'done' }), /run not found/);
+  assert.throws(() => orch.ownerResolve({ runId: stamp.runId, id: 'o1', action: 'zap' }), /done or drop/);
+});
+
+test('owner items survive a reload of run.json and are in describeRun; ownerList spans runs', async (t) => {
+  const { rep, run, mgr, orch, stamp, tool } = await ownerSetup(t);
+  rep([{ what: 'One', key: 'one' }, { what: 'Two', key: 'two' }]);
+  tool({ action: 'resolve', id: 'o2', answer: 'ok' });
+  tool({ action: 'reorder', order: ['o1'] });
+  const file = JSON.parse(fs.readFileSync(path.join(run().runDir, 'run.json'), 'utf8'));
+  assert.deepStrictEqual(file.ownerItems.map(i => [i.id, i.state]), [['o1', 'open'], ['o2', 'done']]);
+  assert.strictEqual(file.ownerSeq, 2);
+
+  // A second instance on the same sessions, as after a restart.
+  const { orch: again } = setup({ mgr });
+  const d = again.describeRun(again.getRun(stamp.runId));
+  assert.deepStrictEqual(d.ownerItems.map(i => [i.id, i.state, i.answer]), [['o1', 'open', undefined], ['o2', 'done', 'ok']]);
+  rep([{ what: 'Three' }]);
+  assert.strictEqual(again.getRun(stamp.runId).ownerItems.at(-1).id, 'o3', 'ids go on counting');
+
+  const list = orch.ownerList();
+  assert.deepStrictEqual(list.map(r => [r.runId, r.items.map(i => i.what)]), [[stamp.runId, ['One', 'Three']]]);
+  assert.deepStrictEqual(orch.ownerList(stamp.runId)[0].items.map(i => i.state), ['open', 'open', 'done']);
+});
+
+test('the owner routes sit behind the dashboard\'s owner gate like their neighbours', async (t) => {
+  const express = require('express');
+  const http = require('http');
+  const { createAuth } = require('../src/auth');
+  const { orch, stamp } = await (async () => { const c = await ownerSetup(t); c.rep([{ what: 'Gate' }]); return c; })();
+  const TOKEN = 'secret-token';
+  const auth = createAuth({ authToken: TOKEN, login: { getSession: () => null } });
+  const app = express();
+  app.use(express.json());
+  app.use((req, res, next) => (auth.isOwnerRequest(req) ? next() : res.status(401).json({ error: 'Unauthorized' })));
+  app.use('/api/orchestration', orch.router());
+  const server = http.createServer(app);
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise(r => { server.closeAllConnections?.(); server.close(r); }));
+  const call = (method, p, { auth: a, body } = {}) => new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request({ host: '127.0.0.1', port: server.address().port, method, path: p, headers: { ...(a ? { authorization: `Bearer ${TOKEN}` } : {}), ...(payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {}) } }, (res) => {
+      let data = '';
+      res.on('data', d => { data += d; });
+      res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(data || '{}') }));
+    });
+    req.on('error', reject);
+    req.end(payload);
+  });
+  const resolveBody = { runId: stamp.runId, id: 'o1', action: 'done' };
+  for (const [m, p, body] of [['GET', '/api/orchestration/owner-items'], ['GET', '/api/orchestration/run?runId=x'], ['POST', '/api/orchestration/owner-resolve', resolveBody], ['POST', '/api/orchestration/owner-items', {}]]) {
+    assert.strictEqual((await call(m, p, { body })).status, 401, `${m} ${p}`);
+  }
+  const list = await call('GET', '/api/orchestration/owner-items', { auth: true });
+  assert.strictEqual(list.status, 200);
+  assert.strictEqual(list.json.runs[0].items[0].what, 'Gate');
+  assert.strictEqual((await call('POST', '/api/orchestration/owner-resolve', { auth: true, body: resolveBody })).json.ownerItems[0].state, 'done');
+  assert.match((await call('POST', '/api/orchestration/owner-resolve', { auth: true, body: resolveBody })).json.error, /already done/);
+});
+
+test('the cards name the owner checklist; the MCP server lists owner_items and report\'s ownerItems', () => {
+  const { orchestratorCard, workerCard } = require('../src/orchestration');
+  const run = { runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' };
+  assert.match(orchestratorCard(run), /`owner_items` \(list, add, resolve, drop, reorder\)/);
+  assert.match(workerCard(run, { name: 'orch-abc123-w1', cwd: '/tmp' }), /report's `ownerItems`.*never only in prose/);
+  const src = fs.readFileSync(path.join(CORE, 'lib', 'orchestrator-mcp.js'), 'utf8');
+  assert.match(src, /name: "owner_items"/);
+  assert.match(src, /ownerItems: \{\s*type: "array"/);
+});

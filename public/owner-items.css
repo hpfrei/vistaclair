@@ -1,0 +1,31 @@
+/* The owner's "your turn" checklist and the locks panel (owner-items.js). */
+.oi-panel { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card, var(--bg)); padding: 10px 12px; margin-bottom: 14px; font-size: 12px; }
+.oi-panel.hidden { display: none; }
+.oi-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.oi-title { font-size: 13px; font-weight: 600; color: var(--text-bright, var(--text)); }
+.oi-count { font-size: 11px; color: var(--text-dim); }
+.oi-count-on { color: var(--yellow); font-weight: 600; }
+.oi-empty { margin: 0 0 6px; color: var(--text-dim); }
+.oi-list { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.oi-item { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; padding: 6px 8px; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; }
+.oi-item.oi-blocking { border-left-color: var(--yellow); }
+.oi-main { min-width: 0; flex: 1 1 auto; }
+.oi-what { font-weight: 600; overflow-wrap: anywhere; }
+.oi-why { color: var(--text-dim); margin-top: 2px; overflow-wrap: anywhere; }
+.oi-meta { color: var(--text-dim); font-size: 10px; margin-top: 3px; }
+.oi-flag { font-size: 9px; font-weight: 700; text-transform: uppercase; padding: 0 4px; border-radius: 3px; background: var(--yellow); color: #000; vertical-align: 1px; }
+.oi-ctl { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; align-items: center; flex: 0 1 auto; max-width: 55%; }
+.oi-answer { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; align-items: center; }
+.oi-input { font: inherit; font-size: 11px; padding: 2px 6px; min-width: 130px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.oi-drop { opacity: .7; }
+.oi-locks { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
+.oi-panel > .oi-locks:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.oi-lock { margin-bottom: 4px; }
+.oi-lk-name { font-family: var(--vc-mono, ui-monospace, monospace); font-weight: 600; margin-right: 8px; }
+.oi-lk-count { color: var(--text-dim); font-size: 11px; }
+.oi-lock ul { list-style: none; margin: 2px 0 0; padding: 0 0 0 12px; color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
+.oi-lk-waiter { font-style: italic; }
+/* The SDK run panel's popover under the toolbar. */
+.sdk-turn { position: absolute; z-index: 30; right: 8px; top: 34px; width: min(560px, calc(100% - 16px)); max-height: 70%; overflow: auto; box-shadow: 0 6px 24px rgba(0,0,0,.35); background: var(--bg); }
+.sdk-tb-turn.on { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 55%, var(--border)); }
+@media (max-width: 700px) { .oi-item { flex-direction: column; } .oi-ctl { max-width: none; justify-content: flex-start; } }
