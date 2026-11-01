@@ -39,8 +39,8 @@
 //                        Quiet events (started/update reports, overlaps) never
 //                        type the notice: they ride along with the next delivery,
 //                        or push once after QUIET_VALVE_MS (run.quietValve).
-//   tools                lib/orchestrator-mcp.js: launch_cli, resume_worker,
-//                        close_worker, stop_worker, list_workers, end_run,
+//   tools                lib/orchestrator-mcp.js: launch_cli, cancel_launch,
+//                        resume_worker, close_worker, stop_worker, list_workers, end_run,
 //                        undo_landing (orchestrator); report (workers);
 //                        SendMessage, ListAgents (both, SDK runs: Claude Code's
 //                        own cross-session messaging is a CLI feature). A message
@@ -55,6 +55,11 @@
 //                        are named in its result; checkOverlaps (a timer) tells
 //                        the workers involved of a file changed in two live
 //                        worktrees, and the orchestrator with a quiet event.
+//   launch queue         launch_cli on a full run, or with `after` workers not
+//                        finished, waits in run.queue; pumpQueue starts the
+//                        ready ones oldest first (closing a finished, landed,
+//                        clean idle worker when no slot is free), never while
+//                        the run pauses; cancel_launch drops one, end_run all.
 //   session folders      every member keeps TODO.md / NOTES.md in
 //                        <sessionsRoot>/<name>/ (session-folders.js); the
 //                        orchestrator reads its workers' folders (list_workers
@@ -232,7 +237,7 @@ function orchestratorCard(run) {
     '',
     'Rules',
     `1. Never write or edit code or project files yourself. The only files you write are your TODO.md and NOTES.md in ${dir} (edits elsewhere are blocked). Reading, searching and read-only commands to plan are fine.`,
-    `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${MAX_WORKERS} workers run at once. A follow-up for a running worker goes to it with SendMessage — never relaunch it. A trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none.`,
+    `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${MAX_WORKERS} workers run at once: a launch beyond that is queued and starts when a slot frees (\`after: [worker]\` holds it until those workers have landed), and a finished, landed, clean idle worker may be closed automatically to make room for it. A follow-up for a running worker goes to it with SendMessage — never relaunch it. A trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none.`,
     '3. A brief must be self-contained: the goal, the files or areas involved, acceptance criteria (how the worker proves it is done), constraints, and what is already ruled out. The worker knows only what you write.',
     `4. For a non-trivial request, write the plan as TODO rows and confirm it with the user (AskUserQuestion) before fanning out to several workers. Keep ${todo} current: update it after every launch, report and event. One row per task in its table (id | description | depends on | status): name the worker in the description; status is queued|running|blocked|done|failed followed by the last report in a few words. It is your memory — after a compaction or resume, read it and NOTES.md first.`,
     '5. Workers report with the `report` tool and SendMessage. Worker events (report, exited, idle without reporting) arrive in your context automatically, marked "[orchestration]". "started" and progress reports and overlaps do not wake you: they come with the next delivery. Act on each one and update the TODO.',
@@ -283,6 +288,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   const pendingAsks = new Map();   // dedupe key -> Promise
   const relayTimers = new Map();   // worker name -> pause fallback timeout
   const valveTimers = new Map();   // runId -> quiet-event safety valve timeout (run.quietValve is the state)
+  // This server process: a worker started in it carries it (w.boot), so one
+  // from an earlier process that has not come back still holds its slot.
+  const BOOT = crypto.randomBytes(4).toString('hex');
   let askSeq = 0;
 
   // --- Ask (the dashboard form, shared with /api/ask) ---
@@ -727,34 +735,101 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
   }
 
-  function launchWorker(instanceId, { title, task, cwd, isolation, model, tools, area } = {}) {
+  // launch_cli: a worker starts at once when a slot is free, its `after`
+  // workers are finished and no ready queued launch is ahead of it; else it is
+  // queued in run.json (pumpQueue starts it), and the result says so.
+  function launchWorker(instanceId, args = {}) {
     const { run } = callerRun(instanceId, 'orchestrator');
     if (run.pausing) throw new Error('this run is being paused: launch nothing new');
-    if (!task || !String(task).trim()) throw new Error('task is required');
-    if (model && !WORKER_MODELS.includes(model)) throw new Error(`model must be one of ${WORKER_MODELS.join(', ')}`);
+    if (!args.task || !String(args.task).trim()) throw new Error('task is required');
+    if (args.model && !WORKER_MODELS.includes(args.model)) throw new Error(`model must be one of ${WORKER_MODELS.join(', ')}`);
     const paused = run.workers.filter(w => w.paused);
     if (paused.length) {
       throw new Error(`paused workers must be resumed (resume_worker) before new ones are launched: ${paused.map(w => w.name).join(', ')}`);
     }
-    assertCapacity(run);
+    const spec = launchSpec(run, args);
+    const queue = run.queue || [];
+    if (freeSlots(run) > 0 && depsMet(run, spec) && !queue.some(e => depsMet(run, e))) return startWorker(run, spec);
+    checkQueued(run, spec);
+    const entry = { id: `q${(run.queueSeq = (run.queueSeq || 0) + 1)}`, ...spec, at: new Date().toISOString() };
+    run.queue = [...queue, entry];
+    run.closed = false;    // an ended run is reopened by new work
+    saveRun(run);
+    const mine = pumpQueue(run.runDir, { silent: entry.id }).find(s => s.entry.id === entry.id);
+    if (mine?.error) throw mine.error;
+    if (mine) {
+      return {
+        ...mine.result,
+        ...(mine.autoClosed ? { autoClosed: mine.autoClosed, closeNote: `the run was full: ${mine.autoClosed} (idle, done, landed, clean) was closed to free its slot; resume_worker brings it back` } : {}),
+      };
+    }
+    const fresh = loadRun(run.runDir);
+    const q = queueList(fresh).find(e => e.id === entry.id);
+    if (!q) return { queued: false, id: entry.id, note: 'it was not started: see the run events' };
+    const available = runningWorkers(fresh).filter(w => workerAvailable(fresh, w));
+    return {
+      queued: true, id: q.id, position: q.position, waitingFor: q.waitingFor,
+      note: `queued: it starts when ${q.waitingFor.join(' and ')}. cancel_launch({ id: "${q.id}" }) drops it.${available.length && q.waitingFor.includes('a free slot') ? ` Finished and idle, available to close: ${available.map(w => `${w.name} (last report: ${w.lastReport.status})`).join(', ')}.` : ''}`,
+    };
+  }
+
+  // A launch's checked parameters, as a queue entry keeps them (cwd resolved,
+  // `after` as worker ids). Throws, having changed nothing.
+  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after } = {}) {
     const target = realpathOr(cwd ? path.resolve(run.root, cwd) : run.root);
     if (!isInside(target, run.root)) throw new Error(`cwd must be inside the run root ${run.root}`);
+    const spec = {
+      title: title || '', task: String(task), cwd: target, isolation: isolation || run.isolation,
+      ...(model ? { model } : {}), ...(tools !== undefined ? { tools } : {}),
+    };
+    const areas = areaOf(area);
+    if (areas) spec.area = areas;
+    const deps = afterOf(run, after);
+    if (deps.length) spec.after = deps;
+    if (spec.isolation === 'worktree' && !gitToplevel(target)) throw new Error(`isolation "worktree" needs a git repository; ${target} is not in one`);
+    grantsOf(tools);
+    return spec;
+  }
 
+  // A queued launch's tool packs are asked before it is queued, as the
+  // worker it would be now (startWorker asks again when it starts).
+  function checkQueued(run, spec) {
+    const id = `w${run.workerSeq + 1}`;
+    const grants = grantsOf(spec.tools);
+    const probe = { id, name: `${run.orchestrator}-${id}-${slugify(spec.title)}`, title: spec.title || id, task: spec.task, cwd: spec.cwd, branch: null, worktree: null, ...(grants ? { grants } : {}), ...(spec.model ? { model: spec.model } : {}) };
+    checkPacks(run, probe, { toolsGiven: spec.tools !== undefined });
+  }
+
+  // launch_cli `after`: addresses or ids of workers of this run, as ids.
+  function afterOf(run, after) {
+    if (after === undefined || after === null) return [];
+    const list = Array.isArray(after) ? after : [after];
+    if (list.some(a => typeof a !== 'string' || !a.trim())) throw new Error('after must be a list of worker addresses or ids');
+    return [...new Set(list.map((a) => {
+      const want = a.trim().replace(/\s+\[[^\]]*\]$/, '');
+      const w = run.workers.find(x => x.name === want || x.id === want);
+      if (w) return w.id;
+      const other = /^orch-([0-9a-f]{6})-/.exec(want);
+      if (other && other[1] !== run.runId) throw new Error(`after: ${want} is a worker of run ${other[1]}, not of this run (${run.runId})`);
+      throw new Error(`after: no worker ${want} in this run`);
+    }))];
+  }
+
+  // Start a worker from a checked launch (launchSpec). Persists it before the spawn.
+  function startWorker(run, { title, task, cwd: target, isolation: mode, model, tools, area }) {
     const id = `w${++run.workerSeq}`;
     const name = `${run.orchestrator}-${id}-${slugify(title)}`;
     const worker = {
       id, name, title: title || id, task: String(task), cwd: target, branch: null, worktree: null,
       sessionDir: path.join(run.sessionsRoot || path.join(dataHome, 'data', 'sessions'), name),
-      launchedAt: new Date().toISOString(), exitedAt: null, lastReport: null,
+      launchedAt: new Date().toISOString(), exitedAt: null, lastReport: null, boot: BOOT,
       ...(model ? { model } : {}),
     };
     const grants = grantsOf(tools);
     if (grants) worker.grants = grants;
-    const areas = areaOf(area);
-    if (areas) worker.area = areas;
+    if (area) worker.area = area;
     checkPacks(run, worker, { toolsGiven: tools !== undefined });
 
-    const mode = isolation || run.isolation;
     if (mode === 'worktree') {
       const top = gitToplevel(target);
       if (!top) throw new Error(`isolation "worktree" needs a git repository; ${target} is not in one`);
@@ -781,6 +856,181 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         note: `its area overlaps running workers' areas (${overlaps.map(o => `${o.worker}: ${o.paths.join(', ')}`).join('; ')}). It was launched: serialize them, or expect a conflict when the later one lands.`,
       } : {}),
     };
+  }
+
+  // --- Launch queue (run.queue) ---
+  //
+  // A launch that cannot start (the run full, its `after` workers not finished)
+  // waits in run.queue. pumpQueue starts the ready ones, oldest first, when a
+  // slot frees or a dependency lands — never while the run is pausing or
+  // paused. A slot is held by a running worker, and by one that was running
+  // when an earlier server process stopped and is not back yet (run members are
+  // never reopened at boot: they come back by resume). An entry leaves run.json
+  // before its worker is spawned, so it never starts twice.
+
+  // A dependency is finished: a worktree worker's last report is done and its
+  // landing came to landed or nothing; any other worker's last report is done.
+  function depFinished(w) {
+    if (!w || w.deleted || w.lastReport?.status !== 'done') return false;
+    if (!w.branch) return true;
+    const r = w.landingResult;
+    return !!r && r.report === w.lastReport.at && (r.outcome === 'landed' || r.outcome === 'nothing');
+  }
+
+  function depsMet(run, entry) {
+    return (entry.after || []).every(id => depFinished(run.workers.find(w => w.id === id)));
+  }
+
+  // Ran in an earlier server process and was live when it stopped (no exit
+  // recorded, or a shutdown exit), not back yet and not finished.
+  function awaitingRestore(run, w) {
+    if (w.boot === BOOT || w.closed || w.paused || w.deleted || w.abandoned) return false;
+    if (w.exitedAt && !w.shutdownAt) return false;
+    return !workerSession(run, w.id)?.session.running && !depFinished(w);
+  }
+
+  function freeSlots(run) {
+    return MAX_WORKERS - run.workers.filter(w => workerSession(run, w.id)?.session.running || awaitingRestore(run, w)).length;
+  }
+
+  // What a dependency that is not finished came to, when it will not finish
+  // by itself: { key (one warning per dependency and report), what } or null.
+  function depProblem(run, w) {
+    if (depFinished(w)) return null;
+    const key = `${w.id}:${w.lastReport?.at || 'none'}`;
+    if (w.deleted) return { key, what: 'was deleted' };
+    if (w.lastReport?.status === 'failed') return { key, what: `reported failed (${clip(w.lastReport.summary, 200)})` };
+    if (w.landing || landingJobs.has(jobKey(run, w))) return null;
+    const r = w.landingResult;
+    if (w.lastReport?.status === 'done' && r?.report === w.lastReport.at && r.outcome === 'not landed') return { key, what: `came back not landed (${clip(r.reason, 200)})` };
+    if (w.closed) return { key, what: `was closed without ${w.branch ? 'landing' : 'reporting done'}` };
+    if (w.exitedAt && !w.shutdownAt && !workerSession(run, w.id)?.session.running) return { key, what: `exited without ${w.branch ? 'landing' : 'reporting done'}` };
+    return null;
+  }
+
+  // One wake event per new dependency problem; the entry keeps waiting.
+  function warnDependencies(run) {
+    for (const e of run.queue || []) {
+      for (const id of e.after || []) {
+        const w = run.workers.find(x => x.id === id);
+        const p = w && depProblem(run, w);
+        if (!p || (e.warned || []).includes(p.key)) continue;
+        e.warned = [...(e.warned || []), p.key].slice(-50);
+        addEvent(run, { worker: w.name, kind: 'queue', text: `queued launch ${e.id} (${e.title || 'untitled'}) waits on ${w.name} which ${p.what}: cancel_launch it or let it wait` });
+      }
+    }
+  }
+
+  // A running worker the platform may close for a ready queued launch: a
+  // worktree worker, idle, its last report done and landed (or nothing to
+  // land), no landing in flight, no follow-up since, and a clean worktree.
+  function autoClosable(run, w) {
+    if (!w.branch || !workerAvailable(run, w) || w.turnStopped || !depFinished(w)) return false;
+    if (w.landing || landingJobs.has(jobKey(run, w))) return false;
+    if ((w.followUps || []).some(f => f.at > w.lastReport.at)) return false;
+    return worktreeChanges(w).length === 0;
+  }
+
+  // The landings recorded since a queued launch was queued, as one line of
+  // its brief ('' when none).
+  function landedSince(run, entry) {
+    const list = (run.landings || []).filter(l => l.at >= entry.at && !l.undone);
+    if (!list.length) return '';
+    return `\n\n[vistaclair queue] Landed since this launch was queued: ${clip(list.map(l => `${l.worker} (${String(l.mergeSha).slice(0, 10)}: ${clip(l.summary, 80)})`).join('; '), 1200)}`;
+  }
+
+  // The queue as list_workers and the run board show it.
+  function queueList(run) {
+    const restoring = run.workers.filter(w => awaitingRestore(run, w)).map(w => w.name);
+    const free = freeSlots(run);
+    return (run.queue || []).map((e, i) => {
+      const unmet = (e.after || []).map(id => run.workers.find(w => w.id === id)).filter(w => !depFinished(w));
+      const waitingFor = unmet.map(w => `${w ? w.name : 'a deleted worker'} to ${w?.branch ? 'land' : 'report done'}`);
+      if (!unmet.length) {
+        if (run.pausing || run.paused) waitingFor.push('the run to be resumed');
+        else if (free <= 0) waitingFor.push(restoring.length ? `a free slot (not back since the restart: ${restoring.join(', ')})` : 'a free slot');
+      }
+      return {
+        id: e.id, position: i + 1, title: e.title, waitingFor, queuedAt: e.at,
+        after: (e.after || []).map(id => run.workers.find(w => w.id === id)?.name || id),
+        brief: clip(e.task, 300), cwd: e.cwd, ...(e.model ? { model: e.model } : {}), ...(e.area ? { area: e.area } : {}),
+      };
+    });
+  }
+
+  // Start the ready queued launches, oldest first. `silent`: the entry whose
+  // start the caller reports itself (launch_cli); every other start is a quiet
+  // event. Returns [{ entry, result, autoClosed }].
+  const pumping = new Set();
+  const pumpAgain = new Set();
+  function pumpQueue(runDir, { silent = null } = {}) {
+    if (!runDir) return [];
+    if (pumping.has(runDir)) { pumpAgain.add(runDir); return []; }
+    pumping.add(runDir);
+    const started = [];
+    try {
+      do {
+        pumpAgain.delete(runDir);
+        started.push(...pumpOnce(runDir, silent));
+      } while (pumpAgain.has(runDir));
+    } catch (e) {
+      console.error('[orchestration] launch queue error:', e.message);
+    } finally {
+      pumping.delete(runDir);
+    }
+    return started;
+  }
+
+  function pumpOnce(runDir, silent) {
+    if (mgr._shuttingDown) return [];
+    const out = [];
+    for (;;) {
+      const run = loadRun(runDir);
+      if (!run?.queue?.length) break;
+      warnDependencies(run);
+      if (run.pausing || run.paused) break;
+      const entry = run.queue.find(e => depsMet(run, e));
+      if (!entry) break;
+      let autoClosed = null;
+      if (freeSlots(run) <= 0) {
+        const c = runningWorkers(run).filter(w => autoClosable(run, w))
+          .sort((a, b) => String(a.lastReport.at).localeCompare(String(b.lastReport.at)))[0];
+        if (!c) break;
+        closeLive(run, c, workerSession(run, c.id), { auto: entry.id });
+        autoClosed = c.name;
+        if (freeSlots(run) <= 0) { saveRun(run); break; }
+      }
+      // Out of run.json before the spawn: a crash now loses it, never doubles it.
+      run.queue = run.queue.filter(e => e.id !== entry.id);
+      saveRun(run);
+      let result;
+      try {
+        result = startWorker(run, { ...entry, task: `${entry.task}${landedSince(run, entry)}` });
+      } catch (e) {
+        // launch_cli's own entry: its caller gets the error.
+        if (entry.id === silent) { out.push({ entry, error: e, autoClosed }); continue; }
+        addEvent(loadRun(runDir), { worker: null, kind: 'queue', text: `queued launch ${entry.id} (${entry.title || 'untitled'}) could not start and was dropped: ${String(e.message).split('\n')[0]}. Launch it again with launch_cli once that is fixed` });
+        continue;
+      }
+      out.push({ entry, result, autoClosed });
+      if (entry.id !== silent) {
+        addEvent(loadRun(runDir), {
+          worker: result.worker, kind: 'queue', quiet: true,
+          text: `queued launch ${entry.id} (${entry.title || 'untitled'}) started as ${result.worker}${autoClosed ? `; ${autoClosed} (idle, done, landed, clean) was closed to free its slot` : ''}`,
+        });
+      }
+    }
+    return out;
+  }
+
+  // cancel_launch (orchestrator tool): drop a queued launch.
+  function cancelLaunch(instanceId, { id } = {}) {
+    const { run } = callerRun(instanceId, 'orchestrator');
+    const e = (run.queue || []).find(x => x.id === String(id || '').trim());
+    if (!e) throw new Error(`no queued launch ${id || '(no id given)'} in this run${run.queue?.length ? `; queued: ${run.queue.map(x => x.id).join(', ')}` : ''}`);
+    run.queue = run.queue.filter(x => x.id !== e.id);
+    saveRun(run);
+    return { cancelled: e.id, title: e.title, queued: run.queue.length };
   }
 
   // The repo a worker works in (its worktree's main checkout), for comparing
@@ -962,6 +1212,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       refreshSuggested: (run.compactions || 0) >= REFRESH_SUGGESTED_AFTER,
       pendingEvents: run.events.filter(e => e.seq > run.delivered).length,
       ownerItems: ownerItemsView(run),
+      // Launches waiting for a slot or their `after` workers (launch_cli).
+      queue: queueList(run),
       workers: run.workers.map(w => {
         const live = workerSession(run, w.id);
         return {
@@ -1044,8 +1296,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       else kept.push({ worker: w.name, reason: r.kept, ...(r.files?.length ? { files: r.files } : {}) });
     }
     if (kept.length === 0) run.closed = true;
+    // Queued launches go: an ended run starts nothing by itself.
+    const dropped = (run.queue || []).map(e => ({ id: e.id, title: e.title }));
+    run.queue = [];
     saveRun(run);
-    return { removed, kept, closed: run.closed };
+    return {
+      removed, kept, closed: run.closed,
+      ...(dropped.length ? { queueDropped: dropped, queueNote: `${dropped.length} queued launch(es) dropped (${dropped.map(e => e.id).join(', ')}): launch them again with launch_cli if they are still wanted` } : {}),
+    };
   }
 
   // --- Landing (src/worktree-landing.js) ---
@@ -1153,6 +1411,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     addEvent(run, { worker: w.name, kind, text: [head, outcome, ...rest].join(' — ') });
   }
 
+  // What the landing of a done report (by its `at`) came to: landed | nothing
+  // | not landed. A queued launch's `after` reads it (depFinished).
+  function noteLanding(w, outcome, reportAt, reason = '') {
+    w.landingResult = { outcome, report: reportAt || null, at: new Date().toISOString(), ...(reason ? { reason: clip(reason, 300) } : {}) };
+  }
+
   // Record a landing in run.landings.
   function recordLanding(run, w, r, summary) {
     run.landings = [...(run.landings || []), {
@@ -1178,7 +1442,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // Record what a landing came to: run.landings and the report's one event; a
   // stop goes back to the worker when it can act on it.
-  function settleLanding(runDir, workerId, r, { summary, parts }, key, job) {
+  function settleLanding(runDir, workerId, r, { summary, parts, reportAt }, key, job) {
     const run = loadRun(runDir);
     // Loaded while the job is still listed: loadRun must not take it for one
     // a restart cut off.
@@ -1188,10 +1452,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     delete w.landing;
     if (r.outcome === 'nothing') {
       // Nothing new on the branch: the report on its own.
+      noteLanding(w, 'nothing', reportAt);
       addEvent(run, { worker: w.name, kind: 'report', text: (parts || reportParts(w)).join(' — ') });
       return;
     }
     if (r.outcome === 'landed') {
+      noteLanding(w, 'landed', reportAt);
       recordLanding(run, w, r, summary);
       landingEvent(run, w, parts, `landed ${r.mergeSha} (${w.branch} merged into ${w.base})${landedOverlaps(run, w, r)}`, 'landed');
       // Already gone (closed, exited): its worktree goes now.
@@ -1201,6 +1467,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const n = notLanded(w, r);
     let told = '';
     if (n.worker) told = tellWorker(run, w, n.worker) ? ` Sent back to ${w.name}.` : ` ${w.name} is not running: ${n.gone || 'resume_worker it with this'}.`;
+    noteLanding(w, 'not landed', reportAt, n.event);
     landingEvent(run, w, parts, `not landed: ${n.event}.${told}`, 'not landed');
   }
 
@@ -1211,7 +1478,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // Returns { note (the report's answer, or null), evented }.
   function startLanding(run, w, parts) {
     if (!w.worktree || !w.branch) return { note: null, evented: false };
+    const reportAt = w.lastReport?.at;
     if (!w.base) {
+      noteLanding(w, 'not landed', reportAt, 'no base branch was recorded at launch');
       landingEvent(run, w, parts, `not landed: no base branch was recorded at launch (a detached HEAD, or a worker from before landing); merge ${w.branch} by hand`, 'not landed');
       return { note: 'not landed: no base branch was recorded at launch; the orchestrator is told', evented: true };
     }
@@ -1219,9 +1488,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const key = jobKey(run, w);
     // One of its landings still in flight: this one queues behind it.
     const pre = landingJobs.has(key) ? null : landing.precheck({ repo, worktree: wt, branch: w.branch, base: w.base, links });
-    if (pre?.outcome === 'nothing') return { note: null, evented: false };
+    if (pre?.outcome === 'nothing') { noteLanding(w, 'nothing', reportAt); return { note: null, evented: false }; }
     if (pre) {
       const n = notLanded(w, pre);
+      noteLanding(w, 'not landed', reportAt, n.event);
       landingEvent(run, w, parts, `not landed: ${n.event}.${n.worker ? ` ${w.name} is told in its report's answer.` : ''}`, 'not landed');
       return { note: n.worker || `not landed: ${n.event}`, evented: true };
     }
@@ -1232,12 +1502,16 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const fw = fresh?.workers.find(x => x.id === w.id);
       if (!fw?.worktree) {
         // Its worktree went meanwhile: nothing to land, the report on its own.
-        if (fw) addEvent(fresh, { worker: fw.name, kind: 'report', text: parts.join(' — ') });
+        if (fw) {
+          noteLanding(fw, 'nothing', reportAt);
+          addEvent(fresh, { worker: fw.name, kind: 'report', text: parts.join(' — ') });
+          pumpQueue(run.runDir);
+        }
         return;
       }
       // The report's parts ride along: a restart that cuts the landing off
       // still sends the one event (recoverLandings).
-      fw.landing = { at: new Date().toISOString(), branch: fw.branch, base: fw.base, report: parts, summary };
+      fw.landing = { at: new Date().toISOString(), branch: fw.branch, base: fw.base, report: parts, summary, reportAt };
       saveRun(fresh);
       let r;
       try {
@@ -1251,7 +1525,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       } catch (e) {
         r = { outcome: 'error', message: String(e.message || e).split('\n')[0] };
       }
-      settleLanding(run.runDir, w.id, r, { summary, parts }, key, job);
+      settleLanding(run.runDir, w.id, r, { summary, parts, reportAt }, key, job);
+      // A queued launch may wait on this landing.
+      pumpQueue(run.runDir);
       return r;
     }).catch((e) => {
       if (landingJobs.get(key) === job) landingJobs.delete(key);
@@ -1297,7 +1573,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function recoverLandings(run) {
     for (const w of run.workers) {
       if (!w.landing || landingJobs.has(jobKey(run, w))) continue;
-      const { report: parts, summary = w.lastReport?.summary || '' } = w.landing;
+      const { report: parts, summary = w.lastReport?.summary || '', reportAt = w.lastReport?.at } = w.landing;
       let aborted = [];
       if (w.worktree) {
         try { aborted = landing.abortInterrupted({ repo: w.worktree.repo, worktree: w.worktree.path, branch: w.branch, base: w.base }); } catch {}
@@ -1306,14 +1582,17 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const made = mergeMade(w);
       if (made && (run.landings || []).some(l => l.mergeSha === made.mergeSha)) {
         // An earlier landing's merge: this one had nothing new to land.
+        noteLanding(w, 'nothing', reportAt);
         addEvent(run, { worker: w.name, kind: 'report', text: (parts || reportParts(w)).join(' — ') });
         continue;
       }
       if (made) {
+        noteLanding(w, 'landed', reportAt);
         recordLanding(run, w, made, summary);
         landingEvent(run, w, parts, `landed ${made.mergeSha} (${w.branch} merged into ${w.base}; its landing was cut off by a restart after the merge)`, 'landed');
         continue;
       }
+      noteLanding(w, 'not landed', reportAt, 'the landing was cut off by a restart');
       landingEvent(run, w, parts, `not landed: the landing was cut off by a restart${aborted.length ? ` (${aborted.join(' and ')} aborted)` : ''}; ${w.base || 'the base'} is as before. Have ${w.name} report done again`, 'not landed');
     }
   }
@@ -1536,6 +1815,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           saveRun(run);
         }
       }
+      pumpQueue(run.runDir);   // a freed slot; nothing starts while the run pauses
       return;
     }
     if (p.meta?.mode === 'refresh') {
@@ -1826,13 +2106,16 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const lost = !fresh && !control?.canContinue(entry);
     if (fresh || lost) {
       const reason = lost ? 'paused, and its conversation could not be restored' : 'paused';
-      return { runId, fresh: true, fellBack: lost, ...freshOrchestrator(run, { settings: entry?.settings, title: entry?.title, replaces: entry?.id, reason }) };
+      const out = { runId, fresh: true, fellBack: lost, ...freshOrchestrator(run, { settings: entry?.settings, title: entry?.title, replaces: entry?.id, reason }) };
+      pumpQueue(run.runDir);
+      return out;
     }
     run.pausing = null;
     if (!run.workers.some(w => w.paused)) run.paused = null;
     saveRun(run);
     const resumed = control.resumeSaved(entry.id, { message: warmupText(run), fallback: false });
     seedResumedCost(resumed.tabId, run.orchestratorCost);
+    pumpQueue(run.runDir);
     return { runId, fresh: false, ...resumed };
   }
 
@@ -1908,10 +2191,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     fw.exitedAt = null;
     delete fw.closed;
     delete fw.closedAt;
+    delete fw.autoClosed;
+    delete fw.shutdownAt;
+    fw.boot = BOOT;
     fw.resumedAt = new Date().toISOString();
     if (!fresh.workers.some(x => x.paused)) fresh.paused = null;
     fresh.closed = false;
     saveRun(fresh);
+    // The last paused worker back unpauses the run: queued launches may start.
+    if (!fresh.paused) pumpQueue(fresh.runDir);
     const v = vol(w.name);
     v.agents = 0; v.reported = false; v.nudged = false; v.stopping = false;
     return { worker: w.name, tabId, mode: mode === 'fresh' || lost ? 'fresh' : 'continue', ...(lost ? { fellBack: true, note: 'its conversation could not be restored, so it was started fresh from its brief and notes' } : {}) };
@@ -1946,12 +2234,30 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!['done', 'failed'].includes(status) && !w.turnStopped) {
       throw new Error(`${w.name} has not finished (last report: ${status || 'none'}): only a worker whose last report is done or failed, or one stopped with stop_worker, can be closed`);
     }
+    const { now, td } = closeLive(run, w, live);
+    const p = folderSummary(w.sessionDir);
+    const open = p ? p.total - p.done : 0;
+    const out = {
+      worker: w.name, closed: true, closedAt: now, lastReport: status,
+      ...(open > 0 ? { note: `closed with ${open} open TODO row(s): its last report was ${status}` } : {}),
+      ...(td ? { worktree: td.removed ? 'removed' : `kept: ${td.kept}${td.files?.length ? ` (${td.files.join(', ')})` : ''}` } : {}),
+      resume: 'it stays in list_workers; resume_worker (continue or fresh) brings it back',
+    };
+    pumpQueue(run.runDir);
+    return out;
+  }
+
+  // Close a live worker quietly (close_worker, or `auto`: the queued launch it
+  // is closed for): saved like a pause, marked closed, its worktree torn down
+  // when merged and clean. Saves the run.
+  function closeLive(run, w, live, { auto = null } = {}) {
     const s = live.session;
     if (s.sessId && s.cwd) mgr.saveToHistory({ sessId: s.sessId, cwd: s.cwd, title: s.title, settings: s.getSettings(), autoMemory: s.autoMemory });
     mgr.closeQuiet(live.tabId, 'close_worker');
     const now = new Date().toISOString();
     w.closed = true;
     w.closedAt = now;
+    if (auto) w.autoClosed = { at: now, for: auto };
     delete w.turnStopped;
     w.exitedAt = now;
     if (typeof s.costUsd === 'number') w.costUsd = s.costUsd;
@@ -1959,14 +2265,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     dropInbox(run.runDir, w.name);
     const td = w.worktree ? teardownWorker(run, w) : null;
     saveRun(run);
-    const p = folderSummary(w.sessionDir);
-    const open = p ? p.total - p.done : 0;
-    return {
-      worker: w.name, closed: true, closedAt: now, lastReport: status,
-      ...(open > 0 ? { note: `closed with ${open} open TODO row(s): its last report was ${status}` } : {}),
-      ...(td ? { worktree: td.removed ? 'removed' : `kept: ${td.kept}${td.files?.length ? ` (${td.files.join(', ')})` : ''}` } : {}),
-      resume: 'it stays in list_workers; resume_worker (continue or fresh) brings it back',
-    };
+    return { now, td };
   }
 
   // stop_worker (orchestrator tool): end a busy worker's current turn (the SDK
@@ -2162,6 +2461,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const { note, evented } = w.lastReport.status === 'done' ? startLanding(run, w, parts) : { note: null, evented: false };
     if (!evented) addEvent(run, { worker: w.name, kind: 'report', text: parts.join(' — '), quiet: !WAKE_STATUSES.has(w.lastReport.status) });
     else saveRun(run);   // the landing job reads lastReport from run.json
+    pumpQueue(run.runDir);   // a queued launch may wait on this worker
     return { ok: true, ...(note ? { landing: note } : {}), ...(owner ? { ownerItems: { added: owner.added, updated: owner.updated, ignored: owner.ignored } } : {}) };
   }
 
@@ -2628,11 +2928,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const w = run.workers.find(x => x.id === stamp.workerId);
     if (!w) return;
     w.exitedAt = new Date().toISOString();
+    // A shutdown exit: it holds its slot until it is back (awaitingRestore).
+    if (mgr._shuttingDown) w.shutdownAt = w.exitedAt;
+    else delete w.shutdownAt;
     if (typeof session.costUsd === 'number') w.costUsd = session.costUsd;
     addEvent(run, { worker: w.name, kind: 'exited', text: `${w.name} exited${w.lastReport ? ` (last report: ${w.lastReport.status})` : ' without reporting'}` });
     // Its worktree goes when merged and clean — not at a server shutdown,
     // which exits every session that is restored at the next boot.
     if (w.worktree && !mgr._shuttingDown) { teardownWorker(run, w); saveRun(run); }
+    pumpQueue(run.runDir);   // its slot is free (never at a shutdown: pumpOnce)
   }
 
   // --- Hooks ---
@@ -2718,6 +3022,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
             w.paused = false;
             if (!run.workers.some(x => x.paused)) run.paused = null;
             saveRun(run);
+            if (!run.paused) pumpQueue(run.runDir);
           }
         }
         // Messages queued before a restart (inbox.json) come with the start.
@@ -2840,6 +3145,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
     });
     r.post('/launch', call(b => launchWorker(b.instanceId, b)));
+    r.post('/cancel-launch', call(b => cancelLaunch(b.instanceId, b)));
     r.post('/workers', call(b => listWorkers(b.instanceId)));
     r.post('/end', call(b => endRun(b.instanceId)));
     r.post('/undo-landing', call(b => undoLanding(b.instanceId, b)));
@@ -2878,7 +3184,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   return {
-    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, sendMessage, listAgents, sendToSession, toolParams,
+    router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged, setRunModelMap, setRunAuth, setRunModel,
