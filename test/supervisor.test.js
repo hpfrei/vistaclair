@@ -60,14 +60,15 @@ function request(port, { path: p = '/', method = 'GET', headers = {}, body } = {
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function supervise(t, mode, { env = {}, tg = false } = {}) {
+async function supervise(t, mode, { env = {}, legacyTg = false } = {}) {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vc-sup-')));
   const port = await freePort();
   const ctrl = path.join(home, 'ctrl');
   const spawnsFile = path.join(home, 'spawns');
   fs.writeFileSync(ctrl, mode);
   fs.writeFileSync(spawnsFile, '');
-  if (tg) writeSecretFile(path.join(home, 'tg-login.enc'), { botToken: '1:abc', ownerUserId: '42' }, home);
+  // A config left over from core's removed Telegram login: ignored by the supervisor.
+  if (legacyTg) writeSecretFile(path.join(home, 'tg-login.enc'), { botToken: '1:abc', ownerUserId: '42' }, home);
   const fullEnv = {
     ...process.env,
     VISTACLAIR_SUPERVISOR_CHILD: CHILD, VISTACLAIR_HOME: home, DASHBOARD_PORT: String(port), DASHBOARD_HOST: '127.0.0.1',
@@ -168,8 +169,8 @@ test('boot crash → rescue page on the port with the log tail; static-token aut
   ws.close();
 });
 
-test('Telegram configured: token only from truly-local callers; a valid sid is accepted', async (t) => {
-  const s = await supervise(t, 'crash', { tg: true });
+test('token from any caller (even with a leftover tg-login.enc); a valid sid is accepted', async (t) => {
+  const s = await supervise(t, 'crash', { legacyTg: true });
   const sid = crypto.randomBytes(32).toString('hex');
   const expired = crypto.randomBytes(32).toString('hex');
   const hash = (v) => crypto.createHash('sha256').update(v).digest('hex');
@@ -180,21 +181,28 @@ test('Telegram configured: token only from truly-local callers; a valid sid is a
   await s.rescued();
   const xff = { 'x-forwarded-for': '1.2.3.4' };
 
-  assert.strictEqual((await request(s.port, { path: '/', headers: { ...tokenCookie, ...xff } })).status, 302);
-  assert.strictEqual((await request(s.port, { path: '/rescue/status', headers: { authorization: `Bearer ${TOKEN}`, ...xff } })).status, 401);
+  assert.strictEqual((await request(s.port, { path: '/', headers: { ...tokenCookie, ...xff } })).status, 200);
+  assert.strictEqual((await request(s.port, { path: '/rescue/status', headers: { authorization: `Bearer ${TOKEN}`, ...xff } })).status, 200);
+  assert.strictEqual((await request(s.port, { path: '/rescue/status', headers: { authorization: 'Bearer wrong', ...xff } })).status, 401);
   assert.strictEqual((await request(s.port, { path: '/', headers: tokenCookie })).status, 200);
   assert.strictEqual((await request(s.port, { path: '/', headers: { cookie: `sid=${sid}`, ...xff } })).status, 200);
   assert.strictEqual((await request(s.port, { path: '/', headers: { cookie: `sid=${expired}`, ...xff } })).status, 302);
 
-  // Remote login form: no token form, and a POST with the right token is refused.
+  // Remote login form: the token form, and a POST with the right token logs in.
   const login = await request(s.port, { path: '/login', headers: xff });
-  assert.match(login.body, /Telegram login is configured/);
-  assert.doesNotMatch(login.body, /name="token"/);
+  assert.match(login.body, /name="token"/);
+  assert.doesNotMatch(login.body, /Telegram/i);
   const post = await request(s.port, { path: '/login', method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', ...xff }, body: `token=${TOKEN}` });
-  assert.strictEqual(post.headers.location, '/login?error=1');
+  assert.strictEqual(post.headers.location, '/');
+  const bad = await request(s.port, { path: '/login', method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', ...xff }, body: 'token=nope' });
+  assert.strictEqual(bad.headers.location, '/login?error=1');
 
   const origin = { origin: `http://127.0.0.1:${s.port}` };
-  assert.strictEqual((await wsOpen(s.port, { ...tokenCookie, ...xff, ...origin })).status, 401);
+  for (const headers of [{ ...tokenCookie, ...xff, ...origin }, { cookie: `sid=${sid}`, ...xff, ...origin }]) {
+    const { ws, msgs } = await wsOpen(s.port, headers);
+    await waitFor(() => msgs.find(m => m.type === 'hello'), 3000, 'hello');
+    ws.close();
+  }
   const { ws, msgs } = await wsOpen(s.port, { cookie: `sid=${sid}`, ...xff, ...origin });
   await waitFor(() => msgs.find(m => m.type === 'hello'), 3000, 'hello');
   if (ptyAvailable && msgs[0].mode === 'pty') {
@@ -203,10 +211,6 @@ test('Telegram configured: token only from truly-local callers; a valid sid is a
     await waitFor(() => /pty-5/.test(output(msgs)), 8000, 'pty output');
   }
   ws.close();
-
-  // An unreadable Telegram config fails closed: the token stays local-only.
-  fs.writeFileSync(path.join(s.home, 'tg-login.enc'), 'garbage');
-  assert.strictEqual((await request(s.port, { path: '/', headers: { ...tokenCookie, ...xff } })).status, 302);
 });
 
 test('boot timeout → child killed, rescue', async (t) => {

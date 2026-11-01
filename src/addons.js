@@ -15,7 +15,7 @@
 //                             // dashboard CSP (no inline handlers, no eval).
 //                             // Until then the policy is report-only (src/csp.js).
 //     authExemptPaths: [...],     // public route prefixes (e.g. OAuth callbacks)
-//     authExemptPatterns: [...],  // public route RegExps (e.g. per-app telegram mini-app assets)
+//     authExemptPatterns: [...],  // public route RegExps (e.g. per-app public assets)
 //     handleUpgrade(req, socket, head) -> bool,
 //     authExemptUpgradePaths: [...],  // optional; EXACT pathnames (query ignored,
 //                             // no prefix match) whose WS upgrades skip the

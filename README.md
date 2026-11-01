@@ -87,13 +87,23 @@ Open **http://localhost:3457** and log in with the auth token printed to the con
 > [!WARNING]
 > The dashboard binds to `0.0.0.0` for remote access. It is protected by the auth token, but do not expose it to untrusted networks without TLS/VPN.
 
+### Dashboard login
+
+The auth token is always a login, from the host itself or from anywhere else (including through a reverse proxy or tunnel): enter it on the login page, or send it as a `token` cookie or an `Authorization: Bearer` header. Locally started servers open the dashboard already signed in (`/login/auto`, host-only).
+
+**One-time login link** — `vistaclair login-link` (run on the host while the server is running) prints a URL that signs a browser in once, without the token: valid 5 minutes, single use. Replace `localhost` with your public dashboard address to use it from another device.
+
+Other login methods come from add-ons, such as Vistaclair Pro's "scan a QR code, approve in Telegram". Core provides the mechanism: the login page asks for a challenge (`POST /login/challenge/start`) — a short code, plus a QR code for each login provider an add-on registered — and waits (`POST /login/challenge/poll`) until the provider approves or denies the code out of band; an approved challenge becomes a dashboard session. Add-ons use `ctx.login`: `registerProvider({ id, label, link(code) })`, `describe(code)`, `approve(code, { via, who })`, `deny(code)`, `listSessions()`, `revokeSession(id)`, `revokeAll()` and `onLogin(fn)`, documented in `src/addon-host.js`.
+
+Sessions (from login links and challenges) last 30 days, survive restarts (`sessions.json` in the data home stores only hashes of the session cookies) and are listed on the Security page, with how each signed in, where it can be revoked.
+
 ### Supervisor and rescue page
 
 `npm start`, `npm run dev` and `vistaclair` run `bin/supervisor.js`, which starts `server.js` as a child process (`node server.js` still runs unwrapped; server mode, `VISTACLAIR_SERVER=1`, is never wrapped). The supervisor keeps one auth token for every restart, so the header's **Restart** button gives you a fresh server process under the same login. Server output is echoed to the terminal and appended to `data/logs/server.log` under the data home.
 
 If the server cannot come back — it exits during startup, does not answer `/api/ping` within `VISTACLAIR_BOOT_TIMEOUT_MS` (default 120 s), crashes 3 times within a minute, or stops answering pings while running for `VISTACLAIR_HANG_TIMEOUT_MS` (default 180 s) — the supervisor stops it and serves a **rescue page** on the dashboard port itself: the reason, the log tail, a shell in the browser (your login shell in the install directory; one-command-at-a-time if `node-pty` is unavailable) and a **Retry start** button. Fix the problem in the shell (e.g. `git revert`, `npm install`) and press Retry; the page switches to the dashboard once it answers.
 
-The rescue page asks for the same credentials as the dashboard: a Telegram session already in your browser, or the auth token — the token only from the host itself once Telegram login is configured. Ctrl-C stops the supervisor and the server.
+The rescue page asks for the same credentials as the dashboard: the auth token, or a dashboard session already in your browser. Ctrl-C stops the supervisor and the server.
 
 ### Claude subscription and terms
 
