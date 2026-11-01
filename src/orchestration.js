@@ -238,9 +238,9 @@ function orchestratorCard(run) {
     'Rules',
     `1. Never write or edit code or project files yourself. The only files you write are your TODO.md and NOTES.md in ${dir} (edits elsewhere are blocked). Reading, searching and read-only commands to plan are fine.`,
     `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${MAX_WORKERS} workers run at once: a launch beyond that is queued and starts when a slot frees (\`after: [worker]\` holds it until those workers have landed), and a finished, landed, clean idle worker may be closed automatically to make room for it. A follow-up for a running worker goes to it with SendMessage — never relaunch it. A trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none.`,
-    '3. A brief must be self-contained: the goal, the files or areas involved, acceptance criteria (how the worker proves it is done), constraints, and what is already ruled out. The worker knows only what you write.',
+    '3. A brief must be self-contained: the goal, the files or areas involved, acceptance criteria (how the worker proves it is done), constraints, and what is already ruled out. The worker knows only what you write. Prefer ordering work with `after` to workers waiting on each other. When workers must talk, write their briefs together and check them as a pair: every message one side waits for, the other side is told to send on every outcome (success and failure). The waiting side reports blocked while it waits; silence is yours to handle.',
     `4. For a non-trivial request, write the plan as TODO rows and confirm it with the user (AskUserQuestion) before fanning out to several workers. Keep ${todo} current: update it after every launch, report and event. One row per task in its table (id | description | depends on | status): name the worker in the description; status is queued|running|blocked|done|failed followed by the last report in a few words. It is your memory — after a compaction or resume, read it and NOTES.md first.`,
-    '5. Workers report with the `report` tool and SendMessage. Worker events (report, exited, idle without reporting) arrive in your context automatically, marked "[orchestration]". "started" and progress reports and overlaps do not wake you: they come with the next delivery. Act on each one and update the TODO.',
+    '5. Workers report with the `report` tool and SendMessage. Worker events (report, exited, idle: a turn ended without a done, failed, blocked or paused report) arrive in your context automatically, marked "[orchestration]". "started" and progress reports and overlaps do not wake you: they come with the next delivery. Act on each one and update the TODO. On a done or failed report, check the workers that wait on or talk to that worker. One that is idle without a done, failed or blocked report since then is stalled: read its NOTES.md and message it with what to do. That is not a status request under rule 10.',
     `6. \`list_workers\` shows every worker's state. ${isolation}`,
     `7. You may run at most ${MAX_SUBAGENTS} subagents at once, for reading only (e.g. Explore). Never use a subagent to edit code.`,
     '8. A worker\'s "done" report is trusted: do not re-run its checks, re-read its diff or launch a reviewer worker. Act on "failed" and "blocked"; launch a review only when the user asks for one. Tell the user what each worker reported and what is open.',
@@ -263,7 +263,7 @@ function workerCard(run, worker) {
     `You are a WORKER CLI launched by the orchestrator \`${run.orchestrator}\`. Your own cross-session address is \`${worker.name}\`. Your task is the first user message. These instructions stay in force for the whole session, including after any compaction.`,
     '',
     'Rules',
-    `1. Report to the orchestrator with the \`report\` tool (mcp__orchestrator__report): status "started" when you begin, "blocked" when you need a decision (and SendMessage the question to \`${run.orchestrator}\`), "done" or "failed" when finished, "paused" when a pause is complete — with summary, filesChanged, verified (the one check you ran) and open. Never end a turn without reporting. The steps of your brief are the rows of your TODO.md (short descriptions, detail in NOTES.md); your orchestrator reads it to follow your progress.`,
+    `1. Report to the orchestrator with the \`report\` tool (mcp__orchestrator__report): status "started" when you begin, "blocked" when you need a decision or wait on someone (a question goes by SendMessage to \`${run.orchestrator}\`), "done" or "failed" when finished, "paused" when a pause is complete — with summary, filesChanged, verified (the one check you ran) and open. A turn ends only after a done, failed, blocked or paused report in that turn, or a message to the orchestrator. Never end a turn waiting on someone: report "blocked" naming whom you wait for and what. Their message starts your next turn. The steps of your brief are the rows of your TODO.md (short descriptions, detail in NOTES.md); your orchestrator reads it to follow your progress.`,
     `2. You may delegate through subagents, at most ${MAX_SUBAGENTS} running at once: \`coder\` (Opus) for a substantial piece of code, \`explorer\` (Sonnet, read-only; use it rather than the built-in Explore) for a search across many files. Make small edits and single lookups yourself — a subagent's overhead costs more. A subagent's summary is trusted: do not repeat its checks.`,
     '3. Stay within your brief. If the scope has to grow, ask the orchestrator instead of widening it yourself.',
     `4. Messages from \`${run.orchestrator}\` are follow-up instructions: act on them and report.`,
@@ -2452,7 +2452,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!w) throw new Error('worker not found in run');
     w.lastReport = { status: status || 'update', summary: summary || '', filesChanged: filesChanged || [], verified: verified || '', open: open || '', at: new Date().toISOString() };
     delete w.turnStopped;
-    vol(session.getSettings().name).reported = true;
+    if (WAKE_STATUSES.has(w.lastReport.status)) vol(session.getSettings().name).reported = true;
     const parts = reportParts(w);
     // What only the owner can do or decide: the run's checklist (run.ownerItems).
     const owner = Array.isArray(ownerItems) ? addOwnerItems(run, ownerItems, { worker: w.name, blocking: w.lastReport.status === 'blocked' }) : null;
@@ -3072,7 +3072,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         const addressed = (n) => to === n || (to || '').startsWith(`${n} [`);
         if (!isOrch) {
           if (to && (addressed(run.orchestrator) || to === 'orchestrator')) v.reported = true;
-          if (/(^|__)report$/.test(tool)) v.reported = true;
+          // Only a report that hands the turn back counts: "started" and
+          // progress reports do not (a worker waiting on a peer must say so).
+          if (/(^|__)report$/.test(tool) && WAKE_STATUSES.has(input.tool_input?.status)) v.reported = true;
           return ctxOut('PostToolUse', inboxOf());
         }
         if (to && run.pausing) {
@@ -3119,9 +3121,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         if (v.reported) return {};
         if (!v.nudged && !input.stop_hook_active) {
           v.nudged = true;
-          return { stdout: JSON.stringify({ decision: 'block', reason: `Before ending this turn, report to the orchestrator \`${run.orchestrator}\` with the \`report\` tool (status, summary, filesChanged, verified, open).` }) };
+          return { stdout: JSON.stringify({ decision: 'block', reason: `Before ending this turn, report to the orchestrator \`${run.orchestrator}\` with the \`report\` tool (status, summary, filesChanged, verified, open). The status must be done, failed, blocked (name whom you wait for and what) or paused; "started" or a progress report does not end a turn, nor does a message to another worker.` }) };
         }
-        addEvent(run, { worker: name, kind: 'idle', text: `${name} went idle without reporting. Its last message: ${clip(input.last_assistant_message, 500)}` });
+        const last = run.workers.find(x => x.id === stamp.workerId)?.lastReport;
+        const head = last ? `${name} went idle; last report: ${last.status} (${clip(last.summary, 200)}).` : `${name} went idle without reporting.`;
+        addEvent(run, { worker: name, kind: 'idle', text: `${head} Its last message: ${clip(input.last_assistant_message, 500)}` });
         return {};
       }
       default:

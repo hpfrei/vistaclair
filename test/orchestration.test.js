@@ -581,6 +581,64 @@ test('a worker must report before it stops; an unreported stop becomes an idle e
   assert.deepStrictEqual(stop(), {});
 });
 
+test('only a done, failed, blocked or paused report (or a message to the orchestrator) ends a worker turn', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const ws = mgr.sessions.get(w.tabId);
+  const orchName = orchSession.settings.name;
+  const stop = (extra = {}) => hook(orch, ws, { hook_event_name: 'Stop', last_assistant_message: 'waiting for w2', ...extra });
+  // A report through the MCP server: the call, then its PostToolUse.
+  const reportTool = (status, summary) => {
+    orch.report(ws.instanceId, { status, summary });
+    hook(orch, ws, { hook_event_name: 'PostToolUse', tool_name: 'mcp__orchestrator__report', tool_input: { status, summary } });
+  };
+  const idles = () => run().events.filter(e => e.kind === 'idle');
+
+  // (a) "started", then Stop: nudged, then an idle event naming the last report.
+  hook(orch, ws, { hook_event_name: 'UserPromptSubmit' });
+  reportTool('started', 'on it, waiting for the schema from w2');
+  const nudge = blockOf(stop());
+  assert.match(nudge, /report to the orchestrator/);
+  assert.match(nudge, /done, failed, blocked \(name whom you wait for and what\) or paused/);
+  assert.deepStrictEqual(stop({ stop_hook_active: true }), {});
+  assert.strictEqual(idles().length, 1);
+  assert.strictEqual(idles()[0].text, `${w.worker} went idle; last report: started (on it, waiting for the schema from w2). Its last message: waiting for w2`);
+  assert.strictEqual(idles()[0].quiet, undefined, 'the idle event wakes the orchestrator');
+
+  // A second Stop without stop_hook_active in the same turn: already nudged, an idle event.
+  hook(orch, ws, { hook_event_name: 'UserPromptSubmit' });
+  reportTool('started', 'again');
+  assert.ok(blockOf(stop()));
+  assert.deepStrictEqual(stop(), {});
+  assert.strictEqual(idles().length, 2);
+
+  // (b) "blocked", then Stop: no nudge, no idle event.
+  hook(orch, ws, { hook_event_name: 'UserPromptSubmit' });
+  reportTool('started', 'on it');
+  reportTool('blocked', 'waiting for w2 to send the schema');
+  assert.deepStrictEqual(stop(), {});
+  assert.strictEqual(idles().length, 2);
+
+  // (c) A message to the orchestrator, then Stop: no nudge.
+  hook(orch, ws, { hook_event_name: 'UserPromptSubmit' });
+  hook(orch, ws, { hook_event_name: 'PostToolUse', tool_name: 'mcp__orchestrator__SendMessage', tool_input: { to: orchName } });
+  assert.deepStrictEqual(stop(), {});
+
+  // (d) Only a message to a peer worker, then Stop: nudged.
+  hook(orch, ws, { hook_event_name: 'UserPromptSubmit' });
+  hook(orch, ws, { hook_event_name: 'PostToolUse', tool_name: 'mcp__orchestrator__SendMessage', tool_input: { to: `${orchName}-w2-other` } });
+  assert.ok(blockOf(stop()));
+  assert.strictEqual(idles().length, 2);
+
+  // The worker card says so.
+  const card = ws.settings.appendSystemPrompt;
+  assert.ok(card.includes('A turn ends only after a done, failed, blocked or paused report in that turn, or a message to the orchestrator. Never end a turn waiting on someone: report "blocked" naming whom you wait for and what. Their message starts your next turn.'));
+  assert.ok(!card.includes('Never end a turn without reporting.'));
+  const oCard = orchSession.settings.appendSystemPrompt;
+  assert.match(oCard, /Prefer ordering work with `after` to workers waiting on each other\./);
+  assert.match(oCard, /That is not a status request under rule 10\./);
+});
+
 test('events reach a busy orchestrator through its hooks and wake an idle one', async (t) => {
   const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
   const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
