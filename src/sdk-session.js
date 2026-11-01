@@ -80,10 +80,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const caps = require('./capabilities');
-const { buildClaudeEnv, trackInstance, disallowedToolsFor, DATA_HOME } = require('./utils');
+const { buildClaudeEnv, trackInstance, disallowedToolsFor, modelFamily, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
 const { toolPackContributions, releaseToolPacks } = require('./tool-packs');
-const { modelFamily } = require('./proxy');
 const { notifyAuthFailed } = require('./ws/claude-auth-handler');
 
 const SDK_PACKAGE = '@anthropic-ai/claude-agent-sdk';

@@ -3,7 +3,7 @@ const path = require('path');
 const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream');
 const SSEPassthrough = require('./sse-passthrough');
-const { generateId, filterRequestHeaders, filterResponseHeaders, sanitizeForDashboard, getInstanceContext, DATA_HOME } = require('./utils');
+const { generateId, filterRequestHeaders, filterResponseHeaders, sanitizeForDashboard, getInstanceContext, DATA_HOME, modelFamily } = require('./utils');
 const { getProvider } = require('./providers/registry');
 const caps = require('./capabilities');
 const { getModelPricing } = caps;
@@ -138,17 +138,6 @@ async function* resumeWebStream(firstChunk, reader) {
   } finally {
     try { reader.releaseLock(); } catch {}
   }
-}
-
-// The modelMap family of a model id or alias (substring match), or null.
-// Also used by the SDK panel's status (src/sdk-session.js) to name a mapping.
-function modelFamily(model) {
-  const lower = String(model || '').toLowerCase();
-  return lower.includes('fable') ? 'fable'
-    : lower.includes('opus') ? 'opus'
-    : lower.includes('sonnet') ? 'sonnet'
-    : lower.includes('haiku') ? 'haiku'
-    : null;
 }
 
 // Tab-level "show thinking": newer models omit the thinking text by default,
@@ -982,4 +971,3 @@ module.exports = createProxyRouter;
 module.exports.pendingQuestions = pendingQuestions;
 module.exports.applyShowThinking = applyShowThinking;
 module.exports.clearPendingQuestionsForTab = clearPendingQuestionsForTab;
-module.exports.modelFamily = modelFamily;

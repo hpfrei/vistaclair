@@ -200,6 +200,16 @@ function disallowedToolsFor(settings, base = [], extra = []) {
   return [...new Set([...base, ...(ROLE_DISALLOWED_TOOLS[role] || []), ...extra])];
 }
 
+// The modelMap family of a model id or alias (substring match), or null.
+function modelFamily(model) {
+  const lower = String(model || '').toLowerCase();
+  return lower.includes('fable') ? 'fable'
+    : lower.includes('opus') ? 'opus'
+    : lower.includes('sonnet') ? 'sonnet'
+    : lower.includes('haiku') ? 'haiku'
+    : null;
+}
+
 /**
  * Build CLI args for interactive PTY mode.
  * No -p, --output-format, or --verbose flags. `disallowedTools`: the
@@ -683,4 +693,5 @@ module.exports = {
   readJSON,
   writeJSON,
   processUploadedFiles,
+  modelFamily,
 };
