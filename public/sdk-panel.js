@@ -1823,6 +1823,7 @@
               <span class="sdk-bill" role="group" aria-label="Billing">
                 <button type="button" data-auth="subscription"><span class="sdk-bill-long">Subscription</span><span class="sdk-bill-short">Sub</span></button><button type="button" data-auth="apikey"><span class="sdk-bill-long">API credits</span><span class="sdk-bill-short">API</span></button>
               </span>
+              <button type="button" class="sdk-tb-btn sdk-tb-turn hidden" data-act="turn" aria-expanded="false">Your turn</button>
               <button type="button" class="sdk-tb-btn sdk-tb-models" data-act="models">${MODELS_ICON}<span class="sdk-tb-lbl">Models</span></button>
               <span class="sdk-tb-actions"></span>
               <button type="button" class="sdk-tb-btn" data-act="pause">Pause &amp; save</button>
@@ -1857,6 +1858,7 @@
       this.shelfList = q('.sdk-shelf-list');
       this.pauseBtn = q('[data-act="pause"]');
       this.modelsBtn = q('[data-act="models"]');
+      this.turnBtn = q('[data-act="turn"]');
       this.billEl = q('.sdk-bill');
       this.billBtns = Object.fromEntries([...this.billEl.querySelectorAll('button')].map(b => [b.dataset.auth, b]));
       this.actionsEl = q('.sdk-tb-actions');
@@ -1864,6 +1866,7 @@
 
       this.pauseBtn.addEventListener('click', () => this.pause());
       this.modelsBtn.addEventListener('click', () => openModels(this));
+      this.turnBtn.addEventListener('click', () => this.toggleTurn());
       for (const [auth, b] of Object.entries(this.billBtns)) b.addEventListener('click', () => this.setBilling(auth));
       this.shelfTab.addEventListener('click', () => this.foldShelf(!this.shelfEl.classList.contains('folded')));
       this.composer.addEventListener('send', (e) => this.openPicker(e.detail));
@@ -2491,6 +2494,7 @@
         : this.runId ? 'Every session saves its progress and closes. Resume later from the + menu. Nothing is lost.'
           : 'The session saves its progress and closes. Resume later from the + menu. Nothing is lost.';
       this.renderBilling(isWorkerTab);
+      this.renderTurn(!this.runId || isWorkerTab);
       // Models: the whole run from its orchestrator's tab, or the tab's own
       // session; a model map in force shows on the button.
       this.modelsBtn.classList.toggle('hidden', isWorkerTab);
@@ -2528,6 +2532,33 @@
       const isRun = !!this.runId && !isWorkerTab;
       this.canRefresh = isRun && !!(run?.orchestratorRunning && !run.pausing && !info.pausing);
       this.renderFresh();
+    }
+
+    // The "Your turn" button of a run's orchestrator tab: the number of open
+    // items on the owner's checklist (from the run description), and under it
+    // the checklist and the machine's locks (public/owner-items.js).
+    renderTurn(hide) {
+      const n = (this.run?.ownerItems || []).filter(i => i.state === 'open').length;
+      this.turnBtn.classList.toggle('hidden', !!hide);
+      this.turnBtn.classList.toggle('on', n > 0);
+      this.turnBtn.textContent = n ? `Your turn · ${n}` : 'Your turn';
+      this.turnBtn.title = n ? `${n} thing${n === 1 ? '' : 's'} only you can do or decide` : 'Nothing waits for you. Shows the checklist and the locks held on this machine';
+      if (this.turnEl && n !== this._turnN) this.turnView?.refresh();
+      this._turnN = n;
+    }
+
+    toggleTurn() {
+      if (!window.ownerItems) return;
+      if (!this.turnEl) {
+        this.turnView = window.ownerItems.view({ runId: this.runId, emptyText: 'Nothing waits for you in this run.' });
+        this.turnEl = this.turnView.el;
+        this.turnEl.classList.add('sdk-turn', 'hidden');
+        this.panelEl.appendChild(this.turnEl);
+      }
+      const open = this.turnEl.classList.contains('hidden');
+      this.turnEl.classList.toggle('hidden', !open);
+      this.turnBtn.setAttribute('aria-expanded', String(open));
+      if (open) this.turnView.start();
     }
 
     renderFresh() {

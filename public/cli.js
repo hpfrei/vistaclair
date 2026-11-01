@@ -882,6 +882,10 @@
     if (html === _sessionsHtml) return;
     _sessionsHtml = html;
     sessionsView.innerHTML = html;
+    // The "your turn" checklist and the locks, above the cards: one panel that
+    // keeps its own state across these rebuilds.
+    const turn = window.ownerItems?.globalView();
+    if (turn) { sessionsView.prepend(turn.el); turn.start(); }
   }
 
   sessionsView?.addEventListener('click', (e) => {
@@ -1926,7 +1930,7 @@
 
 
   window.dashboard.registerModule?.('orchestration:', (msg) => {
-    if (msg.type === 'orchestration:run') window.sdkPanel?.onRunUpdate(msg);
+    if (msg.type === 'orchestration:run') { window.sdkPanel?.onRunUpdate(msg); window.ownerItems?.onRunUpdate(msg); }
     if (msg.type === 'orchestration:run') requestSavedSessions(1000);
   });
 

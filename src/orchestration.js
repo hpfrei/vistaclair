@@ -244,6 +244,7 @@ function orchestratorCard(run) {
     '11. A paused worker is resumed with `resume_worker` ("continue" keeps its own context; "fresh" starts a clean session from its brief and notes). Never relaunch a paused worker\'s task with launch_cli.',
     '12. Unrelated new work goes to a new worker. Close a finished worker you will not reuse with `close_worker` (it stays listed and resumable with resume_worker, also after end_run); reuse a worker by SendMessage only for a follow-up in the area it just worked on.',
     '13. A worker going the wrong way: `stop_worker` ends its current turn and leaves it idle; then SendMessage it new instructions, or close_worker it.',
+    '14. The owner\'s "your turn" checklist (actions only the owner can do, decisions waiting on the owner) fills from the workers\' reports; keep it right with `owner_items` (list, add, resolve, drop, reorder): merge duplicates, close what is stale, and tell the owner what waits. The owner\'s answers arrive as "owner" events.',
   ].join('\n');
 }
 
@@ -262,7 +263,7 @@ function workerCard(run, worker) {
     '3. Stay within your brief. If the scope has to grow, ask the orchestrator instead of widening it yourself.',
     `4. Messages from \`${run.orchestrator}\` are follow-up instructions: act on them and report.`,
     `5. ${where}`,
-    `6. Where the instructions above this card tell the session to ask the user, ask \`${run.orchestrator}\` instead (SendMessage, report "blocked"). Project-wide finishing steps they ask for (a check that rewrites shared files, a docs update) are yours only when your brief assigns them; otherwise list what they need in your "done" report.`,
+    `6. Where the instructions above this card tell the session to ask the user, ask \`${run.orchestrator}\` instead (SendMessage, report "blocked"). Project-wide finishing steps they ask for (a check that rewrites shared files, a docs update) are yours only when your brief assigns them; otherwise list what they need in your "done" report. Anything only the owner can do (Stop→Start, Build, Make live, Rebuild client, an approval) or decide goes into report's \`ownerItems\` ({ what, why, kind: "action" | "decision", options, recommended }), never only in prose: it lands on the owner's "your turn" checklist, and you are told when the owner has done or decided it.`,
     `7. A shared machine resource (GPU, a memory-heavy job) is taken with a lock, not by message: run the command as \`node ${path.join(__dirname, '..', 'bin', 'vistaclair-lock.js')} <name> -- <cmd>\` (\`-s\` for a shared hold; names are [a-z0-9._-]; it waits its turn and releases when the command exits).`,
   ].join('\n');
 }
@@ -960,6 +961,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       compactions: run.compactions || 0,
       refreshSuggested: (run.compactions || 0) >= REFRESH_SUGGESTED_AFTER,
       pendingEvents: run.events.filter(e => e.seq > run.delivered).length,
+      ownerItems: ownerItemsView(run),
       workers: run.workers.map(w => {
         const live = workerSession(run, w.id);
         return {
@@ -2145,7 +2147,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   if (control) control.onFinalized(onMemberFinalized);
 
-  function report(instanceId, { status, summary, filesChanged, verified, open } = {}) {
+  function report(instanceId, { status, summary, filesChanged, verified, open, ownerItems } = {}) {
     const { session, stamp, run } = callerRun(instanceId, 'worker');
     const w = run.workers.find(x => x.id === stamp.workerId);
     if (!w) throw new Error('worker not found in run');
@@ -2153,11 +2155,190 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     delete w.turnStopped;
     vol(session.getSettings().name).reported = true;
     const parts = reportParts(w);
+    // What only the owner can do or decide: the run's checklist (run.ownerItems).
+    const owner = Array.isArray(ownerItems) ? addOwnerItems(run, ownerItems, { worker: w.name, blocking: w.lastReport.status === 'blocked' }) : null;
+    if (owner?.touched.length) parts.push(`for the owner: ${clip(owner.touched.map(i => i.what).join('; '), 400)}`);
     // A done report that goes to landing is one event, with its outcome.
     const { note, evented } = w.lastReport.status === 'done' ? startLanding(run, w, parts) : { note: null, evented: false };
     if (!evented) addEvent(run, { worker: w.name, kind: 'report', text: parts.join(' — '), quiet: !WAKE_STATUSES.has(w.lastReport.status) });
     else saveRun(run);   // the landing job reads lastReport from run.json
-    return { ok: true, ...(note ? { landing: note } : {}) };
+    return { ok: true, ...(note ? { landing: note } : {}), ...(owner ? { ownerItems: { added: owner.added, updated: owner.updated, ignored: owner.ignored } } : {}) };
+  }
+
+  // --- The owner's checklist (run.ownerItems) ---
+  // The actions only the owner can do (Stop→Start, Build, Make live, approvals)
+  // and the decisions waiting on the owner, gathered from the workers' reports
+  // and kept right by the orchestrator (owner_items). A list in run.json, so it
+  // survives a restart: { id, what, why, kind, options, recommended, key,
+  // worker (the proposer), blocking, at, state: open|done|dropped, resolvedAt,
+  // answer, resolvedBy }. An item is the same as another by its key, else by
+  // its normalised `what` when either has none; an open one is updated, never duplicated, and a
+  // resolved one is opened again only when its `why` is different.
+
+  const OWNER_ITEM_MAX = 10;     // items one call may carry
+  const OWNER_RESOLVED_KEPT = 30; // resolved items kept in run.json
+  const OWNER_RESOLVED_SHOWN = 10;
+
+  const normText = (v) => String(v ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const sameItem = (a, b) => (a.key && b.key) ? normText(a.key) === normText(b.key) : normText(a.what) === normText(b.what);
+
+  // One item from the caller's fields; null when it has no `what`.
+  function cleanOwnerItem(f) {
+    if (!f || typeof f !== 'object') return null;
+    const what = clip(String(f.what ?? '').replace(/\s+/g, ' ').trim(), 300);
+    if (!what) return null;
+    const kind = f.kind === 'decision' ? 'decision' : 'action';
+    const options = kind === 'decision' && Array.isArray(f.options)
+      ? f.options.map(o => clip(String(o ?? '').trim(), 120)).filter(Boolean).slice(0, 8) : [];
+    const key = String(f.key ?? '').trim();
+    const recommended = String(f.recommended ?? '').trim();
+    return {
+      what, kind,
+      why: clip(String(f.why ?? '').trim(), 600),
+      ...(options.length ? { options } : {}),
+      ...(kind === 'decision' && recommended ? { recommended: clip(recommended, 120) } : {}),
+      ...(key ? { key: clip(key, 80) } : {}),
+      ...(f.blocking === true ? { blocking: true } : {}),
+    };
+  }
+
+  // Adds or updates items in run.ownerItems (the caller saves the run).
+  // { added, updated, ignored, touched: [item] }.
+  function addOwnerItems(run, fields, { worker = null, blocking = false } = {}) {
+    run.ownerItems ||= [];
+    const out = { added: 0, updated: 0, ignored: 0, touched: [] };
+    for (const f of fields.slice(0, OWNER_ITEM_MAX)) {
+      const c = cleanOwnerItem(f);
+      if (!c) { out.ignored++; continue; }
+      const now = new Date().toISOString();
+      const open = run.ownerItems.find(i => i.state === 'open' && sameItem(i, c));
+      if (open) {
+        Object.assign(open, { what: c.what, kind: c.kind, why: c.why || open.why, updatedAt: now });
+        if (c.options) open.options = c.options; else if (c.kind === 'action') delete open.options;
+        if (c.recommended) open.recommended = c.recommended;
+        if (c.key) open.key = c.key;
+        if (c.blocking || blocking) open.blocking = true;
+        out.updated++; out.touched.push(open);
+        continue;
+      }
+      // Resolved before, for the same reason: it stays resolved.
+      const done = run.ownerItems.filter(i => i.state !== 'open' && sameItem(i, c)).pop();
+      if (done && normText(done.why) === normText(c.why)) { out.ignored++; continue; }
+      run.ownerSeq = (run.ownerSeq || 0) + 1;
+      const item = { id: `o${run.ownerSeq}`, ...c, worker, at: now, state: 'open' };
+      if (blocking && !item.blocking) item.blocking = true;
+      run.ownerItems.push(item);
+      out.added++; out.touched.push(item);
+    }
+    return out;
+  }
+
+  // The open items in the order the owner sees them: after a reorder, as
+  // arranged; by default the ones that block others first, then oldest.
+  function orderedOwnerItems(run) {
+    const open = (run.ownerItems || []).filter(i => i.state === 'open');
+    if (run.ownerManual) return open;
+    return open.map((i, n) => [i, n]).sort(([a, x], [b, y]) => (b.blocking ? 1 : 0) - (a.blocking ? 1 : 0) || String(a.at).localeCompare(String(b.at)) || x - y).map(([i]) => i);
+  }
+
+  // What the dashboard gets: the open items in order, then the latest resolved.
+  function ownerItemsView(run) {
+    const resolved = (run.ownerItems || []).filter(i => i.state !== 'open')
+      .sort((a, b) => String(b.resolvedAt).localeCompare(String(a.resolvedAt))).slice(0, OWNER_RESOLVED_SHOWN);
+    return [...orderedOwnerItems(run), ...resolved];
+  }
+
+  // Resolve (done) or drop an open item. `by`: 'owner' (the dashboard) wakes the
+  // orchestrator with an event and tells the proposing worker if it runs; 'orchestrator'
+  // is recorded on the board only.
+  function resolveOwnerItem(run, id, { state = 'done', answer = '', by = 'owner' } = {}) {
+    const item = (run.ownerItems || []).find(i => i.id === String(id || '').trim());
+    if (!item) throw new Error(`no owner item ${id} in run ${run.runId}`);
+    if (item.state !== 'open') throw new Error(`owner item ${item.id} is already ${item.state}`);
+    if (state !== 'done' && state !== 'dropped') throw new Error('state must be done or dropped');
+    const ans = clip(String(answer ?? '').trim(), 600);
+    if (state === 'done' && item.kind === 'decision' && !ans) throw new Error('a decision needs an answer');
+    Object.assign(item, { state, resolvedAt: new Date().toISOString(), resolvedBy: by, ...(ans ? { answer: ans } : {}) });
+    const closed = run.ownerItems.filter(i => i.state !== 'open');
+    if (closed.length > OWNER_RESOLVED_KEPT) {
+      const gone = new Set(closed.sort((a, b) => String(a.resolvedAt).localeCompare(String(b.resolvedAt))).slice(0, closed.length - OWNER_RESOLVED_KEPT));
+      run.ownerItems = run.ownerItems.filter(i => !gone.has(i));
+    }
+    const verb = state === 'dropped' ? 'dropped' : item.kind === 'decision' ? 'decided' : 'did';
+    const text = `${verb}: ${item.what}${ans ? ` — ${ans}` : ''}`;
+    if (by === 'owner') {
+      addEvent(run, { worker: item.worker || null, kind: 'owner', text: `owner ${text}` });
+      const ts = item.worker ? run.workers.find(w => w.name === item.worker) : null;
+      const live = ts ? workerSession(run, ts.id) : null;
+      if (live?.session.running) {
+        deliver(live.session, ts.name, `[message from the owner] ${text}`, 'owner');
+        emitTo(live.session, run, { platform: { kind: 'message', from: 'owner', to: ts.name, text: `${text}` } });
+      }
+    } else {
+      addEvent(run, { worker: item.worker || null, kind: 'owner', text: `owner item ${state === 'dropped' ? 'dropped' : 'closed'} by the orchestrator: ${item.what}${ans ? ` — ${ans}` : ''}`, delivered: true });
+    }
+    return item;
+  }
+
+  // The orchestrator's owner_items tool: list | add | resolve | drop | reorder.
+  function ownerItems(instanceId, { action = 'list', items, item, id, answer, order } = {}) {
+    const { session, run } = callerRun(instanceId, 'orchestrator');
+    const from = session.getSettings().name || 'orchestrator';
+    switch (action) {
+      case 'list':
+        return { ok: true, ownerItems: ownerItemsView(run) };
+      case 'add': {
+        const list = Array.isArray(items) ? items : item ? [item] : null;
+        if (!list) throw new Error('add needs `items` (an array of { what, why, kind, options, recommended, key })');
+        const r = addOwnerItems(run, list, { worker: from });
+        saveRun(run);
+        return { ok: true, added: r.added, updated: r.updated, ignored: r.ignored, ownerItems: ownerItemsView(run) };
+      }
+      case 'resolve':
+      case 'drop': {
+        resolveOwnerItem(run, id, { state: action === 'drop' ? 'dropped' : 'done', answer, by: 'orchestrator' });
+        return { ok: true, ownerItems: ownerItemsView(run) };
+      }
+      case 'reorder': {
+        if (!Array.isArray(order)) throw new Error('reorder needs `order`: the open items\' ids, first to last');
+        const open = orderedOwnerItems(run);
+        const byId = new Map(open.map(i => [i.id, i]));
+        const named = [...new Set(order.map(String))].map(x => byId.get(x)).filter(Boolean);
+        const rest = open.filter(i => !named.includes(i));
+        const sorted = [...named, ...rest];
+        run.ownerItems = [...sorted, ...run.ownerItems.filter(i => i.state !== 'open')];
+        run.ownerManual = true;
+        saveRun(run);
+        return { ok: true, ownerItems: ownerItemsView(run) };
+      }
+      default:
+        throw new Error('action must be list, add, resolve, drop or reorder');
+    }
+  }
+
+  // The owner's view, over every run with an open item: [{ runId, name, title,
+  // state, items }], runs with the most waiting first.
+  function ownerList(runId) {
+    const ids = runId ? [runId] : listRuns().map(r => r.runId);
+    const out = [];
+    for (const rid of ids) {
+      const run = getRun(rid);
+      if (!run) continue;
+      const items = orderedOwnerItems(run);
+      if (!items.length && !runId) continue;
+      const orch = orchestratorSession(run);
+      out.push({ runId: rid, name: run.orchestrator, title: orch?.session.title || null, items: runId ? ownerItemsView(run) : items });
+    }
+    return out.sort((a, b) => b.items.length - a.items.length);
+  }
+
+  function ownerResolve({ runId, id, action, answer } = {}) {
+    const run = getRun(String(runId || ''));
+    if (!run) throw new Error('run not found');
+    const state = action === 'drop' ? 'dropped' : action === 'done' ? 'done' : null;
+    if (!state) throw new Error('action must be done or drop');
+    resolveOwnerItem(run, id, { state, answer, by: 'owner' });
+    return { ok: true, ownerItems: ownerItemsView(run) };
   }
 
   // --- Messages between run members (SendMessage / ListAgents) ---
@@ -2669,11 +2850,18 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     r.post('/send-message', call(b => sendMessage(b.instanceId, b)));
     r.post('/list-agents', call(b => listAgents(b.instanceId)));
     r.post('/tool-params', call(() => toolParams()));
+    r.post('/owner-items', call(b => ownerItems(b.instanceId, b)));
     // The run board (GUI).
     r.post('/pause', call(b => pauseRun(String(b.runId || ''))));
     r.post('/refresh', call(b => refreshOrchestrator(String(b.runId || ''))));
     r.post('/resume-run', call(b => resumeRun(String(b.runId || ''), { fresh: b.fresh === true })));
     r.post('/delete-run', call(b => deleteRun(String(b.runId || ''), { force: b.force === true })));
+    // The owner's checklist (GUI): GET lists, one run's or every run's open
+    // items; POST resolves (done, with an answer for a decision) or drops one.
+    r.get('/owner-items', (req, res) => {
+      try { res.json({ runs: ownerList(String(req.query.runId || '') || null) }); } catch (e) { res.status(400).json({ error: e.message }); }
+    });
+    r.post('/owner-resolve', call(b => ownerResolve(b)));
     r.get('/run', (req, res) => {
       const run = getRun(String(req.query.runId || ''));
       // A run whose orchestrator is an external session (another machine's):
@@ -2690,7 +2878,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   return {
-    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, sendMessage, listAgents, sendToSession, toolParams,
+    router, openCli, askUser, prepareRun, launchWorker, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged, setRunModelMap, setRunAuth, setRunModel,
