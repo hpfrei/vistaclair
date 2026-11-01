@@ -72,6 +72,31 @@
 //                        it warms the workers up with resume_worker
 //                        (continue | fresh). refreshOrchestrator replaces a
 //                        drifted orchestrator with a fresh one at any time.
+//   remote workers       registerHostProvider({ hosts, launch, kill }) (the
+//                        add-on ctx; one provider, a second replaces it):
+//                        launch_cli `host` (+ `app`) records a member that runs
+//                        on another machine (w.host, w.app, w.remote), state
+//                        pending-approval until provider.launch resolves the
+//                        tab of a registerExternalSession session; the start
+//                        or the refusal (.code) is a "remote" event. It counts
+//                        toward MAX_WORKERS and queues like any launch. Its
+//                        reports and messages arrive through the handle's
+//                        deliver(); SendMessage goes to its adapter's submit;
+//                        close_worker / end_run / deleteRun → provider.kill;
+//                        stop_worker → its adapter's interrupt. No cwd,
+//                        isolation, area or tools; nothing lands; a pause does
+//                        not reach it; resume_worker refuses it. Its record
+//                        survives a restart (a lost pending launch becomes a
+//                        "remote" event); the provider re-adopts its tab.
+//   mirror runs          openMirrorRun({ key, orchestrator: { address, host },
+//                        deliver }) (the add-on ctx): the slave side. A run
+//                        whose orchestrator is an address on another machine,
+//                        keyed in <dataHome>/data/mirror-runs/index.json and
+//                        re-opened by key. Its members are SDK workers
+//                        (launchWorker); their reports and SendMessage to the
+//                        orchestrator go to deliver(); submit / interrupt /
+//                        kill by address; close(). No orchestrator session:
+//                        pause, resume and refresh refuse it.
 
 const fs = require('fs');
 const path = require('path');
@@ -224,8 +249,12 @@ function orchestratorDir(run) {
   return run.orchestratorDir || run.runDir;
 }
 
-function orchestratorCard(run) {
+// `hosts`: the host provider's machines (hostList); none → no remote rule.
+function orchestratorCard(run, { hosts = [] } = {}) {
   const dir = orchestratorDir(run);
+  const remote = hosts.length
+    ? `15. Remote workers: launch_cli \`host\` runs a worker on another machine: ${hosts.map(h => `\`${h.name}\`${h.available ? '' : ` (unavailable now: ${h.reason || 'no reason given'})`}`).join(', ')}. The owner approves each remote launch on a card first, so launch_cli returns at once (state pending-approval) and a "remote" event says when it started or why not. It runs in an app's directory there (\`app\`, default the run's app) and has nothing on this machine: no cwd, isolation, area or tools. It reports and takes SendMessage like any worker; close_worker or end_run stops it; it cannot be resumed (launch a new one with its brief and last report).`
+    : null;
   const todo = path.join(dir, 'TODO.md');
   const isolation = run.isolation === 'worktree'
     ? 'Workers run in their own git worktree on branch `orch/' + run.runId + '/<worker>`, so they cannot overwrite each other. A worker\'s "done" report lands its branch, by code: rebased onto its base branch, the repo\'s check run, merged with --no-ff. You get one event for the report and its landing ("reported done: … — landed <sha>", or "— not landed: <reason>"); what the worker can fix goes back to it by itself. Never merge, rebase or reset branches yourself. Plan disjoint areas and pass each worker\'s files or directories as `area` in launch_cli; an overlap named in its result, or an "overlap" event (a file changed in two worktrees; the workers are told too), means: serialize those workers, or expect a conflict at landing. A conflict of a worker that is no longer running: resume_worker it, or launch a worker to merge its branch into its own and resolve the conflicts. `undo_landing` reverts a landing with a new commit. A closed or exited worker\'s worktree goes once landed and clean; call `end_run` to finish the run: it removes what can go, says what is kept and why, and keeps every worker\'s record, folder and conversation. A worker stays resumable after end_run (resume_worker adds its worktree back at the same path, on its branch or a new one from its base), and launch_cli or resume_worker reopens an ended run.'
@@ -250,6 +279,7 @@ function orchestratorCard(run) {
     '12. Unrelated new work goes to a new worker. Close a finished worker you will not reuse with `close_worker` (it stays listed and resumable with resume_worker, also after end_run); reuse a worker by SendMessage only for a follow-up in the area it just worked on.',
     '13. A worker going the wrong way: `stop_worker` ends its current turn and leaves it idle; then SendMessage it new instructions, or close_worker it.',
     '14. The owner\'s "your turn" checklist (actions only the owner can do, decisions waiting on the owner) fills from the workers\' reports; keep it right with `owner_items` (list, add, resolve, drop, reorder): merge duplicates, close what is stale, and tell the owner what waits. The owner\'s answers arrive as "owner" events.',
+    ...(remote ? [remote] : []),
   ].join('\n');
 }
 
@@ -266,7 +296,7 @@ function workerCard(run, worker) {
     `1. Report to the orchestrator with the \`report\` tool (mcp__orchestrator__report): status "started" when you begin, "blocked" when you need a decision or wait on someone (a question goes by SendMessage to \`${run.orchestrator}\`), "done" or "failed" when finished, "paused" when a pause is complete — with summary, filesChanged, verified (the one check you ran) and open. A turn ends only after a done, failed, blocked or paused report in that turn, or a message to the orchestrator. Never end a turn waiting on someone: report "blocked" naming whom you wait for and what. Their message starts your next turn. The steps of your brief are the rows of your TODO.md (short descriptions, detail in NOTES.md); your orchestrator reads it to follow your progress.`,
     `2. You may delegate through subagents, at most ${MAX_SUBAGENTS} running at once: \`coder\` (Opus) for a substantial piece of code, \`explorer\` (Sonnet, read-only; use it rather than the built-in Explore) for a search across many files. Make small edits and single lookups yourself — a subagent's overhead costs more. A subagent's summary is trusted: do not repeat its checks.`,
     '3. Stay within your brief. If the scope has to grow, ask the orchestrator instead of widening it yourself.',
-    `4. Messages from \`${run.orchestrator}\` are follow-up instructions: act on them and report.`,
+    `4. Messages from \`${run.orchestrator}\` are follow-up instructions: act on them and report.${run.mirror ? ` Your orchestrator runs on another machine (${run.mirror.host}): your reports and your messages to it reach it there.` : ''}`,
     `5. ${where}`,
     `6. Where the instructions above this card tell the session to ask the user, ask \`${run.orchestrator}\` instead (SendMessage, report "blocked"). Project-wide finishing steps they ask for (a check that rewrites shared files, a docs update) are yours only when your brief assigns them; otherwise list what they need in your "done" report. Anything only the owner can do (Stop→Start, Build, Make live, Rebuild client, an approval) or decide goes into report's \`ownerItems\` ({ what, why, kind: "action" | "decision", options, recommended }), never only in prose: it lands on the owner's "your turn" checklist, and you are told when the owner has done or decided it.`,
     `7. A shared machine resource (GPU, a memory-heavy job) is taken with a lock, not by message: run the command as \`node ${path.join(__dirname, '..', 'bin', 'vistaclair-lock.js')} <name> -- <cmd>\` (\`-s\` for a shared hold; names are [a-z0-9._-]; it waits its turn and releases when the command exits).`,
@@ -292,6 +322,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // from an earlier process that has not come back still holds its slot.
   const BOOT = crypto.randomBytes(4).toString('hex');
   let askSeq = 0;
+  // Remote workers (registerHostProvider): the one provider, the launches
+  // waiting for it in this process (`${runId}/${workerId}`), and the remote
+  // members' tabs (tabId -> { runId, workerId }) for their exit.
+  let hostProvider = null;
+  const remoteLaunches = new Set();
+  const remoteTabs = new Map();
+  // Mirror runs (openMirrorRun): runId -> the add-on's deliver(msg), set at
+  // every open (the index on disk maps key -> run).
+  const mirrorDeliver = new Map();
 
   // --- Ask (the dashboard form, shared with /api/ask) ---
 
@@ -476,6 +515,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const run = readJsonOr(runFile(runDir), null);
     if (run) runDirs.set(run.runId, runDir);
     if (run?.workers?.some(w => w.landing)) recoverLandings(run);
+    if (run?.workers?.some(w => lostLaunch(run, w))) recoverRemote(run);
     // After a restart the valve's timer is gone; its due time is in run.json.
     if (run?.quietValve && !run.quietValve.fired) armValve(run);
     return run;
@@ -497,6 +537,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const st = e.settings?.orchestration;
       if (st?.runId === runId && st.runDir) { runDirs.set(runId, st.runDir); return st.runDir; }
     }
+    // A mirror run without members yet.
+    const m = Object.values(readJsonOr(mirrorIndexFile(), {})).find(x => x?.runId === runId);
+    if (m?.runDir && fs.existsSync(runFile(m.runDir))) { runDirs.set(runId, m.runDir); return m.runDir; }
     return null;
   }
 
@@ -627,7 +670,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     saveRun(run);
     runDirs.set(runId, runDir);
 
-    const card = orchestratorCard(run);
+    const card = orchestratorCard(run, { hosts: hostList() });
     return {
       ...settings,
       engine: run.engine,
@@ -725,7 +768,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // A full run names the running workers that are finished, so the
   // orchestrator closes one rather than pushing unrelated work into it.
   function assertCapacity(run) {
-    const running = runningWorkers(run);
+    const running = [...runningWorkers(run), ...run.workers.filter(w => w.remote && remoteHoldsSlot(run, w))];
     if (running.length >= MAX_WORKERS) {
       const available = running.filter(w => workerAvailable(run, w));
       const hint = available.length
@@ -775,7 +818,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // A launch's checked parameters, as a queue entry keeps them (cwd resolved,
   // `after` as worker ids). Throws, having changed nothing.
-  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after } = {}) {
+  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app } = {}) {
+    if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after });
+    if (app !== undefined && app !== null && app !== '') throw new Error('app is for a remote worker (with host)');
     const target = realpathOr(cwd ? path.resolve(run.root, cwd) : run.root);
     if (!isInside(target, run.root)) throw new Error(`cwd must be inside the run root ${run.root}`);
     const spec = {
@@ -794,6 +839,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // A queued launch's tool packs are asked before it is queued, as the
   // worker it would be now (startWorker asks again when it starts).
   function checkQueued(run, spec) {
+    if (spec.host) return;   // no tool packs: startRemote checks its host again
     const id = `w${run.workerSeq + 1}`;
     const grants = grantsOf(spec.tools);
     const probe = { id, name: `${run.orchestrator}-${id}-${slugify(spec.title)}`, title: spec.title || id, task: spec.task, cwd: spec.cwd, branch: null, worktree: null, ...(grants ? { grants } : {}), ...(spec.model ? { model: spec.model } : {}) };
@@ -816,7 +862,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // Start a worker from a checked launch (launchSpec). Persists it before the spawn.
-  function startWorker(run, { title, task, cwd: target, isolation: mode, model, tools, area }) {
+  function startWorker(run, spec) {
+    if (spec.host) return startRemote(run, spec);
+    const { title, task, cwd: target, isolation: mode, model, tools, area } = spec;
     const id = `w${++run.workerSeq}`;
     const name = `${run.orchestrator}-${id}-${slugify(title)}`;
     const worker = {
@@ -858,6 +906,481 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
   }
 
+  // --- Remote workers (ctx.orchestration.registerHostProvider) ---
+  //
+  // An add-on (Pro's peer-remote-host.js) provides other machines a worker can
+  // run on. launch_cli({ host }) records the member like a local worker (w.host,
+  // w.app, w.remote) in state pending-approval and calls provider.launch, which
+  // resolves { tabId } of a registerExternalSession tab once the owner approved
+  // the launch, or rejects with a .code (REMOTE_CODES). The outcome is a
+  // "remote" event. The member's reports and messages come back through the
+  // handle's deliver(); SendMessage goes to its tab's adapter.submit(text,
+  // { from }); close_worker / end_run / deleteRun call provider.kill. It has no
+  // worktree, folder or saved session here: nothing lands, a pause does not
+  // reach it, resume_worker refuses it. Its record survives a restart; the
+  // provider re-adopts its tab (rebound by tabId or by the tab's stamp).
+
+  const REMOTE_CODES = new Set(['declined', 'refused', 'unavailable', 'invalid', 'failed', 'cancelled']);
+  const REMOTE_STATUSES = new Set(['started', 'update', 'done', 'failed', 'blocked', 'paused']);
+  const APP_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+  // The run's own app, when its stamps name one (Pro's change / workspace sessions).
+  const RUN_APP_STAMPS = ['changeApp', 'workspaceApp'];
+  const remoteKey = (run, w) => `${run.runId}/${w.id}`;
+
+  // One provider at a time: a second registration replaces the first, whose
+  // handle goes inert (deliver → false, unregister a no-op).
+  function registerHostProvider(provider) {
+    if (!provider || typeof provider.hosts !== 'function' || typeof provider.launch !== 'function' || typeof provider.kill !== 'function') {
+      throw new Error('registerHostProvider needs { hosts, launch, kill } functions');
+    }
+    const entry = { hosts: provider.hosts, launch: provider.launch, kill: provider.kill };
+    hostProvider = entry;
+    return Object.freeze({
+      deliver: (msg) => (hostProvider === entry ? deliverRemote(msg) : false),
+      unregister: () => { if (hostProvider === entry) hostProvider = null; },
+    });
+  }
+
+  // The provider's hosts, cleaned: [{ name, label, available, reason? }]; [] without one.
+  function hostList() {
+    if (!hostProvider) return [];
+    let list;
+    try { list = hostProvider.hosts(); } catch (e) { console.error('[orchestration] hosts():', e.message); return []; }
+    if (!Array.isArray(list)) return [];
+    return list.filter(h => h && typeof h.name === 'string' && h.name).slice(0, 50).map(h => ({
+      name: h.name.slice(0, 100),
+      label: typeof h.label === 'string' && h.label ? h.label.slice(0, 200) : h.name.slice(0, 100),
+      available: h.available === true,
+      ...(h.available !== true && h.reason ? { reason: clip(h.reason, 300) } : {}),
+    }));
+  }
+
+  // `host` checked against hosts(): the host, or a throw naming the choices.
+  function checkHost(host) {
+    if (!hostProvider) throw new Error('remote workers need Pro\'s host provider: none is registered, so launch_cli takes no host');
+    if (typeof host !== 'string' || !host.trim()) throw new Error('host must be a host name');
+    const list = hostList();
+    const h = list.find(x => x.name === host.trim());
+    const names = list.length ? list.map(x => `${x.name}${x.available ? '' : ` (unavailable: ${x.reason || 'no reason given'})`}`).join(', ') : 'none';
+    if (!h) throw new Error(`no host "${host}". Hosts: ${names}`);
+    if (!h.available) throw new Error(`host "${h.name}" is unavailable: ${h.reason || 'no reason given'}`);
+    return h;
+  }
+
+  function runApp(run) {
+    const s = run.base?.stamps || {};
+    return RUN_APP_STAMPS.map(k => s[k]).find(v => typeof v === 'string' && APP_RE.test(v)) || null;
+  }
+
+  // launch_cli with a host: the checked spec, or a throw having changed nothing.
+  function remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after }) {
+    const h = checkHost(host);
+    const no = (what, why) => { throw new Error(`${what}: ${why}; omit it for a remote worker`); };
+    if (cwd !== undefined && cwd !== null && cwd !== '') no('cwd', 'a remote worker runs in its app\'s directory on its host');
+    if (isolation !== undefined && isolation !== null && isolation !== 'none') no('isolation', 'a remote worker has no worktree on this machine');
+    if (area !== undefined && area !== null) no('area', 'areas are compared between worktrees on this machine');
+    if (tools !== undefined) no('tools', 'add-on tool grants are this machine\'s');
+    const theApp = app === undefined || app === null || app === '' ? runApp(run) : String(app).trim();
+    if (!theApp) throw new Error('app: name the app on the host this worker runs in (this run has none of its own)');
+    if (!APP_RE.test(theApp)) throw new Error('app must be an app name ([a-z0-9-])');
+    const spec = { title: title || '', task: String(task), host: h.name, app: theApp, ...(model ? { model } : {}) };
+    const deps = afterOf(run, after);
+    if (deps.length) spec.after = deps;
+    return spec;
+  }
+
+  // Record the member and ask the provider. Returns at once; the outcome is an event.
+  function startRemote(run, { title, task, host, app, model }) {
+    checkHost(host);
+    const id = `w${++run.workerSeq}`;
+    const name = `${run.orchestrator}-${id}-${slugify(title)}`;
+    const now = new Date().toISOString();
+    const worker = {
+      id, name, title: title || id, task: String(task), cwd: null, branch: null, worktree: null, sessionDir: null,
+      host, app, remote: { state: 'pending-approval', since: now },
+      launchedAt: now, exitedAt: null, lastReport: null, boot: BOOT,
+      ...(model ? { model } : {}),
+    };
+    run.workers.push(worker);
+    run.closed = false;
+    saveRun(run);
+    const key = remoteKey(run, worker);
+    remoteLaunches.add(key);
+    const provider = hostProvider;
+    const args = {
+      runId: run.runId, address: name, title: worker.title, task: worker.task, host, app,
+      ...(model ? { model } : {}),
+      ...(run.auth === 'apikey' ? { auth: 'apikey' } : {}),
+      orchestrator: { address: run.orchestrator, title: orchestratorSession(run)?.session.title || '' },
+    };
+    let pending;
+    try { pending = Promise.resolve(provider.launch(args)); } catch (e) { pending = Promise.reject(e); }
+    const runDir = run.runDir;
+    pending.then(
+      (r) => remoteStarted(runDir, id, r, provider, key),
+      (e) => remoteFailed(runDir, id, e, key),
+    ).catch(e => console.error('[orchestration] remote launch:', e.message))
+      .finally(() => remoteLaunches.delete(key));
+    return {
+      worker: name, host, app, state: 'pending-approval',
+      note: `nothing runs on ${host} until the owner approves its card on the dashboard: a "remote" event says when it started or why not`,
+    };
+  }
+
+  // `key`: its remoteLaunches entry, dropped once the run is loaded (a launch
+  // loaded without one is a lost one: lostLaunch).
+  function remoteStarted(runDir, workerId, r, provider, key) {
+    const tabId = r && typeof r.tabId === 'string' && r.tabId ? r.tabId.slice(0, 100) : null;
+    if (!tabId) return remoteFailed(runDir, workerId, Object.assign(new Error('the host provider named no tab'), { code: 'failed' }), key);
+    const run = loadRun(runDir);
+    remoteLaunches.delete(key);
+    const w = run?.workers.find(x => x.id === workerId);
+    if (!w) return;
+    // Closed (close_worker, end_run) while the owner was deciding: stop it again.
+    if (w.closed) { Promise.resolve().then(() => provider.kill({ runId: run.runId, address: w.name })).catch(() => {}); return; }
+    w.remote = { state: 'started', tabId, since: w.remote?.since || null, startedAt: new Date().toISOString() };
+    remoteTabs.set(tabId, { runId: run.runId, workerId });
+    addEvent(run, { worker: w.name, kind: 'remote', quiet: true, text: `${w.name} started on ${w.host} (the owner approved it)` });
+  }
+
+  function remoteFailed(runDir, workerId, e, key) {
+    const run = loadRun(runDir);
+    remoteLaunches.delete(key);
+    const w = run?.workers.find(x => x.id === workerId);
+    if (!w) return;
+    const code = REMOTE_CODES.has(e?.code) ? e.code : 'failed';
+    const error = clip(String(e?.message || e || code), 500);
+    const now = new Date().toISOString();
+    w.remote = { state: 'failed', code, error, since: w.remote?.since || null, at: now };
+    w.exitedAt = now;
+    // Cancelled by the run itself (close_worker, end_run): recorded, not delivered.
+    addEvent(run, { worker: w.name, kind: 'remote', delivered: code === 'cancelled' && !!w.closed, text: `${w.name}: the launch on ${w.host} came to ${code}: ${error}` });
+    pumpQueue(runDir);   // its slot is free
+  }
+
+  // A launch left waiting by an earlier server process: nobody waits for it now.
+  function lostLaunch(run, w) {
+    return w.remote?.state === 'pending-approval' && !remoteLaunches.has(remoteKey(run, w));
+  }
+
+  function recoverRemote(run) {
+    const now = new Date().toISOString();
+    for (const w of run.workers) {
+      if (!lostLaunch(run, w)) continue;
+      w.remote = { state: 'failed', code: 'cancelled', error: 'the server restarted before the owner approved it: nothing was launched', since: w.remote.since || null, at: now };
+      w.exitedAt = now;
+      addEvent(run, { worker: w.name, kind: 'remote', text: `${w.name}: the launch on ${w.host} was lost: the server restarted before the owner approved it. Launch it again if it is still wanted` });
+    }
+  }
+
+  // The member's tab: { tabId, session } (an ExternalSession), or null. By its
+  // recorded tabId, else by the tab's stamp (a tab re-adopted after a restart).
+  function remoteLive(run, w) {
+    if (w.remote?.state !== 'started' || typeof mgr.getExternal !== 'function') return null;
+    const ours = (s) => {
+      const st = s?.getSettings?.() || {};
+      return st.orchestration?.runId === run.runId && st.orchestration?.name === w.name && (!st.externalHost || st.externalHost === w.host);
+    };
+    const byId = mgr.getExternal(w.remote.tabId);
+    if (byId && ours(byId)) return { tabId: w.remote.tabId, session: byId };
+    const ext = mgr.external instanceof Map ? [...mgr.external.values()] : [];
+    const s = ext.find(ours);
+    if (!s) return null;
+    remoteTabs.set(s.tabId, { runId: run.runId, workerId: w.id });
+    return { tabId: s.tabId, session: s };
+  }
+
+  // A worker's live tab, local or remote: { tabId, session } or null.
+  function liveOf(run, w) {
+    return w.remote ? remoteLive(run, w) : workerSession(run, w.id);
+  }
+
+  // Holds one of the run's MAX_WORKERS slots: waiting for the owner in this
+  // process, running, or started and not back since a restart.
+  function remoteHoldsSlot(run, w) {
+    if (w.closed || w.deleted) return false;
+    if (w.remote.state === 'pending-approval') return remoteLaunches.has(remoteKey(run, w));
+    if (w.remote.state !== 'started') return false;
+    if (remoteLive(run, w)?.session.running) return true;
+    return awaitingRestore(run, w);
+  }
+
+  // The panel's state word for a remote member.
+  function remoteState(run, w, live) {
+    const r = w.remote || {};
+    if (r.state === 'pending-approval') return remoteLaunches.has(remoteKey(run, w)) ? 'pending-approval' : 'not started';
+    if (r.state === 'failed') return w.closed ? 'closed' : `launch ${r.code || 'failed'}`;
+    if (w.closed) return 'closed';   // its tab may still be closing on its host
+    if (live?.session.running) return memberState(live.session, w);
+    if (w.exitedAt && !w.shutdownAt) return 'exited';
+    return 'disconnected';
+  }
+
+  function killRemote(run, w) {
+    const provider = hostProvider;
+    if (!provider) return false;
+    Promise.resolve().then(() => provider.kill({ runId: run.runId, address: w.name }))
+      .catch(e => console.error(`[orchestration] kill of ${w.name}:`, e?.message || e));
+    return true;
+  }
+
+  // Close a remote member (close_worker, end_run): killed through the provider,
+  // marked closed. The caller saves the run.
+  function closeRemote(run, w) {
+    const live = remoteLive(run, w);
+    const now = new Date().toISOString();
+    if (typeof live?.session.costUsd === 'number' && live.session.costUsd > 0) w.costUsd = live.session.costUsd;
+    w.closed = true;
+    w.closedAt = now;
+    if (!w.exitedAt || w.shutdownAt) w.exitedAt = now;
+    delete w.shutdownAt;
+    delete w.turnStopped;
+    return killRemote(run, w);
+  }
+
+  // The provider's deliver(): a remote member's report or message, into the run
+  // as a local worker's report tool / SendMessage would. False when ignored.
+  function deliverRemote(msg) {
+    if (!msg || typeof msg !== 'object') return false;
+    const run = typeof msg.runId === 'string' ? getRun(msg.runId) : null;
+    const w = run?.workers.find(x => x.remote && x.name === msg.address);
+    if (!w) return false;
+    if (msg.kind === 'report') {
+      if (!REMOTE_STATUSES.has(msg.status)) return false;
+      w.lastReport = { status: msg.status, summary: clip(msg.summary, 32000), filesChanged: [], verified: '', open: '', at: new Date().toISOString() };
+      delete w.turnStopped;
+      addEvent(run, { worker: w.name, kind: 'report', text: reportParts(w).join(' — '), quiet: !WAKE_STATUSES.has(msg.status) });
+      pumpQueue(run.runDir);   // a queued launch may wait on this worker
+      return true;
+    }
+    if (msg.kind === 'message') {
+      const text = String(msg.text ?? '').trim();
+      if (!text) return false;
+      const orch = orchestratorSession(run);
+      if (orch?.session.running && !run.pausing) {
+        deliver(orch.session, run.orchestrator, `[message from ${w.name}] ${clip(text, 32000)}`, w.name);
+        emitTo(orch.session, run, { platform: { kind: 'message', from: w.name, to: run.orchestrator, text } });
+      } else {
+        // Not lost while the orchestrator is away: it comes with the events.
+        addEvent(run, { worker: w.name, kind: 'message', text: `message from ${w.name}: ${clip(text, EVENT_ITEM_LIMIT - 200)}` });
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // A remote member's tab exited (cli:exit), or one came back (cli:spawned,
+  // re-adopted by the provider after a restart or a reconnect).
+  function onRemoteBroadcast(m) {
+    if (m?.type === 'cli:exit' && remoteTabs.has(m.tabId)) {
+      const { runId, workerId } = remoteTabs.get(m.tabId);
+      const run = getRun(runId);
+      const w = run?.workers.find(x => x.id === workerId);
+      if (!w || w.remote?.tabId !== m.tabId) return;
+      if (w.exitedAt && !w.shutdownAt) return;
+      w.exitedAt = new Date().toISOString();
+      const live = mgr.getExternal?.(m.tabId);
+      if (typeof live?.costUsd === 'number' && live.costUsd > 0) w.costUsd = live.costUsd;
+      if (mgr._shuttingDown) { w.shutdownAt = w.exitedAt; saveRun(run); return; }
+      delete w.shutdownAt;
+      if (w.closed) { saveRun(run); return; }
+      addEvent(run, { worker: w.name, kind: 'exited', text: `${w.name} exited on ${w.host}${w.lastReport ? ` (last report: ${w.lastReport.status})` : ' without reporting'}` });
+      pumpQueue(run.runDir);
+      return;
+    }
+    if (m?.type === 'cli:spawned' && m.external && typeof m.tabId === 'string') {
+      const st = m.settings?.orchestration;
+      if (!st?.runId || !st.name) return;
+      const run = getRun(st.runId);
+      const w = run?.workers.find(x => x.remote?.state === 'started' && x.name === st.name);
+      if (!w || w.closed || (m.settings.externalHost && m.settings.externalHost !== w.host)) return;
+      remoteTabs.set(m.tabId, { runId: run.runId, workerId: w.id });
+      const back = mgr.getExternal?.(m.tabId)?.running === true && (w.shutdownAt || w.boot !== BOOT);
+      if (w.remote.tabId === m.tabId && !back) return;
+      w.remote.tabId = m.tabId;
+      if (back) { w.exitedAt = null; delete w.shutdownAt; w.boot = BOOT; }
+      saveRun(run);
+    }
+  }
+  if (typeof broadcaster.onBroadcast === 'function') broadcaster.onBroadcast(onRemoteBroadcast);
+
+  // --- Mirror runs (ctx.orchestration.openMirrorRun) ---
+  //
+  // The slave side of remote workers: a run whose orchestrator is an address
+  // on another machine (run.orchestrator, run.mirror { key, host, closed }),
+  // with no orchestrator session here. Keyed by the add-on's `key` in
+  // <dataHome>/data/mirror-runs/index.json (key -> { runId, runDir }); the run
+  // lives in <dataHome>/data/mirror-runs/<runId>/ and re-opening a key returns
+  // it. Its members are ordinary SDK workers (launchWorker): their report and
+  // their SendMessage to the orchestrator go to the add-on's deliver(); submit
+  // / interrupt / kill act on one by its address. No worktree, queue or
+  // landing; the dashboard cannot start, resume, refresh or pause an
+  // orchestrator for it (assertNotMirror).
+
+  const KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
+  const ADDRESS_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+  // Settings a member's caller may not set: the run decides them.
+  const RESERVED = new Set(['name', 'orchestration', 'appendSystemPrompt', 'settingsFile', 'engine', 'auth', 'model', 'sessionDir', 'sessionsRoot', 'agents', 'grants', 'maxBudgetUsd', 'modelMap']);
+
+  function mirrorDir() { return path.join(dataHome, 'data', 'mirror-runs'); }
+  function mirrorIndexFile() { return path.join(mirrorDir(), 'index.json'); }
+
+  function assertNotMirror(run) {
+    if (run?.mirror) throw new Error(`run ${run.runId} is a mirror of the orchestrator ${run.orchestrator} on ${run.mirror.host}: it is run from there`);
+  }
+
+  // openMirrorRun({ key, orchestrator: { address, host }, deliver }) → the
+  // run's handle. The same key returns the same run (after a restart too).
+  function openMirrorRun({ key, orchestrator, deliver: fn } = {}) {
+    if (typeof key !== 'string' || !KEY_RE.test(key)) throw new Error('openMirrorRun: key must be 1-200 characters of [A-Za-z0-9._:-]');
+    const address = orchestrator?.address;
+    if (typeof address !== 'string' || !ADDRESS_RE.test(address)) throw new Error('openMirrorRun: orchestrator.address must be a session address');
+    const host = typeof orchestrator?.host === 'string' && orchestrator.host.trim() ? clip(orchestrator.host.trim(), 100) : 'another machine';
+    if (typeof fn !== 'function') throw new Error('openMirrorRun: deliver must be a function');
+    const index = readJsonOr(mirrorIndexFile(), {});
+    let run = index[key]?.runDir ? loadRun(index[key].runDir) : null;
+    if (!run?.mirror || run.mirror.key !== key) run = null;
+    if (!run) {
+      const runId = crypto.randomBytes(3).toString('hex');
+      const runDir = path.join(mirrorDir(), runId);
+      fs.mkdirSync(runDir, { recursive: true });
+      run = {
+        runId, runDir, root: runDir, orchestrator: address,
+        mirror: { key, host, closed: false },
+        orchestratorDir: runDir, sessionsRoot: path.join(dataHome, 'data', 'sessions'),
+        isolation: 'none', engine: 'sdk', auth: null, orchestratorModel: null, maxBudgetUsd: null,
+        base: { appendSystemPrompt: '', settingsFile: null, stamps: {} },
+        createdAt: new Date().toISOString(), request: null, closed: false, busy: false, pausing: null, paused: null,
+        compactions: 0, workerSeq: 0, workers: [], events: [], delivered: 0,
+      };
+      index[key] = { runId, runDir };
+      fs.mkdirSync(mirrorDir(), { recursive: true });
+      writeJsonAtomic(mirrorIndexFile(), index);
+    }
+    run.orchestrator = address;
+    run.mirror = { key, host, closed: false };
+    run.closed = false;
+    saveRun(run);
+    runDirs.set(run.runId, run.runDir);
+    mirrorDeliver.set(run.runId, fn);
+    const runId = run.runId;
+    let closed = false;
+    const live = () => {
+      if (closed) throw new Error('this mirror run is closed: open it again');
+      const r = loadRun(run.runDir);
+      if (!r) throw new Error(`mirror run ${runId} is gone`);
+      return r;
+    };
+    const member = (r, addr) => {
+      const w = r.workers.find(x => x.name === String(addr || ''));
+      if (!w) throw new Error(`no member ${addr} in mirror run ${runId}`);
+      return w;
+    };
+    return Object.freeze({
+      runId,
+      launchWorker: async (opts) => mirrorLaunch(live(), opts),
+      submit: async (addr, text, { from } = {}) => {
+        const r = live();
+        const w = member(r, addr);
+        const body = String(text ?? '').trim();
+        if (!body) throw new Error('text is required');
+        const sender = typeof from === 'string' && from.trim() ? clip(from.trim(), 120) : r.orchestrator;
+        const ws = workerSession(r, w.id);
+        if (!ws?.session.running) throw new Error(`${w.name} is not running`);
+        const how = deliver(ws.session, w.name, `[message from ${sender}] ${body}`, sender);
+        delete w.turnStopped;
+        addFollowUp(r, w.id, body);
+        emitTo(ws.session, r, { platform: { kind: 'message', from: sender, to: w.name, text: body } });
+        return { delivered: true, how };
+      },
+      interrupt: async (addr) => {
+        const r = live();
+        const w = member(r, addr);
+        const ws = workerSession(r, w.id);
+        if (!ws?.session.running) throw new Error(`${w.name} is not running`);
+        vol(w.name).stopping = true;
+        if (typeof ws.session.interrupt === 'function') await ws.session.interrupt();
+        else ws.session.write?.('\x1b');
+        return { interrupted: true };
+      },
+      kill: async (addr) => {
+        const r = live();
+        const w = member(r, addr);
+        const ws = workerSession(r, w.id);
+        if (ws?.session.running) closeLive(r, w, ws);
+        else if (!w.closed) { w.closed = true; w.closedAt = new Date().toISOString(); saveRun(r); }
+        return { killed: true };
+      },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        const r = loadRun(run.runDir);
+        if (mirrorDeliver.get(runId) === fn) mirrorDeliver.delete(runId);
+        if (!r) return;
+        for (const w of r.workers) {
+          const ws = workerSession(r, w.id);
+          if (ws?.session.running) closeLive(r, w, ws);
+        }
+        r.mirror = { ...r.mirror, closed: true };
+        r.closed = true;
+        saveRun(r);
+      },
+    });
+  }
+
+  // A member of a mirror run: { title, task, cwd, auth?, model?, settings? }
+  // (settings: the caller's stamps, and sessionsRoot) → { tabId, address }.
+  function mirrorLaunch(run, { title, task, cwd, auth, model, settings } = {}) {
+    if (typeof task !== 'string' || !task.trim()) throw new Error('task is required');
+    if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error('cwd must be an existing absolute directory');
+    if (auth != null && auth !== 'apikey' && auth !== 'subscription') throw new Error('auth must be "apikey" or "subscription"');
+    if (model != null && model !== '' && (typeof model !== 'string' || !MODEL_RE.test(model))) throw new Error('model is not a model name');
+    if (freeSlots(run) <= 0) throw new Error(`${MAX_WORKERS} members of this run are running`);
+    let stamps = {};
+    try { stamps = settings && typeof settings === 'object' && !Array.isArray(settings) ? JSON.parse(JSON.stringify(settings)) : {}; } catch { stamps = {}; }
+    const root = typeof stamps.sessionsRoot === 'string' && path.isAbsolute(stamps.sessionsRoot) ? stamps.sessionsRoot : run.sessionsRoot;
+    for (const k of Object.keys(stamps)) if (RESERVED.has(k)) delete stamps[k];
+    const id = `w${++run.workerSeq}`;
+    const name = `${run.orchestrator}-${id}-${slugify(title)}`;
+    const worker = {
+      id, name, title: clip(title || id, 200), task, cwd: realpathOr(cwd), branch: null, worktree: null,
+      sessionDir: path.join(root, name),
+      launchedAt: new Date().toISOString(), exitedAt: null, lastReport: null, boot: BOOT,
+      ...(model ? { model } : {}), ...(auth ? { auth } : {}),
+      ...(Object.keys(stamps).length ? { stamps } : {}),
+    };
+    checkPacks(run, worker);
+    run.workers.push(worker);
+    run.closed = false;
+    saveRun(run);
+    const tabId = spawnWorker(run, worker, worker.task);
+    return { tabId, address: name };
+  }
+
+  // A member's report / message to the mirror's orchestrator → the add-on's
+  // deliver(). 'relayed', or why not (none registered since a restart).
+  function relayMirror(run, msg) {
+    const fn = mirrorDeliver.get(run.runId);
+    if (!fn) {
+      addEvent(run, { worker: msg.address, kind: 'mirror', text: `not relayed to ${run.orchestrator} (the run is not open): ${clip(msg.summary ?? msg.text, 300)}` });
+      return 'not relayed: the run is not open';
+    }
+    try { fn(msg); } catch (e) { console.error(`[orchestration] mirror deliver (${run.runId}):`, e.message); return `not relayed: ${e.message}`; }
+    return 'relayed';
+  }
+
+  // A local report as the one text the remote orchestrator gets.
+  function mirrorSummary(w, owner) {
+    const r = w.lastReport;
+    return [
+      r.summary,
+      r.filesChanged?.length ? `files: ${r.filesChanged.join(', ')}` : '',
+      r.verified ? `verified: ${r.verified}` : '',
+      r.open ? `open: ${r.open}` : '',
+      owner?.touched.length ? `for the owner: ${owner.touched.map(i => i.what).join('; ')}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
   // --- Launch queue (run.queue) ---
   //
   // A launch that cannot start (the run full, its `after` workers not finished)
@@ -886,11 +1409,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function awaitingRestore(run, w) {
     if (w.boot === BOOT || w.closed || w.paused || w.deleted || w.abandoned) return false;
     if (w.exitedAt && !w.shutdownAt) return false;
+    if (w.remote) return w.remote.state === 'started' && !remoteLive(run, w)?.session.running && !depFinished(w);
     return !workerSession(run, w.id)?.session.running && !depFinished(w);
   }
 
   function freeSlots(run) {
-    return MAX_WORKERS - run.workers.filter(w => workerSession(run, w.id)?.session.running || awaitingRestore(run, w)).length;
+    return MAX_WORKERS - run.workers.filter(w => (w.remote ? remoteHoldsSlot(run, w) : workerSession(run, w.id)?.session.running || awaitingRestore(run, w))).length;
   }
 
   // What a dependency that is not finished came to, when it will not finish
@@ -953,7 +1477,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       return {
         id: e.id, position: i + 1, title: e.title, waitingFor, queuedAt: e.at,
         after: (e.after || []).map(id => run.workers.find(w => w.id === id)?.name || id),
-        brief: clip(e.task, 300), cwd: e.cwd, ...(e.model ? { model: e.model } : {}), ...(e.area ? { area: e.area } : {}),
+        brief: clip(e.task, 300), ...(e.host ? { host: e.host, app: e.app } : { cwd: e.cwd }), ...(e.model ? { model: e.model } : {}), ...(e.area ? { area: e.area } : {}),
       };
     });
   }
@@ -1063,8 +1587,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const card = workerCard(run, worker);
     return {
       ...run.base.stamps,
+      ...(worker.stamps || {}),
       engine: run.engine || 'cli',
       ...authOf(run),
+      ...(worker.auth ? { auth: worker.auth } : {}),
       name: worker.name,
       ...(worker.sessionDir ? { sessionDir: worker.sessionDir } : {}),
       orchestration: { runId: run.runId, role: 'worker', workerId: worker.id, orchestrator: run.orchestrator, runDir: run.runDir },
@@ -1102,15 +1628,24 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // The orchestrator MCP's extra parameters (lib/orchestrator-mcp.js asks at
   // tools/list), by tool: `tools` while a registered pack consumes it, else
   // none, so the schemas read as without packs.
+  // `host` / `app` while a host provider names at least one host.
   function toolParams() {
-    if (!toolPacks.consumedGrants().includes('tools')) return { params: {} };
-    const items = { type: 'string' };
-    return {
-      params: {
-        launch_cli: { tools: { type: 'array', items, description: 'Add-on tools this worker may use, by name (e.g. app__tool). Fixed for the worker: kept across pause, resume and restart. Omit for none.' } },
-        resume_worker: { tools: { type: 'array', items, description: 'Replaces the worker\'s add-on tools (an empty array clears them). Omitted: it keeps the ones it has.' } },
-      },
-    };
+    const params = {};
+    if (toolPacks.consumedGrants().includes('tools')) {
+      const items = { type: 'string' };
+      params.launch_cli = { tools: { type: 'array', items, description: 'Add-on tools this worker may use, by name (e.g. app__tool). Fixed for the worker: kept across pause, resume and restart. Omit for none.' } };
+      params.resume_worker = { tools: { type: 'array', items, description: 'Replaces the worker\'s add-on tools (an empty array clears them). Omitted: it keeps the ones it has.' } };
+    }
+    const hosts = hostList();
+    if (hosts.length) {
+      const names = hosts.map(h => `${h.name}${h.available ? '' : ` (unavailable: ${h.reason || 'no reason given'})`}`).join(', ');
+      params.launch_cli = {
+        ...(params.launch_cli || {}),
+        host: { type: 'string', description: `Run this worker on another machine: ${names}. The owner approves the launch on a card first: the call returns at once (state pending-approval) and a "remote" event says when it started or why not. Not with cwd, isolation, area or tools; it cannot be resumed.` },
+        app: { type: 'string', description: 'With host: the app on that machine the worker runs in ([a-z0-9-]). Default: the run\'s app' },
+      };
+    }
+    return { params };
   }
 
   // A new session (fresh transcript) for a worker, with `prompt` auto-submitted.
@@ -1140,6 +1675,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       lastReport: w.lastReport ? { status: w.lastReport.status, summary: clip(w.lastReport.summary, 160) } : null,
       branch: w.branch, todo: w.todo, notes: w.notes,
       ...(w.grants ? { grants: w.grants } : {}),
+      ...(w.host ? { host: w.host, remote: w.remote } : {}),
     };
   }
 
@@ -1203,6 +1739,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       notes: path.join(orchestratorDir(run), 'NOTES.md'),
       pausing: !!run.pausing,
       paused: run.paused || null,
+      ...(run.mirror ? { mirror: { key: run.mirror.key, host: run.mirror.host, orchestrator: run.orchestrator, closed: !!run.mirror.closed } } : {}),
       orchestratorRunning: !!orch?.session.running,
       orchestratorSessId: orch?.session.sessId || savedId(st => st.role === 'orchestrator'),
       orchestratorTabId: orch?.tabId || null,
@@ -1215,6 +1752,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       // Launches waiting for a slot or their `after` workers (launch_cli).
       queue: queueList(run),
       workers: run.workers.map(w => {
+        if (w.remote) return describeRemote(run, w);
         const live = workerSession(run, w.id);
         return {
           worker: w.name, name: w.name, id: w.id, title: w.title, running: !!live?.session.running, tabId: live?.tabId || null,
@@ -1236,6 +1774,33 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           live: live && control ? control.liveOf(live.session) : null,
         };
       }),
+    };
+  }
+
+  // describeRun's entry for a remote member: no cwd, branch or worktree; its
+  // TODO / NOTES are the provider's copy (the tab's settings.sessionDir).
+  function describeRemote(run, w) {
+    const live = remoteLive(run, w);
+    const dir = live?.session.getSettings().sessionDir || null;
+    const r = w.remote || {};
+    return {
+      worker: w.name, name: w.name, id: w.id, title: w.title, running: !!live?.session.running, tabId: live?.tabId || null,
+      sessId: live?.session.sessId || null, engine: 'sdk',
+      host: w.host, app: w.app,
+      remote: { state: r.state, ...(r.code ? { code: r.code, error: r.error } : {}), ...(r.startedAt ? { startedAt: r.startedAt } : {}) },
+      model: w.model || live?.session.getSettings().model || null,
+      state: remoteState(run, w, live),
+      cost: costOf(live?.session, w.costUsd, null),
+      cwd: null, branch: null, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: w.lastReport,
+      paused: false, abandoned: false,
+      closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
+      ...(w.turnStopped ? { turnStopped: w.turnStopped } : {}),
+      brief: clip(w.task, 300),
+      context: live?.session.running ? contextOf(live.session) : null,
+      todo: dir ? path.join(dir, 'TODO.md') : null,
+      notes: dir ? path.join(dir, 'NOTES.md') : null,
+      progress: folderSummary(dir),
+      live: null,
     };
   }
 
@@ -1265,10 +1830,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       out.push({
         runId,
         name: run.orchestrator,
-        title: (orch ? orch.session.title : entry?.title) || null,
+        title: (orch ? orch.session.title : entry?.title) || (run.mirror ? `${run.orchestrator} on ${run.mirror.host}` : null),
         cwd: (orch ? orch.session.cwd : entry?.cwd) || run.root,
         engine: run.engine || 'cli',
-        state: running ? memberState(orch.session, null) : run.pausing ? 'pausing' : run.paused ? 'paused' : run.closed ? 'closed' : 'exited',
+        state: running ? memberState(orch.session, null) : run.mirror ? (run.closed ? 'closed' : 'mirror') : run.pausing ? 'pausing' : run.paused ? 'paused' : run.closed ? 'closed' : 'exited',
         busy: running && orch.session.busy === true,
         paused: !!run.paused,
         pausing: !!run.pausing,
@@ -1276,6 +1841,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         orchestratorSessId: orch?.session.sessId || entry?.id || null,
         workerCount: run.workers.length,
         updatedAt,
+        ...(run.mirror ? { mirror: { host: run.mirror.host, orchestrator: run.orchestrator } } : {}),
       });
     }
     return out.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
@@ -1295,6 +1861,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       if (r.removed) removed.push(w.name);
       else kept.push({ worker: w.name, reason: r.kept, ...(r.files?.length ? { files: r.files } : {}) });
     }
+    // Remote members stop: their host keeps nothing for the run.
+    const remoteClosed = [];
+    for (const w of run.workers) {
+      if (!w.remote || w.closed) continue;
+      if (remoteHoldsSlot(run, w)) { closeRemote(run, w); remoteClosed.push(w.name); }
+    }
     if (kept.length === 0) run.closed = true;
     // Queued launches go: an ended run starts nothing by itself.
     const dropped = (run.queue || []).map(e => ({ id: e.id, title: e.title }));
@@ -1302,6 +1874,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     saveRun(run);
     return {
       removed, kept, closed: run.closed,
+      ...(remoteClosed.length ? { remoteClosed } : {}),
       ...(dropped.length ? { queueDropped: dropped, queueNote: `${dropped.length} queued launch(es) dropped (${dropped.map(e => e.id).join(', ')}): launch them again with launch_cli if they are still wanted` } : {}),
     };
   }
@@ -1729,9 +2302,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // writes its own last and is closed too. A run whose orchestrator is not
   // running pauses its workers directly.
   function pauseRun(runId) {
-    if (!control) throw new Error('pause is not available');
     const run = getRun(runId);
     if (!run) throw new Error('run not found');
+    assertNotMirror(run);
+    if (!control) throw new Error('pause is not available');
     if (run.pausing) return { already: true };
     const orch = orchestratorSession(run);
     if (orch && control.isPausing(orch.session)) throw new Error('the orchestrator is being refreshed; pause the run once the fresh one is up');
@@ -1834,6 +2408,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!control) throw new Error('refresh is not available');
     const run = getRun(runId);
     if (!run) throw new Error('run not found');
+    assertNotMirror(run);
     if (run.pausing) throw new Error('the run is being paused');
     const orch = orchestratorSession(run);
     if (!orch?.session.running) throw new Error('the orchestrator is not running: restart it fresh from the "+" menu');
@@ -1842,7 +2417,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   function orchestratorSettings(run) {
-    const card = orchestratorCard(run);
+    const card = orchestratorCard(run, { hosts: hostList() });
     return {
       ...run.base.stamps,
       engine: run.engine || 'cli',
@@ -2071,6 +2646,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   function freshOrchestrator(run, { settings, title, replaces, reason = 'paused' } = {}) {
+    assertNotMirror(run);
     const seed = writeSeed(run, reason);
     const paused = run.workers.filter(w => w.paused).length;
     const prompt = [
@@ -2101,6 +2677,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function resumeRun(runId, { fresh = false } = {}) {
     const run = getRun(runId);
     if (!run) throw new Error('run not found');
+    assertNotMirror(run);
     if (orchestratorSession(run)?.session.running) throw new Error('the orchestrator is already running');
     const entry = savedMember(run, st => st.role === 'orchestrator');
     const lost = !fresh && !control?.canContinue(entry);
@@ -2153,6 +2730,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // A run ended with end_run is reopened. `tools` (resume_worker) replaces
   // its grants; omitted, it keeps them.
   function bringBack(run, w, { mode = 'continue', message = '', tools } = {}) {
+    if (w.remote) throw new Error(`${w.name} is a remote worker on ${w.host}: it cannot be resumed. Launch a new one with launch_cli({ host }) from its brief and its last report`);
     if (workerSession(run, w.id)?.session.running) throw new Error(`${w.name} is already running: send it a message instead`);
     assertCapacity(run);
     const grants = tools === undefined ? w.grants || null : grantsOf(tools);
@@ -2227,6 +2805,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (run.pausing) throw new Error('this run is being paused');
     const w = run.workers.find(x => x.name === worker || x.id === worker);
     if (!w) throw new Error(`no worker ${worker} in this run`);
+    if (w.remote) return closeRemoteWorker(run, w);
     const live = workerSession(run, w.id);
     if (!live?.session.running) throw new Error(`${w.name} is not running${w.closed ? ' (already closed)' : w.paused ? ' (paused)' : ''}`);
     if (live.session.busy) throw new Error(`${w.name} is busy: close it once it has reported and gone idle, or stop it first with stop_worker`);
@@ -2245,6 +2824,32 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
     pumpQueue(run.runDir);
     return out;
+  }
+
+  // close_worker of a remote member: a launch still waiting for the owner is
+  // cancelled; a running one closes on the same terms as a local worker; one
+  // not back since a restart is let go. provider.kill does it.
+  function closeRemoteWorker(run, w) {
+    const live = remoteLive(run, w);
+    const st = remoteState(run, w, live);
+    const waiting = st === 'pending-approval';
+    if (!waiting && !remoteHoldsSlot(run, w)) throw new Error(`${w.name} is not running (${st})`);
+    if (live?.session.running) {
+      if (live.session.busy) throw new Error(`${w.name} is busy: close it once it has reported and gone idle, or stop it first with stop_worker`);
+      const status = w.lastReport?.status;
+      if (!['done', 'failed'].includes(status) && !w.turnStopped) {
+        throw new Error(`${w.name} has not finished (last report: ${status || 'none'}): only a worker whose last report is done or failed, or one stopped with stop_worker, can be closed`);
+      }
+    }
+    const killed = closeRemote(run, w);
+    saveRun(run);
+    pumpQueue(run.runDir);
+    return {
+      worker: w.name, host: w.host, closed: true, closedAt: w.closedAt, lastReport: w.lastReport?.status || null,
+      ...(waiting ? { note: 'its launch was cancelled before the owner approved it' } : {}),
+      ...(killed ? {} : { note: 'no host provider is registered: it is marked closed here only' }),
+      resume: 'a remote worker cannot be resumed: launch a new one with launch_cli({ host })',
+    };
   }
 
   // Close a live worker quietly (close_worker, or `auto`: the queued launch it
@@ -2279,11 +2884,17 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (run.pausing) throw new Error('this run is being paused');
     const w = run.workers.find(x => x.name === worker || x.id === worker);
     if (!w) throw new Error(`no worker ${worker} in this run`);
-    const live = workerSession(run, w.id);
+    const live = liveOf(run, w);
+    if (w.remote && !live?.session.running) {
+      const st = remoteState(run, w, live);
+      throw new Error(`${w.name} (on ${w.host}) is ${st}${st === 'pending-approval' ? ': nothing runs yet; close_worker cancels its launch' : ''}`);
+    }
     if (!live?.session.running) throw new Error(`${w.name} is not running${w.closed ? ' (closed)' : w.paused ? ' (paused)' : ''}`);
     if (!live.session.busy) throw new Error(`${w.name} is idle: nothing to stop. Send it new instructions with SendMessage, or close it with close_worker`);
     vol(w.name).stopping = true;
-    if (typeof live.session.interrupt === 'function') live.session.interrupt();
+    // A remote member: its tab adapter's interrupt (the turn ends on its host).
+    if (w.remote) live.session.call('interrupt').catch(e => console.error(`[orchestration] interrupt of ${w.name}:`, e.message));
+    else if (typeof live.session.interrupt === 'function') live.session.interrupt();
     else live.session.write('\x1b');
     const at = new Date().toISOString();
     const why = clip(String(reason || '').trim(), 500);
@@ -2338,6 +2949,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
     for (const w of run?.workers || []) {
       if (w.worktree && !removeWorktree(w)) keptBranches.push(w.branch);
+      if (w.remote && !w.closed && remoteHoldsSlot(run, w)) killRemote(run, w);
     }
     for (const e of entries) mgr.deleteSavedSession(e.id);
     const dirs = [run?.orchestratorDir, ...(run?.workers || []).map(w => w.sessionDir)];
@@ -2401,7 +3013,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // last report is done or failed, or it was stopped (stop_worker). Open TODO
   // rows do not hold it.
   function workerAvailable(run, w) {
-    const live = workerSession(run, w.id);
+    const live = liveOf(run, w);
     return !!live?.session.running && !live.session.busy && (['done', 'failed'].includes(w.lastReport?.status) || !!w.turnStopped);
   }
 
@@ -2462,6 +3074,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!evented) addEvent(run, { worker: w.name, kind: 'report', text: parts.join(' — '), quiet: !WAKE_STATUSES.has(w.lastReport.status) });
     else saveRun(run);   // the landing job reads lastReport from run.json
     pumpQueue(run.runDir);   // a queued launch may wait on this worker
+    if (run.mirror) relayMirror(run, { address: w.name, kind: 'report', status: w.lastReport.status, summary: mirrorSummary(w, owner) });
     return { ok: true, ...(note ? { landing: note } : {}), ...(owner ? { ownerItems: { added: owner.added, updated: owner.updated, ignored: owner.ignored } } : {}) };
   }
 
@@ -2646,7 +3259,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // The run's members, by address: the orchestrator, then every worker.
   function members(run) {
     const out = [{ name: run.orchestrator, role: 'orchestrator', id: null, title: 'orchestrator', worker: null, live: orchestratorSession(run) }];
-    for (const w of run.workers) out.push({ name: w.name, role: 'worker', id: w.id, title: w.title, worker: w, live: workerSession(run, w.id) });
+    for (const w of run.workers) out.push({ name: w.name, role: 'worker', id: w.id, title: w.title, worker: w, live: liveOf(run, w) });
     return out;
   }
 
@@ -2747,20 +3360,31 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!text) throw new Error('message is required');
     const target = resolveMember(run, to);
     if (target.name === from) throw new Error('that is your own address');
+    if (run.mirror && target.role === 'orchestrator') {
+      const how = relayMirror(run, { address: from, kind: 'message', text });
+      emitTo(session, run, { platform: { kind: 'message', from, to: target.name, text } });
+      return { ok: true, to: target.name, delivery: how };
+    }
     const ts = target.live?.session;
+    if (target.worker?.remote && !ts?.running) {
+      const st = remoteState(run, target.worker, target.live);
+      throw new Error(`${target.name} (on ${target.worker.host}) is ${st}${st === 'pending-approval' ? ': it gets its brief when the owner approves; nothing to send to yet' : ''}`);
+    }
     if (!ts?.running) {
       throw new Error(target.role === 'worker'
         ? `${target.name} is not running${target.worker.paused ? ' (paused)' : ''}${stamp.role === 'orchestrator' ? ': bring it back with resume_worker, passing this as its message' : ''}`
         : `the orchestrator ${target.name} is not running`);
     }
-    const delivery = deliver(ts, target.name, `[message from ${from}] ${text}`, from);
+    const delivery = target.worker?.remote
+      ? submitRemote(ts, target.name, `[message from ${from}] ${text}`, from)
+      : deliver(ts, target.name, `[message from ${from}] ${text}`, from);
     if (stamp.role === 'orchestrator' && target.role === 'worker') {
       delete target.worker.turnStopped;   // its new instructions: no longer a stopped worker
       addFollowUp(run, target.id, text);
     }
     const ev = { platform: { kind: 'message', from, to: target.name, text } };
     emitTo(session, run, ev);
-    emitTo(ts, run, ev);
+    if (!target.worker?.remote) emitTo(ts, run, ev);   // a remote tab's events are its provider's
     return { ok: true, to: target.name, delivery };
   }
 
@@ -2775,6 +3399,13 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       queueMessage(stampOf(ts).runDir, name, body);
       return 'queued';
     }
+    return 'submitted';
+  }
+
+  // Into a remote member: its tab adapter's submit(text, { from }). A refusal
+  // comes back after this returns: logged, not thrown.
+  function submitRemote(ts, name, body, from) {
+    ts.call('submit', body, { from }).catch(e => console.error(`[orchestration] message to ${name}:`, e.message));
     return 'submitted';
   }
 
@@ -2803,7 +3434,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       runId: run.runId,
       agents: members(run).map(m => ({
         name: m.name, role: m.role, title: m.title,
-        state: memberState(m.live?.session, m.worker),
+        state: m.worker?.remote ? remoteState(run, m.worker, m.live) : run.mirror && m.role === 'orchestrator' ? `on ${run.mirror.host}` : memberState(m.live?.session, m.worker),
+        ...(m.worker?.host ? { host: m.worker.host } : {}),
         ...(m.worker?.lastReport ? { lastReport: `${m.worker.lastReport.status}: ${clip(m.worker.lastReport.summary, 200)}` } : {}),
       })),
     };
@@ -2820,6 +3452,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     run.events.push({ seq, at: new Date().toISOString(), worker, kind, text, ...(quiet ? { quiet: true } : {}) });
     if (run.events.length > 200) run.events = run.events.slice(-200);
     if (delivered && run.delivered === seq - 1) run.delivered = seq;
+    // A mirror run's orchestrator is on another machine: nothing waits here.
+    if (run.mirror) run.delivered = seq;
     const pending = run.delivered < seq;
     if (pending && quiet && !run.quietValve) run.quietValve = { due: new Date(Date.now() + quietValveMs).toISOString() };
     saveRun(run);
@@ -2942,7 +3576,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // --- Hooks ---
 
   function workerLine(w) {
-    const state = w.running ? (w.available ? 'running, finished — close_worker if not reused' : 'running') : w.paused ? 'paused — resume_worker brings it back' : w.closed ? 'closed — resume_worker brings it back' : w.abandoned ? 'abandoned' : 'stopped';
+    const state = w.host
+      ? `on ${w.host}: ${w.running ? (w.available ? 'running, finished — close_worker if not reused' : 'running') : w.state}`
+      : w.running ? (w.available ? 'running, finished — close_worker if not reused' : 'running') : w.paused ? 'paused — resume_worker brings it back' : w.closed ? 'closed — resume_worker brings it back' : w.abandoned ? 'abandoned' : 'stopped';
     const p = w.progress;
     const progress = p ? ` — TODO ${p.done}/${p.total}${p.doing ? `, doing ${p.doing.id}: ${clip(p.doing.description, 80)}` : ''}${p.hasResumeNote ? ', has a resume note' : ''}` : '';
     const last = w.lastReport ? ` — last report: ${w.lastReport.status}: ${clip(w.lastReport.summary, 200)}` : '';
@@ -3191,7 +3827,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
-    memberModelChanged, setRunModelMap, setRunAuth, setRunModel,
+    memberModelChanged, setRunModelMap, setRunAuth, setRunModel, registerHostProvider, hostList, openMirrorRun,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
 }

@@ -184,6 +184,34 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // [{ member, error }] } (setRunAuth also sessions, applied); it rejects,
       // having changed nothing, for an unknown run, an invalid auth or model,
       // a terminal run's billing and a missing credential (setAuth's message).
+      // registerHostProvider({ hosts, launch, kill }) → { deliver(msg),
+      // unregister() }: the machines a run's worker may run on (launch_cli
+      // `host`). hosts() → [{ name, label, available, reason? }];
+      // launch({ runId, address, title, task, host, app, model?, auth?,
+      // orchestrator: { address, title } }) → { tabId } of a
+      // registerExternalSession tab once the owner approved, or rejects with
+      // .code 'declined' | 'refused' | 'unavailable' | 'invalid' | 'failed' |
+      // 'cancelled' (any other: 'failed'); `auth` 'apikey' only when the run
+      // bills the API key. kill({ runId, address }) stops a member, a pending
+      // launch too. deliver({ runId, address, kind: 'report', status,
+      // summary } | { runId, address, kind: 'message', text }) → true, or
+      // false for an unknown run or member: the member's report / message to
+      // its orchestrator, as a local worker's. SendMessage to the member is
+      // its tab adapter's submit(text, { from }). One provider at a time: a
+      // second registration replaces the first, whose handle goes inert;
+      // unregister() is idempotent.
+      // openMirrorRun({ key, orchestrator: { address, host }, deliver }) →
+      // { runId, launchWorker, submit, interrupt, kill, close }: the slave
+      // side, a run whose orchestrator is `address` on `host` (no local
+      // orchestrator; the dashboard cannot start, resume, refresh or pause one).
+      // The same key ([A-Za-z0-9._:-], ≤ 200) returns the same run, after a
+      // restart too. launchWorker({ title, task, cwd (absolute), auth?, model?,
+      // settings? (the caller's stamps and sessionsRoot) }) → { tabId, address
+      // } of an SDK worker; deliver({ address, kind: 'report', status, summary
+      // } | { address, kind: 'message', text }) gets its report and its
+      // SendMessage to the orchestrator. submit(address, text, { from }),
+      // interrupt(address), kill(address) act on a member; close() closes
+      // every live member and the run (open the key again to reuse it).
       // Dashboard profile only.
       ...(orchestration ? {
         orchestration: Object.freeze({
@@ -194,6 +222,10 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
           refreshOrchestrator: (runId) => orchestration.refreshOrchestrator(String(runId || '')),
           setRunAuth: (runId, auth, { continueTurn = false } = {}) => orchestration.setRunAuth(String(runId || ''), auth, { continueTurn: continueTurn === true }),
           setRunModel: (runId, model) => orchestration.setRunModel(String(runId || ''), model),
+          ...(typeof orchestration.registerHostProvider === 'function'
+            ? { registerHostProvider: (provider) => orchestration.registerHostProvider(provider) } : {}),
+          ...(typeof orchestration.openMirrorRun === 'function'
+            ? { openMirrorRun: (opts) => orchestration.openMirrorRun(opts) } : {}),
         }),
       } : {}),
       // Dashboard login (src/login.js), frozen. Dashboard profile only: the
