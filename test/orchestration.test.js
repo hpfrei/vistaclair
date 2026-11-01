@@ -529,9 +529,12 @@ test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds it
 test('launch_cli guards: orchestrator only, at most 5 running, cwd inside the root', async (t) => {
   const { orch, orchSession, mgr, cwd } = await openOrchestrator(t, { isolation: 'none' });
   const ids = [1, 2, 3, 4, 5].map(i => orch.launchWorker(orchSession.instanceId, { title: `t${i}`, task: 'x' }));
-  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' }), /5 workers are running/);
+  const q = orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' });
+  assert.deepStrictEqual([q.queued, q.id, q.position, q.waitingFor], [true, 'q1', 1, ['a free slot']], 'a full run queues the launch');
   mgr.sessions.get(ids[0].tabId).running = false;
-  assert.doesNotThrow(() => orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' }), 'an exited worker frees its slot');
+  const t7 = orch.launchWorker(orchSession.instanceId, { title: 't7', task: 'x' });
+  assert.strictEqual(t7.queued, true, 'a ready queued launch goes first');
+  assert.strictEqual(mgr.launches.at(-1).opts.title, 't6 (w6)', 'an exited worker frees its slot: the oldest queued launch takes it');
 
   assert.throws(() => orch.launchWorker(mgr.sessions.get(ids[1].tabId).instanceId, { title: 'w', task: 'x' }), /only an orchestrator/);
   mgr.sessions.get(ids[1].tabId).running = false;
@@ -965,8 +968,11 @@ test('close_worker: refuses a busy or unfinished worker, closes a done idle one 
   assert.deepStrictEqual(d.workers[0].context, { tokens: 50000, window: 200000, compactAt: 160000, percent: 25 });
   assert.strictEqual(d.workers[1].context, null, 'nothing counted yet');
   assert.strictEqual(d.workers[0].brief, 'brief 1');
-  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' }),
-    new RegExp(`5 workers are running[\\s\\S]*available to close: ${ws[0].worker} \\(last report: done\\)[\\s\\S]*close_worker[\\s\\S]*SendMessage`));
+  // A shared-directory worker is never closed for a queued launch.
+  const q = orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' });
+  assert.strictEqual(q.queued, true);
+  assert.match(q.note, new RegExp(`available to close: ${ws[0].worker} \\(last report: done\\)`));
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId).queue.map(e => [e.id, e.position, e.waitingFor]), [['q1', 1, ['a free slot']]]);
 
   // An open TODO row does not hold it; the result says so.
   fs.writeFileSync(path.join(ws[0].folder, 'TODO.md'), '| id | description | depends on | status |\n|---|---|---|---|\n| 1 | step | — | todo |\n');
@@ -987,15 +993,16 @@ test('close_worker: refuses a busy or unfinished worker, closes a done idle one 
   assert.deepStrictEqual({ state: dw.state, closed: dw.closed, closedAt: dw.closedAt, sessId: dw.sessId, available: dw.available },
     { state: 'closed', closed: true, closedAt: w1.closedAt, sessId: s1.sessId, available: false });
   const lw = orch.listWorkers(orchSession.instanceId).workers;
-  assert.strictEqual(lw.length, 5);
+  assert.strictEqual(lw.length, 6, 'the queued launch started in the freed slot');
   assert.deepStrictEqual(lw[0].lastReport, { status: 'done', summary: 'parser done' });
   assert.strictEqual(lw[0].state, 'closed');
   assert.strictEqual(lw[0].progress, undefined, 'a compact entry');
   assert.ok(lw[1].progress !== undefined, 'a running worker keeps its full entry');
   assert.strictEqual(orch.listAgents(orchSession.instanceId).agents[1].state, 'closed');
 
-  // The slot is free again.
-  assert.doesNotThrow(() => orch.launchWorker(orchSession.instanceId, { title: 't6', task: 'x' }));
+  // The slot is free again: the queued launch takes it.
+  assert.strictEqual(run().queue.length, 0);
+  assert.strictEqual(run().workers.at(-1).title, 't6');
 
   // A pausing run closes nothing.
   orch.report(mgr.sessions.get(ws[1].tabId).instanceId, { status: 'done', summary: 'ok' });
@@ -1753,7 +1760,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     const port = server.address().port;
     const plain = await list(port);
     const props = (tools, name) => Object.keys(tools.find(t => t.name === name).inputSchema.properties);
-    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model']);
+    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after']);
     assert.deepStrictEqual(props(plain, 'resume_worker'), ['worker', 'mode', 'message']);
     // No dashboard at all: the same schemas.
     const closed = http.createServer();
@@ -1767,7 +1774,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     params = setup().orch.toolParams().params;
     clearPacks();
     const granted = await list(port);
-    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'tools']);
+    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'tools']);
     assert.deepStrictEqual(props(granted, 'resume_worker'), ['worker', 'mode', 'message', 'tools']);
     assert.deepStrictEqual(granted.find(t => t.name === 'launch_cli').inputSchema.required, ['title', 'task']);
     assert.deepStrictEqual(granted.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)), plain.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)));
@@ -2453,4 +2460,208 @@ test('the cards name the owner checklist; the MCP server lists owner_items and r
   const src = fs.readFileSync(path.join(CORE, 'lib', 'orchestrator-mcp.js'), 'utf8');
   assert.match(src, /name: "owner_items"/);
   assert.match(src, /ownerItems: \{\s*type: "array"/);
+});
+
+// --- Launch queue (launch_cli on a full run, `after`) ---
+
+// A worker session ends as core reports it: gone from the tabs, the exit listener called.
+function exitWorker(mgr, orch, tabId) {
+  const s = mgr.sessions.get(tabId);
+  s.running = false;
+  mgr.sessions.delete(tabId);
+  orch.onSessionExit(tabId, s);
+}
+const fill = (orch, orchSession, n = 5) => Array.from({ length: n }, (_, i) => orch.launchWorker(orchSession.instanceId, { title: `t${i + 1}`, task: `brief ${i + 1}` }));
+const queueEvents = (run) => run.events.filter(e => e.kind === 'queue');
+
+test('launch queue: a full run queues the launch, a freed slot starts it with a quiet event; list_workers shows it', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const ws = fill(orch, orchSession);
+  const q = orch.launchWorker(orchSession.instanceId, { title: 'six', task: 'brief six', model: 'haiku', area: ['src'] });
+  assert.deepStrictEqual([q.queued, q.id, q.position, q.waitingFor], [true, 'q1', 1, ['a free slot']]);
+  const q2 = orch.launchWorker(orchSession.instanceId, { title: 'seven', task: 'brief seven' });
+  assert.strictEqual(q2.position, 2);
+  assert.strictEqual(mgr.launches.length, 6, 'nothing spawned (the orchestrator and 5 workers)');
+  const listed = orch.listWorkers(orchSession.instanceId).queue;
+  assert.deepStrictEqual(listed.map(e => [e.id, e.position, e.title, e.waitingFor]), [['q1', 1, 'six', ['a free slot']], ['q2', 2, 'seven', ['a free slot']]]);
+  assert.deepStrictEqual([listed[0].brief, listed[0].model, listed[0].area], ['brief six', 'haiku', ['src']]);
+  assert.deepStrictEqual(orch.describeRun(run()).queue.map(e => e.id), ['q1', 'q2'], 'the run board too');
+  assert.strictEqual(run().queue[0].cwd, run().root, 'kept in run.json, cwd resolved');
+
+  exitWorker(mgr, orch, ws[0].tabId);
+  const started = run().workers.at(-1);
+  assert.deepStrictEqual([started.title, started.task, started.model, started.area], ['six', 'brief six', 'haiku', ['src']], 'oldest first, as it was asked');
+  assert.deepStrictEqual(run().queue.map(e => e.id), ['q2']);
+  const ev = queueEvents(run());
+  assert.strictEqual(ev.length, 1);
+  assert.strictEqual(ev[0].quiet, true, 'a start does not wake the orchestrator');
+  assert.match(ev[0].text, new RegExp(`queued launch q1 \\(six\\) started as ${started.name}`));
+});
+
+test('launch queue: `after` waits for a landing or nothing to land — not for a bare done report of a worktree worker', async (t) => {
+  const { orch, orchSession, launch, run, events } = await landingRun(t);
+  const a = launch('a');
+  const q = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'after a', after: [a.worker] });
+  assert.deepStrictEqual([q.queued, q.waitingFor], [true, [`${a.worker} to land`]], 'free slots, but its dependency is not finished');
+  commitAll(a.cwd, { 'a.txt': 'a' });
+  orch.report(a.session.instanceId, { status: 'done', summary: 'added a' });
+  assert.strictEqual(run().queue.length, 1, 'a done report whose landing is in flight is not enough');
+  await orch.landingOf(a.worker);
+  assert.strictEqual(events('landed').length, 1);
+  assert.strictEqual(run().queue.length, 0, 'landed: it starts');
+  const b = run().workers.find(w => w.title === 'b');
+  assert.match(b.task, new RegExp(`^after a\\n\\n\\[vistaclair queue\\] Landed since this launch was queued: ${a.worker} \\(`), 'its brief names the landings since it was queued');
+
+  // Nothing new to land counts too.
+  const c = launch('c');
+  orch.launchWorker(orchSession.instanceId, { title: 'd', task: 'after c', after: ['w3'] });
+  orch.report(c.session.instanceId, { status: 'started', summary: 'on it' });
+  assert.strictEqual(run().queue.length, 1);
+  orch.report(c.session.instanceId, { status: 'done', summary: 'nothing to change' });
+  assert.strictEqual(run().queue.length, 0, 'nothing to land: it starts');
+  assert.ok(run().workers.some(w => w.title === 'd'));
+
+  // A not-landed dependency: one wake event, the launch keeps waiting.
+  const e = launch('e');
+  orch.launchWorker(orchSession.instanceId, { title: 'f', task: 'after e', after: [e.worker] });
+  fs.writeFileSync(path.join(e.cwd, 'f.txt'), 'uncommitted\n');
+  orch.report(e.session.instanceId, { status: 'done', summary: 'forgot to commit' });
+  const warned = queueEvents(run()).filter(x => !x.quiet);
+  assert.strictEqual(warned.length, 1);
+  assert.match(warned[0].text, new RegExp(`queued launch q3 \\(f\\) waits on ${e.worker} which came back not landed \\(uncommitted changes .*\\): cancel_launch it or let it wait`));
+  assert.deepStrictEqual(run().queue.map(x => x.id), ['q3']);
+});
+
+test('launch queue: `after` a shared-directory worker waits for its done report; a failure is one wake event and the entry stays', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const [x, y] = fill(orch, orchSession, 2);
+  const sx = mgr.sessions.get(x.tabId);
+  const sy = mgr.sessions.get(y.tabId);
+  const q = orch.launchWorker(orchSession.instanceId, { title: 'after-x', task: 'z', after: [`${x.worker} [ref]`] });
+  assert.deepStrictEqual(q.waitingFor, [`${x.worker} to report done`]);
+  orch.report(sx.instanceId, { status: 'failed', summary: 'tests red' });
+  const wake = () => queueEvents(run()).filter(e => !e.quiet);
+  assert.strictEqual(wake().length, 1);
+  assert.match(wake()[0].text, new RegExp(`queued launch q1 \\(after-x\\) waits on ${x.worker} which reported failed \\(tests red\\): cancel_launch it or let it wait`));
+  orch.report(sy.instanceId, { status: 'started', summary: 'other work' });
+  orch.closeWorker(orchSession.instanceId, { worker: x.worker });
+  assert.strictEqual(wake().length, 1, 'once: another pump or its close says nothing new');
+  assert.deepStrictEqual(run().queue.map(e => e.id), ['q1'], 'not dropped');
+
+  // Brought back and done: it starts.
+  orch.resumeWorker(orchSession.instanceId, { worker: x.worker, mode: 'fresh' });
+  const sx2 = [...mgr.sessions.values()].find(s => s.settings.name === x.worker);
+  orch.report(sx2.instanceId, { status: 'done', summary: 'fixed' });
+  assert.strictEqual(run().queue.length, 0);
+  assert.ok(run().workers.some(w => w.title === 'after-x'));
+});
+
+test('launch queue: `after` names workers of this run only', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const r2 = await orch.openCli({ cwd: tmpDir(), mode: 'orchestrator', engine: 'cli', isolation: 'none' });
+  const other = orch.launchWorker(mgr.sessions.get(r2.tabId).instanceId, { title: 'other', task: 'x' });
+  const launches = mgr.launches.length;
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'x', after: ['w9'] }), /after: no worker w9 in this run/);
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'x', after: [other.worker] }), /after: .* is a worker of run [0-9a-f]{6}, not of this run/);
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'x', after: [''] }), /after must be a list/);
+  assert.strictEqual(mgr.launches.length, launches, 'nothing launched');
+  assert.strictEqual((run().queue || []).length, 0, 'nothing queued');
+});
+
+test('launch queue: auto-close takes only an idle, done, landed, clean worker, the oldest finished first', async (t) => {
+  const { orch, orchSession, launch, done, run } = await landingRun(t);
+  const [w1, w2, w3, w4, w5] = ['a', 'b', 'c', 'd', 'e'].map(n => launch(n));
+  commitAll(w1.cwd, { 'a.txt': 'a' }); await done(w1);
+  w1.session.busy = true;                                              // busy
+  commitAll(w2.cwd, { 'b.txt': 'b' }); await done(w2);
+  fs.writeFileSync(path.join(w2.cwd, 'junk.txt'), 'x');                // dirty worktree
+  orch.report(w3.session.instanceId, { status: 'failed', summary: 'no' }); // not done
+  commitAll(w4.cwd, { 'd.txt': 'd' }); await done(w4);                 // landed, idle, clean
+  await done(w5);                                                      // nothing to land, idle, clean: later
+  assert.strictEqual(run().landings.length, 3);
+
+  const r6 = orch.launchWorker(orchSession.instanceId, { title: 'f', task: 'x' });
+  assert.ok(r6.worker && !r6.queued, 'started at once');
+  assert.strictEqual(r6.autoClosed, w4.worker, 'the oldest finished candidate');
+  const fw4 = run().workers.find(w => w.name === w4.worker);
+  assert.deepStrictEqual([fw4.closed, fw4.autoClosed.for], [true, 'q1']);
+  assert.strictEqual(fw4.worktree, null, 'merged and clean: its worktree went');
+  const r7 = orch.launchWorker(orchSession.instanceId, { title: 'g', task: 'x' });
+  assert.strictEqual(r7.autoClosed, w5.worker);
+  const r8 = orch.launchWorker(orchSession.instanceId, { title: 'h', task: 'x' });
+  assert.strictEqual(r8.queued, true, 'busy, dirty, failed and unreported workers are never closed');
+  assert.deepStrictEqual(run().workers.filter(w => w.closed).map(w => w.name), [w4.worker, w5.worker]);
+});
+
+test('launch queue: nothing starts while the run pauses', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const ws = fill(orch, orchSession);
+  orch.launchWorker(orchSession.instanceId, { title: 'six', task: 'x' });
+  orch.pauseRun(run().runId);
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'seven', task: 'x' }), /being paused/);
+  const launches = mgr.launches.length;
+  exitWorker(mgr, orch, ws[0].tabId);
+  assert.strictEqual(mgr.launches.length, launches, 'a freed slot starts nothing while pausing');
+  assert.deepStrictEqual(orch.describeRun(run()).queue.map(e => e.waitingFor), [['the run to be resumed']]);
+});
+
+test('launch queue: never started twice across a reload; after a restart, workers not back yet hold their slots', async (t) => {
+  const { orch, orchSession, mgr, run, stamp } = await openOrchestrator(t, { isolation: 'none' });
+  const ws = fill(orch, orchSession);
+  orch.launchWorker(orchSession.instanceId, { title: 'queued-one', task: 'x' });
+  // The spawn sees run.json without the entry: persisted before spawning.
+  const seen = [];
+  const launchSession = mgr.launchSession;
+  mgr.launchSession = (tabId, opts) => {
+    if (/^queued-one/.test(opts.title)) seen.push(JSON.parse(fs.readFileSync(path.join(stamp.runDir, 'run.json'), 'utf8')).queue.length);
+    return launchSession(tabId, opts);
+  };
+
+  // A restart: every worker exits at the shutdown, a new instance on the same sessions.
+  mgr._shuttingDown = true;
+  for (const w of ws) exitWorker(mgr, orch, w.tabId);
+  mgr._shuttingDown = false;
+  assert.strictEqual(run().queue.length, 1, 'a shutdown starts nothing');
+  const { orch: orch2 } = setup({ mgr });
+  // One worker comes back; the four others still hold their slots.
+  orch2.resumeWorker(orchSession.instanceId, { worker: ws[0].worker, mode: 'fresh' });
+  assert.strictEqual(run().queue.length, 1, 'not started: the other workers are not back');
+  assert.match(orch2.describeRun(run()).queue[0].waitingFor[0], new RegExp(`a free slot \\(not back since the restart: ${ws[1].worker}`));
+  // One of them comes back and finishes for good.
+  orch2.resumeWorker(orchSession.instanceId, { worker: ws[1].worker, mode: 'fresh' });
+  const s2 = [...mgr.sessions.values()].find(s => s.settings.name === ws[1].worker);
+  exitWorker(mgr, orch2, s2.tabId);
+  assert.strictEqual(run().queue.length, 0, 'its slot freed: the entry starts');
+  assert.deepStrictEqual(seen, [0]);
+  // The old instance, run.json reloaded: nothing left to start.
+  const s1 = [...mgr.sessions.values()].find(s => s.settings.name === ws[0].worker);
+  exitWorker(mgr, orch, s1.tabId);
+  assert.strictEqual(run().workers.filter(w => w.title === 'queued-one').length, 1, 'started once');
+  assert.deepStrictEqual(seen, [0]);
+});
+
+test('launch queue: cancel_launch drops one entry; end_run drops the rest and says so', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const ws = fill(orch, orchSession);
+  orch.launchWorker(orchSession.instanceId, { title: 'six', task: 'x' });
+  orch.launchWorker(orchSession.instanceId, { title: 'seven', task: 'x' });
+  assert.throws(() => orch.cancelLaunch(mgr.sessions.get(ws[0].tabId).instanceId, { id: 'q1' }), /only an orchestrator/);
+  assert.throws(() => orch.cancelLaunch(orchSession.instanceId, { id: 'q9' }), /no queued launch q9 in this run; queued: q1, q2/);
+  assert.deepStrictEqual(orch.cancelLaunch(orchSession.instanceId, { id: 'q1' }), { cancelled: 'q1', title: 'six', queued: 1 });
+  assert.deepStrictEqual(run().queue.map(e => e.id), ['q2']);
+  const res = orch.endRun(orchSession.instanceId);
+  assert.deepStrictEqual(res.queueDropped, [{ id: 'q2', title: 'seven' }]);
+  assert.match(res.queueNote, /1 queued launch\(es\) dropped \(q2\)/);
+  assert.deepStrictEqual(run().queue, []);
+  exitWorker(mgr, orch, ws[0].tabId);
+  assert.ok(!run().workers.some(w => w.title === 'seven'), 'a dropped entry never starts');
+});
+
+test('launch queue: the orchestrator card and the MCP server name the queue', () => {
+  const { orchestratorCard } = require('../src/orchestration');
+  const card = orchestratorCard({ runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' });
+  assert.match(card, /a launch beyond that is queued and starts when a slot frees \(`after: \[worker\]` holds it/);
+  assert.match(card, /finished, landed, clean idle worker may be closed automatically/);
+  const src = fs.readFileSync(path.join(CORE, 'lib', 'orchestrator-mcp.js'), 'utf8');
+  assert.match(src, /name: "cancel_launch",\s*path: "cancel-launch"/);
 });
