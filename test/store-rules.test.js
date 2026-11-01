@@ -9,6 +9,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { readJsonWhenReady } = require('./wait-for');
 
 function freshStore(home) {
   process.env.VISTACLAIR_HOME = home;
@@ -18,8 +19,6 @@ function freshStore(home) {
   const InteractionStore = require('../src/store');
   return new InteractionStore(200);
 }
-
-const flush = () => new Promise(r => setTimeout(r, 50));
 
 test('rule deltas are written with the interaction and read back', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vistaclair-test-'));
@@ -39,11 +38,10 @@ test('rule deltas are written with the interaction and read back', async () => {
   const bare = { ...t, id: 'turn-without-rules', rules: [] };
   store.add(bare);
   store.save(bare.id);
-  await flush();
-
-  const onDisk = JSON.parse(fs.readFileSync(path.join(home, 'interactions', sessId, '1.json'), 'utf8'));
+  const onDisk = await readJsonWhenReady(path.join(home, 'interactions', sessId, '1.json'));
+  const bareOnDisk = await readJsonWhenReady(path.join(home, 'interactions', sessId, '2.json'));
   assert.deepStrictEqual(onDisk.rules, rules);
-  assert.strictEqual('rules' in JSON.parse(fs.readFileSync(path.join(home, 'interactions', sessId, '2.json'), 'utf8')), false,
+  assert.strictEqual('rules' in bareOnDisk, false,
     'an empty list is not written');
 
   store = freshStore(home);

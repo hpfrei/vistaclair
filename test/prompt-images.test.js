@@ -10,6 +10,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { readJsonWhenReady } = require('./wait-for');
 
 const { imageSourcesInText, promptImagesInRecord } = require('../src/prompt-images');
 
@@ -23,7 +24,6 @@ function freshStore(home) {
 }
 
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vistaclair-test-'));
-const flush = () => new Promise(r => setTimeout(r, 50));
 
 const SESS = 'f0d701bb-de26-4b7f-b6eb-eddcef36827b';
 const PROMPT_ID = 'bece5688-faca-44db-acfd-763afa2d3062';
@@ -83,10 +83,9 @@ test('a prompt hook saved after its transcript records carries the pasted image'
   hook.request.transcript_path = transcript;
   store.add(hook);
   store.save(hook.id);
-  await flush();
 
   assert.deepStrictEqual(hook.promptImages, [IMG]);
-  const onDisk = JSON.parse(fs.readFileSync(path.join(home, 'interactions', SESS, '1.json'), 'utf8'));
+  const onDisk = await readJsonWhenReady(path.join(home, 'interactions', SESS, '1.json'));
   assert.deepStrictEqual(onDisk.promptImages, [IMG]);
   assert.strictEqual(onDisk.request.prompt, 'screenshot shows the preview panel', 'raw payload kept as is');
 
@@ -112,11 +111,11 @@ test('an image record landing after the hook is stamped on it and broadcast', as
 
   fs.appendFileSync(transcript, jsonl([imageMetaRecord]));
   store.rescanTrace(SESS);
-  await flush();
 
   assert.deepStrictEqual(hook.promptImages, [IMG]);
   assert.deepStrictEqual(sent, [{ type: 'interaction:enriched', interactionId: 'hook-2', promptImages: [IMG] }]);
-  const onDisk = JSON.parse(fs.readFileSync(path.join(home, 'interactions', SESS, '1.json'), 'utf8'));
+  // The first save wrote the file without the image; wait for the re-write.
+  const onDisk = await readJsonWhenReady(path.join(home, 'interactions', SESS, '1.json'), j => j.promptImages);
   assert.deepStrictEqual(onDisk.promptImages, [IMG]);
 
   // A rescan of the same lines changes nothing.
