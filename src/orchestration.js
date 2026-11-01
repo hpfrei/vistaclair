@@ -127,11 +127,13 @@ function gitToplevel(dir) {
   try { return git(dir, ['rev-parse', '--show-toplevel']); } catch { return null; }
 }
 
-// A new worktree's dependency links (src/worktree-landing.js), as its run.json
-// record: { links } when there are any.
+// A new worktree's dependency links and copies (src/worktree-landing.js), as
+// its run.json record: { links } when there are any, { gap } the gitignored
+// paths it lacks (its card says so).
 function linksOf(repo, worktree, dir) {
   const links = landing.createLinks({ repo, worktree, dir });
-  return links.length ? { links } : {};
+  const gap = landing.gapList({ repo, worktree, dir, records: links });
+  return { ...(links.length ? { links } : {}), ...(gap.paths.length ? { gap } : {}) };
 }
 
 // --- Worker areas (launch_cli `area`) ---
@@ -236,7 +238,7 @@ function orchestratorCard(run) {
 
 function workerCard(run, worker) {
   const where = worker.branch
-    ? `You work in a git worktree at ${worker.cwd} on branch \`${worker.branch}\`. Commit your work on this branch before you report "done" (links the server made to the main checkout's dependencies are not yours to commit); your done report lands it: the server rebases it onto \`${worker.base || 'its base'}\`, runs the repo's check and merges it. If something stops the landing, a "[vistaclair landing]" message (or the report's answer) says what to fix: fix it, commit, and report done again.`
+    ? `You work in a git worktree at ${worker.cwd} on branch \`${worker.branch}\`. Commit your work on this branch before you report "done" (links the server made to the main checkout's dependencies are not yours to commit); your done report lands it: the server rebases it onto \`${worker.base || 'its base'}\`, runs the repo's check and merges it. If something stops the landing, a "[vistaclair landing]" message (or the report's answer) says what to fix: fix it, commit, and report done again.${worker.worktree?.gap ? ` ${landing.gapSentence(worker.worktree.gap)}` : ''}`
     : `Your working directory is ${worker.cwd}. Other workers share it: touch only the files your brief names.`;
   return [
     `# Role: worker \`${worker.name}\` — orchestration run ${run.runId}`,

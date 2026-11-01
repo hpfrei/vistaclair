@@ -1,4 +1,4 @@
 {
-  "links": ["node_modules"],
+  "links": ["node_modules", "mcp-servers/integrated/node_modules"],
   "check": "npm test"
 }

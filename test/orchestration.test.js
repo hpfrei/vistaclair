@@ -1752,7 +1752,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     const port = server.address().port;
     const plain = await list(port);
     const props = (tools, name) => Object.keys(tools.find(t => t.name === name).inputSchema.properties);
-    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'model']);
+    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model']);
     assert.deepStrictEqual(props(plain, 'resume_worker'), ['worker', 'mode', 'message']);
     // No dashboard at all: the same schemas.
     const closed = http.createServer();
@@ -1766,7 +1766,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     params = setup().orch.toolParams().params;
     clearPacks();
     const granted = await list(port);
-    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'model', 'tools']);
+    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'tools']);
     assert.deepStrictEqual(props(granted, 'resume_worker'), ['worker', 'mode', 'message', 'tools']);
     assert.deepStrictEqual(granted.find(t => t.name === 'launch_cli').inputSchema.required, ['title', 'task']);
     assert.deepStrictEqual(granted.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)), plain.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)));
@@ -2070,4 +2070,46 @@ test('overlap check: a file changed in two live worktrees is one event, not repe
   orch.checkOverlaps();
   assert.match(events('overlap')[1], new RegExp(`^files changed in more than one worktree: f\\.txt \\(${a.worker}, ${b.worker}\\)`));
   assert.ok(!events('overlap').some(e => e.includes(n.worker) || e.includes('.data') || e.includes('only-a')));
+});
+
+// --- copy entries and the gap sentence reach workers ---
+
+test('worker worktree: copy entries made and recorded, the gap sentence in its card; teardown removes the copy, resume brings it back', async (t) => {
+  const repo = tmpDir('vistaclair-copy-repo-');
+  const g = (...a) => execFileSync('git', ['-C', repo, ...a], { stdio: 'pipe' }).toString().trim();
+  g('init', '-q', '-b', 'main');
+  g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
+  fs.writeFileSync(path.join(repo, '.gitignore'), '.data/\n.settings.json\n.venv/\ndist/\n');
+  fs.writeFileSync(path.join(repo, '.vistaclair-worktree.json'), JSON.stringify({ links: ['.data'], copy: ['.settings.json'] }));
+  g('add', '.'); g('commit', '-qm', 'init');
+  fs.mkdirSync(path.join(repo, '.data')); fs.writeFileSync(path.join(repo, '.data', 'db'), 'db');
+  fs.writeFileSync(path.join(repo, '.settings.json'), 'secret');
+  for (const d of ['.venv', 'dist']) { fs.mkdirSync(path.join(repo, d)); fs.writeFileSync(path.join(repo, d, 'x'), 'x'); }
+
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { cwd: repo });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const copy = path.join(w.cwd, '.settings.json');
+  assert.ok(!fs.lstatSync(copy).isSymbolicLink() && fs.readFileSync(copy, 'utf8') === 'secret', 'a real copy');
+  assert.ok(fs.lstatSync(path.join(w.cwd, '.data')).isSymbolicLink());
+  const rec = run().workers[0].worktree;
+  assert.deepStrictEqual(rec.links.map(l => [path.relative(w.cwd, l.path), !!l.copy]), [['.data', false], ['.settings.json', true]]);
+  assert.deepStrictEqual(rec.gap, { paths: ['.venv'], more: 0 }, 'dist is noise, the others are linked or copied');
+  const prompt = mgr.sessions.get(w.tabId).settings.appendSystemPrompt;
+  assert.match(prompt, /Not available here \(gitignored in the main checkout\): \.venv; they can be added to "links" or "copy" in \.vistaclair-worktree\.json \(tell your orchestrator\/owner\)\./);
+  assert.strictEqual(g('-C', w.cwd, 'status', '--porcelain'), '', 'neither is a change');
+
+  fs.writeFileSync(copy, 'worker edit');
+  assert.strictEqual(fs.readFileSync(path.join(repo, '.settings.json'), 'utf8'), 'secret', 'private');
+  g('merge', '-q', '--ff-only', w.branch);        // nothing to land: merged as it is
+  mgr.sessions.get(w.tabId).running = false;
+  const res = orch.endRun(orchSession.instanceId);
+  assert.deepStrictEqual(res.removed, [w.worker]);
+  assert.ok(!fs.existsSync(w.cwd), 'worktree and copy gone');
+  assert.strictEqual(fs.readFileSync(path.join(repo, '.settings.json'), 'utf8'), 'secret');
+
+  orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'fresh' });
+  assert.strictEqual(fs.readFileSync(path.join(w.cwd, '.settings.json'), 'utf8'), 'secret', 'a fresh copy after the resume');
+  const back = run().workers[0].worktree;
+  assert.ok(back.links.some(l => l.copy), 'recorded again');
+  assert.deepStrictEqual(back.gap, { paths: ['.venv'], more: 0 });
 });

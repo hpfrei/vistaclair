@@ -53,9 +53,7 @@ const list = (files = []) => files.slice(0, 10).join(', ') + (files.length > 10 
 
 // What a session in a worktree is told (appended to its system prompt).
 function card(wt, cwd, gap = null) {
-  const missing = gap?.paths.length
-    ? ` Not available here (gitignored in the main checkout): ${gap.paths.join(', ')}${gap.more ? `, +${gap.more} more` : ''}; they can be added to "links" or "copy" in .vistaclair-worktree.json (tell your orchestrator/owner).`
-    : '';
+  const missing = landing.gapSentence(gap) ? ` ${landing.gapSentence(gap)}` : '';
   return `You work in a git worktree at ${cwd} on branch \`${wt.branch}\`, isolated from the main checkout (${wt.repo}). Commit your work on this branch; links the server made to the main checkout's dependencies are not yours to commit. The owner lands it into \`${wt.base}\` (rebase, the repo's check, merge --no-ff)${wt.landOnClose ? ', also when this session closes' : ''}. Never merge into ${wt.base}, rebase it or reset branches yourself.${missing}`;
 }
 
@@ -98,8 +96,7 @@ function createCliIsolation({ mgr, broadcaster, dataHome }) {
     git(repo, ['worktree', 'add', '-b', branch, wtPath, 'HEAD']);
     const links = landing.createLinks({ repo, worktree: wtPath, dir: source });
     const wt = { id, path: wtPath, repo, branch, base, cwd: source, ...(links.length ? { links } : {}), ...(opts.landOnClose ? { landOnClose: true } : {}) };
-    const cfg = landing.readConfig(repo, source);
-    const gap = landing.gapList({ repo, worktree: wtPath, dir: cfg ? cfg.dir : source, records: links });
+    const gap = landing.gapList({ repo, worktree: wtPath, dir: source, records: links });
     const cwd = path.join(wtPath, path.relative(repo, source));
     const prior = opts.settings?.appendSystemPrompt;
     return {
