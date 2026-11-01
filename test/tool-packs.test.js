@@ -397,10 +397,11 @@ test('the add-on ctx: orchestration in the dashboard profile only, frozen, deleg
     setRunAuth: (id, auth, opts) => { calls.push(['auth', id, auth, opts]); return { runId: id }; },
     setRunModel: (id, model) => { calls.push(['model', id, model]); return { runId: id }; },
     registerHostProvider: (p) => { calls.push(['provider', typeof p.hosts]); return { deliver() {}, unregister() {} }; },
+    openMirrorRun: (o) => { calls.push(['mirror', o.key]); return {}; },
   };
   const ctx = createAddonCtx({ dataHome: HOME, dashboard: { broadcaster: { broadcast() {} }, store, cliSessionManager: {}, orchestration } });
   assert.ok(Object.isFrozen(ctx.orchestration));
-  assert.deepStrictEqual(Object.keys(ctx.orchestration), ['listRuns', 'describeRun', 'pauseRun', 'resumeRun', 'refreshOrchestrator', 'setRunAuth', 'setRunModel', 'registerHostProvider']);
+  assert.deepStrictEqual(Object.keys(ctx.orchestration), ['listRuns', 'describeRun', 'pauseRun', 'resumeRun', 'refreshOrchestrator', 'setRunAuth', 'setRunModel', 'registerHostProvider', 'openMirrorRun']);
   assert.deepStrictEqual(ctx.orchestration.listRuns(), [{ runId: 'abc123' }]);
   assert.deepStrictEqual(ctx.orchestration.describeRun('abc123'), { runId: 'abc123' });
   assert.strictEqual(ctx.orchestration.describeRun('nope'), null);
@@ -412,8 +413,9 @@ test('the add-on ctx: orchestration in the dashboard profile only, frozen, deleg
   ctx.orchestration.setRunAuth('abc123', 'subscription', { continueTurn: true });
   ctx.orchestration.setRunModel('abc123', 'sonnet');
   ctx.orchestration.registerHostProvider({ hosts: () => [], launch() {}, kill() {} });
+  ctx.orchestration.openMirrorRun({ key: 'm:1' });
   assert.deepStrictEqual(calls, [['pause', 'abc123'], ['resume', 'abc123', { fresh: false }], ['resume', 'abc123', { fresh: true }], ['refresh', 'abc123'],
-    ['auth', 'abc123', 'apikey', { continueTurn: false }], ['auth', 'abc123', 'subscription', { continueTurn: true }], ['model', 'abc123', 'sonnet'], ['provider', 'function']]);
+    ['auth', 'abc123', 'apikey', { continueTurn: false }], ['auth', 'abc123', 'subscription', { continueTurn: true }], ['model', 'abc123', 'sonnet'], ['provider', 'function'], ['mirror', 'm:1']]);
   assert.strictEqual(createAddonCtx({ dataHome: HOME }).orchestration, undefined, 'headless profile has none');
   assert.ok(!('orchestration' in createAddonCtx({ dataHome: HOME })));
 });

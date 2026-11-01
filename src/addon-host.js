@@ -200,6 +200,18 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // its tab adapter's submit(text, { from }). One provider at a time: a
       // second registration replaces the first, whose handle goes inert;
       // unregister() is idempotent.
+      // openMirrorRun({ key, orchestrator: { address, host }, deliver }) →
+      // { runId, launchWorker, submit, interrupt, kill, close }: the slave
+      // side, a run whose orchestrator is `address` on `host` (no local
+      // orchestrator; the dashboard cannot start, resume, refresh or pause one).
+      // The same key ([A-Za-z0-9._:-], ≤ 200) returns the same run, after a
+      // restart too. launchWorker({ title, task, cwd (absolute), auth?, model?,
+      // settings? (the caller's stamps and sessionsRoot) }) → { tabId, address
+      // } of an SDK worker; deliver({ address, kind: 'report', status, summary
+      // } | { address, kind: 'message', text }) gets its report and its
+      // SendMessage to the orchestrator. submit(address, text, { from }),
+      // interrupt(address), kill(address) act on a member; close() closes
+      // every live member and the run (open the key again to reuse it).
       // Dashboard profile only.
       ...(orchestration ? {
         orchestration: Object.freeze({
@@ -212,6 +224,8 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
           setRunModel: (runId, model) => orchestration.setRunModel(String(runId || ''), model),
           ...(typeof orchestration.registerHostProvider === 'function'
             ? { registerHostProvider: (provider) => orchestration.registerHostProvider(provider) } : {}),
+          ...(typeof orchestration.openMirrorRun === 'function'
+            ? { openMirrorRun: (opts) => orchestration.openMirrorRun(opts) } : {}),
         }),
       } : {}),
       // Dashboard login (src/login.js), frozen. Dashboard profile only: the

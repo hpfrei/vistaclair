@@ -88,6 +88,15 @@
 //                        not reach it; resume_worker refuses it. Its record
 //                        survives a restart (a lost pending launch becomes a
 //                        "remote" event); the provider re-adopts its tab.
+//   mirror runs          openMirrorRun({ key, orchestrator: { address, host },
+//                        deliver }) (the add-on ctx): the slave side. A run
+//                        whose orchestrator is an address on another machine,
+//                        keyed in <dataHome>/data/mirror-runs/index.json and
+//                        re-opened by key. Its members are SDK workers
+//                        (launchWorker); their reports and SendMessage to the
+//                        orchestrator go to deliver(); submit / interrupt /
+//                        kill by address; close(). No orchestrator session:
+//                        pause, resume and refresh refuse it.
 
 const fs = require('fs');
 const path = require('path');
@@ -287,7 +296,7 @@ function workerCard(run, worker) {
     `1. Report to the orchestrator with the \`report\` tool (mcp__orchestrator__report): status "started" when you begin, "blocked" when you need a decision or wait on someone (a question goes by SendMessage to \`${run.orchestrator}\`), "done" or "failed" when finished, "paused" when a pause is complete — with summary, filesChanged, verified (the one check you ran) and open. A turn ends only after a done, failed, blocked or paused report in that turn, or a message to the orchestrator. Never end a turn waiting on someone: report "blocked" naming whom you wait for and what. Their message starts your next turn. The steps of your brief are the rows of your TODO.md (short descriptions, detail in NOTES.md); your orchestrator reads it to follow your progress.`,
     `2. You may delegate through subagents, at most ${MAX_SUBAGENTS} running at once: \`coder\` (Opus) for a substantial piece of code, \`explorer\` (Sonnet, read-only; use it rather than the built-in Explore) for a search across many files. Make small edits and single lookups yourself — a subagent's overhead costs more. A subagent's summary is trusted: do not repeat its checks.`,
     '3. Stay within your brief. If the scope has to grow, ask the orchestrator instead of widening it yourself.',
-    `4. Messages from \`${run.orchestrator}\` are follow-up instructions: act on them and report.`,
+    `4. Messages from \`${run.orchestrator}\` are follow-up instructions: act on them and report.${run.mirror ? ` Your orchestrator runs on another machine (${run.mirror.host}): your reports and your messages to it reach it there.` : ''}`,
     `5. ${where}`,
     `6. Where the instructions above this card tell the session to ask the user, ask \`${run.orchestrator}\` instead (SendMessage, report "blocked"). Project-wide finishing steps they ask for (a check that rewrites shared files, a docs update) are yours only when your brief assigns them; otherwise list what they need in your "done" report. Anything only the owner can do (Stop→Start, Build, Make live, Rebuild client, an approval) or decide goes into report's \`ownerItems\` ({ what, why, kind: "action" | "decision", options, recommended }), never only in prose: it lands on the owner's "your turn" checklist, and you are told when the owner has done or decided it.`,
     `7. A shared machine resource (GPU, a memory-heavy job) is taken with a lock, not by message: run the command as \`node ${path.join(__dirname, '..', 'bin', 'vistaclair-lock.js')} <name> -- <cmd>\` (\`-s\` for a shared hold; names are [a-z0-9._-]; it waits its turn and releases when the command exits).`,
@@ -319,6 +328,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   let hostProvider = null;
   const remoteLaunches = new Set();
   const remoteTabs = new Map();
+  // Mirror runs (openMirrorRun): runId -> the add-on's deliver(msg), set at
+  // every open (the index on disk maps key -> run).
+  const mirrorDeliver = new Map();
 
   // --- Ask (the dashboard form, shared with /api/ask) ---
 
@@ -525,6 +537,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const st = e.settings?.orchestration;
       if (st?.runId === runId && st.runDir) { runDirs.set(runId, st.runDir); return st.runDir; }
     }
+    // A mirror run without members yet.
+    const m = Object.values(readJsonOr(mirrorIndexFile(), {})).find(x => x?.runId === runId);
+    if (m?.runDir && fs.existsSync(runFile(m.runDir))) { runDirs.set(runId, m.runDir); return m.runDir; }
     return null;
   }
 
@@ -1189,6 +1204,183 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
   if (typeof broadcaster.onBroadcast === 'function') broadcaster.onBroadcast(onRemoteBroadcast);
 
+  // --- Mirror runs (ctx.orchestration.openMirrorRun) ---
+  //
+  // The slave side of remote workers: a run whose orchestrator is an address
+  // on another machine (run.orchestrator, run.mirror { key, host, closed }),
+  // with no orchestrator session here. Keyed by the add-on's `key` in
+  // <dataHome>/data/mirror-runs/index.json (key -> { runId, runDir }); the run
+  // lives in <dataHome>/data/mirror-runs/<runId>/ and re-opening a key returns
+  // it. Its members are ordinary SDK workers (launchWorker): their report and
+  // their SendMessage to the orchestrator go to the add-on's deliver(); submit
+  // / interrupt / kill act on one by its address. No worktree, queue or
+  // landing; the dashboard cannot start, resume, refresh or pause an
+  // orchestrator for it (assertNotMirror).
+
+  const KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
+  const ADDRESS_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+  // Settings a member's caller may not set: the run decides them.
+  const RESERVED = new Set(['name', 'orchestration', 'appendSystemPrompt', 'settingsFile', 'engine', 'auth', 'model', 'sessionDir', 'sessionsRoot', 'agents', 'grants', 'maxBudgetUsd', 'modelMap']);
+
+  function mirrorDir() { return path.join(dataHome, 'data', 'mirror-runs'); }
+  function mirrorIndexFile() { return path.join(mirrorDir(), 'index.json'); }
+
+  function assertNotMirror(run) {
+    if (run?.mirror) throw new Error(`run ${run.runId} is a mirror of the orchestrator ${run.orchestrator} on ${run.mirror.host}: it is run from there`);
+  }
+
+  // openMirrorRun({ key, orchestrator: { address, host }, deliver }) → the
+  // run's handle. The same key returns the same run (after a restart too).
+  function openMirrorRun({ key, orchestrator, deliver: fn } = {}) {
+    if (typeof key !== 'string' || !KEY_RE.test(key)) throw new Error('openMirrorRun: key must be 1-200 characters of [A-Za-z0-9._:-]');
+    const address = orchestrator?.address;
+    if (typeof address !== 'string' || !ADDRESS_RE.test(address)) throw new Error('openMirrorRun: orchestrator.address must be a session address');
+    const host = typeof orchestrator?.host === 'string' && orchestrator.host.trim() ? clip(orchestrator.host.trim(), 100) : 'another machine';
+    if (typeof fn !== 'function') throw new Error('openMirrorRun: deliver must be a function');
+    const index = readJsonOr(mirrorIndexFile(), {});
+    let run = index[key]?.runDir ? loadRun(index[key].runDir) : null;
+    if (!run?.mirror || run.mirror.key !== key) run = null;
+    if (!run) {
+      const runId = crypto.randomBytes(3).toString('hex');
+      const runDir = path.join(mirrorDir(), runId);
+      fs.mkdirSync(runDir, { recursive: true });
+      run = {
+        runId, runDir, root: runDir, orchestrator: address,
+        mirror: { key, host, closed: false },
+        orchestratorDir: runDir, sessionsRoot: path.join(dataHome, 'data', 'sessions'),
+        isolation: 'none', engine: 'sdk', auth: null, orchestratorModel: null, maxBudgetUsd: null,
+        base: { appendSystemPrompt: '', settingsFile: null, stamps: {} },
+        createdAt: new Date().toISOString(), request: null, closed: false, busy: false, pausing: null, paused: null,
+        compactions: 0, workerSeq: 0, workers: [], events: [], delivered: 0,
+      };
+      index[key] = { runId, runDir };
+      fs.mkdirSync(mirrorDir(), { recursive: true });
+      writeJsonAtomic(mirrorIndexFile(), index);
+    }
+    run.orchestrator = address;
+    run.mirror = { key, host, closed: false };
+    run.closed = false;
+    saveRun(run);
+    runDirs.set(run.runId, run.runDir);
+    mirrorDeliver.set(run.runId, fn);
+    const runId = run.runId;
+    let closed = false;
+    const live = () => {
+      if (closed) throw new Error('this mirror run is closed: open it again');
+      const r = loadRun(run.runDir);
+      if (!r) throw new Error(`mirror run ${runId} is gone`);
+      return r;
+    };
+    const member = (r, addr) => {
+      const w = r.workers.find(x => x.name === String(addr || ''));
+      if (!w) throw new Error(`no member ${addr} in mirror run ${runId}`);
+      return w;
+    };
+    return Object.freeze({
+      runId,
+      launchWorker: async (opts) => mirrorLaunch(live(), opts),
+      submit: async (addr, text, { from } = {}) => {
+        const r = live();
+        const w = member(r, addr);
+        const body = String(text ?? '').trim();
+        if (!body) throw new Error('text is required');
+        const sender = typeof from === 'string' && from.trim() ? clip(from.trim(), 120) : r.orchestrator;
+        const ws = workerSession(r, w.id);
+        if (!ws?.session.running) throw new Error(`${w.name} is not running`);
+        const how = deliver(ws.session, w.name, `[message from ${sender}] ${body}`, sender);
+        delete w.turnStopped;
+        addFollowUp(r, w.id, body);
+        emitTo(ws.session, r, { platform: { kind: 'message', from: sender, to: w.name, text: body } });
+        return { delivered: true, how };
+      },
+      interrupt: async (addr) => {
+        const r = live();
+        const w = member(r, addr);
+        const ws = workerSession(r, w.id);
+        if (!ws?.session.running) throw new Error(`${w.name} is not running`);
+        vol(w.name).stopping = true;
+        if (typeof ws.session.interrupt === 'function') await ws.session.interrupt();
+        else ws.session.write?.('\x1b');
+        return { interrupted: true };
+      },
+      kill: async (addr) => {
+        const r = live();
+        const w = member(r, addr);
+        const ws = workerSession(r, w.id);
+        if (ws?.session.running) closeLive(r, w, ws);
+        else if (!w.closed) { w.closed = true; w.closedAt = new Date().toISOString(); saveRun(r); }
+        return { killed: true };
+      },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        const r = loadRun(run.runDir);
+        if (mirrorDeliver.get(runId) === fn) mirrorDeliver.delete(runId);
+        if (!r) return;
+        for (const w of r.workers) {
+          const ws = workerSession(r, w.id);
+          if (ws?.session.running) closeLive(r, w, ws);
+        }
+        r.mirror = { ...r.mirror, closed: true };
+        r.closed = true;
+        saveRun(r);
+      },
+    });
+  }
+
+  // A member of a mirror run: { title, task, cwd, auth?, model?, settings? }
+  // (settings: the caller's stamps, and sessionsRoot) → { tabId, address }.
+  function mirrorLaunch(run, { title, task, cwd, auth, model, settings } = {}) {
+    if (typeof task !== 'string' || !task.trim()) throw new Error('task is required');
+    if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error('cwd must be an existing absolute directory');
+    if (auth != null && auth !== 'apikey' && auth !== 'subscription') throw new Error('auth must be "apikey" or "subscription"');
+    if (model != null && model !== '' && (typeof model !== 'string' || !MODEL_RE.test(model))) throw new Error('model is not a model name');
+    if (freeSlots(run) <= 0) throw new Error(`${MAX_WORKERS} members of this run are running`);
+    let stamps = {};
+    try { stamps = settings && typeof settings === 'object' && !Array.isArray(settings) ? JSON.parse(JSON.stringify(settings)) : {}; } catch { stamps = {}; }
+    const root = typeof stamps.sessionsRoot === 'string' && path.isAbsolute(stamps.sessionsRoot) ? stamps.sessionsRoot : run.sessionsRoot;
+    for (const k of Object.keys(stamps)) if (RESERVED.has(k)) delete stamps[k];
+    const id = `w${++run.workerSeq}`;
+    const name = `${run.orchestrator}-${id}-${slugify(title)}`;
+    const worker = {
+      id, name, title: clip(title || id, 200), task, cwd: realpathOr(cwd), branch: null, worktree: null,
+      sessionDir: path.join(root, name),
+      launchedAt: new Date().toISOString(), exitedAt: null, lastReport: null, boot: BOOT,
+      ...(model ? { model } : {}), ...(auth ? { auth } : {}),
+      ...(Object.keys(stamps).length ? { stamps } : {}),
+    };
+    checkPacks(run, worker);
+    run.workers.push(worker);
+    run.closed = false;
+    saveRun(run);
+    const tabId = spawnWorker(run, worker, worker.task);
+    return { tabId, address: name };
+  }
+
+  // A member's report / message to the mirror's orchestrator → the add-on's
+  // deliver(). 'relayed', or why not (none registered since a restart).
+  function relayMirror(run, msg) {
+    const fn = mirrorDeliver.get(run.runId);
+    if (!fn) {
+      addEvent(run, { worker: msg.address, kind: 'mirror', text: `not relayed to ${run.orchestrator} (the run is not open): ${clip(msg.summary ?? msg.text, 300)}` });
+      return 'not relayed: the run is not open';
+    }
+    try { fn(msg); } catch (e) { console.error(`[orchestration] mirror deliver (${run.runId}):`, e.message); return `not relayed: ${e.message}`; }
+    return 'relayed';
+  }
+
+  // A local report as the one text the remote orchestrator gets.
+  function mirrorSummary(w, owner) {
+    const r = w.lastReport;
+    return [
+      r.summary,
+      r.filesChanged?.length ? `files: ${r.filesChanged.join(', ')}` : '',
+      r.verified ? `verified: ${r.verified}` : '',
+      r.open ? `open: ${r.open}` : '',
+      owner?.touched.length ? `for the owner: ${owner.touched.map(i => i.what).join('; ')}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
   // --- Launch queue (run.queue) ---
   //
   // A launch that cannot start (the run full, its `after` workers not finished)
@@ -1395,8 +1587,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const card = workerCard(run, worker);
     return {
       ...run.base.stamps,
+      ...(worker.stamps || {}),
       engine: run.engine || 'cli',
       ...authOf(run),
+      ...(worker.auth ? { auth: worker.auth } : {}),
       name: worker.name,
       ...(worker.sessionDir ? { sessionDir: worker.sessionDir } : {}),
       orchestration: { runId: run.runId, role: 'worker', workerId: worker.id, orchestrator: run.orchestrator, runDir: run.runDir },
@@ -1545,6 +1739,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       notes: path.join(orchestratorDir(run), 'NOTES.md'),
       pausing: !!run.pausing,
       paused: run.paused || null,
+      ...(run.mirror ? { mirror: { key: run.mirror.key, host: run.mirror.host, orchestrator: run.orchestrator, closed: !!run.mirror.closed } } : {}),
       orchestratorRunning: !!orch?.session.running,
       orchestratorSessId: orch?.session.sessId || savedId(st => st.role === 'orchestrator'),
       orchestratorTabId: orch?.tabId || null,
@@ -1635,10 +1830,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       out.push({
         runId,
         name: run.orchestrator,
-        title: (orch ? orch.session.title : entry?.title) || null,
+        title: (orch ? orch.session.title : entry?.title) || (run.mirror ? `${run.orchestrator} on ${run.mirror.host}` : null),
         cwd: (orch ? orch.session.cwd : entry?.cwd) || run.root,
         engine: run.engine || 'cli',
-        state: running ? memberState(orch.session, null) : run.pausing ? 'pausing' : run.paused ? 'paused' : run.closed ? 'closed' : 'exited',
+        state: running ? memberState(orch.session, null) : run.mirror ? (run.closed ? 'closed' : 'mirror') : run.pausing ? 'pausing' : run.paused ? 'paused' : run.closed ? 'closed' : 'exited',
         busy: running && orch.session.busy === true,
         paused: !!run.paused,
         pausing: !!run.pausing,
@@ -1646,6 +1841,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         orchestratorSessId: orch?.session.sessId || entry?.id || null,
         workerCount: run.workers.length,
         updatedAt,
+        ...(run.mirror ? { mirror: { host: run.mirror.host, orchestrator: run.orchestrator } } : {}),
       });
     }
     return out.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
@@ -2106,9 +2302,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // writes its own last and is closed too. A run whose orchestrator is not
   // running pauses its workers directly.
   function pauseRun(runId) {
-    if (!control) throw new Error('pause is not available');
     const run = getRun(runId);
     if (!run) throw new Error('run not found');
+    assertNotMirror(run);
+    if (!control) throw new Error('pause is not available');
     if (run.pausing) return { already: true };
     const orch = orchestratorSession(run);
     if (orch && control.isPausing(orch.session)) throw new Error('the orchestrator is being refreshed; pause the run once the fresh one is up');
@@ -2211,6 +2408,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!control) throw new Error('refresh is not available');
     const run = getRun(runId);
     if (!run) throw new Error('run not found');
+    assertNotMirror(run);
     if (run.pausing) throw new Error('the run is being paused');
     const orch = orchestratorSession(run);
     if (!orch?.session.running) throw new Error('the orchestrator is not running: restart it fresh from the "+" menu');
@@ -2448,6 +2646,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   function freshOrchestrator(run, { settings, title, replaces, reason = 'paused' } = {}) {
+    assertNotMirror(run);
     const seed = writeSeed(run, reason);
     const paused = run.workers.filter(w => w.paused).length;
     const prompt = [
@@ -2478,6 +2677,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function resumeRun(runId, { fresh = false } = {}) {
     const run = getRun(runId);
     if (!run) throw new Error('run not found');
+    assertNotMirror(run);
     if (orchestratorSession(run)?.session.running) throw new Error('the orchestrator is already running');
     const entry = savedMember(run, st => st.role === 'orchestrator');
     const lost = !fresh && !control?.canContinue(entry);
@@ -2874,6 +3074,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!evented) addEvent(run, { worker: w.name, kind: 'report', text: parts.join(' — '), quiet: !WAKE_STATUSES.has(w.lastReport.status) });
     else saveRun(run);   // the landing job reads lastReport from run.json
     pumpQueue(run.runDir);   // a queued launch may wait on this worker
+    if (run.mirror) relayMirror(run, { address: w.name, kind: 'report', status: w.lastReport.status, summary: mirrorSummary(w, owner) });
     return { ok: true, ...(note ? { landing: note } : {}), ...(owner ? { ownerItems: { added: owner.added, updated: owner.updated, ignored: owner.ignored } } : {}) };
   }
 
@@ -3159,6 +3360,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!text) throw new Error('message is required');
     const target = resolveMember(run, to);
     if (target.name === from) throw new Error('that is your own address');
+    if (run.mirror && target.role === 'orchestrator') {
+      const how = relayMirror(run, { address: from, kind: 'message', text });
+      emitTo(session, run, { platform: { kind: 'message', from, to: target.name, text } });
+      return { ok: true, to: target.name, delivery: how };
+    }
     const ts = target.live?.session;
     if (target.worker?.remote && !ts?.running) {
       const st = remoteState(run, target.worker, target.live);
@@ -3228,7 +3434,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       runId: run.runId,
       agents: members(run).map(m => ({
         name: m.name, role: m.role, title: m.title,
-        state: m.worker?.remote ? remoteState(run, m.worker, m.live) : memberState(m.live?.session, m.worker),
+        state: m.worker?.remote ? remoteState(run, m.worker, m.live) : run.mirror && m.role === 'orchestrator' ? `on ${run.mirror.host}` : memberState(m.live?.session, m.worker),
         ...(m.worker?.host ? { host: m.worker.host } : {}),
         ...(m.worker?.lastReport ? { lastReport: `${m.worker.lastReport.status}: ${clip(m.worker.lastReport.summary, 200)}` } : {}),
       })),
@@ -3246,6 +3452,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     run.events.push({ seq, at: new Date().toISOString(), worker, kind, text, ...(quiet ? { quiet: true } : {}) });
     if (run.events.length > 200) run.events = run.events.slice(-200);
     if (delivered && run.delivered === seq - 1) run.delivered = seq;
+    // A mirror run's orchestrator is on another machine: nothing waits here.
+    if (run.mirror) run.delivered = seq;
     const pending = run.delivered < seq;
     if (pending && quiet && !run.quietValve) run.quietValve = { due: new Date(Date.now() + quietValveMs).toISOString() };
     saveRun(run);
@@ -3619,7 +3827,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
-    memberModelChanged, setRunModelMap, setRunAuth, setRunModel, registerHostProvider, hostList,
+    memberModelChanged, setRunModelMap, setRunAuth, setRunModel, registerHostProvider, hostList, openMirrorRun,
     MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
   };
 }
