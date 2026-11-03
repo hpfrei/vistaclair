@@ -266,6 +266,12 @@ function handleMessage(ws, msg, bc) {
     case 'cli:pauseRun':
       actionResult(send, 'pause', msg, () => bc.orchestration.pauseRun(String(msg.runId || '')));
       break;
+    case 'cli:runMaxWorkers':
+      // The orchestrator tab's "Workers: N" select: the run's worker limit
+      // (orchestration.setRunMaxWorkers; every client sees it by the
+      // orchestration:run push).
+      actionResult(send, 'maxWorkers', msg, () => bc.orchestration.setRunMaxWorkers(String(msg.runId || ''), msg.maxWorkers));
+      break;
     case 'cli:interrupt': {
       const ext = msg.tabId ? mgr.getExternal?.(msg.tabId) : null;
       if (ext) settle(ext.call('interrupt'), () => actionReply(sendLater, 'interrupt', msg, { ok: true }), (e) => actionReply(sendLater, 'interrupt', msg, { error: e.message }));

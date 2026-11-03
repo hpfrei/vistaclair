@@ -80,6 +80,9 @@
 .sdk-tb-models,
 .sdk-tb-action { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .sdk-tb-models svg { flex: none; color: var(--purple); }
+/* "Workers: N" (the run's worker limit): a select dressed as a toolbar button. */
+.sdk-tb-workers { flex: none; width: auto; padding-right: 6px; white-space: nowrap; }
+.sdk-tb-workers option { background: var(--bg); color: var(--text); }
 /* A model map in force, or an add-on toggle that is on: the Live tab's blue. */
 .sdk-tb-btn.on {
   color: var(--accent);

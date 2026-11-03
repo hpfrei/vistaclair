@@ -107,7 +107,7 @@
       <div class="ncd-section">
         <div class="ncd-label">Session type</div>
         <div class="ncd-cards">
-          ${card('orchestrator', 'Orchestrator', `Plans, delegates to up to ${nc.maxWorkers || 5} workers, tracks a TODO. Never codes itself.`, '◇')}
+          ${card('orchestrator', 'Orchestrator', `Plans, delegates to workers (up to ${nc.maxWorkers || 5} at once; adjustable in its header), tracks a TODO. Never codes itself.`, '◇')}
           ${card('simple', 'Simple', 'One Claude Code session, as usual.', '▢')}
         </div>
       </div>`}

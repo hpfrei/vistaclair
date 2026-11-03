@@ -1863,6 +1863,7 @@
               <button type="button" class="sdk-tb-btn sdk-tb-turn hidden" data-act="turn" aria-expanded="false">Your turn</button>
               <button type="button" class="sdk-tb-btn sdk-tb-models" data-act="models">${MODELS_ICON}<span class="sdk-tb-lbl">Models</span></button>
               <span class="sdk-tb-actions"></span>
+              <select class="sdk-tb-btn sdk-tb-workers hidden" data-act="workers" aria-label="Worker limit">${Array.from({ length: 10 }, (_, i) => `<option value="${i + 1}">Workers: ${i + 1}</option>`).join('')}</select>
               <button type="button" class="sdk-tb-btn" data-act="pause">Pause &amp; save</button>
             </span>
           </div>
@@ -1894,6 +1895,7 @@
       this.shelfTitle = q('.sdk-shelf-title');
       this.shelfList = q('.sdk-shelf-list');
       this.pauseBtn = q('[data-act="pause"]');
+      this.workersSel = q('[data-act="workers"]');
       this.modelsBtn = q('[data-act="models"]');
       this.turnBtn = q('[data-act="turn"]');
       this.billEl = q('.sdk-bill');
@@ -1902,6 +1904,12 @@
       this.composer = q('vc-composer');
 
       this.pauseBtn.addEventListener('click', () => this.pause());
+      // The run's worker limit: the server clamps it, starts the queued
+      // launches a raise makes room for, and tells the orchestrator; every
+      // client's select follows by the orchestration:run push.
+      this.workersSel.addEventListener('change', () => {
+        if (this.runId) sendWs({ type: 'cli:runMaxWorkers', runId: this.runId, maxWorkers: Number(this.workersSel.value) });
+      });
       this.modelsBtn.addEventListener('click', () => openModels(this));
       this.turnBtn.addEventListener('click', () => this.toggleTurn());
       for (const [auth, b] of Object.entries(this.billBtns)) b.addEventListener('click', () => this.setBilling(auth));
@@ -2500,6 +2508,26 @@
       }
     }
 
+    // "Workers: N": the run's worker limit, on the orchestrator's tab only
+    // (from GET /api/orchestration/run, refetched on every orchestration:run).
+    renderWorkers(isWorkerTab) {
+      const sel = this.workersSel;
+      const n = this.run?.runId === this.runId ? this.run?.maxWorkers : null;
+      const show = !!this.runId && !isWorkerTab && !this.run?.mirror && Number.isInteger(n);
+      sel.classList.toggle('hidden', !show);
+      if (!show) return;
+      // Never yank the value out from under an open dropdown.
+      if (document.activeElement !== sel || sel.dataset.shown !== String(n)) sel.value = String(n);
+      sel.dataset.shown = String(n);
+      const running = (this.run.workers || []).filter(w => w.running).length;
+      sel.title = [
+        `How many workers of this run may run at once (now ${n}; default 5).`,
+        'Raising it starts queued launches right away. Lowering it stops no running worker: new ones wait until fewer than the limit run.',
+        'The orchestrator is told of every change.',
+        running > n ? `Running now: ${running}, above the limit — no new worker starts until fewer than ${n} run.` : `Running now: ${running}.`,
+      ].join('\n');
+    }
+
     setBilling(auth) {
       const b = this.billBtns[auth];
       if (!b || b.getAttribute('aria-disabled') === 'true') return;
@@ -2530,6 +2558,7 @@
         ? 'Saving… Click to stop immediately (the resume note may be missing).'
         : this.runId ? 'Every session saves its progress and closes. Resume later from the + menu. Nothing is lost.'
           : 'The session saves its progress and closes. Resume later from the + menu. Nothing is lost.';
+      this.renderWorkers(isWorkerTab);
       this.renderBilling(isWorkerTab);
       this.renderTurn(!this.runId || isWorkerTab);
       // Models: the whole run from its orchestrator's tab, or the tab's own
@@ -2783,5 +2812,6 @@
     mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, onSettingsData, onCredentials, _panels: panels, _areas: areas,
     _feedWindow: { feedExcess, cursorAbove, capOldest, FEED_MAX, FEED_HARD_MAX, PAGE },
     _max: { openMax, closeMax, current: () => _max },
+    _Panel: Panel,
   };
 })();
