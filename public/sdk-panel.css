@@ -668,6 +668,8 @@
 .sdk-max-body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--paper-bg, var(--bg-surface)); }
 .sdk-max-body > .sdk-todo-top { flex: 1 1 0; max-height: none; }
 .sdk-max-body .sdk-max-btn { display: none; }
+/* Its composer sits under the body, inside the dialog; the body keeps the rest. */
+.sdk-max > .vc-composer { flex-shrink: 0; }
 .sdk-text { overflow-wrap: anywhere; }
 .sdk-text > :first-child { margin-top: 0; }
 .sdk-text > :last-child { margin-bottom: 0; }
