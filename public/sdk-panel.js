@@ -581,6 +581,7 @@
         ended ? 'The session has ended.' : 'Click to switch the model; the context and the cost so far are kept.',
       ].filter(Boolean).join('\n');
       this.modelBtn.disabled = ended;
+      if (_max?.area === this) _max.composer.disabled = ended;
       this.thinkBtn.classList.toggle('on', this.showThinking);
       this.thinkBtn.setAttribute('aria-pressed', String(this.showThinking));
       this.thinkBtn.disabled = ended;
@@ -1531,6 +1532,8 @@
   // followers, "Load earlier" and the pills go with it); a comment holds its
   // place in the box, and on close it goes back there. ×, Esc or a click on
   // the backdrop closes it; so does its box leaving the stage or going away.
+  // Below the pane, a composer of its own talks to that box's session only:
+  // no picker, and images dropped anywhere on the dialog go to it.
 
   let _max = null;
   function closeMax() {
@@ -1545,9 +1548,28 @@
     area.todoFollow.settle();
   }
 
+  // The dialog's composer: what it sends goes straight to `area`, and a
+  // session that has ended takes nothing (renderHeader keeps that in step).
+  function maxComposer(area, dialog) {
+    const composer = document.createElement('vc-composer');
+    composer.setAttribute('placeholder', `Message ${area.label}…`);
+    composer.addEventListener('send', (e) => {
+      e.stopPropagation();
+      if (area.ended()) return;
+      const { text, images } = e.detail;
+      sendWs({ type: 'sdk:send', sessId: area.sessId, text, images: images || [] });
+      composer.clear();
+    });
+    composer.addEventListener('interrupt', (e) => { e.stopPropagation(); area.stop?.(); });
+    dialog.appendChild(composer);
+    return composer;
+  }
+
   function openMax(area, pane, what) {
     closeMax();
     closeMenu();
+    // Its Enter would answer the picker's capture handler: the main draft stays.
+    closePicker();
     const overlay = el('div', 'curl-modal-overlay sdk-max-overlay');
     overlay.innerHTML = `
       <div class="curl-modal sdk-max" role="dialog" aria-modal="true">
@@ -1555,21 +1577,36 @@
         <div class="sdk-max-body"></div>
       </div>`;
     const title = `${area.label} · ${what}`;
+    const dialog = overlay.querySelector('.sdk-max');
     overlay.querySelector('.sdk-max-title').textContent = title;
-    overlay.querySelector('.sdk-max').setAttribute('aria-label', title);
+    dialog.setAttribute('aria-label', title);
     const slot = document.createComment('maximized');
     pane.replaceWith(slot);
     overlay.querySelector('.sdk-max-body').appendChild(pane);
+    const composer = maxComposer(area, dialog);
     document.body.appendChild(overlay);
+    // In the document it has built itself (vc-composer.js loads first).
+    composer.disabled = area.ended();
+    composer.attachDropTarget?.(dialog);
     const close = overlay.querySelector('.curl-modal-close');
     close.addEventListener('click', closeMax);
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeMax(); });
-    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMax(); } };
+    // Only Esc is taken, and not while an input method composes (that Esc
+    // cancels the composition); every other key reaches the composer. Esc
+    // closes even from the composer: the box's Stop button stops the session.
+    const onKey = (e) => {
+      if (e.key !== 'Escape' || e.isComposing) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeMax();
+    };
     document.addEventListener('keydown', onKey, true);
-    _max = { area, pane, slot, overlay, onKey };
+    _max = { area, pane, slot, overlay, onKey, composer };
     area.feedFollow.settle();
     area.todoFollow.settle();
-    close.focus();
+    // A phone's keyboard would cover the pane; there the reader taps in.
+    if (D.isPhone?.() || composer.disabled) close.focus();
+    else composer.focus();
   }
 
   // ---- menus (one open at a time): a box's model ----------------------------
@@ -2745,5 +2782,6 @@
   window.sdkPanel = {
     mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, onSettingsData, onCredentials, _panels: panels, _areas: areas,
     _feedWindow: { feedExcess, cursorAbove, capOldest, FEED_MAX, FEED_HARD_MAX, PAGE },
+    _max: { openMax, closeMax, current: () => _max },
   };
 })();
