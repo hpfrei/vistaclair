@@ -1641,9 +1641,10 @@ test('the orchestrator MCP server offers SendMessage / ListAgents to SDK session
   assert.match(src, /name: "ListAgents",\s*path: "list-agents"/);
   assert.match(src, /name: "close_worker",\s*path: "close-worker"/);
   assert.match(src, /name: "stop_worker",\s*path: "stop-worker"/);
-  const { MAX_WORKERS } = require('../src/orchestration');
-  assert.doesNotMatch(src, /At most 3|3-worker/);
-  assert.match(src, new RegExp(`MAX_WORKERS run(ning)? at once \\(${MAX_WORKERS}\\)`));
+  const { DEFAULT_MAX_WORKERS } = require('../src/orchestration');
+  assert.doesNotMatch(src, /At most 3|3-worker|MAX_WORKERS/);
+  assert.strictEqual(src.split(`the run's worker limit`).length - 1, 3);
+  assert.match(src, new RegExp(`default ${DEFAULT_MAX_WORKERS}, set by the owner`));
 });
 
 // --- Tool grants (src/tool-packs.js consumes / validate) ---
@@ -2725,4 +2726,74 @@ test('launch queue: the orchestrator card and the MCP server name the queue', ()
   assert.match(card, /finished, landed, clean idle worker may be closed automatically/);
   const src = fs.readFileSync(path.join(CORE, 'lib', 'orchestrator-mcp.js'), 'utf8');
   assert.match(src, /name: "cancel_launch",\s*path: "cancel-launch"/);
+});
+
+// --- The run's worker limit (run.maxWorkers, setRunMaxWorkers) ---
+
+test('worker limit: default 5, clamped to 1-10, kept in run.json and shown by describeRun / list_workers', async (t) => {
+  const { clampMaxWorkers, maxWorkersOf, DEFAULT_MAX_WORKERS, MAX_WORKERS } = require('../src/orchestration');
+  assert.strictEqual(DEFAULT_MAX_WORKERS, 5);
+  assert.strictEqual(MAX_WORKERS, 5, 'the old export stays');
+  assert.strictEqual(maxWorkersOf({}), 5, 'a run without the field');
+  assert.deepStrictEqual([0, -3, 1, 2.4, 7, 10, 11, 99, '3', 'x', null, NaN, Infinity].map(clampMaxWorkers), [1, 1, 1, 2, 7, 10, 10, 10, 3, 5, 5, 5, 5]);
+  assert.strictEqual(maxWorkersOf({ maxWorkers: 42 }), 10, 'a hand-edited run.json is clamped too');
+
+  const { orch, orchSession, run, stamp } = await openOrchestrator(t, { isolation: 'none' });
+  assert.strictEqual(orch.describeRun(run()).maxWorkers, 5);
+  assert.strictEqual(orch.listWorkers(orchSession.instanceId).maxWorkers, 5, 'the orchestrator sees it in list_workers');
+  assert.deepStrictEqual(orch.setRunMaxWorkers(stamp.runId, 0), { runId: stamp.runId, maxWorkers: 1, changed: true, started: [] });
+  assert.strictEqual(orch.setRunMaxWorkers(stamp.runId, 50).maxWorkers, 10);
+  assert.strictEqual(orch.setRunMaxWorkers(stamp.runId, '4').maxWorkers, 4);
+  assert.strictEqual(orch.setRunMaxWorkers(stamp.runId, 4).changed, false);
+  assert.throws(() => orch.setRunMaxWorkers(stamp.runId, 'many'), /maxWorkers must be a number from 1 to 10/);
+  assert.throws(() => orch.setRunMaxWorkers(stamp.runId, null), /maxWorkers must be a number/);
+  assert.throws(() => orch.setRunMaxWorkers('nope', 3), /run not found/);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(stamp.runDir, 'run.json'), 'utf8')).maxWorkers, 4, 'persisted: a pause, resume or restart keeps it');
+  assert.strictEqual(orch.describeRun(run()).maxWorkers, 4);
+});
+
+test('worker limit: enforced at the set value; a change is one event for the orchestrator; the brief uses it', async (t) => {
+  const { orchestratorCard } = require('../src/orchestration');
+  const { orch, orchSession, mgr, run, stamp } = await openOrchestrator(t, { isolation: 'none' });
+  assert.match(orchestratorCard(run()), /At most 5 workers run at once/);
+  orch.setRunMaxWorkers(stamp.runId, 2);
+  assert.match(orchestratorCard(run()), /At most 2 workers run at once \(the run's worker limit/);
+  const ev = run().events.filter(e => e.kind === 'owner');
+  assert.strictEqual(ev.length, 1);
+  assert.strictEqual(ev[0].text, 'The owner set the worker limit to 2 (was 5).');
+  assert.ok(!ev[0].quiet, 'it wakes the orchestrator');
+  await waitFor(() => mgr.submits.some(s => s.tabId === orchSession.tabId && /\[orchestration\] 1 worker event\(s\) pending/.test(s.data)));
+
+  const ws = fill(orch, orchSession, 2);
+  assert.ok(ws.every(w => !w.queued), 'two start');
+  const q = orch.launchWorker(orchSession.instanceId, { title: 'three', task: 'brief three' });
+  assert.deepStrictEqual([q.queued, q.waitingFor], [true, ['a free slot']], 'a third waits at a limit of 2');
+  assert.strictEqual(run().workers.length, 2);
+});
+
+test('worker limit: raising it starts queued launches at once; lowering it stops no running worker', async (t) => {
+  const { orch, orchSession, mgr, run, stamp } = await openOrchestrator(t, { isolation: 'none' });
+  orch.setRunMaxWorkers(stamp.runId, 2);
+  const ws = fill(orch, orchSession, 2);
+  const queued = [3, 4, 5].map(i => orch.launchWorker(orchSession.instanceId, { title: `t${i}`, task: `brief ${i}` }));
+  assert.ok(queued.every(q => q.queued));
+
+  const up = orch.setRunMaxWorkers(stamp.runId, 4);
+  assert.strictEqual(up.started.length, 2, 'two slots freed by the raise: two queued launches start');
+  assert.deepStrictEqual(run().workers.map(w => w.title), ['t1', 't2', 't3', 't4']);
+  assert.deepStrictEqual(run().queue.map(e => e.title), ['t5']);
+  assert.ok(run().workers.every(w => mgr.sessions.get(orch.describeRun(run()).workers.find(d => d.id === w.id).tabId)?.running));
+
+  const down = orch.setRunMaxWorkers(stamp.runId, 1);
+  assert.deepStrictEqual([down.maxWorkers, down.started], [1, []]);
+  const d = orch.describeRun(run());
+  assert.strictEqual(d.workers.filter(w => w.running).length, 4, 'all four keep running');
+  assert.strictEqual(mgr.closed.length, 0, 'nothing closed');
+  assert.deepStrictEqual(d.queue.map(e => e.waitingFor), [['a free slot']]);
+
+  // One exits: 3 still run, above the limit of 1, so the queued launch waits.
+  exitWorker(mgr, orch, ws[0].tabId);
+  assert.deepStrictEqual(run().queue.map(e => e.title), ['t5']);
+  assert.throws(() => orch.resumeWorker(orchSession.instanceId, { worker: run().workers[0].name }), /3 workers are running and the run's worker limit is 1/);
+  assert.strictEqual(run().workers.length, 4);
 });

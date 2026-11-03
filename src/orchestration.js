@@ -60,6 +60,11 @@
 //                        ready ones oldest first (closing a finished, landed,
 //                        clean idle worker when no slot is free), never while
 //                        the run pauses; cancel_launch drops one, end_run all.
+//   worker limit         run.maxWorkers (1-10, default 5; maxWorkersOf): the
+//                        owner's "Workers: N" select in the orchestrator tab
+//                        (cli:runMaxWorkers → setRunMaxWorkers). A change is a
+//                        wake event for the orchestrator; a raise pumps the
+//                        queue; a lower one stops nothing.
 //   session folders      every member keeps TODO.md / NOTES.md in
 //                        <sessionsRoot>/<name>/ (session-folders.js); the
 //                        orchestrator reads its workers' folders (list_workers
@@ -79,7 +84,7 @@
 //                        pending-approval until provider.launch resolves the
 //                        tab of a registerExternalSession session; the start
 //                        or the refusal (.code) is a "remote" event. It counts
-//                        toward MAX_WORKERS and queues like any launch. Its
+//                        toward the run's worker limit and queues like any launch. Its
 //                        reports and messages arrive through the handle's
 //                        deliver(); SendMessage goes to its adapter's submit;
 //                        close_worker / end_run / deleteRun → provider.kill;
@@ -108,7 +113,13 @@ const landing = require('./worktree-landing');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
 const { transcriptTotals, MODEL_RE } = require('./sdk-session');
 
-const MAX_WORKERS = 5;
+// How many workers of a run may run at once: run.maxWorkers, set by the owner
+// in the orchestrator tab's header (setRunMaxWorkers), clamped to
+// MIN..MAX_WORKER_LIMIT; a run without it uses the default.
+const DEFAULT_MAX_WORKERS = 5;
+const MAX_WORKERS = DEFAULT_MAX_WORKERS;   // the old name, kept for callers
+const MIN_WORKER_LIMIT = 1;
+const MAX_WORKER_LIMIT = 10;
 // The model a worker may be launched on (launch_cli `model`), as Claude Code's
 // Agent tool takes it. Unset: the dashboard's default model for new tabs.
 const WORKER_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
@@ -249,6 +260,19 @@ function orchestratorDir(run) {
   return run.orchestratorDir || run.runDir;
 }
 
+// A worker limit as given (a number or a numeric string) → an integer in
+// MIN..MAX_WORKER_LIMIT; anything else → the default.
+function clampMaxWorkers(v) {
+  const n = typeof v === 'string' && v.trim() ? Number(v) : v;
+  if (typeof n !== 'number' || !Number.isFinite(n)) return DEFAULT_MAX_WORKERS;
+  return Math.min(MAX_WORKER_LIMIT, Math.max(MIN_WORKER_LIMIT, Math.round(n)));
+}
+
+// The run's worker limit (run.maxWorkers; a run without it: the default).
+function maxWorkersOf(run) {
+  return run?.maxWorkers == null ? DEFAULT_MAX_WORKERS : clampMaxWorkers(run.maxWorkers);
+}
+
 // `hosts`: the host provider's machines (hostList); none → no remote rule.
 function orchestratorCard(run, { hosts = [] } = {}) {
   const dir = orchestratorDir(run);
@@ -266,7 +290,7 @@ function orchestratorCard(run, { hosts = [] } = {}) {
     '',
     'Rules',
     `1. Never write or edit code or project files yourself. The only files you write are your TODO.md and NOTES.md in ${dir} (edits elsewhere are blocked). Reading, searching and read-only commands to plan are fine.`,
-    `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${MAX_WORKERS} workers run at once: a launch beyond that is queued and starts when a slot frees (\`after: [worker]\` holds it until those workers have landed), and a finished, landed, clean idle worker may be closed automatically to make room for it. A follow-up for a running worker goes to it with SendMessage — never relaunch it. A trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none.`,
+    `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${maxWorkersOf(run)} workers run at once (the run's worker limit: the owner may change it, and an "[orchestration]" event tells you the new value): a launch beyond that is queued and starts when a slot frees (\`after: [worker]\` holds it until those workers have landed), and a finished, landed, clean idle worker may be closed automatically to make room for it. A follow-up for a running worker goes to it with SendMessage — never relaunch it. A trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none.`,
     '3. A brief must be self-contained: the goal, the files or areas involved, acceptance criteria (how the worker proves it is done), constraints, and what is already ruled out. The worker knows only what you write. Prefer ordering work with `after` to workers waiting on each other. When workers must talk, write their briefs together and check them as a pair: every message one side waits for, the other side is told to send on every outcome (success and failure). The waiting side reports blocked while it waits; silence is yours to handle.',
     `4. For a non-trivial request, write the plan as TODO rows and confirm it with the user (AskUserQuestion) before fanning out to several workers. Keep ${todo} current: update it after every launch, report and event. One row per task in its table (id | description | depends on | status): name the worker in the description; status is queued|running|blocked|done|failed followed by the last report in a few words. It is your memory — after a compaction or resume, read it and NOTES.md first.`,
     '5. Workers report with the `report` tool and SendMessage. Worker events (report, exited, idle: a turn ended without a done, failed, blocked or paused report) arrive in your context automatically, marked "[orchestration]". "started" and progress reports and overlaps do not wake you: they come with the next delivery. Act on each one and update the TODO. On a done or failed report, check the workers that wait on or talk to that worker. One that is idle without a done, failed or blocked report since then is stalled: read its NOTES.md and message it with what to do. That is not a status request under rule 10.',
@@ -456,7 +480,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         defaultValue: 'Orchestrator CLI',
         options: [
           { label: 'Simple CLI', description: 'One Claude Code session, as usual.' },
-          { label: 'Orchestrator CLI', description: `Plans and delegates to up to ${MAX_WORKERS} worker CLIs, tracks them in a TODO, never codes itself.` },
+          { label: 'Orchestrator CLI', description: `Plans and delegates to worker CLIs (up to ${DEFAULT_MAX_WORKERS} at once; adjustable in its header), tracks them in a TODO, never codes itself.` },
         ],
       });
     }
@@ -470,7 +494,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       given: { mode, engine, auth },
       credentials: { apiKey: !!creds.apiKey, subscription: !!creds.subscription },
       onlyAuth,
-      maxWorkers: MAX_WORKERS,
+      maxWorkers: DEFAULT_MAX_WORKERS,
       defaultModel,
       orchestratorModels: ORCHESTRATOR_MODELS.map(m => ({ ...m, available: !!(creds.apiKey || creds.subscription) || engine === 'cli' })),
       orchestratorModel: ORCHESTRATOR_MODELS[0].value,
@@ -769,12 +793,13 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // orchestrator closes one rather than pushing unrelated work into it.
   function assertCapacity(run) {
     const running = [...runningWorkers(run), ...run.workers.filter(w => w.remote && remoteHoldsSlot(run, w))];
-    if (running.length >= MAX_WORKERS) {
+    const limit = maxWorkersOf(run);
+    if (running.length >= limit) {
       const available = running.filter(w => workerAvailable(run, w));
       const hint = available.length
         ? `Finished and idle, available to close: ${available.map(w => `${w.name} (last report: ${w.lastReport.status})`).join(', ')}. Close one you will not reuse with close_worker, or send a follow-up with SendMessage to one that worked on the same area.`
         : 'None of them is finished: send a follow-up with SendMessage to one that works on the same area, or wait for a report or an exit event.';
-      throw new Error(`${MAX_WORKERS} workers are running (${running.map(w => w.name).join(', ')}). ${hint}`);
+      throw new Error(`${running.length} workers are running and the run's worker limit is ${limit} (${running.map(w => w.name).join(', ')}). ${hint}`);
     }
   }
 
@@ -1095,7 +1120,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return w.remote ? remoteLive(run, w) : workerSession(run, w.id);
   }
 
-  // Holds one of the run's MAX_WORKERS slots: waiting for the owner in this
+  // Holds one of the run's worker slots: waiting for the owner in this
   // process, running, or started and not back since a restart.
   function remoteHoldsSlot(run, w) {
     if (w.closed || w.deleted) return false;
@@ -1335,7 +1360,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (typeof cwd !== 'string' || !path.isAbsolute(cwd) || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) throw new Error('cwd must be an existing absolute directory');
     if (auth != null && auth !== 'apikey' && auth !== 'subscription') throw new Error('auth must be "apikey" or "subscription"');
     if (model != null && model !== '' && (typeof model !== 'string' || !MODEL_RE.test(model))) throw new Error('model is not a model name');
-    if (freeSlots(run) <= 0) throw new Error(`${MAX_WORKERS} members of this run are running`);
+    if (freeSlots(run) <= 0) throw new Error(`${maxWorkersOf(run)} members of this run are running (the run's worker limit)`);
     let stamps = {};
     try { stamps = settings && typeof settings === 'object' && !Array.isArray(settings) ? JSON.parse(JSON.stringify(settings)) : {}; } catch { stamps = {}; }
     const root = typeof stamps.sessionsRoot === 'string' && path.isAbsolute(stamps.sessionsRoot) ? stamps.sessionsRoot : run.sessionsRoot;
@@ -1414,7 +1439,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   function freeSlots(run) {
-    return MAX_WORKERS - run.workers.filter(w => (w.remote ? remoteHoldsSlot(run, w) : workerSession(run, w.id)?.session.running || awaitingRestore(run, w))).length;
+    return maxWorkersOf(run) - run.workers.filter(w => (w.remote ? remoteHoldsSlot(run, w) : workerSession(run, w.id)?.session.running || awaitingRestore(run, w))).length;
   }
 
   // What a dependency that is not finished came to, when it will not finish
@@ -1739,6 +1764,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       notes: path.join(orchestratorDir(run), 'NOTES.md'),
       pausing: !!run.pausing,
       paused: run.paused || null,
+      // How many workers may run at once (setRunMaxWorkers).
+      maxWorkers: maxWorkersOf(run),
+      maxWorkersRange: [MIN_WORKER_LIMIT, MAX_WORKER_LIMIT],
       ...(run.mirror ? { mirror: { key: run.mirror.key, host: run.mirror.host, orchestrator: run.orchestrator, closed: !!run.mirror.closed } } : {}),
       orchestratorRunning: !!orch?.session.running,
       orchestratorSessId: orch?.session.sessId || savedId(st => st.role === 'orchestrator'),
@@ -2589,6 +2617,26 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       throw new Error('a terminal cannot change its model mid-session: it starts on it when resumed or restarted');
     }, out, 'model switch');
     return out;
+  }
+
+  // The run's worker limit (the orchestrator tab's header): run.maxWorkers,
+  // clamped to MIN..MAX_WORKER_LIMIT. A change is an event for the
+  // orchestrator (it wakes it) and, raised, starts the queued launches that
+  // now fit; lowered, it stops nothing: new starts wait until fewer run.
+  // Resolves { runId, maxWorkers, changed, started: [worker] }.
+  function setRunMaxWorkers(runId, value) {
+    const n = typeof value === 'string' && value.trim() ? Number(value) : value;
+    if (typeof n !== 'number' || !Number.isFinite(n)) throw new Error(`maxWorkers must be a number from ${MIN_WORKER_LIMIT} to ${MAX_WORKER_LIMIT}`);
+    const run = getRun(runId);
+    if (!run) throw new Error('run not found');
+    const maxWorkers = clampMaxWorkers(n);
+    const before = maxWorkersOf(run);
+    if (run.maxWorkers === maxWorkers) return { runId: run.runId, maxWorkers, changed: false, started: [] };
+    run.maxWorkers = maxWorkers;
+    if (maxWorkers === before) { saveRun(run); return { runId: run.runId, maxWorkers, changed: false, started: [] }; }
+    addEvent(run, { worker: null, kind: 'owner', text: `The owner set the worker limit to ${maxWorkers} (was ${before}).` });
+    const started = maxWorkers > before ? pumpQueue(run.runDir).filter(s => s.result).map(s => s.result.worker) : [];
+    return { runId: run.runId, maxWorkers, changed: true, started };
   }
 
   // A member resumed with its own transcript carries its recorded cost on.
@@ -3827,9 +3875,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
-    memberModelChanged, setRunModelMap, setRunAuth, setRunModel, registerHostProvider, hostList, openMirrorRun,
-    MAX_WORKERS, MAX_SUBAGENTS, WORKER_AGENTS,
+    memberModelChanged, setRunModelMap, setRunAuth, setRunModel, setRunMaxWorkers, registerHostProvider, hostList, openMirrorRun,
+    MAX_WORKERS, DEFAULT_MAX_WORKERS, MIN_WORKER_LIMIT, MAX_WORKER_LIMIT, MAX_SUBAGENTS, WORKER_AGENTS,
   };
 }
 
-module.exports = { createOrchestration, orchestratorCard, workerCard, WORKER_AGENTS, MAX_WORKERS, MAX_SUBAGENTS };
+module.exports = { createOrchestration, orchestratorCard, workerCard, WORKER_AGENTS, MAX_WORKERS, DEFAULT_MAX_WORKERS, MIN_WORKER_LIMIT, MAX_WORKER_LIMIT, clampMaxWorkers, maxWorkersOf, MAX_SUBAGENTS };
