@@ -1101,7 +1101,7 @@ test('an orchestrator SendMessage to a worker is kept as a follow-up: in its rec
   assert.strictEqual(run().workers[0].followUps[0].text, 'extra 2');
 
   const ctx = JSON.parse(hook(orch, s1, { hook_event_name: 'SessionStart', source: 'compact' }).stdout).hookSpecificOutput.additionalContext;
-  assert.match(ctx, /THE ORIGINAL BRIEF[\s\S]*Follow-ups from your orchestrator, oldest first[\s\S]*extra 2[\s\S]*extra 11/);
+  assert.match(ctx, /THE ORIGINAL BRIEF[\s\S]*Follow-ups since your brief, oldest first[\s\S]*extra 2[\s\S]*extra 11/);
   assert.ok(ctx.length <= 9001);
 
   // A long brief and long follow-ups still fit, the newest follow-up kept.
@@ -1121,7 +1121,7 @@ test('an orchestrator SendMessage to a worker is kept as a follow-up: in its rec
   orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
   orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
   const f = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'fresh' });
-  assert.match(typedInto(mgr, f.tabId), /THE ORIGINAL BRIEF[\s\S]*Follow-ups from your orchestrator[\s\S]*do the exporter[\s\S]*fresh restart/);
+  assert.match(typedInto(mgr, f.tabId), /THE ORIGINAL BRIEF[\s\S]*Follow-ups since your brief[\s\S]*do the exporter[\s\S]*fresh restart/);
 
   // The seed of a fresh orchestrator lists them under the brief.
   orch.refreshOrchestrator(run().runId);
@@ -1131,7 +1131,7 @@ test('an orchestrator SendMessage to a worker is kept as a follow-up: in its rec
   hook(orch, orchSession, { hook_event_name: 'Stop' });
   await waitFor(() => fs.existsSync(path.join(orchSession.settings.sessionDir, 'RESTART.md')), { what: 'RESTART.md written' });
   const seed = fs.readFileSync(path.join(orchSession.settings.sessionDir, 'RESTART.md'), 'utf8');
-  assert.match(seed, /THE ORIGINAL BRIEF[\s\S]*Follow-ups you sent it[\s\S]*do the exporter/);
+  assert.match(seed, /THE ORIGINAL BRIEF[\s\S]*Follow-ups since its brief[\s\S]*do the exporter/);
 });
 
 // --- end_run keeps workers resumable; a worker's worktree comes back ---
@@ -1388,6 +1388,52 @@ test('the orchestrator card: plan confirmed before fanning out, cheap workers fo
   assert.match(card, /`stop_worker` ends its current turn and leaves it idle; then SendMessage it new instructions, or close_worker it/);
 });
 
+test('the cards: a requirement change updates TODO.md and NOTES.md first, then reaches the workers', () => {
+  const { orchestratorCard, workerCard } = require('../src/orchestration');
+  const run = { runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' };
+  const card = orchestratorCard(run);
+  assert.match(card, /\n4\. [^\n]*When the owner changes a requirement during a run, first update your TODO\.md and NOTES\.md \(replace the decisions it overrides\), then tell every affected worker: a running or idle one by SendMessage naming what the change replaces; a queued one \(its brief is fixed at launch\) by cancel_launch and a new launch with the corrected brief\./);
+  assert.deepStrictEqual(card.match(/^\d+(?=\. )/gm).map(Number), Array.from({ length: 14 }, (_, i) => i + 1), 'rules numbered 1-14');
+  const wCard = workerCard(run, { name: 'orch-abc123-w1', cwd: '/tmp/w' });
+  assert.match(wCard, /\n4\. Messages from `orch-abc123`, or typed by the owner straight into this session, are new instructions\. If one changes the task, first bring TODO\.md and NOTES\.md in line with it \(rewrite the affected rows, replace the decisions it overrides\), then act on it and report\. Pass an owner instruction the orchestrator did not send on to it \(SendMessage, or in your next report\), so its plan stays right\./);
+  assert.match(wCard, /The rows of your TODO\.md are the steps of your brief and of the instructions since/);
+  assert.ok(!wCard.includes('are follow-up instructions'));
+});
+
+test('an owner message typed into a worker is kept as a follow-up from the owner; the server\'s own texts are not', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'THE ORIGINAL BRIEF' });
+  const s1 = mgr.sessions.get(w.tabId);
+  const prompt = (p) => hook(orch, s1, { hook_event_name: 'UserPromptSubmit', prompt: p });
+  // The brief and the server's or a member's texts: not follow-ups.
+  prompt('THE ORIGINAL BRIEF');
+  prompt('THE ORIGINAL BRIEF\n\n[vistaclair resume] You are worker w1 and this is a fresh restart');
+  prompt('[vistaclair pause] Write your notes');
+  prompt('[vistaclair resume] This session was paused');
+  prompt('[vistaclair landing] the check failed');
+  prompt('[orchestration] 2 worker event(s) pending');
+  prompt('[message from orch] hello');
+  prompt('   ');
+  assert.deepStrictEqual(run().workers[0].followUps || [], []);
+  // The orchestrator's message, then the owner's correction.
+  orch.sendMessage(orchSession.instanceId, { to: w.worker, message: 'map it to the right stick' });
+  prompt('  use the left stick, not the right one ');
+  const ups = run().workers[0].followUps;
+  assert.deepStrictEqual(ups.map(f => [f.text, f.from]), [['map it to the right stick', undefined], ['use the left stick, not the right one', 'owner']]);
+  assert.ok(ups[1].at);
+
+  // A fresh restart is told both, labelled.
+  orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
+  hook(orch, s1, { hook_event_name: 'Stop' });
+  orch.closeWorker(orchSession.instanceId, { worker: 'w1' });
+  const f = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'fresh' });
+  const typed = typedInto(mgr, f.tabId);
+  assert.match(typed, /THE ORIGINAL BRIEF[\s\S]*Follow-ups since your brief, oldest first:\n- [^\n]*, from the orchestrator: map it to the right stick\n- [^\n]*, from the owner: use the left stick, not the right one[\s\S]*fresh restart/);
+  // Its own restart prompt is not taken for an owner message.
+  hook(orch, mgr.sessions.get(f.tabId), { hook_event_name: 'UserPromptSubmit', prompt: typed });
+  assert.strictEqual(run().workers[0].followUps.length, 2);
+});
+
 test('stop_worker: orchestrator only, refuses an idle worker, interrupts a busy one without a nudge or idle event', async (t) => {
   for (const engine of ['cli', 'sdk']) {
     const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine });
@@ -1518,7 +1564,7 @@ test('a member model switch: run.json follows, fresh restarts use it; a resumed 
   assert.strictEqual(orch.memberModelChanged(wSession, 'haiku'), true);
   assert.strictEqual(run().workers[0].model, 'haiku');
   assert.strictEqual(orch.describeRun(run()).workers[0].model, 'haiku');
-  assert.match(mgr.sessions.get(w.tabId).settings.appendSystemPrompt, /rows of your TODO\.md \(short descriptions, detail in NOTES\.md\)/);
+  assert.match(mgr.sessions.get(w.tabId).settings.appendSystemPrompt, /rows of your TODO\.md are the steps of your brief and of the instructions since \(short descriptions, detail in NOTES\.md\)/);
   assert.strictEqual(orch.memberModelChanged(orchSession, 'claude-opus-4-5[1m]'), true);
   assert.strictEqual(run().orchestratorModel, 'claude-opus-4-5[1m]');
   assert.strictEqual(orch.memberModelChanged({ getSettings: () => ({}) }, 'opus'), false, 'not a member');

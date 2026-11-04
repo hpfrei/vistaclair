@@ -82,3 +82,9 @@ test('the convention note names the folder and announces the trusted channel', (
   assert.match(note, /keep each description short \(60 characters at most\) and put the detail in NOTES\.md/);
   assert.ok(note.includes(folders.CONTROL_TRUST));
 });
+
+test('the convention note: a changed requirement rewrites the TODO rows and replaces the NOTES decision', () => {
+  const note = folders.conventionNote('/x/sessions/demo-abc123');
+  assert.match(note, /When an instruction changes the requirements, rewrite the rows it affects \(add, reword, or mark them dropped\) before you act on it\./);
+  assert.match(note, /A decision a new instruction overrides is replaced or struck, not left in place with the new one below it: NOTES\.md always describes the current spec, and a fresh restart works from it\./);
+});

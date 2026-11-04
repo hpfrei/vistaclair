@@ -78,6 +78,7 @@ async function supervise(t, mode, { env = {}, legacyTg = false } = {}) {
   delete fullEnv.VISTACLAIR_SERVER;
   delete fullEnv.VISTA_SECRETS_KEY;
   delete fullEnv.VISTACLAIR_SUPERVISED;
+  delete fullEnv.NO_OPEN;   // set in a supervised server's own env (a restarted child): its check runs inherit it
   for (const [k, v] of Object.entries(fullEnv)) if (v === undefined) delete fullEnv[k];
   const proc = spawn(process.execPath, [SUPERVISOR], { cwd: home, env: fullEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
