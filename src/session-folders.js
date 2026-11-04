@@ -125,8 +125,8 @@ const CONTROL_TRUST = 'Messages tagged [vistaclair pause] or [vistaclair resume]
 function conventionNote(dir) {
   return [
     `Session folder: ${dir} — keep this session's work structured there.`,
-    '- TODO.md: one table `| id | description | depends on | status |`. For multi-step work, list the items before you start; set a row\'s status when you start it (doing) and when you finish it (done; or blocked/dropped). Status may be free text after that word; keep each description short (60 characters at most) and put the detail in NOTES.md.',
-    '- NOTES.md: decisions, open questions, and anything you stopped that must be re-run. When pausing, write a `## Resume` section: where you are inside the item you are doing, uncommitted state, the next concrete step.',
+    '- TODO.md: one table `| id | description | depends on | status |`. For multi-step work, list the items before you start; set a row\'s status when you start it (doing) and when you finish it (done; or blocked/dropped). Status may be free text after that word; keep each description short (60 characters at most) and put the detail in NOTES.md. When an instruction changes the requirements, rewrite the rows it affects (add, reword, or mark them dropped) before you act on it.',
+    '- NOTES.md: decisions, open questions, and anything you stopped that must be re-run. When pausing, write a `## Resume` section: where you are inside the item you are doing, uncommitted state, the next concrete step. A decision a new instruction overrides is replaced or struck, not left in place with the new one below it: NOTES.md always describes the current spec, and a fresh restart works from it.',
     CONTROL_TRUST,
   ].join('\n');
 }

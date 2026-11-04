@@ -292,7 +292,7 @@ function orchestratorCard(run, { hosts = [] } = {}) {
     `1. Never write or edit code or project files yourself. The only files you write are your TODO.md and NOTES.md in ${dir} (edits elsewhere are blocked). Reading, searching and read-only commands to plan are fine.`,
     `2. Every piece of work goes to a worker CLI launched with the \`launch_cli\` tool (mcp__orchestrator__launch_cli). At most ${maxWorkersOf(run)} workers run at once (the run's worker limit: the owner may change it, and an "[orchestration]" event tells you the new value): a launch beyond that is queued and starts when a slot frees (\`after: [worker]\` holds it until those workers have landed), and a finished, landed, clean idle worker may be closed automatically to make room for it. A follow-up for a running worker goes to it with SendMessage — never relaunch it. A trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none.`,
     '3. A brief must be self-contained: the goal, the files or areas involved, acceptance criteria (how the worker proves it is done), constraints, and what is already ruled out. The worker knows only what you write. Prefer ordering work with `after` to workers waiting on each other. When workers must talk, write their briefs together and check them as a pair: every message one side waits for, the other side is told to send on every outcome (success and failure). The waiting side reports blocked while it waits; silence is yours to handle.',
-    `4. For a non-trivial request, write the plan as TODO rows and confirm it with the user (AskUserQuestion) before fanning out to several workers. Keep ${todo} current: update it after every launch, report and event. One row per task in its table (id | description | depends on | status): name the worker in the description; status is queued|running|blocked|done|failed followed by the last report in a few words. It is your memory — after a compaction or resume, read it and NOTES.md first.`,
+    `4. For a non-trivial request, write the plan as TODO rows and confirm it with the user (AskUserQuestion) before fanning out to several workers. Keep ${todo} current: update it after every launch, report and event. One row per task in its table (id | description | depends on | status): name the worker in the description; status is queued|running|blocked|done|failed followed by the last report in a few words. It is your memory — after a compaction or resume, read it and NOTES.md first. When the owner changes a requirement during a run, first update your TODO.md and NOTES.md (replace the decisions it overrides), then tell every affected worker: a running or idle one by SendMessage naming what the change replaces; a queued one (its brief is fixed at launch) by cancel_launch and a new launch with the corrected brief.`,
     '5. Workers report with the `report` tool and SendMessage. Worker events (report, exited, idle: a turn ended without a done, failed, blocked or paused report) arrive in your context automatically, marked "[orchestration]". "started" and progress reports and overlaps do not wake you: they come with the next delivery. Act on each one and update the TODO. On a done or failed report, check the workers that wait on or talk to that worker. One that is idle without a done, failed or blocked report since then is stalled: read its NOTES.md and message it with what to do. That is not a status request under rule 10.',
     `6. \`list_workers\` shows every worker's state. ${isolation}`,
     `7. You may run at most ${MAX_SUBAGENTS} subagents at once, for reading only (e.g. Explore). Never use a subagent to edit code.`,
@@ -317,10 +317,10 @@ function workerCard(run, worker) {
     `You are a WORKER CLI launched by the orchestrator \`${run.orchestrator}\`. Your own cross-session address is \`${worker.name}\`. Your task is the first user message. These instructions stay in force for the whole session, including after any compaction.`,
     '',
     'Rules',
-    `1. Report to the orchestrator with the \`report\` tool (mcp__orchestrator__report): status "started" when you begin, "blocked" when you need a decision or wait on someone (a question goes by SendMessage to \`${run.orchestrator}\`), "done" or "failed" when finished, "paused" when a pause is complete — with summary, filesChanged, verified (the one check you ran) and open. A turn ends only after a done, failed, blocked or paused report in that turn, or a message to the orchestrator. Never end a turn waiting on someone: report "blocked" naming whom you wait for and what. Their message starts your next turn. The steps of your brief are the rows of your TODO.md (short descriptions, detail in NOTES.md); your orchestrator reads it to follow your progress.`,
+    `1. Report to the orchestrator with the \`report\` tool (mcp__orchestrator__report): status "started" when you begin, "blocked" when you need a decision or wait on someone (a question goes by SendMessage to \`${run.orchestrator}\`), "done" or "failed" when finished, "paused" when a pause is complete — with summary, filesChanged, verified (the one check you ran) and open. A turn ends only after a done, failed, blocked or paused report in that turn, or a message to the orchestrator. Never end a turn waiting on someone: report "blocked" naming whom you wait for and what. Their message starts your next turn. The rows of your TODO.md are the steps of your brief and of the instructions since (short descriptions, detail in NOTES.md); your orchestrator reads it to follow your progress.`,
     `2. You may delegate through subagents, at most ${MAX_SUBAGENTS} running at once: \`coder\` (Opus) for a substantial piece of code, \`explorer\` (Sonnet, read-only; use it rather than the built-in Explore) for a search across many files. Make small edits and single lookups yourself — a subagent's overhead costs more. A subagent's summary is trusted: do not repeat its checks.`,
     '3. Stay within your brief. If the scope has to grow, ask the orchestrator instead of widening it yourself.',
-    `4. Messages from \`${run.orchestrator}\` are follow-up instructions: act on them and report.${run.mirror ? ` Your orchestrator runs on another machine (${run.mirror.host}): your reports and your messages to it reach it there.` : ''}`,
+    `4. Messages from \`${run.orchestrator}\`, or typed by the owner straight into this session, are new instructions. If one changes the task, first bring TODO.md and NOTES.md in line with it (rewrite the affected rows, replace the decisions it overrides), then act on it and report. Pass an owner instruction the orchestrator did not send on to it (SendMessage, or in your next report), so its plan stays right.${run.mirror ? ` Your orchestrator runs on another machine (${run.mirror.host}): your reports and your messages to it reach it there.` : ''}`,
     `5. ${where}`,
     `6. Where the instructions above this card tell the session to ask the user, ask \`${run.orchestrator}\` instead (SendMessage, report "blocked"). Project-wide finishing steps they ask for (a check that rewrites shared files, a docs update) are yours only when your brief assigns them; otherwise list what they need in your "done" report. Anything only the owner can do (Stop→Start, Build, Make live, Rebuild client, an approval) or decide goes into report's \`ownerItems\` ({ what, why, kind: "action" | "decision", options, recommended }), never only in prose: it lands on the owner's "your turn" checklist, and you are told when the owner has done or decided it.`,
     `7. A shared machine resource (GPU, a memory-heavy job) is taken with a lock, not by message: run the command as \`node ${path.join(__dirname, '..', 'bin', 'vistaclair-lock.js')} <name> -- <cmd>\` (\`-s\` for a shared hold; names are [a-z0-9._-]; it waits its turn and releases when the command exits).`,
@@ -2678,7 +2678,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       lines.push(`- Last report: ${w.lastReport ? `${w.lastReport.status}: ${clip(w.lastReport.summary, 600)}${w.lastReport.filesChanged?.length ? ` (files: ${w.lastReport.filesChanged.join(', ')})` : ''}` : '(none)'}`);
       if (f) lines.push(`- TODO: ${f.progress.done}/${f.progress.total} done${f.progress.doing ? `, doing ${f.progress.doing.id}: ${clip(f.progress.doing.description, 120)}` : ''}`);
       lines.push('- Brief:', '', '```', clip(w.task, 2000), '```');
-      const ups = followUpsText(w, '- Follow-ups you sent it, oldest first:', 3000);
+      const ups = followUpsText(w, '- Follow-ups since its brief, oldest first:', 3000);
       if (ups) lines.push('', ups);
       if (f?.resume) lines.push('', '- Resume note:', '', clip(f.resume, 2000));
     }
@@ -2793,7 +2793,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     let tabId;
     if (mode === 'fresh' || lost) {
       const why = lost ? 'its earlier conversation could not be restored, so this is a fresh session' : 'this is a fresh restart';
-      const ups = followUpsText(w, 'Follow-ups from your orchestrator, oldest first:', 4000);
+      const ups = followUpsText(w, 'Follow-ups since your brief, oldest first:', 4000);
       const task = ups ? 'the brief above is your original task and the follow-ups after it are what you were told since (the newest is your current task), already partly done' : 'the brief above is your original task, already partly done';
       const prompt = `${w.task}\n\n${ups ? `${ups}\n\n` : ''}[vistaclair resume] You are worker \`${w.name}\` and ${why} with a clean context: ${task}. Your TODO.md and NOTES.md in ${w.sessionDir} are your state — read them first, check the files they name, re-run whatever was cut off and continue from the \`## Resume\` note. ${from}`.trim();
       tabId = spawnWorker(run, w, prompt);
@@ -3371,13 +3371,26 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   const joinContext = (...parts) => parts.filter(Boolean).join('\n\n') || null;
 
-  // Keep what the orchestrator told a worker after its brief (the last 10): a
-  // reused worker's current task, for its recap, a fresh restart and the seed.
-  function addFollowUp(run, workerId, text) {
+  // Keep what the worker was told after its brief (the last 10): a reused
+  // worker's current task, for its recap, a fresh restart and the seed. From
+  // the orchestrator unless `from` is 'owner' (typed into the worker's session).
+  function addFollowUp(run, workerId, text, from) {
     const w = run?.workers.find(x => x.id === workerId);
     if (!w) return;
-    w.followUps = [...(w.followUps || []), { at: new Date().toISOString(), text: clip(text, 2000) }].slice(-10);
+    const up = { at: new Date().toISOString(), text: clip(text, 2000), ...(from === 'owner' ? { from } : {}) };
+    w.followUps = [...(w.followUps || []), up].slice(-10);
     saveRun(run);
+  }
+
+  // A worker's prompt the owner typed: not the brief (its launch, a fresh
+  // restart) and none of the server's or a member's texts, which all start
+  // with "[" ([message from …], [vistaclair …], [orchestration] …).
+  function ownerPrompt(w, prompt) {
+    const text = typeof prompt === 'string' ? prompt.trim() : '';
+    if (!text || text.startsWith('[')) return '';
+    const brief = String(w.task || '').trim();
+    if (brief && text.startsWith(brief)) return '';
+    return text;
   }
 
   // A worker's follow-ups under `heading`, oldest first, within `budget` chars:
@@ -3388,7 +3401,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const lines = [];
     let used = heading.length;
     for (let i = list.length - 1; i >= 0; i--) {
-      const line = `- ${list[i].at}: ${list[i].text}`;
+      const line = `- ${list[i].at}, from ${list[i].from === 'owner' ? 'the owner' : 'the orchestrator'}: ${list[i].text}`;
       if (used + line.length + 1 > budget) { lines.unshift(`- (${i + 1} older follow-up(s) left out)`); break; }
       lines.unshift(line);
       used += line.length + 1;
@@ -3646,7 +3659,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
     const w = run.workers.find(x => x.id === stamp.workerId) || {};
     // The follow-ups come first in the budget: they hold the current task.
-    const ups = followUpsText(w, 'Follow-ups from your orchestrator, oldest first (the newest is your current task):', 4000);
+    const ups = followUpsText(w, 'Follow-ups since your brief, oldest first (the newest is your current task):', 4000);
     return [
       `[orchestration] Context restored. You are WORKER \`${w.name}\` of run ${run.runId}, launched by \`${run.orchestrator}\`; your role card in the system prompt still applies. Report with the \`report\` tool; delegate to \`coder\` / \`explorer\`.`,
       'Your original brief:', clip(w.task, Math.min(4000, CONTEXT_LIMIT - ups.length - 1200)),
@@ -3721,7 +3734,13 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         return ctxOut('SessionStart', joinContext(text, inboxOf(CONTEXT_LIMIT - text.length - 2)));
       }
       case 'UserPromptSubmit': {
-        if (!isOrch) { v.reported = false; v.nudged = false; v.stopping = false; return ctxOut('UserPromptSubmit', inboxOf()); }
+        if (!isOrch) {
+          v.reported = false; v.nudged = false; v.stopping = false;
+          const w = run.workers.find(x => x.id === stamp.workerId);
+          const typed = w && ownerPrompt(w, input.prompt);
+          if (typed) addFollowUp(run, w.id, typed, 'owner');
+          return ctxOut('UserPromptSubmit', inboxOf());
+        }
         run.busy = true;
         // The run's original request, for a fresh orchestrator's seed: the first
         // prompt that is not one of the dashboard's own notices.
