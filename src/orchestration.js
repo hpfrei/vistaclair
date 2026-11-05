@@ -3302,6 +3302,21 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return { ok: true, ownerItems: ownerItemsView(run) };
   }
 
+  // The owner's bulk delete from the checklist: the items go from run.ownerItems
+  // entirely, open or resolved, silently — no event, no message to anyone (the
+  // owner's choice; a Drop is the way that tells). Unknown ids are skipped.
+  function ownerDelete({ runId, ids } = {}) {
+    const run = getRun(String(runId || ''));
+    if (!run) throw new Error('run not found');
+    if (!Array.isArray(ids)) throw new Error('ids must be an array of owner item ids');
+    const gone = new Set(ids.map(x => String(x ?? '').trim()).filter(Boolean));
+    const before = (run.ownerItems || []).length;
+    run.ownerItems = (run.ownerItems || []).filter(i => !gone.has(i.id));
+    const deleted = before - run.ownerItems.length;
+    if (deleted) saveRun(run);
+    return { ok: true, deleted, ownerItems: ownerItemsView(run) };
+  }
+
   // --- Messages between run members (SendMessage / ListAgents) ---
 
   // The run's members, by address: the orchestrator, then every worker.
@@ -3875,6 +3890,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       try { res.json({ runs: ownerList(String(req.query.runId || '') || null) }); } catch (e) { res.status(400).json({ error: e.message }); }
     });
     r.post('/owner-resolve', call(b => ownerResolve(b)));
+    // POST deletes several at once, silently: { runId, ids }.
+    r.post('/owner-delete', call(b => ownerDelete(b)));
     r.get('/run', (req, res) => {
       const run = getRun(String(req.query.runId || ''));
       // A run whose orchestrator is an external session (another machine's):
@@ -3891,7 +3908,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   return {
-    router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, sendMessage, listAgents, sendToSession, toolParams,
+    router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, ownerDelete, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged, setRunModelMap, setRunAuth, setRunModel, setRunMaxWorkers, registerHostProvider, hostList, openMirrorRun,

@@ -62,3 +62,68 @@ test('the panel: header with the count, the checklist, then the locks; nothing w
   assert.ok(html.indexOf('oi-list') < html.indexOf('oi-locks'));
   assert.match(O.panelHtml([], null, { emptyText: 'Nothing waits for you in this run.' }), /nothing waiting.*Nothing waits for you/);
 });
+
+test('every open item has a checkbox, ticked and marked when selected', () => {
+  const a = O.itemHtml(run.items[0], run, { now: NOW });
+  assert.match(a, /<input type="checkbox" class="oi-sel" data-sel-run="r1" data-sel-id="o1" aria-label="Select">/);
+  assert.doesNotMatch(a, /oi-selected/);
+  const s = O.itemHtml(run.items[0], run, { now: NOW, selected: true });
+  assert.match(s, /class="oi-item oi-action oi-blocking oi-selected"/);
+  assert.match(s, /data-sel-id="o1" aria-label="Select" checked>/);
+  const two = [run, { runId: 'r2', items: [{ id: 'o1', kind: 'action', what: 'Other', at: at(1), state: 'open' }] }];
+  const html = O.checklistHtml(two, { now: NOW, selected: new Set([O.selKey('r2', 'o1')]) });
+  assert.match(html, /data-sel-run="r2" data-sel-id="o1" aria-label="Select" checked>/, 'keyed by run and id');
+  assert.match(html, /data-sel-run="r1" data-sel-id="o1" aria-label="Select">/);
+  assert.deepStrictEqual(O.openKeys(two), ['r1 o1', 'r1 o2', 'r2 o1'], 'display order, open items only');
+});
+
+test('the toolbar: select all (checked, or some: indeterminate) and delete selected (N), disabled at 0', () => {
+  assert.strictEqual(O.toolbarHtml([{ runId: 'r2', items: [{ id: 'x', state: 'done' }] }]), '', 'nothing open, no toolbar');
+  const none = O.toolbarHtml([run]);
+  assert.match(none, /<input type="checkbox" data-sel-all> Select all/);
+  assert.match(none, /data-del-sel disabled[^>]*>Delete selected \(0\)/);
+  const some = O.toolbarHtml([run], { selected: new Set(['r1 o2', 'r1 o3', 'r9 o1']) });
+  assert.match(some, /data-sel-all data-some="1">/, 'a resolved or unknown key does not count');
+  assert.match(some, /data-del-sel title=[^>]*>Delete selected \(1\)/);
+  const all = O.toolbarHtml([run], { selected: new Set(['r1 o1', 'r1 o2']) });
+  assert.match(all, /data-sel-all checked>/);
+  assert.match(all, /Delete selected \(2\)/);
+  const panel = O.panelHtml([run], null, { now: NOW, selected: new Set(['r1 o1']) });
+  assert.ok(panel.indexOf('oi-bar') < panel.indexOf('oi-list'), 'above the list');
+  assert.match(panel, /data-sel-id="o1" aria-label="Select" checked>/);
+  assert.doesNotMatch(O.panelHtml([], null, { emptyText: 'Nothing.' }), /oi-bar/);
+});
+
+test('selecting by click: checkbox toggles, shift a range from the anchor, ctrl/cmd toggles, a row alone selects only it', () => {
+  const order = ['a', 'b', 'c', 'd', 'e'];
+  const sel = (r) => [...r.selected].sort().join('');
+  let r = O.clickSelect(new Set(), order, 'b', { box: true });
+  assert.deepStrictEqual([sel(r), r.anchor], ['b', 'b']);
+  r = O.clickSelect(r.selected, order, 'd', { box: true, shift: true, anchor: r.anchor });
+  assert.deepStrictEqual([sel(r), r.anchor], ['bcd', 'b'], 'the range, the anchor kept');
+  r = O.clickSelect(r.selected, order, 'a', { box: true, shift: true, anchor: 'c' });
+  assert.strictEqual(sel(r), 'abcd', 'a was off: the range a..c turns on');
+  // A box turned off with shift turns its range off.
+  r = O.clickSelect(new Set(['a', 'b', 'c', 'e']), order, 'c', { box: true, shift: true, anchor: 'b' });
+  assert.strictEqual(sel(r), 'ae');
+  r = O.clickSelect(new Set(['a', 'e']), order, 'c', { box: true, toggle: true });
+  assert.strictEqual(sel(r), 'ace', 'ctrl on a box: toggles too');
+
+  // Rows: plain selects only it; ctrl/cmd toggles; shift only the range; ctrl+shift adds it.
+  r = O.clickSelect(new Set(['a', 'e']), order, 'c', {});
+  assert.deepStrictEqual([sel(r), r.anchor], ['c', 'c']);
+  r = O.clickSelect(r.selected, order, 'e', { toggle: true, anchor: r.anchor });
+  assert.deepStrictEqual([sel(r), r.anchor], ['ce', 'e']);
+  r = O.clickSelect(r.selected, order, 'e', { toggle: true, anchor: r.anchor });
+  assert.strictEqual(sel(r), 'c');
+  r = O.clickSelect(new Set(['a']), order, 'd', { shift: true, anchor: 'b' });
+  assert.deepStrictEqual([sel(r), r.anchor], ['bcd', 'b']);
+  r = O.clickSelect(new Set(['a']), order, 'd', { shift: true, toggle: true, anchor: 'e' });
+  assert.strictEqual(sel(r), 'ade');
+  // No anchor (or one gone): shift counts as a plain click.
+  r = O.clickSelect(new Set(['a']), order, 'c', { shift: true, anchor: 'zz' });
+  assert.deepStrictEqual([sel(r), r.anchor], ['c', 'c']);
+  // An unknown item changes nothing.
+  r = O.clickSelect(new Set(['a']), order, 'zz', { anchor: 'a' });
+  assert.deepStrictEqual([sel(r), r.anchor], ['a', 'a']);
+});

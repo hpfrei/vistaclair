@@ -18,6 +18,13 @@
 .oi-answer { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; align-items: center; }
 .oi-input { font: inherit; font-size: 11px; padding: 2px 6px; min-width: 130px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
 .oi-drop { opacity: .7; }
+/* Selecting items: a checkbox each, the toolbar above the list. */
+.oi-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.oi-all { display: inline-flex; align-items: center; gap: 5px; color: var(--text-dim); cursor: pointer; user-select: none; }
+.oi-all input, .oi-sel { margin: 0; cursor: pointer; accent-color: var(--accent); }
+.oi-sel { flex: 0 0 auto; margin-top: 2px; }
+.oi-del:not(:disabled) { color: var(--red, #e5534b); border-color: color-mix(in srgb, var(--red, #e5534b) 55%, var(--border)); }
+.oi-item.oi-selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .oi-locks { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border); }
 .oi-panel > .oi-locks:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .oi-lock { margin-bottom: 4px; }
@@ -28,4 +35,4 @@
 /* The SDK run panel's popover under the toolbar. */
 .sdk-turn { position: absolute; z-index: 30; right: 8px; top: 34px; width: min(560px, calc(100% - 16px)); max-height: 70%; overflow: auto; box-shadow: 0 6px 24px rgba(0,0,0,.35); background: var(--bg); }
 .sdk-tb-turn.on { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 55%, var(--border)); }
-@media (max-width: 700px) { .oi-item { flex-direction: column; } .oi-ctl { max-width: none; justify-content: flex-start; } }
+@media (max-width: 700px) { .oi-item { flex-wrap: wrap; } .oi-main { flex-basis: calc(100% - 30px); } .oi-ctl { flex-basis: 100%; max-width: none; justify-content: flex-start; } }

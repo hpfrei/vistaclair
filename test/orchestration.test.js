@@ -2504,6 +2504,32 @@ test('the owner resolving an item: a wake event for the orchestrator and a messa
   assert.throws(() => orch.ownerResolve({ runId: stamp.runId, id: 'o1', action: 'zap' }), /done or drop/);
 });
 
+test('the owner deleting items: gone from run.ownerItems, unknown ids skipped, no event and no message', async (t) => {
+  const { rep, run, mgr, orch, stamp } = await ownerSetup(t);
+  rep([{ what: 'One', key: 'one' }, { what: 'Two', key: 'two' }, { what: 'Three', key: 'three' }, { what: 'Four', key: 'four' }]);
+  orch.ownerResolve({ runId: stamp.runId, id: 'o4', action: 'drop' });
+  const events = run().events.length;
+  const submits = mgr.submits.length;
+  const delivered = run().delivered;
+
+  const r = orch.ownerDelete({ runId: stamp.runId, ids: ['o1', 'o3', 'o4', 'nope'] });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.deleted, 3, 'open and resolved alike; the unknown id skipped');
+  assert.deepStrictEqual(r.ownerItems.map(i => i.id), ['o2']);
+  assert.deepStrictEqual(run().ownerItems.map(i => i.id), ['o2'], 'saved');
+  assert.strictEqual(run().events.length, events, 'no event');
+  assert.strictEqual(run().delivered, delivered);
+  assert.strictEqual(mgr.submits.length, submits, 'no message to anyone');
+  assert.deepStrictEqual(orch.ownerList(stamp.runId)[0].items.map(i => i.id), ['o2']);
+
+  assert.strictEqual(orch.ownerDelete({ runId: stamp.runId, ids: ['o1', 'gone'] }).deleted, 0);
+  // A new item does not reuse a deleted id.
+  rep([{ what: 'Five', key: 'five' }]);
+  assert.deepStrictEqual(run().ownerItems.map(i => i.id), ['o2', 'o5']);
+  assert.throws(() => orch.ownerDelete({ runId: 'nope', ids: ['o2'] }), /run not found/);
+  assert.throws(() => orch.ownerDelete({ runId: stamp.runId, ids: 'o2' }), /ids must be an array/);
+});
+
 test('owner items survive a reload of run.json and are in describeRun; ownerList spans runs', async (t) => {
   const { rep, run, mgr, orch, stamp, tool } = await ownerSetup(t);
   rep([{ what: 'One', key: 'one' }, { what: 'Two', key: 'two' }]);
