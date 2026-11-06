@@ -1,7 +1,8 @@
 // The lines between an orchestrator's box and its workers' boxes in the SDK
 // run panel: which lines a piece of traffic lights and which way it moves on
 // each, when it flies on an arc between two workers instead and that arc's
-// shape, which workers an [orchestration] delivery speaks for, and the guard
+// shape, which workers an [orchestration] delivery speaks for (none when it
+// rides on the owner's own turn), and the guard
 // that lets the two copies of one message light the lines once. Kept free of
 // the DOM so test/sdk-links.test.js can run them. The view is in
 // public/sdk-panel.js (drawLinks, flashLink, flashArc).
@@ -75,6 +76,27 @@
     return out;
   }
 
+  // The owner's own turn the CLI is taking in, after command_lifecycle
+  // message m: from the 'started' of a turn the owner submitted
+  // (isOwnerTurn(id): its chip still waits) until that command moves on; the
+  // turn's echo ends it too (the panel clears it then). The orchestrator's
+  // UserPromptSubmit hook runs in this window and attaches the worker events
+  // still queued (the quiet ones, whose reports lit their lines when they
+  // came in): that delivery rides on the owner's input. current: the id
+  // before m, or null.
+  function intakeAfter(current, m, isOwnerTurn) {
+    if (m?.type !== 'command_lifecycle' || !m.command_uuid) return current;
+    if (m.state === 'started') return isOwnerTurn(m.command_uuid) ? m.command_uuid : null;
+    return m.command_uuid === current ? null : current;
+  }
+
+  // The workers whose lines an [orchestration] delivery lights: none while
+  // the owner's turn is being taken in (ownerIntake: intakeAfter's id), as
+  // that delivery is the owner's doing, not a worker's.
+  function deliveryFlashes(text, ownerIntake) {
+    return ownerIntake ? [] : deliveryWorkers(text);
+  }
+
   // A SendMessage reaches the panel twice, on the sender's session and on
   // the receiver's; either may be the only one seen live (a released box
   // gets no feed). once(key, now) is true for the first sighting of a key
@@ -89,7 +111,7 @@
     };
   }
 
-  const api = { linkFlashes, messageRoute, arcPath, DELIVERY_KINDS, deliveryWorkers, onceWithin };
+  const api = { linkFlashes, messageRoute, arcPath, DELIVERY_KINDS, deliveryWorkers, intakeAfter, deliveryFlashes, onceWithin };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.sdkLinks = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -790,6 +790,7 @@
       this._nowSig = null;
       this.seen = new Set();      // the newest SEEN_MAX message uuids
       this.pending = new Map();   // user turn id -> its "waiting" chip
+      this.intake = null;         // the owner's turn being taken in (sdkLinks.intakeAfter)
       this.pendingEl.innerHTML = '';
       this.pendingEl.classList.add('hidden');
       clearTimeout(this._olderTimer);
@@ -1107,6 +1108,9 @@
         case 'user': return this.applySdkUser(m);
         case 'result': return this.applyResult(m, ts);
         case 'system': return this.applySystem(m);
+        case 'command_lifecycle':
+          this.intake = Links.intakeAfter(this.intake, m, (id) => this.pending.has(id));
+          return;
         case 'tool_progress':
           if (this.act.progress(m, this._at)) this.renderNow();
           return;
@@ -1491,6 +1495,7 @@
       const p = this.pending.get(id);
       if (!p) return null;
       this.pending.delete(id);
+      if (this.intake === id) this.intake = null;
       p.chip.remove();
       this.pendingEl.classList.toggle('hidden', !this.pending.size);
       return p;
@@ -2304,10 +2309,11 @@
     }
 
     // An [orchestration] delivery reaching the orchestrator: each worker
-    // whose report, idle or exit it carries has its line light up.
+    // whose report, idle or exit it carries has its line light up; none when
+    // it rides on the owner's own turn (sdkLinks.deliveryFlashes).
     flashDelivery(area, text) {
       if (area !== this.main) return;
-      for (const name of Links.deliveryWorkers(text)) this.flashLink(name, area.name);
+      for (const name of Links.deliveryFlashes(text, area.intake)) this.flashLink(name, area.name);
     }
 
     // ---- sending ----
