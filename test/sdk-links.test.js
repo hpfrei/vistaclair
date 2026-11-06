@@ -115,6 +115,41 @@ test('other notices name no worker', () => {
   assert.deepStrictEqual(L.deliveryWorkers(null), []);
 });
 
+test('a delivery riding on the owner\'s own turn lights no line', () => {
+  // The orchestrator's stream when the owner submits (run 036e47's
+  // transcript): the waiting turn, its command queued and started, the
+  // UserPromptSubmit hook's delivery of the queued quiet events, init, the echo.
+  const text = '[orchestration] 1 worker event(s) — act on them and update TODO.md:\n'
+    + '- [report] orch-x-w1 reported started: on it';
+  const owner = new Set(['u1']);
+  const isOwner = (id) => owner.has(id);
+  let intake = null;
+  intake = L.intakeAfter(intake, { type: 'command_lifecycle', command_uuid: 'u1', state: 'queued' }, isOwner);
+  assert.strictEqual(intake, null);
+  intake = L.intakeAfter(intake, { type: 'command_lifecycle', command_uuid: 'u1', state: 'started' }, isOwner);
+  assert.strictEqual(intake, 'u1');
+  assert.deepStrictEqual(L.deliveryFlashes(text, intake), []);
+  // The echo: the panel drops the chip and the intake with it.
+  owner.delete('u1'); intake = null;
+  assert.deepStrictEqual(L.deliveryFlashes(text, intake), ['orch-x-w1']);
+});
+
+test('a delivery on a platform or peer turn, or mid-turn, still lights the worker\'s line', () => {
+  const text = '[orchestration] 2 worker event(s) — act on them and update TODO.md:\n'
+    + '- [report] orch-x-w1 reported done: Committed abc\n- [idle] orch-x-w2 went idle';
+  // A turn the platform typed in ("… worker event(s) pending") has no chip.
+  const isOwner = () => false;
+  let intake = L.intakeAfter(null, { type: 'command_lifecycle', command_uuid: 'p1', state: 'started' }, isOwner);
+  assert.strictEqual(intake, null);
+  assert.deepStrictEqual(L.deliveryFlashes(text, intake), ['orch-x-w1', 'orch-x-w2']);
+  // An owner's command that moved on ends its intake; another's does not.
+  intake = L.intakeAfter(null, { type: 'command_lifecycle', command_uuid: 'u1', state: 'started' }, () => true);
+  assert.strictEqual(L.intakeAfter(intake, { type: 'command_lifecycle', command_uuid: 'u2', state: 'completed' }, () => true), 'u1');
+  assert.strictEqual(L.intakeAfter(intake, { type: 'command_lifecycle', command_uuid: 'u1', state: 'completed' }, () => true), null);
+  // Other messages leave it as it is.
+  assert.strictEqual(L.intakeAfter(intake, { type: 'system', subtype: 'init' }, () => true), 'u1');
+});
+
 test('two copies of one message light once; the same text later lights again', () => {
   const once = L.onceWithin(10000);
   assert.strictEqual(once('a>b>hi', 1000), true);
