@@ -51,8 +51,11 @@
 //                  window is the model catalogue's, windowEstimated true.
 //   thinking       settings.showThinking asks Claude Code for summarized
 //                  thinking (--thinking-display summarized: it builds each
-//                  model's own thinking config); off, its default (no text).
-//                  setShowThinking switches it live (setMaxThinkingTokens).
+//                  model's own thinking config); off, for none (omitted, not
+//                  its default "updates" notes). setShowThinking switches it
+//                  live (setMaxThinkingTokens). Its subagents keep Claude
+//                  Code's default either way: the proxy sets the display of
+//                  every request of the session (applyShowThinking).
 //   files          `{ platform: { kind: 'files', todo, notes } }` when a
 //                  main-agent tool call that wrote the folder's TODO.md /
 //                  NOTES.md has returned: the panel re-reads them (sdk:todo).
@@ -675,7 +678,7 @@ class SdkSession {
       stderr: (d) => { this._stderr = (this._stderr + d).slice(-STDERR_TAIL); },
       // Echo each input message (isReplay, same uuid) as the CLI takes it
       // into a turn: the panel's "waiting" chip becomes the user's bubble.
-      extraArgs: { 'replay-user-messages': null, ...(s.showThinking ? { 'thinking-display': 'summarized' } : {}) },
+      extraArgs: { 'replay-user-messages': null, 'thinking-display': s.showThinking ? 'summarized' : 'omitted' },
     };
     if (s.settingsFile) options.settings = s.settingsFile;
     const mcpServers = buildMcpServers(mcpOpts, packs);
@@ -1293,12 +1296,14 @@ class SdkSession {
   updateSettings(newSettings) {
     const thinking = !!this.settings.showThinking;
     this.settings = { ...this.settings, ...newSettings };
-    // The display for the rest of a running query (null tokens: its budget
-    // stays; null display: Claude Code's default). A refusal is only logged.
+    // The display for the rest of a running query (no tokens: its budget
+    // stays as it is, where null would reset it; off is 'omitted', since
+    // null would bring back Claude Code's default "updates" notes). A
+    // refusal is only logged.
     const q = this._query;
     if (q && !!this.settings.showThinking !== thinking && typeof q.setMaxThinkingTokens === 'function') {
       const on = !!this.settings.showThinking;
-      Promise.resolve().then(() => q.setMaxThinkingTokens(null, on ? 'summarized' : null))
+      Promise.resolve().then(() => q.setMaxThinkingTokens(undefined, on ? 'summarized' : 'omitted'))
         .catch((e) => console.error(`[sdk-session] thinking display not switched: ${e?.message || e}`));
     }
     // A new model map rewrites the next request already (the proxy reads the

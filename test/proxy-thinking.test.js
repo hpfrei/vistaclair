@@ -1,5 +1,8 @@
 // The proxy's tab-level "show thinking" (src/proxy.js applyShowThinking):
-// display: 'summarized' only on a thinking config that takes it.
+// on, display: 'summarized' on a thinking config that takes it, over Claude
+// Code's own display ('updates', which it sends on every request, its
+// subagents' too); off, 'omitted' for an Agent SDK session, a terminal tab's
+// request untouched.
 //
 //   node --test test/
 
@@ -35,12 +38,25 @@ test('between_tools, disabled and no thinking at all stay as they are', () => {
   assert.strictEqual(run(null).thinking, null);
 });
 
-test('a display already chosen is kept', () => {
-  assert.deepStrictEqual(run({ type: 'adaptive', display: 'updates' }).thinking, { type: 'adaptive', display: 'updates' });
-  assert.deepStrictEqual(run({ type: 'enabled', budget_tokens: 1024, display: 'omitted' }).thinking, { type: 'enabled', budget_tokens: 1024, display: 'omitted' });
+test('on: the display Claude Code chose is replaced (it always sends one)', () => {
+  // What Claude Code 2.1.x sends for every main-agent and subagent request.
+  assert.deepStrictEqual(run({ type: 'adaptive', display: 'updates' }).thinking, { type: 'adaptive', display: 'summarized' });
+  assert.deepStrictEqual(run({ type: 'enabled', budget_tokens: 1024, display: 'omitted' }).thinking, { type: 'enabled', budget_tokens: 1024, display: 'summarized' });
+  assert.deepStrictEqual(run({ type: 'adaptive', display: 'summarized' }, { showThinking: true, engine: 'sdk' }).thinking, { type: 'adaptive', display: 'summarized' });
 });
 
-test('off, or no tab settings: untouched', () => {
+test('off, an Agent SDK session: no thinking text (omitted, not Claude Code\'s "updates" notes)', () => {
+  const SDK_OFF = { showThinking: false, engine: 'sdk' };
+  assert.deepStrictEqual(run({ type: 'adaptive', display: 'updates' }, SDK_OFF).thinking, { type: 'adaptive', display: 'omitted' });
+  assert.deepStrictEqual(run({ type: 'adaptive', display: 'summarized' }, SDK_OFF).thinking, { type: 'adaptive', display: 'omitted' });
+  assert.deepStrictEqual(run({ type: 'enabled', budget_tokens: 2048 }, SDK_OFF).thinking, { type: 'enabled', budget_tokens: 2048, display: 'omitted' });
+  assert.deepStrictEqual(run({ type: 'disabled' }, SDK_OFF).thinking, { type: 'disabled' });
+  assert.ok(!('thinking' in run(undefined, SDK_OFF)), 'no thinking object is added');
+});
+
+test('off, a terminal tab, or no tab settings: untouched', () => {
   assert.deepStrictEqual(run({ type: 'adaptive' }, { showThinking: false }).thinking, { type: 'adaptive' });
+  assert.deepStrictEqual(run({ type: 'adaptive', display: 'updates' }, { showThinking: false, engine: 'cli' }).thinking, { type: 'adaptive', display: 'updates' });
   assert.deepStrictEqual(run({ type: 'adaptive' }, null).thinking, { type: 'adaptive' });
+  assert.deepStrictEqual(run({ type: 'adaptive', display: 'updates' }, null).thinking, { type: 'adaptive', display: 'updates' });
 });

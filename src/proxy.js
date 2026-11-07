@@ -140,14 +140,21 @@ async function* resumeWebStream(firstChunk, reader) {
   }
 }
 
-// Tab-level "show thinking": newer models omit the thinking text by default,
-// so a tab that opted in asks for summarized reasoning. Only a thinking
-// config that takes `display` gets it (adaptive, enabled; never disabled or
-// between_tools), none is ever added, and a display already chosen stays.
+// Tab-level "show thinking". Claude Code sends every request with its own
+// display (`{ type: 'adaptive', display: 'updates' }`: an empty thinking block
+// and now and then a short progress note), and its subagents keep that
+// display even when the session switched its own. So the tab's choice is
+// made here, per request: on, a tab asks for summarized reasoning; off, an
+// Agent SDK session (whose panel is the only view) asks for none ('omitted'),
+// while a terminal tab keeps Claude Code's default (its screen shows those
+// notes). Only a thinking config that takes `display` gets it (adaptive,
+// enabled; never disabled or between_tools), and none is ever added.
 function applyShowThinking(body, cliSettings) {
   const t = body && body.thinking;
-  if (!cliSettings || !cliSettings.showThinking || !t || typeof t !== 'object') return;
-  if ((t.type === 'adaptive' || t.type === 'enabled') && t.display === undefined) t.display = 'summarized';
+  if (!cliSettings || !t || typeof t !== 'object') return;
+  if (t.type !== 'adaptive' && t.type !== 'enabled') return;
+  if (cliSettings.showThinking) t.display = 'summarized';
+  else if (cliSettings.engine === 'sdk') t.display = 'omitted';
 }
 
 // Resolve a CLI tab's per-session model override (modelMap, family-substring

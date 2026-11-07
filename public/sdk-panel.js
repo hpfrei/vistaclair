@@ -180,6 +180,30 @@
     }
   }
 
+  // ---- live blocks (pure; test/sdk-thinking-blocks.test.js) ----
+
+  // The open block (`type`: text or thinking) a complete message's block
+  // finalizes. The CLI sends one message per content block, once that block
+  // has streamed, so the oldest open block of the type is the usual one; the
+  // block whose streamed text (`raw`) is exactly the message's comes first,
+  // so an empty, signature-only thinking block and the one with text after it
+  // (or two summaries in a row) each take their own, in whatever order.
+  function blockFor(blocks, type, text) {
+    let first = null;
+    for (const b of blocks) {
+      if (b.type !== type || b.final) continue;
+      if (b.raw === text) return b;
+      if (!first) first = b;
+    }
+    return first;
+  }
+  // A block its complete message drew before its stream started (the
+  // message overtook it): that stream's content_block_start takes it over
+  // instead of drawing it twice.
+  function overtaken(blocks, type) {
+    return blocks.find(b => b.early && b.type === type) || null;
+  }
+
   // Scroll `node` (inside the scroller `box`) to a third of the box's height.
   function scrollToNode(box, node) {
     const top = node.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
@@ -1258,6 +1282,8 @@
           // A block the complete message already delivered (it can overtake
           // the deltas) is not counted twice.
           if (type === 'tool_use' && b.id && this.tools.has(b.id)) return;
+          const early = type !== 'tool_use' && overtaken(cur.rec.blocks, type);
+          if (early) { early.early = false; cur.byIndex.set(ev.index, early); return; }
           const blk = this.newBlock(cur.rec, type, { toolId: b.id, toolName: b.name });
           if (blk) cur.byIndex.set(ev.index, blk);
           return;
@@ -1271,9 +1297,11 @@
             if (selectionInside(blk.body)) cancelRenderDebounce(blk.body);
             else renderMarkdownDebounced(blk.raw, blk.body);
           } else if (d.type === 'thinking_delta') {
-            // One text node grows (the body's text is the thinking so far).
+            // One text node grows (the body's text is the thinking so far);
+            // `raw` keeps it too, for blockFor to match its message.
             if (!blk.textNode) blk.textNode = blk.body.appendChild(document.createTextNode(''));
             blk.textNode.appendData(d.thinking || '');
+            blk.raw += d.thinking || '';
             if (/\S/.test(d.thinking || '')) blk.el.classList.remove('sdk-thinking-empty');
           } else if (d.type === 'input_json_delta') {
             blk.partial += d.partial_json || '';
@@ -1316,9 +1344,12 @@
           this.stored(blk.tool.lineEl, rec.id);
         } else if (b.type === 'text' || b.type === 'thinking' || b.type === 'redacted_thinking') {
           const t = b.type === 'text' ? 'text' : 'thinking';
-          let blk = rec.blocks.find(x => x.type === t && !x.final);
-          if (!blk) blk = this.newBlock(rec, t);
-          if (!blk) continue;
+          let blk = blockFor(rec.blocks, t, t === 'text' ? (b.text || '') : b.type === 'thinking' ? (b.thinking || '') : null);
+          if (!blk) {
+            blk = this.newBlock(rec, t);
+            if (!blk) continue;
+            blk.early = true;
+          }
           blk.final = true;
           this.stored(blk.el, rec.id);
           // Drawn for good: the text lives in the DOM only.
@@ -2817,6 +2848,7 @@
   window.sdkPanel = {
     mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, onSettingsData, onCredentials, _panels: panels, _areas: areas,
     _feedWindow: { feedExcess, cursorAbove, capOldest, FEED_MAX, FEED_HARD_MAX, PAGE },
+    _blocks: { blockFor, overtaken },
     _max: { openMax, closeMax, current: () => _max },
     _Panel: Panel,
   };

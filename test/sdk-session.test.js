@@ -399,19 +399,19 @@ test('setModel: live on a running query, settings only when not running; refused
   b.s.kill();
 });
 
-test('showThinking: --thinking-display summarized at spawn, switched live on a running query', async () => {
+test('showThinking: --thinking-display summarized (off: omitted) at spawn, switched live on a running query', async () => {
   const { s, calls, events } = makeSession();
   s.spawn(tmp('proj-'), 80, 24, {});
-  assert.deepStrictEqual(calls[0].options.extraArgs, { 'replay-user-messages': null }, 'off: Claude Code\'s default');
+  assert.deepStrictEqual(calls[0].options.extraArgs, { 'replay-user-messages': null, 'thinking-display': 'omitted' }, 'off: no thinking text, not Claude Code\'s "updates" notes');
   s.updateSettings({ showThinking: true });
   await tick();
-  assert.deepStrictEqual(calls[0].thinking, [[null, 'summarized']]);
+  assert.deepStrictEqual(calls[0].thinking, [[undefined, 'summarized']], 'the budget is left as it is');
   s.updateSettings({ showThinking: true });
   await tick();
   assert.strictEqual(calls[0].thinking.length, 1, 'unchanged: nothing to switch');
   s.updateSettings({ showThinking: false });
   await tick();
-  assert.deepStrictEqual(calls[0].thinking[1], [null, null]);
+  assert.deepStrictEqual(calls[0].thinking[1], [undefined, 'omitted']);
 
   // The panel's toggle: persisted, and told back in the status.
   let saved = 0;
@@ -438,7 +438,7 @@ test('showThinking: a refused live switch is logged, never thrown', async () => 
     assert.doesNotThrow(() => s.updateSettings({ showThinking: false }));
     await tick();
   } finally { console.error = err; }
-  assert.deepStrictEqual(calls[0].thinking, [[null, null]]);
+  assert.deepStrictEqual(calls[0].thinking, [[undefined, 'omitted']]);
   assert.match(logged.join('\n'), /thinking display not switched: refused/);
   assert.strictEqual(s.running, true, 'the session lives on');
   assert.strictEqual(s.settings.showThinking, false);
@@ -837,7 +837,7 @@ const echo = (m, sessId) => ({ type: 'user', message: m.message, parent_tool_use
 test('input: pending at submit, delivered when the CLI echoes it; the echo is not broadcast', async () => {
   const { s, calls, events } = makeSession();
   s.spawn(tmp('proj-'), 80, 24, {});
-  assert.deepStrictEqual(calls[0].options.extraArgs, { 'replay-user-messages': null });
+  assert.strictEqual(calls[0].options.extraArgs['replay-user-messages'], null);
   const q = calls[0];
   const png = Buffer.from('89504e470d0a1a0a0000', 'hex').toString('base64');
   const r1 = s.submit('first', { images: [{ mediaType: 'image/png', base64: png, name: 'a.png' }] });
