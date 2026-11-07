@@ -11,6 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { TurnAttributor } = require('../src/turn-attribution');
+const { readJsonWhenReady } = require('./wait-for');
 
 const PROMPT_A = 'Find every caller of applyResolution in src/ and report the call sites with line numbers.';
 const PROMPT_B = 'Read public/inspector-lanes.js and summarise how laneKeyOf decides a turn\'s lane.';
@@ -144,12 +145,10 @@ function turn(store, messages, response = []) {
 }
 const complete = (store, i) => { i.status = 'complete'; store.save(i.id); };
 
-async function fileOf(home, store, id) {
-  const fp = store.filePaths.get(id);
-  for (let k = 0; k < 50; k++) {
-    try { return JSON.parse(fs.readFileSync(fp, 'utf-8')); } catch { await new Promise(r => setTimeout(r, 10)); }
-  }
-  throw new Error('not written');
+// The store writes with un-awaited fs.writeFile: poll the file until it parses
+// and passes `ready` (e.g. a re-write has landed).
+function fileOf(home, store, id, ready) {
+  return readJsonWhenReady(store.filePaths.get(id), ready);
 }
 
 test('the store stamps a subagent turn provisionally at request time and the trace confirms it', async () => {
@@ -176,8 +175,8 @@ test('the store stamps a subagent turn provisionally at request time and the tra
   const enriched = sent.filter(m => m.type === 'interaction:enriched' && m.interactionId === first.id);
   assert.strictEqual(enriched.length, 1);
   assert.strictEqual(enriched[0].subagent.agentId, 'aaa');
-  await new Promise(r => setTimeout(r, 30));
-  assert.strictEqual((await fileOf(home, store, first.id)).subagentProvisional, undefined);
+  const confirmed = await fileOf(home, store, first.id, j => j.subagentProvisional === undefined);
+  assert.strictEqual(confirmed.subagentProvisional, undefined);
 
   // A resolution equal to a confirmed stamp changes nothing.
   store.applyResolution('s1', 'request', `rid_${first.id}`, 'aaa');

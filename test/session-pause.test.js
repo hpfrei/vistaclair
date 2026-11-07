@@ -60,7 +60,15 @@ function setup() {
   const control = createSessionControl({ mgr, broadcaster: { broadcast: m => broadcasts.push(m) }, finalizeDelayMs: 5, interruptSettleMs: 5 });
   const hook = (input) => control.reply(s.instanceId, input);
   const typed = () => writes.filter(w => w.tabId === 'tab-1').map(w => w.d).join('');
-  const note = () => fs.writeFileSync(path.join(folder, 'NOTES.md'), '# Notes\n\n## Resume\n\nstep 2 is next\n');
+  // A note is fresh when its mtime is not older than the pause's Date.now().
+  // File mtimes come from the kernel's coarse clock, which can lag Date.now()
+  // by a tick: stamp the note a second ahead rather than wait for the clock.
+  const note = () => {
+    const file = path.join(folder, 'NOTES.md');
+    fs.writeFileSync(file, '# Notes\n\n## Resume\n\nstep 2 is next\n');
+    const later = new Date(Date.now() + 1000);
+    fs.utimesSync(file, later, later);
+  };
   return { mgr, control, s, hook, typed, note, folder, history, closed, broadcasts, writes };
 }
 
@@ -72,7 +80,6 @@ test('an idle session is typed the pause, then closes once its note is written',
   control.pause('tab-1');
   assert.match(typed(), /\[vistaclair pause\][\s\S]*Never touch the app's own process or the vistaclair server/);
   assert.strictEqual(s.pausing, true);
-  await wait(15);   // file mtimes come from a coarse clock
   hook({ hook_event_name: 'UserPromptSubmit' });
   assert.match(block(hook({ hook_event_name: 'Stop' })), /## Resume/, 'no note: asked once');
   assert.deepStrictEqual(closed, []);
@@ -103,7 +110,6 @@ test('running subagents or background tasks hold the pause; the session is asked
   hook({ hook_event_name: 'SubagentStart', agent_id: 'a1' });
   control.pause('tab-1');
   hook({ hook_event_name: 'PostToolUse', tool_name: 'Read' });
-  await wait(15);
   note();
   assert.match(block(hook({ hook_event_name: 'Stop' })), /still running.*validation/s);
   assert.deepStrictEqual(hook({ hook_event_name: 'Stop', stop_hook_active: true }), {});
@@ -140,7 +146,6 @@ test('interrupt closes a pause that does not finish, as interrupted; resume tell
 test('a resume whose transcript is gone starts fresh in the same folder', async () => {
   const { control, s, note, hook, history, mgr, writes, folder } = setup();
   control.pause('tab-1');
-  await wait(15);
   note();
   hook({ hook_event_name: 'Stop' });
   await wait(20);
