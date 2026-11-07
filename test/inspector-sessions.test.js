@@ -10,6 +10,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { waitFor } = require('./wait-for');
 
 function freshModules(home) {
   process.env.VISTACLAIR_HOME = home;
@@ -150,8 +151,8 @@ test('removal deletes interactions/<sessId> and stays inside it', async () => {
   turn('app-l-ai-0001');
   store.unregisterSession('app-l-ai-0001');
 
-  // Wait for the store's async writes.
-  await new Promise(r => setTimeout(r, 50));
+  // Wait for the store's async writes (un-awaited fs.writeFile).
+  await waitFor(() => fs.readdirSync(dir).some(f => f.endsWith('.json')), { what: `a turn file in ${dir}` });
   assert.ok(fs.readdirSync(dir).some(f => f.endsWith('.json')));
   store.unregisterSession(id);
   exit(id);

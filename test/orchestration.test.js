@@ -710,8 +710,17 @@ test('worktree isolation: a branch per worker, end_run removes merged ones', asy
 
 // --- Pause, resume, refresh, close and delete (with the real session control) ---
 
-const writeResume = (session, text = 'next: step 2') =>
-  fs.writeFileSync(path.join(session.settings.sessionDir, 'NOTES.md'), `# Notes\n\n## Resume\n\n${text}\n`);
+// The pause takes a note as fresh when its mtime is not older than the moment
+// the pause (or the last instruction) began, a Date.now(). A file's mtime comes
+// from the kernel's coarse clock, which can lag Date.now() by a tick, so a note
+// written right after it can read as older. The note is stamped a second ahead
+// instead: written after the instruction, and visibly so.
+const writeResume = (session, text = 'next: step 2') => {
+  const file = path.join(session.settings.sessionDir, 'NOTES.md');
+  fs.writeFileSync(file, `# Notes\n\n## Resume\n\n${text}\n`);
+  const later = new Date(Date.now() + 1000);
+  fs.utimesSync(file, later, later);
+};
 const typedInto = (mgr, tabId) => mgr.writes.filter(x => x.tabId === tabId).map(x => x.data).join('\n');
 const ctxOf = (r) => JSON.parse(r.stdout || '{}').hookSpecificOutput?.additionalContext || '';
 const blockOf = (r) => { const o = JSON.parse(r.stdout || '{}'); return o.decision === 'block' ? o.reason : null; };
@@ -782,7 +791,6 @@ test('resuming a run: the orchestrator warms up its paused workers with resume_w
   const w2 = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'brief B' });
   const runId = run().runId;
   orch.pauseRun(runId);
-  await wait(15);   // file mtimes come from a coarse clock
   for (const w of [w1, w2]) {
     const s = mgr.sessions.get(w.tabId);
     writeResume(s);
@@ -843,7 +851,6 @@ test('listRuns: a live run and a paused one, each once; describeRun by id, null 
 
   orch.pauseRun(runId);
   assert.strictEqual(orch.listRuns()[0].pausing, true);
-  await wait(15);
   const s1 = mgr.sessions.get(w1.tabId);
   writeResume(s1);
   hook(orch, s1, { hook_event_name: 'Stop' });
@@ -869,7 +876,6 @@ test('a lost transcript: resuming the run and its worker falls back to fresh ses
   hook(orch, orchSession, { hook_event_name: 'Stop' });
   const runId = run().runId;
   orch.pauseRun(runId);
-  await wait(15);
   const s1 = mgr.sessions.get(w1.tabId);
   writeResume(s1, 'parser half done');
   hook(orch, s1, { hook_event_name: 'Stop' });
@@ -933,7 +939,6 @@ test('refreshing the orchestrator: notes, then a fresh session seeded from the r
 
   orch.refreshOrchestrator(run().runId);
   assert.match(typedInto(mgr, orchSession.tabId), /refreshing you/);
-  await wait(15);
   writeResume(orchSession, 'w1 is parsing');
   hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: '[vistaclair pause]' });
   hook(orch, orchSession, { hook_event_name: 'Stop' });
@@ -1125,7 +1130,6 @@ test('an orchestrator SendMessage to a worker is kept as a follow-up: in its rec
 
   // The seed of a fresh orchestrator lists them under the brief.
   orch.refreshOrchestrator(run().runId);
-  await wait(15);
   writeResume(orchSession, 'w1 closed');
   hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: '[vistaclair pause]' });
   hook(orch, orchSession, { hook_event_name: 'Stop' });

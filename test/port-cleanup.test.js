@@ -12,6 +12,7 @@ const os = require('os');
 const net = require('net');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const { waitFor } = require('./wait-for');
 const { killStalePortListeners, lsofListenerPids, procListenerPids } = require('../src/port-cleanup');
 
 const hasLsof = spawnSync('lsof', ['-v']).error?.code !== 'ENOENT';
@@ -53,7 +54,9 @@ test('only the listener is found and killed; a connected client survives', { ski
 
   const killed = killStalePortListeners([port]);
   assert.deepStrictEqual(killed, [srv.pid]);
-  await new Promise(r => setTimeout(r, 300));
+  // A killed child stays a zombie (kill(pid, 0) succeeds) until the event loop
+  // reaps it, which a loaded machine can delay: wait for it to be gone.
+  await waitFor(() => !alive(srv.pid), { what: 'the listener gone' });
   assert.strictEqual(alive(srv.pid), false, 'listener killed');
   assert.strictEqual(alive(cli.pid), true, 'client survives');
   assert.strictEqual(cli.exitCode, null);

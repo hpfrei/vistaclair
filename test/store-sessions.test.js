@@ -10,6 +10,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { waitFor } = require('./wait-for');
 
 // Each test gets its own DATA_HOME. store.js reads it at require time via
 // utils.js, so the env var must be set before either is loaded and the module
@@ -39,8 +40,18 @@ function turn(id, instanceId, ts) {
   };
 }
 
-// save() writes through fs.writeFile; let the callbacks run before reading back.
-const flush = () => new Promise(r => setTimeout(r, 50));
+// save() writes through un-awaited fs.writeFile calls: wait until the session
+// dir holds `count` turn files that all parse (a half-written file does not)
+// before reading back. A loaded machine can starve a write well past any fixed
+// sleep.
+function written(dir, count) {
+  return waitFor(() => {
+    const files = turnFiles(dir);
+    if (files.length < count) return false;
+    for (const f of files) JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    return true;
+  }, { what: `${count} turn file(s) in ${dir}` });
+}
 
 function turnFiles(dir) {
   return fs.readdirSync(dir)
@@ -69,7 +80,7 @@ test('a resumed session appends turns instead of overwriting its history', async
     store.add(t);
     store.save(t.id);
   }
-  await flush();
+  await written(dir, 3);
   assert.deepStrictEqual(turnFiles(dir), ['1.json', '2.json', '3.json']);
 
   // Restart: the constructor's _loadFromDisk pulls this session in (it has the
@@ -90,7 +101,7 @@ test('a resumed session appends turns instead of overwriting its history', async
     store.add(t);
     store.save(t.id);
   }
-  await flush();
+  await written(dir, 5);
 
   assert.deepStrictEqual(idsBySeq(dir), {
     '1.json': 'run1-turn0',
@@ -139,7 +150,7 @@ test('a headless spawn sharing a tab session keeps appending', async () => {
   const first = turn('tab-turn', `cli-${sessId}`, 1000);
   store.add(first);
   store.save(first.id);
-  await flush();
+  await written(dir, 1);
 
   // What addon-host's registerAiSession does when an ai.prompt is pointed at an
   // existing session id.
@@ -147,7 +158,7 @@ test('a headless spawn sharing a tab session keeps appending', async () => {
   const second = turn('headless-turn', 'app-demo-ai-abc', 2000);
   store.add(second);
   store.save(second.id);
-  await flush();
+  await written(dir, 2);
 
   assert.deepStrictEqual(idsBySeq(dir), { '1.json': 'tab-turn', '2.json': 'headless-turn' });
 });
@@ -200,7 +211,7 @@ test('sweeping evicts the dropped interactions from memory', async () => {
   const t = turn('headless-1', instanceId, 1000);
   store.add(t);
   store.save(t.id);
-  await flush();
+  await written(path.join(home, 'interactions', sessId), 1);
 
   // Reload so the interaction is in memory with a filePath, then age it out.
   store = freshStore(home);

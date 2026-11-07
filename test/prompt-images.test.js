@@ -108,6 +108,13 @@ test('an image record landing after the hook is stamped on it and broadcast', as
   store.add(hook);
   store.save(hook.id);
   assert.strictEqual(hook.promptImages, undefined);
+  // The image record lands after the hook was written. The store's writes are
+  // un-awaited fs.writeFile calls with no ordering between them, so wait for
+  // this first one before the re-write starts — two in flight on one file can
+  // land in either order.
+  const file = path.join(home, 'interactions', SESS, '1.json');
+  const first = await readJsonWhenReady(file, j => j.id === 'hook-2');
+  assert.strictEqual(first.promptImages, undefined);
 
   fs.appendFileSync(transcript, jsonl([imageMetaRecord]));
   store.rescanTrace(SESS);
@@ -115,7 +122,7 @@ test('an image record landing after the hook is stamped on it and broadcast', as
   assert.deepStrictEqual(hook.promptImages, [IMG]);
   assert.deepStrictEqual(sent, [{ type: 'interaction:enriched', interactionId: 'hook-2', promptImages: [IMG] }]);
   // The first save wrote the file without the image; wait for the re-write.
-  const onDisk = await readJsonWhenReady(path.join(home, 'interactions', SESS, '1.json'), j => j.promptImages);
+  const onDisk = await readJsonWhenReady(file, j => j.promptImages);
   assert.deepStrictEqual(onDisk.promptImages, [IMG]);
 
   // A rescan of the same lines changes nothing.
