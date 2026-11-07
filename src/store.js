@@ -29,6 +29,11 @@ class InteractionStore {
     this.attributors = new Map();    // instanceId → TurnAttributor
     this._broadcaster = null;
 
+    // Interaction-file writes in flight, serialized per path
+    // (_writeInteractionFile): filePath → { next, idle, resolve }.
+    this._pendingWrites = new Map();
+    this._tmpSeq = 0;
+
     // Whole-session figures for the inspector footer; memory holds only the
     // newest maxSize turns.
     this.totals = new SessionTotals(INTERACTIONS_DIR, {
@@ -260,22 +265,65 @@ class InteractionStore {
   }
 
   /**
-   * Write an interaction file, recreating its session dir if it vanished
-   * (deleteSessionData can remove it while the session is still live).
+   * Write an interaction file, fire-and-forget. save() and the re-saves after
+   * it (applyPromptImages, enrichInteraction, _enrichRelatedHooks) rewrite the
+   * same file, so writes are serialized per path and the newest content wins:
+   * while one write is in flight only the latest pending content is kept, and
+   * it is written once the first lands. Each write goes to a temp file renamed
+   * over the target, so a reader never sees a half-written file. Content is
+   * serialized now, so later changes to the object don't leak into it.
    */
   _writeInteractionFile(filePath, content, label) {
     const json = JSON.stringify(content, null, 2);
-    fs.writeFile(filePath, json, (err) => {
-      if (!err) return;
-      if (err.code === 'ENOENT') {
-        try { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } catch {}
-        fs.writeFile(filePath, json, (err2) => {
-          if (err2 && label) console.error(`Failed to write interaction ${label}:`, err2.message);
-        });
+    const entry = this._pendingWrites.get(filePath);
+    if (entry) { entry.next = { json, label }; return; }
+    let resolve;
+    const idle = new Promise(r => { resolve = r; });
+    const fresh = { next: null, idle, resolve };
+    this._pendingWrites.set(filePath, fresh);
+    this._runWrite(filePath, fresh, json, label);
+  }
+
+  _runWrite(filePath, entry, json, label) {
+    this._atomicWrite(filePath, json, false, (err) => {
+      if (err && label) console.error(`Failed to write interaction ${label}:`, err.message);
+      const next = entry.next;
+      if (next) {
+        entry.next = null;
+        this._runWrite(filePath, entry, next.json, next.label);
         return;
       }
-      if (label) console.error(`Failed to write interaction ${label}:`, err.message);
+      this._pendingWrites.delete(filePath);
+      entry.resolve();
     });
+  }
+
+  // Temp file + rename, recreating the session dir once if it vanished
+  // (deleteSessionData can remove it while the session is still live).
+  _atomicWrite(filePath, json, retried, cb) {
+    const tmp = `${filePath}.${process.pid}.${++this._tmpSeq}.tmp`;
+    const fail = (err) => {
+      if (err.code === 'ENOENT' && !retried) {
+        try { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } catch {}
+        this._atomicWrite(filePath, json, true, cb);
+        return;
+      }
+      cb(err);
+    };
+    fs.writeFile(tmp, json, (err) => {
+      if (err) { fs.unlink(tmp, () => fail(err)); return; }
+      fs.rename(tmp, filePath, (err2) => {
+        if (err2) { fs.unlink(tmp, () => fail(err2)); return; }
+        cb(null);
+      });
+    });
+  }
+
+  /** Resolves once every interaction-file write started so far is on disk. */
+  async flush() {
+    while (this._pendingWrites.size) {
+      await Promise.all([...this._pendingWrites.values()].map(e => e.idle));
+    }
   }
 
   /** Persist an interaction's current state back to its file. */
