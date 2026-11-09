@@ -401,6 +401,7 @@
             <span class="sdk-chip sdk-area-report hidden"></span>
             <span class="sdk-area-cost"></span>
             <button type="button" class="sdk-fresh hidden">↻ Fresh</button>
+            <button type="button" class="sdk-fresh sdk-auto hidden" aria-pressed="true">Auto</button>
           </div>
           <div class="sdk-cap-right">
             <button type="button" class="sdk-shelve" title="Put it back on the shelf">◂ Shelf</button>
@@ -447,7 +448,8 @@
       this.stopBtn = q('.sdk-stop');
       this.reportEl = q('.sdk-area-report');
       this.costEl = q('.sdk-area-cost');
-      this.freshBtn = q('.sdk-fresh');
+      this.freshBtn = q('.sdk-fresh:not(.sdk-auto)');
+      this.autoBtn = q('.sdk-auto');
       this.ctxEl = q('.sdk-ctx');
       this.ctxFill = q('.sdk-ctx-bar > i');
       this.ctxTxt = q('.sdk-ctx-txt');
@@ -474,6 +476,7 @@
       this.thinkBtn.addEventListener('click', () => this.toggleThinking());
       this.stopBtn.addEventListener('click', () => this.stop());
       this.freshBtn.addEventListener('click', () => this.panel.refresh());
+      this.autoBtn.addEventListener('click', () => this.panel.toggleAutoRefresh());
       q('.sdk-shelve').addEventListener('click', () => this.panel.openShelved(null));
       q('.sdk-insp').addEventListener('click', () => {
         // Straight to this session's tab, opened (and loaded) if need be.
@@ -2734,14 +2737,37 @@
       const b = this.main?.role === 'orchestrator' ? this.main.freshBtn : null;
       if (!b) return;
       const isRun = !!this.runId && this.info.settings?.orchestration?.role !== 'worker';
+      const run = this.run?.runId === this.runId ? this.run : null;
+      const refreshing = run?.refreshing || null;
+      const can = this.canRefresh && !refreshing;
       b.classList.toggle('hidden', !isRun);
-      const suggested = this.canRefresh && !!this.run?.refreshSuggested;
+      const suggested = can && !run?.autoRefresh && !!run?.refreshSuggested;
       b.classList.toggle('suggested', suggested);
-      b.setAttribute('aria-disabled', String(!this.canRefresh));
-      b.textContent = suggested ? `↻ Fresh · compacted ${this.run.compactions || 0}×` : '↻ Fresh';
-      b.title = !this.canRefresh ? `Fresh orchestrator: ${FRESH_TEXT}\nNot now: the orchestrator is not running, or the run is pausing.`
-        : suggested ? `Fresh orchestrator: ${FRESH_TEXT}\nSuggested: the orchestrator has compacted ${this.run.compactions || 0}× in this run.`
-          : `Fresh orchestrator: ${FRESH_TEXT}`;
+      b.setAttribute('aria-disabled', String(!can));
+      const n = run?.refreshes ? ` · ${run.refreshes}×` : '';
+      b.textContent = refreshing ? '↻ Refreshing…' : suggested ? `↻ Fresh · compacted ${run.compactions || 0}×` : `↻ Fresh${n}`;
+      const done = run?.refreshes ? `\nRefreshed ${run.refreshes}× in this run${run.lastRefresh ? `, last at ${new Date(run.lastRefresh.at).toLocaleString()}` : ''}.` : '';
+      b.title = refreshing ? `Refresh #${refreshing.n} in progress (${refreshing.reason === 'auto' ? `context at ${refreshing.pct}% of the compaction threshold` : refreshing.reason === 'compaction' ? 'after a compaction' : 'by you'}): the orchestrator writes its notes, then a fresh one takes over. Workers keep running.`
+        : !this.canRefresh ? `Fresh orchestrator: ${FRESH_TEXT}\nNot now: the orchestrator is not running, or the run is pausing.`
+          : suggested ? `Fresh orchestrator: ${FRESH_TEXT}\nSuggested: the orchestrator has compacted ${run.compactions || 0}× in this run.${done}`
+            : `Fresh orchestrator: ${FRESH_TEXT}${done}`;
+      const a = this.main.autoBtn;
+      const show = isRun && !!run && !run.mirror;
+      a.classList.toggle('hidden', !show);
+      if (!show) return;
+      const on = run.autoRefresh !== false;
+      a.setAttribute('aria-pressed', String(on));
+      a.classList.toggle('suggested', on);
+      a.textContent = on ? 'Auto ✓' : 'Auto ✗';
+      a.title = on
+        ? 'Automatic refresh is on: before the orchestrator would compact (its context at about 80% of the threshold, when idle), or right after a compaction, a fresh orchestrator takes over from complete notes. No worker report or message is lost. Click to turn it off.'
+        : 'Automatic refresh is off: the orchestrator compacts as usual. Click to turn it on.';
+    }
+
+    toggleAutoRefresh() {
+      const run = this.run?.runId === this.runId ? this.run : null;
+      if (!run) return;
+      sendWs({ type: 'cli:runAutoRefresh', runId: this.runId, autoRefresh: run.autoRefresh === false });
     }
 
     // This tab as add-on tab actions see it (public/tab-hooks.js).

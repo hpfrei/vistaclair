@@ -276,7 +276,7 @@ dashboardApp.post('/api/ask', async (req, res) => {
 
   let askId = null;
   const promise = orchestration.askUser({
-    formData: formData || {}, questions: questions || [], ctx, title, cwd, tabId,
+    formData: formData || {}, questions: questions || [], ctx, title, cwd, tabId, instanceId: instanceId || null,
     onPending: (id) => { askId = id; },
   });
 

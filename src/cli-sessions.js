@@ -476,6 +476,11 @@ class CliSessionManager {
     return { history, runs };
   }
 
+  // The native transcript of a session (the seed of a refreshed orchestrator reads its last replies).
+  transcriptFile(cwd, sessId) {
+    return _jsonlPath(cwd, sessId);
+  }
+
   transcriptExists(cwd, sessId) {
     return this._transcriptExists(cwd, sessId);
   }
