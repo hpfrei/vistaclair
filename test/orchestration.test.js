@@ -1000,17 +1000,21 @@ test('a "+" menu worker row resumes like resume_worker continue, falling back to
   assert.throws(() => orch.resumeSavedWorker(orchSession.sessId), /not a worker/);
 });
 
-test('refreshing the orchestrator: notes, then a fresh session seeded from the run', async (t) => {
+test('refreshing the orchestrator (the owner\'s ↻ Fresh, auto-refresh off): notes, then a fresh session seeded from the run', async (t) => {
   const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
   hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: 'Build the importer' });
   const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
   orch.report(mgr.sessions.get(w1.tabId).instanceId, { status: 'started', summary: 'on it' });
+  assert.strictEqual(orch.describeRun(run()).autoRefresh, true, 'on by default');
+  assert.deepStrictEqual(orch.setRunAutoRefresh(run().runId, false), { runId: run().runId, autoRefresh: false, changed: true });
   for (let i = 0; i < 3; i++) hook(orch, orchSession, { hook_event_name: 'SessionStart', source: 'compact' });
   assert.strictEqual(orch.describeRun(run()).refreshSuggested, true);
+  assert.strictEqual(run().refreshing, undefined, 'off: a compaction refreshes nothing');
   hook(orch, orchSession, { hook_event_name: 'Stop' });
 
-  orch.refreshOrchestrator(run().runId);
-  assert.match(typedInto(mgr, orchSession.tabId), /refreshing you/);
+  assert.deepStrictEqual(orch.refreshOrchestrator(run().runId), { refreshing: true, reason: 'owner', n: 1 });
+  assert.throws(() => orch.refreshOrchestrator(run().runId), /already being refreshed/);
+  assert.match(typedInto(mgr, orchSession.tabId), /The owner is refreshing you/);
   writeResume(orchSession, 'w1 is parsing');
   hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: '[vistaclair pause]' });
   hook(orch, orchSession, { hook_event_name: 'Stop' });
@@ -1027,6 +1031,9 @@ test('refreshing the orchestrator: notes, then a fresh session seeded from the r
   assert.strictEqual(mgr.findSaved(orchSession.sessId), null, 'the drifted session leaves the resume list');
   assert.strictEqual(run().compactions, 0);
   assert.ok(mgr.sessions.has(w1.tabId), 'workers keep running');
+  assert.strictEqual(run().refreshing, null);
+  assert.strictEqual(run().refreshes, 1);
+  assert.strictEqual(run().events.at(-1).text, 'refreshed by owner (#1)');
 });
 
 test('close guards: a worker closes when complete or forced, an orchestrator not while workers run', async (t) => {
@@ -3020,4 +3027,225 @@ test('worker limit: raising it starts queued launches at once; lowering it stops
   assert.deepStrictEqual(run().queue.map(e => e.title), ['t5']);
   assert.throws(() => orch.resumeWorker(orchSession.instanceId, { worker: run().workers[0].name }), /3 workers are running and the run's worker limit is 1/);
   assert.strictEqual(run().workers.length, 4);
+});
+
+// --- The orchestrator's automatic refresh (instead of a compaction) ---
+
+// A broadcaster whose listeners hear every broadcast (the server's onBroadcast).
+function bus() {
+  const listeners = [];
+  const sent = [];
+  return { sent, broadcast(m) { sent.push(m); for (const f of listeners) f(m); }, onBroadcast(f) { listeners.push(f); } };
+}
+const idleStatus = (b, s) => b.broadcast({ type: 'sdk:event', sessId: s.sessId, ev: { platform: { kind: 'status', state: 'idle' } } });
+const freshOrch = (mgr, old) => [...mgr.sessions.values()].find(s => s.settings.orchestration?.role === 'orchestrator' && s !== old && s.running);
+const seedOf = (s) => fs.readFileSync(path.join(s.settings.sessionDir, 'RESTART.md'), 'utf8');
+// The old session writes its note and ends its turn: the swap.
+async function finishRefresh(orch, mgr, old, note = 'all named') {
+  writeResume(old, note);
+  hook(orch, old, { hook_event_name: 'Stop' });
+  await waitFor(() => freshOrch(mgr, old), { what: 'the fresh orchestrator' });
+  return freshOrch(mgr, old);
+}
+
+test('auto-refresh: an idle SDK orchestrator past 80% of its compaction threshold is refreshed, never while its form waits', async (t) => {
+  const b = bus();
+  const { orch, orchSession, mgr, run, pendingQuestions } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk', setup: { broadcaster: b } });
+  orchSession.context = { tokens: 150000, window: 1000000, compactAt: 200000 };
+  idleStatus(b, orchSession);
+  assert.strictEqual(run().refreshing, undefined, '75%: nothing');
+
+  orchSession.context.tokens = 165000;
+  orchSession.busy = true;
+  idleStatus(b, orchSession);
+  assert.strictEqual(run().refreshing, undefined, 'busy: the idle threshold waits for the turn\'s end');
+  orchSession.busy = false;
+
+  // A form of the orchestrator waits for the owner: no refresh until answered.
+  const asked = orch.askUser({ instanceId: orchSession.instanceId, questions: [{ id: 'db', question: 'Which database?' }] });
+  idleStatus(b, orchSession);
+  assert.strictEqual(run().refreshing, undefined, 'a form is pending');
+  [...pendingQuestions.values()][0].resolve([{ id: 'db', question: 'Which database?', answer: 'Postgres' }]);
+  await asked;
+
+  idleStatus(b, orchSession);
+  const r = run().refreshing;
+  assert.deepStrictEqual({ reason: r.reason, pct: r.pct, n: r.n, cursor: r.cursor }, { reason: 'auto', pct: 83, n: 1, cursor: run().delivered });
+  assert.match(typedInto(mgr, orchSession.tabId), /Your context is at 83% of its compaction threshold[\s\S]*### Workers[\s\S]*### Promises to the owner[\s\S]*### Open owner questions[\s\S]*Reply PAUSED/);
+  assert.deepStrictEqual(orch.describeRun(run()).refreshing, { at: r.at, reason: 'auto', n: 1, pct: 83 });
+
+  const fresh = await finishRefresh(orch, mgr, orchSession);
+  assert.strictEqual(fresh.settings.name, orchSession.settings.name);
+  assert.strictEqual(run().refreshes, 1);
+  assert.strictEqual(run().events.at(-1).text, 'auto-refreshed at 83% (#1)');
+  assert.match(seedOf(fresh), /Q: Which database\?\nA: Postgres/);
+});
+
+test('auto-refresh, busy: at 90% the next tool call carries the instruction; below it nothing', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: 'go' });
+  orchSession.busy = true;
+  orchSession.context = { tokens: 170000, window: 1000000, compactAt: 200000 };
+  let r = hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
+  assert.doesNotMatch(ctxOf(r), /refreshing/, '85% during a turn: it goes on');
+  assert.strictEqual(run().refreshing, undefined);
+  // A subagent's tool call is not the orchestrator's boundary.
+  orchSession.context.tokens = 182000;
+  hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {}, agent_id: 'a1' });
+  assert.strictEqual(run().refreshing, undefined);
+  r = hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
+  assert.match(ctxOf(r), /Your context is at 91% of its compaction threshold/);
+  assert.strictEqual(run().refreshing.reason, 'auto');
+  assert.doesNotMatch(typedInto(mgr, orchSession.tabId), /Your context is at/, 'busy: never typed');
+  orchSession.busy = false;
+  const fresh = await finishRefresh(orch, mgr, orchSession);
+  assert.ok(fresh);
+  assert.strictEqual(run().events.at(-1).text, 'auto-refreshed at 91% (#1)');
+});
+
+test('the compaction backstop: a compacted orchestrator is refreshed at once; the seed says the notes came after it', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });   // CLI: no context figures
+  hook(orch, orchSession, { hook_event_name: 'SessionStart', source: 'compact' });
+  assert.strictEqual(run().refreshing.reason, 'compaction');
+  assert.strictEqual(run().refreshing.afterCompaction, true);
+  assert.match(typedInto(mgr, orchSession.tabId), /You have just compacted: Vistaclair is refreshing you/);
+  // A second compaction while it writes its notes starts nothing new.
+  hook(orch, orchSession, { hook_event_name: 'SessionStart', source: 'compact' });
+  assert.strictEqual(run().refreshing.n, 1);
+  const fresh = await finishRefresh(orch, mgr, orchSession);
+  assert.match(seedOf(fresh), /Your predecessor wrote its notes after a compaction/);
+  assert.match(typedInto(mgr, fresh.tabId), /after refresh #1 \(you compacted\)[\s\S]*list_workers[\s\S]*records and events win[\s\S]*Taken over after refresh #1/);
+  assert.strictEqual(run().events.at(-1).text, 'refreshed after compaction (#1)');
+  assert.strictEqual(run().compactions, 0);
+});
+
+test('refresh delivery: a report and a SendMessage arriving before the swap reach the fresh orchestrator, never the old one', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const s1 = mgr.sessions.get(w1.tabId);
+  orch.report(s1.instanceId, { status: 'started', summary: 'on it' });
+  hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });   // takes it
+  const cursor = run().delivered;
+  orch.refreshOrchestrator(run().runId);
+  assert.strictEqual(run().refreshing.cursor, cursor);
+
+  orch.report(s1.instanceId, { status: 'blocked', summary: 'NEED THE SCHEMA', open: 'which schema version?' });
+  const sent = orch.sendMessage(s1.instanceId, { to: 'orchestrator', message: 'PING FROM W1' });
+  assert.strictEqual(sent.delivery, 'queued', 'held for the fresh orchestrator');
+  assert.ok(!mgr.submits.some(x => x.tabId === orchSession.tabId && /PING FROM W1/.test(x.data)), 'nothing submitted into the old session');
+  await wait(60);   // the push debounce: nothing typed into the old one either
+  assert.ok(!mgr.submits.some(x => x.tabId === orchSession.tabId && /worker event/.test(x.data)));
+  for (const ev of ['PostToolUse', 'UserPromptSubmit']) {
+    const c = ctxOf(hook(orch, orchSession, { hook_event_name: ev, tool_name: 'Read', tool_input: {}, prompt: 'x' }));
+    assert.doesNotMatch(c, /NEED THE SCHEMA|PING FROM W1/, ev);
+  }
+  assert.strictEqual(run().delivered, cursor, 'nothing taken after the cursor');
+
+  const fresh = await finishRefresh(orch, mgr, orchSession, 'w1: needs the schema');
+  const seed = seedOf(fresh);
+  assert.match(seed, /Not delivered to your predecessor[\s\S]*NEED THE SCHEMA/);
+  assert.match(seed, /Messages waiting for you[\s\S]*PING FROM W1/);
+  assert.match(seed, /Open items from worker reports since the run started[\s\S]*which schema version\?/);
+  assert.match(seed, /`orch-[^`]*w1[^`]*` \(w1\) — [a-z]+ — BLOCKED, waiting on you/);
+  // Its first prompt's hook brings both, labelled.
+  const first = ctxOf(hook(orch, fresh, { hook_event_name: 'UserPromptSubmit', prompt: typedInto(mgr, fresh.tabId) }));
+  assert.match(first, /PING FROM W1/);
+  assert.match(first, /since your predecessor's notes — some may already be in them[\s\S]*NEED THE SCHEMA/);
+  assert.strictEqual(run().handover, undefined);
+  // After the swap a message goes straight in again.
+  assert.strictEqual(orch.sendMessage(s1.instanceId, { to: 'orchestrator', message: 'again' }).delivery, 'submitted');
+});
+
+test('refresh timeout: no PAUSED in time, the swap goes on from the server\'s records; the seed says the note is missing', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', setup: { refreshTimeoutMs: 30 } });
+  orch.refreshOrchestrator(run().runId);
+  await waitFor(() => freshOrch(mgr, orchSession), { what: 'the swap after the timeout' });
+  const fresh = freshOrch(mgr, orchSession);
+  assert.match(seedOf(fresh), /The resume note is missing or partial/);
+  assert.strictEqual(run().refreshing, null);
+  assert.match(run().events.at(-1).text, /refreshed by owner \(#1\) — the old session did not reply PAUSED in time/);
+  assert.strictEqual(mgr.findSaved(orchSession.sessId), null);
+});
+
+test('refresh failure: the new session does not start — old transcript resumable, nothing delivered, an owner item', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const cursor = run().delivered;
+  orch.refreshOrchestrator(run().runId);
+  orch.report(mgr.sessions.get(w1.tabId).instanceId, { status: 'done', summary: 'MISSED REPORT' });
+  const launch = mgr.launchSession;
+  mgr.launchSession = () => { throw new Error('spawn failed'); };
+  writeResume(orchSession, 'w1 working');
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  await waitFor(() => run().refreshing === null, { what: 'the refresh given up' });
+  mgr.launchSession = launch;
+  assert.ok(mgr.findSaved(orchSession.sessId), 'the old conversation stays resumable');
+  assert.strictEqual(run().delivered, cursor);
+  assert.ok(run().events.some(e => e.seq > cursor && /MISSED REPORT/.test(e.text)), 'still pending');
+  const item = run().ownerItems.find(i => i.state === 'open');
+  assert.match(item.what, /fresh orchestrator of refresh #1 did not start/);
+  assert.match(item.why, /spawn failed/);
+  assert.match(run().events.at(-1).text, /refresh #1 failed: spawn failed/);
+  // The "+" menu's Resume continues the old one, which then gets what it missed.
+  const r = orch.resumeRun(run().runId);
+  assert.strictEqual(r.fresh, false);
+  const back = mgr.sessions.get(r.tabId);
+  assert.strictEqual(back.sessId, orchSession.sessId);
+  assert.match(ctxOf(hook(orch, back, { hook_event_name: 'SessionStart', source: 'resume' })), /MISSED REPORT/);
+});
+
+test('owner messages: typed prompts (an "[Image: …]" one too), form answers and owner-item answers are logged; notices are not; the seed has them all', async (t) => {
+  const { orch, orchSession, mgr, run, pendingQuestions } = await openOrchestrator(t, { isolation: 'none' });
+  const p = (prompt) => hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt });
+  p(`OLD ${'x'.repeat(50000)} END-OF-OLD`);
+  p('Build the importer');
+  p('[Image: source: /tmp/shot.png] the wall looks wrong here');
+  p('[vistaclair pause] The owner is pausing this run.');
+  p('[vistaclair resume] Run resumed.');
+  p('[orchestration] 2 worker event(s) pending');
+  p('[message from orch-x-w1] done');
+  p('<task-notification><task-id>t1</task-id></task-notification>');
+  const asked = orch.askUser({ instanceId: orchSession.instanceId, questions: [{ id: 'q', question: 'Ship it?' }] });
+  const [entry] = pendingQuestions.values();
+  assert.strictEqual(entry.instanceId, orchSession.instanceId);
+  entry.resolve([{ id: 'q', question: 'Ship it?', answer: 'Yes, Friday' }]);
+  await asked;
+  orch.ownerItems(orchSession.instanceId, { action: 'add', items: [{ what: 'Pick the port', kind: 'decision', options: ['3457', '3458'] }] });
+  orch.ownerResolve({ runId: run().runId, id: 'o1', action: 'done', answer: '3458' });
+
+  const log = fs.readFileSync(path.join(run().runDir, 'owner-messages.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  assert.deepStrictEqual(log.map(m => m.kind), ['prompt', 'prompt', 'prompt', 'form', 'owner-item']);
+  assert.ok(log.every(m => m.at));
+  assert.strictEqual(log[2].text, '[Image: source: /tmp/shot.png] the wall looks wrong here');
+  assert.strictEqual(log[3].text, 'Q: Ship it?\nA: Yes, Friday');
+  assert.strictEqual(log[4].text, 'o1 decided: Pick the port — 3458');
+  assert.match(run().request, /^OLD x/, 'run.request is still the first prompt');
+
+  hook(orch, orchSession, { hook_event_name: 'Stop' });   // its turn ends
+  orch.refreshOrchestrator(run().runId);
+  const fresh = await finishRefresh(orch, mgr, orchSession);
+  const seed = seedOf(fresh);
+  for (const s of ['Build the importer', '[Image: source: /tmp/shot.png] the wall looks wrong here', 'A: Yes, Friday', 'o1 decided: Pick the port — 3458']) assert.ok(seed.includes(s), s);
+  assert.doesNotMatch(seed, /owner-messages[\s\S]*Run resumed\./);
+  // The 50k one does not fit whole beside the run's other text: clipped, with the pointer.
+  assert.match(seed, /OLD x+… \[clipped: the full text is in .*owner-messages\.jsonl\]/);
+  assert.doesNotMatch(seed, /END-OF-OLD/);
+  assert.match(seed, /Resolved since the run started:\n- o1 done by owner/);
+});
+
+test('refresh: a resume note that leaves out a running worker or an open owner item is asked for once more, then the swap goes on', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const w2 = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'brief B' });
+  orch.ownerItems(orchSession.instanceId, { action: 'add', items: [{ what: 'Approve the deploy', key: 'deploy' }] });
+  orch.refreshOrchestrator(run().runId);
+  writeResume(orchSession, `### Workers\n- ${w1.worker}: parsing`);
+  const ask = blockOf(hook(orch, orchSession, { hook_event_name: 'Stop' }));
+  assert.match(ask, /does not name the workers `[^`]*w2[^`]*`; and the open owner items o1 \(Approve the deploy\)/);
+  assert.doesNotMatch(ask, new RegExp(w1.worker));
+  assert.ok(!freshOrch(mgr, orchSession), 'no swap yet');
+  // Still incomplete: it goes on regardless.
+  const fresh = await finishRefresh(orch, mgr, orchSession, `### Workers\n- ${w1.worker}: parsing`);
+  assert.ok(fresh);
+  assert.match(seedOf(fresh), new RegExp(`### \`${w2.worker}\` \\(w2\\)`));
 });

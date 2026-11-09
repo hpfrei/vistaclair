@@ -238,6 +238,14 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
       // Asked once and it still stopped without a note: pause anyway — the
       // TODO and the transcript stand in for it.
     }
+    // A note that leaves something out (checkNote names it): asked once more,
+    // then the pause goes on regardless.
+    if (p.checkNote && !p.checked && freshResume(session, p.since)) {
+      p.checked = true;
+      let more = null;
+      try { more = p.checkNote(); } catch (e) { console.error('[session-control] checkNote:', e.message); }
+      if (more) return blockReply(more);
+    }
     setTimeout(() => finalize(session, { interrupted: false }), finalizeDelayMs);
     return {};
   }
@@ -253,6 +261,8 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
   //               orchestrator's relay; deliver() types it later)
   //   holdUntil   () => true while the session must not be closed yet
   //   needsNote   false: close without waiting for a resume note
+  //   checkNote   () => text naming what the resume note leaves out, or null:
+  //               asked once at a Stop once a note exists
   //   meta        kept on the entry (runId, role, mode) for listeners
   function pause(tabId, opts = {}) {
     const session = mgr.get(tabId);
@@ -262,7 +272,7 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
     const dir = folderOf(session);
     const p = {
       tabId, since: Date.now(), text: opts.text || pauseText(dir), hookText: opts.hookText || null,
-      stopText: opts.stopText || null, holdUntil: opts.holdUntil || null, needsNote: opts.needsNote,
+      stopText: opts.stopText || null, holdUntil: opts.holdUntil || null, needsNote: opts.needsNote, checkNote: opts.checkNote || null,
       meta: opts.meta || {}, type: opts.type, blocked: false, bgBlocked: false, seen: false,
     };
     pausing.set(session.sessId, p);

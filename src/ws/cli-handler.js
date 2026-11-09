@@ -339,6 +339,10 @@ function handleMessage(ws, msg, bc) {
       });
       break;
     }
+    case 'cli:runAutoRefresh':
+      // The orchestrator box's "Auto-refresh" toggle (orchestration.setRunAutoRefresh).
+      actionResult(send, 'autoRefresh', msg, () => bc.orchestration.setRunAutoRefresh(String(msg.runId || ''), msg.autoRefresh === true));
+      break;
     case 'cli:refreshOrchestrator':
       actionResult(send, 'refresh', msg, () => bc.orchestration.refreshOrchestrator(String(msg.runId || '')));
       break;
