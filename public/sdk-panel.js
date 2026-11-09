@@ -105,13 +105,13 @@
   const envKey = (ev) => ev?.sdk?.uuid ? `u:${ev.sdk.uuid}` : JSON.stringify(ev);
   // History holds the broadcast envelopes ({sessId, runId?, ts, ev}); take the ev.
   const unwrap = (rec) => (rec && typeof rec === 'object' && rec.ev && typeof rec.ev === 'object') ? rec.ev : rec;
-  const ENDED = new Set(['exited', 'stopped', 'abandoned', 'closed']);
+  const ENDED = new Set(['exited', 'stopped', 'abandoned', 'closed', 'replaced']);
   // Billing: settings.auth ids, the credential a status names, their words.
   const AUTH_IDS = ['subscription', 'apikey'];
   const authOf = (credential) => credential === 'api-key' ? 'apikey' : 'subscription';
   const BILL_TEXT = { subscription: 'the Claude subscription', apikey: 'API credits' };
   const BILL_SHORT = { subscription: 'Sub', apikey: 'API' };
-  const STATE_TEXT = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing', closed: 'closed' };
+  const STATE_TEXT = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing', closed: 'closed', replaced: 'replaced' };
   // A worktree worker's landing (describeRun's `landing`, src/landing-state.js)
   // as its box shows it: `chip` follows "done ·" on the report chip (with its
   // class `cls`), `line` is the line under the caption. null: none to show.
@@ -2102,6 +2102,12 @@
         if (run.orchestratorState) this.main.setState(run.orchestratorState);
         this.main.renderHeader();
       }
+      // An orchestrator a refresh replaced is the orchestrator's history, not
+      // a member: a box adopted from its last envelopes goes.
+      for (const id of run.retiredOrchestrators || []) {
+        const old = this.workers.get(id);
+        if (old) { old.destroy(); this.workers.delete(id); }
+      }
       for (const w of run.workers || []) {
         if (!w.sessId) continue;
         if (w.engine && w.engine !== 'sdk') continue;
@@ -2877,12 +2883,15 @@
   }
 
   // An event from a session no panel knows yet: a worker of a run we show
-  // that was launched after the last membership fetch.
+  // that was launched after the last membership fetch. Never an orchestrator
+  // a refresh replaced (the server stops naming the run on its envelopes;
+  // the run lists it in retiredOrchestrators).
   function adopt(msg) {
     if (!msg.runId) return null;
     for (const p of panels.values()) {
       if (p.runId !== msg.runId) continue;
       if (p.main?.sessId === msg.sessId) return p.main;
+      if (p.run?.retiredOrchestrators?.includes(msg.sessId)) return null;
       const a = p.addWorker(msg.sessId, msg.sessId);
       p.fetchRun();
       return a;

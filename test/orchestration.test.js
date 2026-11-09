@@ -44,6 +44,9 @@ function fakeMgr() {
     submit(data, opts) { submits.push({ tabId, data, opts }); writes.push({ tabId, data }); writes.push({ tabId, data: '\r' }); },
     // SdkSession.seedCost: a resumed member's carried-over cost.
     seedCost(usd) { this.seeded = usd; },
+    // SdkSession: how its exit reads (a completed pause, a refresh's handover).
+    notePaused() { this.exitNote = 'paused'; },
+    noteRetired() { this.exitNote = 'replaced'; },
     // SdkSession.setAuth: the billing switch (the real one respawns).
     setAuth(auth, opts) { (this.authCalls ||= []).push([auth, opts]); this.settings.auth = auth; return { auth, applied: this.busy ? 'pending' : 'now' }; },
   });
@@ -3165,6 +3168,101 @@ test('refresh timeout: no PAUSED in time, the swap goes on from the server\'s re
   assert.strictEqual(run().refreshing, null);
   assert.match(run().events.at(-1).text, /refreshed by owner \(#1\) — the old session did not reply PAUSED in time/);
   assert.strictEqual(mgr.findSaved(orchSession.sessId), null);
+});
+
+// Every list the dashboard draws a session card from, for one sessId: the
+// saved sessions (Sessions tab, "+" menu), the open tabs, a cli:paused (its
+// toast and refetch), the run's members (ListAgents, run board, SDK panel).
+function standaloneTraces(ctx, sessId) {
+  const { mgr, orch, broadcasts, run } = ctx;
+  const out = [];
+  const saved = mgr.findSaved(sessId);
+  if (saved) out.push(`saved entry${saved.paused ? ' (paused)' : ''}${saved.interrupted ? ' (interrupted)' : ''}`);
+  if ([...mgr.sessions.values()].some(s => s.sessId === sessId)) out.push('open tab');
+  if (broadcasts.some(b => b.type === 'cli:paused' && b.sessId === sessId)) out.push('cli:paused');
+  const d = orch.describeRun(run());
+  if (d.orchestratorSessId === sessId) out.push('the run\'s orchestrator');
+  if (d.workers.some(w => w.sessId === sessId)) out.push('a run member');
+  return out;
+}
+
+async function assertHandover(ctx, old, fresh, reason) {
+  const { mgr, orch, run } = ctx;
+  assert.deepStrictEqual(standaloneTraces(ctx, old.sessId), [], 'the retired session is no standalone card anywhere');
+  assert.strictEqual(old.exitNote, 'replaced', 'retired, not paused');
+  assert.strictEqual(mgr.closeReasons.at(-1), 'refresh');
+  const d = orch.describeRun(run());
+  assert.strictEqual(d.orchestratorSessId, fresh.sessId);
+  assert.deepStrictEqual(d.retiredOrchestrators, [old.sessId], 'part of the orchestrator\'s history');
+  assert.deepStrictEqual(run().retiredOrchestrators.map(r => [r.sessId, r.replacedBy, r.n, r.reason]), [[old.sessId, fresh.sessId, 1, reason]]);
+  assert.strictEqual(run().lastRefresh.from, old.sessId);
+  assert.strictEqual(run().lastRefresh.to, fresh.sessId);
+  const agents = orch.listAgents(fresh.instanceId).agents;
+  assert.strictEqual(agents.filter(a => a.role === 'orchestrator').length, 1, 'one orchestrator on the run');
+  // The predecessor's transcript stays readable for the seed (its last replies).
+  assert.ok(fs.existsSync(path.join(fresh.settings.sessionDir, 'RESTART.md')));
+}
+
+test('refresh handover (PAUSED): the old session is never a standalone paused/resumable entry, in any list', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const { orch, orchSession, mgr, run } = ctx;
+  orch.refreshOrchestrator(run().runId);
+  writeResume(orchSession, 'all named');
+  // Watch every moment of finalize → swap: no paused entry is ever saved.
+  const save = mgr.saveToHistory;
+  const flagged = [];
+  mgr.saveToHistory = (e) => { if (e.sessId === orchSession.sessId && (e.flags?.paused || e.flags?.interrupted)) flagged.push(e.flags); return save(e); };
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  await waitFor(() => freshOrch(mgr, orchSession), { what: 'the swap' });
+  mgr.saveToHistory = save;
+  assert.deepStrictEqual(flagged, [], 'no paused or interrupted entry saved for a handover');
+  await assertHandover(ctx, orchSession, freshOrch(mgr, orchSession), 'owner');
+});
+
+test('refresh handover (timeout → interrupt): the old session is never a standalone paused/resumable entry, in any list', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none', setup: { refreshTimeoutMs: 30 } });
+  const { orch, orchSession, mgr, run } = ctx;
+  orch.refreshOrchestrator(run().runId);
+  await waitFor(() => freshOrch(mgr, orchSession), { what: 'the swap after the timeout' });
+  assert.ok(mgr.writes.some(w => w.tabId === orchSession.tabId && w.data === '\x1b'), 'interrupted');
+  await assertHandover(ctx, orchSession, freshOrch(mgr, orchSession), 'owner');
+});
+
+test('refresh handover (timeout, the old session already gone): swapped from its saved entry, which leaves', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none', setup: { refreshTimeoutMs: 30 } });
+  const { orch, orchSession, mgr, run } = ctx;
+  orch.refreshOrchestrator(run().runId);
+  orchSession.running = false;   // exited on its own, still in the tab map
+  await waitFor(() => freshOrch(mgr, orchSession), { what: 'the swap after the timeout' });
+  await assertHandover(ctx, orchSession, freshOrch(mgr, orchSession), 'owner');
+});
+
+test('leftovers at load: a saved paused orchestrator a refresh replaced is dropped; the run\'s own paused one stays', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const { orch, orchSession, mgr, run } = ctx;
+  await finishRefresh(orch, mgr, (orch.refreshOrchestrator(run().runId), orchSession));
+  const fresh = freshOrch(mgr, orchSession);
+  // What an earlier version left: the retired session saved as paused.
+  const ghost = { sessId: orchSession.sessId, cwd: orchSession.cwd, title: orchSession.title, settings: orchSession.getSettings(), flags: { paused: true } };
+  mgr.saveToHistory(ghost);
+  // The run is then paused: the fresh orchestrator is saved paused too (newest).
+  fresh.running = false;
+  mgr.saveToHistory({ sessId: fresh.sessId, cwd: fresh.cwd, title: fresh.title, settings: fresh.getSettings(), flags: { paused: true } });
+  mgr.sessions.delete(fresh.tabId);
+  setup({ mgr });   // a server start
+  assert.strictEqual(mgr.findSaved(orchSession.sessId), null, 'recorded as retired: dropped');
+  assert.ok(mgr.findSaved(fresh.sessId)?.paused, 'the run\'s paused orchestrator stays resumable');
+
+  // A run refreshed before the record existed: the paused orchestrator entry
+  // behind the newest one goes.
+  const r = run();
+  delete r.retiredOrchestrators;
+  fs.writeFileSync(path.join(r.runDir, 'run.json'), JSON.stringify(r));
+  mgr.saveToHistory(ghost);
+  mgr.saveToHistory({ sessId: fresh.sessId, cwd: fresh.cwd, title: fresh.title, settings: fresh.getSettings(), flags: { paused: true } });
+  assert.strictEqual(setup({ mgr }).orch.dropRetiredEntries(), 0, 'already done at load');
+  assert.strictEqual(mgr.findSaved(orchSession.sessId), null);
+  assert.ok(mgr.findSaved(fresh.sessId)?.paused);
 });
 
 test('refresh failure: the new session does not start — old transcript resumable, nothing delivered, an owner item', async (t) => {

@@ -89,12 +89,28 @@
 //                        (run.refreshing.cursor) it gets no event, inbox
 //                        message or typed notice — the fresh session gets them
 //                        all, labelled. No PAUSED within REFRESH_TIMEOUT_MS: the
+//                        old session is interrupted (or, gone, closed) and the
 //                        swap goes on. The seed (RESTART.md) is generated at
 //                        the swap: the owner log (<runDir>/owner-messages.jsonl),
-//                        the last replies, every worker's snapshot and open
-//                        items, all events since the last refresh. A new
-//                        session that fails to start leaves the old one
-//                        resumable and an owner item.
+//                        the last replies (the predecessor's transcript, by
+//                        cwd + sessId), every worker's snapshot and open
+//                        items, all events since the last refresh.
+//                        A refresh is a handover inside one orchestrator
+//                        identity, never a pause: session-control saves no
+//                        paused entry and sends no cli:paused for it, the old
+//                        session is retired (an SDK one's envelopes stop
+//                        naming the run, so no panel adopts it as a worker),
+//                        its saved entry is forgotten, and the run records it
+//                        (run.retiredOrchestrators [{ sessId, replacedBy, n,
+//                        at, reason }], lastRefresh.from/to; describeRun's
+//                        retiredOrchestrators), which the SDK panel never
+//                        shows as a box. A new session that fails to start
+//                        leaves the old one saved as paused (resumable: the
+//                        run's Resume / Resume from notes) and an owner item.
+//                        At load, a saved orchestrator entry a run records as
+//                        retired (or, for a run refreshed before that record,
+//                        a paused one behind the run's newest orchestrator
+//                        entry) is dropped.
 //   remote workers       registerHostProvider({ hosts, launch, kill }) (the
 //                        add-on ctx; one provider, a second replaces it):
 //                        launch_cli `host` (+ `app`) records a member that runs
@@ -1865,6 +1881,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       refreshing: run.refreshing ? { at: run.refreshing.at, reason: run.refreshing.reason, n: run.refreshing.n, ...(run.refreshing.pct != null ? { pct: run.refreshing.pct } : {}) } : null,
       refreshes: run.refreshes || 0,
       lastRefresh: run.lastRefresh || null,
+      // The sessions earlier refreshes replaced: the orchestrator's history.
+      retiredOrchestrators: [...retiredIds(run)],
       pendingEvents: run.events.filter(e => e.seq > run.delivered).length,
       ownerItems: ownerItemsView(run),
       // Launches waiting for a slot or their `after` workers (launch_cli).
@@ -2650,7 +2668,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       try { control.interrupt(orch.tabId); return; } catch (e) { console.error('[orchestration] refresh timeout:', e.message); }
     }
     const entry = savedMember(run, st => st.role === 'orchestrator');
-    if (orch) mgr.closeQuiet?.(orch.tabId, 'refresh');
+    if (orch) {
+      orch.session.noteRetired?.();
+      mgr.closeQuiet?.(orch.tabId, 'refresh');
+    }
     swapOrchestrator(run, {
       settings: orch?.session.getSettings() || entry?.settings, title: orch?.session.title || entry?.title,
       replaces: orch?.session.sessId || entry?.id, previous: orch?.session || (entry ? { sessId: entry.id, cwd: entry.cwd } : null),
@@ -3286,6 +3307,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const fresh = loadRun(run.runDir) || run;
     if (refresh && failure) {
       if (mgr.get(tabId)) mgr.closeQuiet?.(tabId, 'refresh');
+      // The handover saved nothing (session-control finalize): the old
+      // session becomes the run's paused orchestrator, resumable.
+      keepResumable(previous);
       fresh.delivered = Math.min(fresh.delivered, refresh.cursor);
       fresh.refreshing = null;
       fresh.busy = false;
@@ -3299,6 +3323,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       return { tabId: null, seed, failed: failure };
     }
     if (replaces && typeof mgr.forgetSaved === 'function') mgr.forgetSaved(replaces);
+    const newSessId = mgr.get(tabId)?.sessId || null;
     fresh.compactions = 0;
     fresh.refreshedAt = now;
     fresh.pausing = null;
@@ -3310,12 +3335,64 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       if (lastSeq > fresh.delivered) fresh.handover = { upTo: lastSeq };
       fresh.refreshes = refresh.n;
       fresh.refreshing = null;
-      fresh.lastRefresh = { at: now, seq: lastSeq, n: refresh.n, reason: refresh.reason };
+      fresh.lastRefresh = { at: now, seq: lastSeq, n: refresh.n, reason: refresh.reason, from: replaces || null, to: newSessId };
+      // The handover inside one orchestrator identity: the retired session is
+      // part of the orchestrator's history, never a member of its own.
+      if (replaces) recordRetired(fresh, { sessId: replaces, replacedBy: newSessId, n: refresh.n, at: now, reason: refresh.reason });
     }
     if (!fresh.workers.some(w => w.paused)) fresh.paused = null;
     saveRun(fresh);
     if (refresh) addEvent(fresh, { worker: null, kind: 'refresh', text: refreshEventText(refresh), delivered: true });
     return { tabId, seed };
+  }
+
+  // A refresh's predecessor: run.retiredOrchestrators, oldest first, one
+  // entry per sessId.
+  function recordRetired(run, rec) {
+    const list = Array.isArray(run.retiredOrchestrators) ? run.retiredOrchestrators.filter(r => r.sessId !== rec.sessId) : [];
+    list.push(rec);
+    run.retiredOrchestrators = list;
+  }
+
+  function retiredIds(run) {
+    return new Set((run?.retiredOrchestrators || []).map(r => r.sessId).filter(Boolean));
+  }
+
+  // A failed swap: the old orchestrator (closed by the handover, unsaved) is
+  // saved as paused so "Resume" continues it.
+  function keepResumable(previous) {
+    if (!previous?.sessId || !previous.cwd || typeof mgr.saveToHistory !== 'function') return;
+    const saved = mgr.findSaved?.(previous.sessId);
+    const settings = typeof previous.getSettings === 'function' ? previous.getSettings() : saved?.settings;
+    if (!settings) return;
+    mgr.saveToHistory({
+      sessId: previous.sessId, cwd: previous.cwd, title: previous.title ?? saved?.title, settings,
+      autoMemory: previous.autoMemory ?? saved?.autoMemory, flags: { paused: true, pausedAt: Date.now() },
+    });
+  }
+
+  // Leftovers of a refresh before handovers were kept out of the saved
+  // sessions: a saved orchestrator entry the run records as retired, or (a run
+  // refreshed before that record existed) a paused one that is not the run's
+  // newest orchestrator entry, is dropped. Once, at load.
+  function dropRetiredEntries() {
+    if (typeof mgr.listSaved !== 'function' || typeof mgr.forgetSaved !== 'function') return 0;
+    const newest = new Map();   // runId -> the newest orchestrator entry's id
+    const drop = [];
+    const runs = new Map();
+    for (const e of mgr.listSaved()) {
+      const st = e.settings?.orchestration;
+      if (st?.role !== 'orchestrator' || !st.runId || !st.runDir) continue;
+      if (!runs.has(st.runDir)) runs.set(st.runDir, loadRun(st.runDir));
+      const run = runs.get(st.runDir);
+      if (!run) continue;
+      const first = !newest.has(st.runId);
+      if (first) newest.set(st.runId, e.id);
+      const live = orchestratorSession(run)?.session.sessId;
+      if (retiredIds(run).has(e.id) || (e.paused && run.refreshes > 0 && (!first || (live && live !== e.id)))) drop.push(e.id);
+    }
+    for (const id of drop) mgr.forgetSaved(id);
+    return drop.length;
   }
 
   // Reopen a paused run from the "+" menu: the orchestrator continues its own
@@ -4552,12 +4629,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return r;
   }
 
+  try { dropRetiredEntries(); } catch (e) { console.error('[orchestration] retired entries:', e.message); }
+
   return {
     router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, ownerDelete, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, askAddress, isRefreshing, deliverLate, noteLate, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged, setRunModelMap, setRunAuth, setRunModel, setRunMaxWorkers, setRunAutoRefresh, registerHostProvider, hostList, openMirrorRun,
-    writeSeed,
+    writeSeed, dropRetiredEntries,
     MAX_WORKERS, DEFAULT_MAX_WORKERS, MIN_WORKER_LIMIT, MAX_WORKER_LIMIT, MAX_SUBAGENTS, WORKER_AGENTS,
   };
 }

@@ -992,6 +992,19 @@ test('the query ending reports cli:exit like a PTY exit; kill does too; a respaw
   assert.strictEqual(b.broadcasts.filter(m => m.type === 'cli:exit').length, 1);
   assert.strictEqual(b.events().at(-1).ev.platform.state, 'paused', 'a completed pause reads paused');
 
+  // An orchestrator a refresh replaced: its exit reads "replaced" and no longer
+  // names the run, so no panel takes it for a new member.
+  const r = makeSession({ orchestration: { runId: 'abc123', role: 'orchestrator' } });
+  r.s.spawn(tmp('proj-'), 80, 24, {});
+  await tick();
+  assert.strictEqual(r.events().at(-1).runId, 'abc123');
+  r.s.noteRetired();
+  r.s.kill();
+  await tick();
+  const last = r.events().at(-1);
+  assert.strictEqual(last.ev.platform.state, 'replaced');
+  assert.strictEqual(last.runId, undefined, 'a retired session\'s envelopes do not name the run');
+
   const c = makeSession();
   c.s.spawn(tmp('proj-'), 80, 24, {});
   c.s.spawn(tmp('proj-'), 80, 24, {});

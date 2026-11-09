@@ -75,6 +75,9 @@
 //   exit           the query ending (or kill) broadcasts the same `cli:exit`
 //                  a PTY exit does, so the manager's exit callbacks and
 //                  listeners (Pro's addExitHook, orchestration) fire alike.
+//                  Its last status reads `paused` after a completed pause
+//                  (notePaused), `replaced` after a refresh's handover
+//                  (noteRetired, whose envelopes no longer carry runId).
 //
 // The SDK is a hard requirement of core: loaded once with import() when this
 // module is required; server.js awaits `ready` before any session can spawn.
@@ -480,7 +483,7 @@ class SdkSession {
     this.hidden = false;
     this.owner = null;
     this.busy = false;
-    // busy | idle | awaiting (an AskUserQuestion is open) | paused | exited
+    // busy | idle | awaiting (an AskUserQuestion is open) | paused | replaced | exited
     this.state = 'idle';
     this.costUsd = 0;         // the folder's running total: _costBase + this id's own
     this._costBase = 0;       // the folder's other session ids' cost, at spawn
@@ -506,6 +509,7 @@ class SdkSession {
     this._typed = '';
     this._seeding = null;     // envelopes held back while a resume seeds the transcript
     this._exitState = null;
+    this._retired = false;    // replaced by a refresh (noteRetired)
     this._awaiting = false;
     this._stderr = '';
     this._credential = null;      // the spawn's: 'api-key' | 'subscription'
@@ -527,8 +531,11 @@ class SdkSession {
     return this.status === 'running' && this._query !== null;
   }
 
+  // The run its envelopes name, so the run's panel finds them. None once
+  // retired by a refresh: what it still emits (its exit status) must not be
+  // taken for a new member of the run.
   get runId() {
-    return this.settings.orchestration?.runId || null;
+    return this._retired ? null : this.settings.orchestration?.runId || null;
   }
 
   sessionDir() {
@@ -565,6 +572,7 @@ class SdkSession {
 
     this.status = 'running';
     this._exitState = null;
+    this._retired = false;
     this._awaiting = false;
     this._stderr = '';
     this._initModel = null;
@@ -1148,6 +1156,14 @@ class SdkSession {
   // "paused", not "exited".
   notePaused() {
     this._exitState = 'paused';
+  }
+
+  // Closed by a refresh's handover (session-control finalize): an orchestrator
+  // replaced by a fresh session of the same identity. Its exit reads
+  // "replaced", and its envelopes stop naming the run (runId).
+  noteRetired() {
+    this._exitState = 'replaced';
+    this._retired = true;
   }
 
   // One user turn. opts: priority 'now' | 'next' | 'later' (unset: the SDK's
