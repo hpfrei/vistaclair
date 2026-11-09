@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const folders = require('./session-folders');
 const { transcriptTotals } = require('./sdk-session');
+const { landingView } = require('./landing-state');
 
 // How many of the orchestrator's TODO rows a card shows.
 const TODO_TAIL = 5;
@@ -102,6 +103,8 @@ function summarizeRuns(entries, { runs = new Map(), liveOf = () => null } = {}) 
         state: workerState(run ? w : null, live),
         model: w.model || entry?.settings?.model || null,
         lastReport: r ? { status: r.status, summary: String(r.summary || '').slice(0, 200), at: r.at || null } : null,
+        // A worktree worker's landing (src/landing-state.js), from run.json.
+        landing: run ? landingView(w, { landings: run.landings || [] }) : null,
         lastActivityAt: Math.max(entry?.lastInteractionAt || 0, ms(r?.at), ms(w.exitedAt), ms(w.launchedAt)) || null,
         completed: finished(w),
         cost: costOf(live, w.costUsd, sdk ? w.sessionDir || entry?.settings?.sessionDir : null),

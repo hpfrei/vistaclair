@@ -112,6 +112,31 @@
   const BILL_TEXT = { subscription: 'the Claude subscription', apikey: 'API credits' };
   const BILL_SHORT = { subscription: 'Sub', apikey: 'API' };
   const STATE_TEXT = { busy: 'busy', idle: 'idle', awaiting: 'awaiting answer', paused: 'paused', exited: 'exited', pausing: 'pausing', closed: 'closed' };
+  // A worktree worker's landing (describeRun's `landing`, src/landing-state.js)
+  // as its box shows it: `chip` follows "done ·" on the report chip (with its
+  // class `cls`), `line` is the line under the caption. null: none to show.
+  function landingLabel(l) {
+    if (!l) return null;
+    const short = (x) => String(x || '').slice(0, 7);
+    const base = l.base || 'its base';
+    switch (l.state) {
+      case 'landing': return { chip: 'landing…', cls: 'landing', line: `landing on ${base}…`, tip: `Its branch is being rebased onto ${base}, checked and merged.` };
+      case 'landed': return l.undone
+        ? { chip: 'landed, undone', cls: 'undone', line: `landed on ${base} as ${short(l.sha)}, undone by ${short(l.undone)}`, tip: `Merged into ${base} as ${l.sha}, then reverted by ${l.undone}.` }
+        : { chip: 'landed', cls: 'landed', line: `landed on ${base} as ${short(l.sha)}`, tip: `Merged into ${base} as ${l.sha}.` };
+      case 'nothing': return { chip: 'nothing to land', cls: 'landed', line: `nothing new to land on ${base}`, tip: `Its branch had nothing ${base} does not have.` };
+      case 'not-landed': return { chip: 'not landed', cls: 'notlanded', line: `not landed: ${l.reason || 'see the orchestrator'}`, tip: `Not merged; ${base} is untouched.` };
+      default: return null;
+    }
+  }
+
+  // The report chip's word and class: a done report with its landing.
+  function reportChip(r, l) {
+    const rs = String(r?.status || '').toLowerCase().replace(/[^a-z]/g, '');
+    const lab = rs === 'done' && l?.current ? landingLabel(l) : null;
+    return lab ? { text: `done · ${lab.chip}`, cls: `sdk-report-${lab.cls}` } : { text: r?.status || 'report', cls: `sdk-report-${rs}` };
+  }
+
   // `claude-sonnet-5-5` → `sonnet-5-5`; aliases and `[1m]` stay as they are.
   const fmtModel = (m) => String(m || '').replace(/^claude-/, '');
   const fmtTokens = (n) => n >= 1e6 ? `${+(n / 1e6).toFixed(n % 1e6 ? 1 : 0)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
@@ -337,6 +362,7 @@
       this.gotStatus = false;
       this.cost = null;
       this.lastReport = null;
+      this.landing = null;           // describeRun's `landing` (a worktree worker)
       this.closed = false;           // closed by its orchestrator (run membership)
       this.closedAt = null;          // ms
       this.model = null;             // chosen (settings.model)
@@ -389,6 +415,7 @@
           <div class="sdk-now"></div>
         </div>
         <div class="sdk-area-awaiting hidden">Awaiting your answer: the question is open in the dialog.</div>
+        <div class="sdk-area-landing hidden"></div>
         <div class="sdk-main">
           <div class="sdk-view sdk-view-live">
             <div class="sdk-todo-top">
@@ -426,6 +453,7 @@
       this.ctxTxt = q('.sdk-ctx-txt');
       this.nowEl = q('.sdk-now');
       this.awaitEl = q('.sdk-area-awaiting');
+      this.landEl = q('.sdk-area-landing');
       this.finalEl = q('.sdk-area-final');
       this.todoTop = q('.sdk-todo-top');
       this.todoView = q('.sdk-todo-scroll');
@@ -561,6 +589,16 @@
       window.cliModule?.updateStreamingState?.();
     }
 
+    // The landing's line under the caption: "landed on main as 1a2b3c4",
+    // "not landed: …", "landing on main…"; one of an earlier report says so.
+    renderLanding() {
+      const l = this.landing;
+      const lab = landingLabel(l);
+      this.landEl.className = `sdk-area-landing${lab ? ` sdk-landing-${lab.cls}${l.current ? '' : ' earlier'}` : ' hidden'}`;
+      this.landEl.textContent = lab ? `${l.current ? '' : 'earlier report: '}${lab.line}` : '';
+      this.landEl.title = lab ? [lab.tip, l.at ? `At ${new Date(l.at).toLocaleString()}` : ''].filter(Boolean).join('\n') : '';
+    }
+
     setCost(c) {
       if (typeof c !== 'number' || !isFinite(c)) return;
       this.cost = c;
@@ -586,10 +624,12 @@
       this.el.classList.toggle('sdk-area-is-blocked', !ended && (rs === 'blocked' || rs === 'failed'));
       this.reportEl.classList.toggle('hidden', !r);
       if (r) {
-        this.reportEl.textContent = r.status || 'report';
+        const chip = reportChip(r, this.landing);
+        this.reportEl.textContent = chip.text;
         this.reportEl.title = r.summary || '';
-        this.reportEl.className = `sdk-chip sdk-area-report sdk-report-${rs}`;
+        this.reportEl.className = `sdk-chip sdk-area-report ${chip.cls}`;
       }
+      this.renderLanding();
       // The last report heads the TODO table once ended, or when there is no TODO.
       this.finalEl.classList.toggle('hidden', !(r?.summary && (ended || !this.todo?.rows?.length)));
       if (r?.summary) this.finalEl.textContent = `${r.status || 'report'}: ${r.summary}`;
@@ -2003,6 +2043,12 @@
         this.foldShelf(!!(runId && storedKey(SHELF_STORE, runId)), { store: false });
         if (runId) this.fetchRun();
       }
+      // A worker's own tab: its report and landing, from its run.
+      const member = orch?.role === 'worker' && orch.runId ? `${orch.runId}/${orch.workerId || ''}` : null;
+      if (member !== (this.member || null)) {
+        this.member = member;
+        if (member) this.fetchMember();
+      }
       this.composer.disabled = this.info.status === 'exited';
       if (this.composer.getAttribute('placeholder') !== composerHint(role)) this.composer.setAttribute('placeholder', composerHint(role));
       this.renderToolbar();
@@ -2020,6 +2066,24 @@
       } catch {}
       this._fetching = false;
       if (this._refetch) { this._refetch = false; this.fetchRun(); }
+    }
+
+    // A worker's own tab (settings.orchestration role worker): its box shows
+    // its last report and landing like the box on its orchestrator's tab.
+    async fetchMember() {
+      const member = this.member;
+      if (!member) return;
+      const [runId, workerId] = member.split('/');
+      try {
+        const res = await fetch(`/api/orchestration/run?runId=${encodeURIComponent(runId)}`, { credentials: 'same-origin' });
+        const run = await res.json();
+        if (!res.ok || member !== this.member || panels.get(this.tabId) !== this || !this.main) return;
+        const w = (run.workers || []).find(x => x.id === workerId);
+        if (!w) return;
+        this.main.lastReport = w.lastReport || null;
+        this.main.landing = w.landing || null;
+        this.main.renderHeader();
+      } catch {}
     }
 
     applyRun(run) {
@@ -2049,6 +2113,7 @@
         a.label = w.id ? `${w.id}${w.title && w.title !== w.id ? ` · ${w.title}` : ''}` : shortName(a.name, run);
         a.addAliases([w.name, w.worker, w.id, shortName(w.name || w.worker, run)]);
         a.lastReport = w.lastReport || null;
+        a.landing = w.landing || null;
         a.closed = !!w.closed || w.state === 'closed';
         a.closedAt = Date.parse(w.closedAt) || null;
         if (!a.model && w.model) a.model = w.model;
@@ -2143,12 +2208,13 @@
         const at = this.shelfList.children[i] || null;
         if (at !== c.el) this.shelfList.insertBefore(c.el, at);
         const r = a.lastReport;
-        const rs = String(r?.status || '').toLowerCase().replace(/[^a-z]/g, '');
         c.name.textContent = a.label;
-        c.rep.textContent = r ? r.status || 'report' : 'none';
-        c.rep.className = r ? `sdk-chip sdk-shelf-rep sdk-report-${rs}` : 'sdk-chip';
+        const chip = reportChip(r, a.landing);
+        c.rep.textContent = r ? chip.text : 'none';
+        c.rep.className = r ? `sdk-chip sdk-shelf-rep ${chip.cls}` : 'sdk-chip';
         c.cost.textContent = fmtCost(a.cost);
-        c.el.title = `${a.label}\n${r ? `${r.status || 'report'}: ${r.summary || ''}` : 'No report.'}`;
+        const lab = landingLabel(a.landing);
+        c.el.title = `${a.label}\n${r ? `${r.status || 'report'}: ${r.summary || ''}` : 'No report.'}${lab ? `\n${a.landing.current ? '' : 'earlier report: '}${lab.line}` : ''}`;
         c.el.classList.toggle('open', a.sessId === this.openId);
         c.el.setAttribute('aria-pressed', String(a.sessId === this.openId));
         c.at = t(a);
@@ -2778,7 +2844,10 @@
 
   function onRunUpdate(msg) {
     if (!msg?.runId || msg.deleted) return;
-    for (const p of panels.values()) if (p.runId === msg.runId) p.fetchRun();
+    for (const p of panels.values()) {
+      if (p.runId === msg.runId) p.fetchRun();
+      else if (p.member?.startsWith(`${msg.runId}/`)) p.fetchMember();
+    }
   }
 
   // An event from a session no panel knows yet: a worker of a run we show
@@ -2851,5 +2920,6 @@
     _blocks: { blockFor, overtaken },
     _max: { openMax, closeMax, current: () => _max },
     _Panel: Panel,
+    _landing: { landingLabel, reportChip },
   };
 })();

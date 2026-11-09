@@ -457,6 +457,12 @@
 .sdk-area-report, .sdk-shelf-rep { background: color-mix(in srgb, var(--cyan) 18%, transparent); color: var(--cyan); }
 .sdk-report-done, .sdk-report-complete { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
 .sdk-report-blocked, .sdk-report-failed { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+/* A done worktree worker's landing (src/landing-state.js): green once merged,
+   yellow while it lands, red when it did not. */
+.sdk-report-landed { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
+.sdk-report-landing { background: color-mix(in srgb, var(--yellow) 22%, transparent); color: var(--yellow); }
+.sdk-report-notlanded { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
+.sdk-report-undone { background: var(--bg-hover); color: var(--text-dim); }
 @keyframes sdk-pulse { 50% { opacity: .35; } }
 /* A busy worker shows it on its Live button, not with a chip: a pulsing dot
    and a breathing fill, whichever view is open. Other states keep the chip. */
@@ -543,6 +549,22 @@
   flex-shrink: 0;
 }
 .sdk-area-awaiting::before { content: '? '; font-weight: 700; }
+/* The landing's line under the caption: "landed on main as 1a2b3c4". */
+.sdk-area-landing {
+  margin: 0 10px 6px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sdk-area-landing::before { content: '⎇ '; }
+.sdk-landing-landed { color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
+.sdk-landing-landing { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 12%, transparent); }
+.sdk-landing-notlanded { color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.sdk-landing-undone, .sdk-area-landing.earlier { color: var(--text-dim); background: var(--bg-hover); }
 
 /* --- the box's main area: one view at a time --- */
 .sdk-main { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
