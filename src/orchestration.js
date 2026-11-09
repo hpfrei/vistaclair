@@ -3449,10 +3449,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // A worker's prompt the owner typed: not the brief (its launch, a fresh
   // restart) and none of the server's or a member's texts, which all start
-  // with "[" ([message from …], [vistaclair …], [orchestration] …).
+  // with "[" ([message from …], [vistaclair …], [orchestration] …). Nor are the
+  // CLI's own injections (a finished subagent/background task as
+  // <task-notification>, /clear and local-command output, system reminders):
+  // those are skipped, not recorded.
+  const CLI_INJECTED = /^<(task-notification|system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args)[\s>]/;
   function ownerPrompt(w, prompt) {
     const text = typeof prompt === 'string' ? prompt.trim() : '';
-    if (!text || text.startsWith('[')) return '';
+    if (!text || text.startsWith('[') || CLI_INJECTED.test(text)) return '';
     const brief = String(w.task || '').trim();
     if (brief && text.startsWith(brief)) return '';
     return text;
