@@ -237,6 +237,48 @@ function areaOf(area) {
   return out.length ? out : undefined;
 }
 
+// The parameters each orchestration tool takes (lib/orchestrator-mcp.js), with
+// a few words each. Claude Code forwards an MCP call unvalidated (an
+// orchestrator that lost a deferred tool's schema guesses its parameters), so
+// the router refuses any other key and names these, to fix the call from.
+const TOOL_PARAMS = {
+  launch_cli: {
+    title: 'short name, required', task: 'full brief, required', model: WORKER_MODELS.join(' | '),
+    isolation: 'worktree | none', area: 'repo-relative files or globs it will change',
+    after: 'workers it waits for', cwd: 'directory inside the run root', tools: 'add-on tools, by name',
+    host: 'another machine, for a remote worker', app: 'with host: the app it runs in',
+  },
+  cancel_launch: { id: 'the queued launch\'s id, required' },
+  list_workers: {},
+  resume_worker: { worker: 'address or id, required', mode: 'continue | fresh, required', message: 'what it does first', tools: 'add-on tools, by name' },
+  close_worker: { worker: 'address or id, required' },
+  stop_worker: { worker: 'address or id, required', reason: 'why it is stopped' },
+  end_run: {},
+  undo_landing: { landing: 'merge sha', worker: 'or a worker\'s address or id' },
+  owner_items: { action: 'list | add | resolve | drop | reorder', items: 'add: the items', item: 'add: one item', id: 'resolve / drop: the item\'s id', answer: 'resolve: the answer', order: 'reorder: the open items\' ids' },
+  report: { status: 'started | blocked | done | failed | paused, required', summary: 'required', filesChanged: 'paths', verified: 'the one check you ran', open: 'what is still open', ownerItems: 'what only the owner can do or decide' },
+  SendMessage: { to: 'recipient\'s address, required', message: 'the message, required' },
+  ListAgents: {},
+};
+
+// Throws on a key `tool` does not take (instanceId is the MCP server's own).
+function checkParams(tool, args) {
+  const params = TOOL_PARAMS[tool];
+  const unknown = Object.keys(args || {}).filter(k => k !== 'instanceId' && !Object.hasOwn(params, k));
+  if (!unknown.length) return;
+  const takes = Object.keys(params).length
+    ? `${tool} takes: ${Object.entries(params).map(([k, d]) => `${k} (${d})`).join(', ')}`
+    : `${tool} takes no parameters`;
+  throw new Error(`unknown parameter${unknown.length > 1 ? 's' : ''} ${unknown.map(k => JSON.stringify(k)).join(', ')} — ${takes}`);
+}
+
+// launch_cli `title`, trimmed and without a leading worker id ("w58-train11"
+// → "train11"): the address puts the new worker's own id in front of it.
+function cleanTitle(title) {
+  const t = String(title).trim();
+  return t.replace(/^w\d+[-_\s]+/i, '').trim() || t;
+}
+
 function writeJsonAtomic(file, data) {
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n');
@@ -809,15 +851,22 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function launchWorker(instanceId, args = {}) {
     const { run } = callerRun(instanceId, 'orchestrator');
     if (run.pausing) throw new Error('this run is being paused: launch nothing new');
-    if (!args.task || !String(args.task).trim()) throw new Error('task is required');
+    if (typeof args.title !== 'string' || !args.title.trim()) throw new Error('title is required: a short name for the worker (part of its address)');
+    if (typeof args.task !== 'string' || !args.task.trim()) throw new Error('task is required: the complete brief, non-empty');
     if (args.model && !WORKER_MODELS.includes(args.model)) throw new Error(`model must be one of ${WORKER_MODELS.join(', ')}`);
     const paused = run.workers.filter(w => w.paused);
     if (paused.length) {
       throw new Error(`paused workers must be resumed (resume_worker) before new ones are launched: ${paused.map(w => w.name).join(', ')}`);
     }
     const spec = launchSpec(run, args);
+    // No area: overlaps cannot be detected. It is launched, with a warning.
+    const warn = (r) => {
+      if (spec.host || spec.area) return r;
+      const w = 'no area given, so its overlaps with other workers cannot be detected: pass area (the files or globs it will change) at launch';
+      return { ...r, note: r.note ? `${r.note} Also: ${w}.` : `${w}.` };
+    };
     const queue = run.queue || [];
-    if (freeSlots(run) > 0 && depsMet(run, spec) && !queue.some(e => depsMet(run, e))) return startWorker(run, spec);
+    if (freeSlots(run) > 0 && depsMet(run, spec) && !queue.some(e => depsMet(run, e))) return warn(startWorker(run, spec));
     checkQueued(run, spec);
     const entry = { id: `q${(run.queueSeq = (run.queueSeq || 0) + 1)}`, ...spec, at: new Date().toISOString() };
     run.queue = [...queue, entry];
@@ -826,24 +875,25 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const mine = pumpQueue(run.runDir, { silent: entry.id }).find(s => s.entry.id === entry.id);
     if (mine?.error) throw mine.error;
     if (mine) {
-      return {
+      return warn({
         ...mine.result,
         ...(mine.autoClosed ? { autoClosed: mine.autoClosed, closeNote: `the run was full: ${mine.autoClosed} (idle, done, landed, clean) was closed to free its slot; resume_worker brings it back` } : {}),
-      };
+      });
     }
     const fresh = loadRun(run.runDir);
     const q = queueList(fresh).find(e => e.id === entry.id);
     if (!q) return { queued: false, id: entry.id, note: 'it was not started: see the run events' };
     const available = runningWorkers(fresh).filter(w => workerAvailable(fresh, w));
-    return {
+    return warn({
       queued: true, id: q.id, position: q.position, waitingFor: q.waitingFor,
       note: `queued: it starts when ${q.waitingFor.join(' and ')}. cancel_launch({ id: "${q.id}" }) drops it.${available.length && q.waitingFor.includes('a free slot') ? ` Finished and idle, available to close: ${available.map(w => `${w.name} (last report: ${w.lastReport.status})`).join(', ')}.` : ''}`,
-    };
+    });
   }
 
   // A launch's checked parameters, as a queue entry keeps them (cwd resolved,
   // `after` as worker ids). Throws, having changed nothing.
   function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app } = {}) {
+    title = cleanTitle(title);
     if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after });
     if (app !== undefined && app !== null && app !== '') throw new Error('app is for a remote worker (with host)');
     const target = realpathOr(cwd ? path.resolve(run.root, cwd) : run.root);
@@ -3866,19 +3916,21 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         res.json({});
       }
     });
-    r.post('/launch', call(b => launchWorker(b.instanceId, b)));
-    r.post('/cancel-launch', call(b => cancelLaunch(b.instanceId, b)));
-    r.post('/workers', call(b => listWorkers(b.instanceId)));
-    r.post('/end', call(b => endRun(b.instanceId)));
-    r.post('/undo-landing', call(b => undoLanding(b.instanceId, b)));
-    r.post('/report', call(b => report(b.instanceId, b)));
-    r.post('/resume-worker', call(b => resumeWorker(b.instanceId, b)));
-    r.post('/close-worker', call(b => closeWorker(b.instanceId, b)));
-    r.post('/stop-worker', call(b => stopWorker(b.instanceId, b)));
-    r.post('/send-message', call(b => sendMessage(b.instanceId, b)));
-    r.post('/list-agents', call(b => listAgents(b.instanceId)));
+    // The MCP tools (lib/orchestrator-mcp.js): an unknown parameter is refused.
+    const tool = (name, fn) => call((b) => { checkParams(name, b); return fn(b); });
+    r.post('/launch', tool('launch_cli', b => launchWorker(b.instanceId, b)));
+    r.post('/cancel-launch', tool('cancel_launch', b => cancelLaunch(b.instanceId, b)));
+    r.post('/workers', tool('list_workers', b => listWorkers(b.instanceId)));
+    r.post('/end', tool('end_run', b => endRun(b.instanceId)));
+    r.post('/undo-landing', tool('undo_landing', b => undoLanding(b.instanceId, b)));
+    r.post('/report', tool('report', b => report(b.instanceId, b)));
+    r.post('/resume-worker', tool('resume_worker', b => resumeWorker(b.instanceId, b)));
+    r.post('/close-worker', tool('close_worker', b => closeWorker(b.instanceId, b)));
+    r.post('/stop-worker', tool('stop_worker', b => stopWorker(b.instanceId, b)));
+    r.post('/send-message', tool('SendMessage', b => sendMessage(b.instanceId, b)));
+    r.post('/list-agents', tool('ListAgents', b => listAgents(b.instanceId)));
     r.post('/tool-params', call(() => toolParams()));
-    r.post('/owner-items', call(b => ownerItems(b.instanceId, b)));
+    r.post('/owner-items', tool('owner_items', b => ownerItems(b.instanceId, b)));
     // The run board (GUI).
     r.post('/pause', call(b => pauseRun(String(b.runId || ''))));
     r.post('/refresh', call(b => refreshOrchestrator(String(b.runId || ''))));

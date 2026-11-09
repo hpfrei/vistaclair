@@ -542,6 +542,78 @@ test('launch_cli guards: orchestrator only, at most 5 running, cwd inside the ro
   assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'out', task: 'x', cwd: path.dirname(cwd) }), /inside the run root/);
 });
 
+// The MCP tools' routes, called as lib/orchestrator-mcp.js does: { error } or the result.
+const viaRouter = (orch, route, body) => new Promise((resolve) => {
+  const layer = orch.router().stack.find(l => l.route?.path === route);
+  layer.route.stack[0].handle({ body }, { json: resolve });
+});
+
+test('launch_cli strict: an unknown parameter is refused with the parameter list; other tools refuse unknown keys too', async (t) => {
+  const { orch, orchSession, run } = await openOrchestrator(t, { isolation: 'none' });
+  const iid = orchSession.instanceId;
+  const bad = await viaRouter(orch, '/launch', { instanceId: iid, name: 'train', task: 'x', model: 'opus', isolation: 'none' });
+  assert.match(bad.error, /^unknown parameter "name" — launch_cli takes: title \(short name, required\), task \(full brief, required\), model \(fable \| opus \| sonnet \| haiku\), isolation \(worktree \| none\), area \(.+\), after \(.+\), cwd \(.+\), tools \(.+\), host \(.+\), app \(.+\)$/);
+  const two = await viaRouter(orch, '/launch', { instanceId: iid, title: 't', prompt: 'x', subagent_type: 'coder' });
+  assert.match(two.error, /^unknown parameters "prompt", "subagent_type" — launch_cli takes: title/);
+  assert.strictEqual(run().workers.length, 0, 'nothing launched');
+  const ok = await viaRouter(orch, '/launch', { instanceId: iid, title: 'good', task: 'x', area: ['src/**'] });
+  assert.ok(ok.worker && !ok.error, 'the instanceId and the real parameters pass');
+
+  assert.match((await viaRouter(orch, '/close-worker', { instanceId: iid, name: ok.worker })).error, /^unknown parameter "name" — close_worker takes: worker \(address or id, required\)$/);
+  assert.match((await viaRouter(orch, '/cancel-launch', { instanceId: iid, queue: 'q1' })).error, /cancel_launch takes: id /);
+  assert.match((await viaRouter(orch, '/resume-worker', { instanceId: iid, worker: 'w1', mode: 'fresh', prompt: 'go' })).error, /unknown parameter "prompt" — resume_worker takes: worker .*mode .*message .*tools/);
+  assert.match((await viaRouter(orch, '/stop-worker', { instanceId: iid, worker: 'w1', why: 'x' })).error, /stop_worker takes: worker .*reason/);
+  assert.match((await viaRouter(orch, '/undo-landing', { instanceId: iid, sha: 'abc' })).error, /undo_landing takes: landing .*worker/);
+  assert.match((await viaRouter(orch, '/end', { instanceId: iid, force: true })).error, /^unknown parameter "force" — end_run takes no parameters$/);
+  assert.match((await viaRouter(orch, '/workers', { instanceId: iid, all: true })).error, /list_workers takes no parameters/);
+  assert.match((await viaRouter(orch, '/send-message', { instanceId: iid, to: 'x', text: 'hi' })).error, /SendMessage takes: to .*message/);
+  assert.match((await viaRouter(orch, '/owner-items', { instanceId: iid, what: 'x' })).error, /owner_items takes: action/);
+  assert.match((await viaRouter(orch, '/report', { instanceId: iid, status: 'done', summary: 's', files: [] })).error, /report takes: status .*summary .*filesChanged/);
+  assert.ok(Array.isArray((await viaRouter(orch, '/workers', { instanceId: iid })).workers), 'no extra key: answered');
+});
+
+test('launch_cli strict: title required and non-blank, task non-blank, queued launches checked at call time', async (t) => {
+  const { orch, orchSession, run } = await openOrchestrator(t, { isolation: 'none' });
+  const launch = (a) => orch.launchWorker(orchSession.instanceId, a);
+  assert.throws(() => launch({ task: 'x' }), /^Error: title is required/);
+  assert.throws(() => launch({ title: '   ', task: 'x' }), /^Error: title is required/);
+  assert.throws(() => launch({ title: 't', task: ' \n ' }), /^Error: task is required: the complete brief, non-empty/);
+  assert.throws(() => launch({ title: 't' }), /^Error: task is required/);
+  fill(orch, orchSession);
+  assert.throws(() => launch({ title: '', task: 'x' }), /title is required/, 'a full run: refused, not queued');
+  assert.throws(() => launch({ title: 't', task: '' }), /task is required/);
+  assert.match((await viaRouter(orch, '/launch', { instanceId: orchSession.instanceId, name: 't', task: 'x' })).error, /unknown parameter "name"/);
+  assert.deepStrictEqual(run().queue || [], [], 'nothing queued');
+  const q = launch({ title: 'w9-later', task: 'x' });
+  assert.strictEqual(q.queued, true);
+  assert.strictEqual(run().queue[0].title, 'later', 'the queue entry keeps the stripped title');
+});
+
+test('launch_cli title: a leading worker id is stripped, so the address does not double it', async (t) => {
+  const { orch, orchSession, run } = await openOrchestrator(t, { isolation: 'none' });
+  const launch = (title) => orch.launchWorker(orchSession.instanceId, { title, task: 'x', area: ['a'] });
+  const o = run().orchestrator;
+  assert.strictEqual(launch('w1-train11').worker, `${o}-w1-train11`, 'its own id');
+  assert.strictEqual(launch('W58 - Train 12').worker, `${o}-w2-train-12`, 'any w<digits> prefix, any case');
+  assert.strictEqual(run().workers[1].title, 'Train 12');
+  assert.strictEqual(launch('w3').worker, `${o}-w3-w3`, 'no prefix without a separator: kept');
+  assert.strictEqual(launch('wiki-pages').worker, `${o}-w4-wiki-pages`, 'not an id: kept');
+});
+
+test('launch_cli area: a local launch without area warns in its note, also queued; with area, no warning', async (t) => {
+  const { orch, orchSession, mgr } = await openOrchestrator(t, { isolation: 'none' });
+  const launch = (a) => orch.launchWorker(orchSession.instanceId, { task: 'x', ...a });
+  const a = launch({ title: 'a' });
+  assert.ok(mgr.sessions.get(a.tabId).running, 'launched all the same');
+  assert.match(a.note, /^no area given, so its overlaps with other workers cannot be detected: pass area/);
+  assert.strictEqual(launch({ title: 'b', area: ['src/**'] }).note, undefined);
+  fill(orch, orchSession, 3);
+  const q = launch({ title: 'q' });
+  assert.strictEqual(q.queued, true);
+  assert.match(q.note, /^queued: .* Also: no area given, so its overlaps with other workers cannot be detected/);
+  assert.doesNotMatch(launch({ title: 'r', area: ['docs'] }).note, /no area given/);
+});
+
 test('subagent cap, Workflow ban and the orchestrator edit guard', async (t) => {
   const { orch, orchSession, stamp } = await openOrchestrator(t, { isolation: 'none' });
   const pre = (tool, tool_input = {}) => hook(orch, orchSession, { hook_event_name: 'PreToolUse', tool_name: tool, tool_input, cwd: '/' });

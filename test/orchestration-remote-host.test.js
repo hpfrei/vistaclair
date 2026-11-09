@@ -192,6 +192,15 @@ test('launch_cli host: unknown and unavailable hosts, and the parameters a remot
   assert.throws(() => ctx.orch.launchWorker(h2.iid, { title: 't', task: 'x', host: 'hetzner-1' }), /app: name the app on the host/);
 });
 
+test('launch_cli host: no missing-area warning; a leading worker id is stripped from the title', async () => {
+  const ctx = setup();
+  ctx.orch.registerHostProvider(fakeProvider());
+  const h = await openRun(ctx, { app: 'notes' });
+  const r = ctx.orch.launchWorker(h.iid, { title: 'w1-port', task: 'x', host: 'hetzner-1' });
+  assert.match(r.worker, /-w1-port$/);
+  assert.doesNotMatch(r.note, /no area given/);
+});
+
 test('happy path: pending-approval, the tab bound, SendMessage to its adapter, a done report wakes the orchestrator, close kills', async () => {
   const ctx = setup();
   const p = fakeProvider();
