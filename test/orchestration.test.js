@@ -1464,6 +1464,15 @@ test('the orchestrator card: plan confirmed before fanning out, cheap workers fo
   assert.match(card, /`stop_worker` ends its current turn and leaves it idle; then SendMessage it new instructions, or close_worker it/);
 });
 
+test('the orchestrator card (worktree and shared-directory) lists launch_cli\'s parameters and says to load its schema after a compaction', () => {
+  const { orchestratorCard } = require('../src/orchestration');
+  for (const isolation of ['worktree', 'none']) {
+    const card = orchestratorCard({ runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation });
+    assert.match(card, /launch_cli takes title \(short name, no wN- prefix; required\), task \(the full brief; required\), area \(files\/dirs\/globs it will change; give it in every run, also isolation none\), model, isolation, after, cwd, tools \(and host\/app for remote workers\) — not the Agent tool's name\/prompt\/description\./, isolation);
+    assert.match(card, /After a compaction or resume, load its schema \(ToolSearch "select:mcp__orchestrator__launch_cli"\) before the first launch\./, isolation);
+  }
+});
+
 test('the cards: a requirement change updates TODO.md and NOTES.md first, then reaches the workers', () => {
   const { orchestratorCard, workerCard } = require('../src/orchestration');
   const run = { runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' };
