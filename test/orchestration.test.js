@@ -2232,6 +2232,68 @@ test('landing: one cut off by a restart has its rebase aborted and is reported n
   assert.match(events('not landed')[0], /cut off by a restart \(rebase aborted\); main is as before/);
 });
 
+test('landing state: recorded on the worker in run.json and shown by describeRun / list_workers — landing, landed, not landed; no message to the worker on success', async (t) => {
+  const { orch, orchSession, repo, g, launch, toWorker, run } = await landingRun(t);
+  const view = (w) => orch.describeRun(run()).workers.find(x => x.name === w.worker).landing;
+  const listed = (w) => orch.listWorkers(orchSession.instanceId).workers.find(x => x.name === w.worker).landing;
+  const a = launch('a');
+  assert.strictEqual(view(a), null, 'nothing reported yet');
+
+  // In progress: recorded the moment the report answers, before the job runs.
+  commitAll(a.cwd, { 'a.txt': 'a' });
+  const r = orch.report(a.session.instanceId, { status: 'done', summary: 'added a' });
+  assert.match(r.landing, /being landed/);
+  const reportAt = run().workers[0].lastReport.at;
+  assert.deepStrictEqual([run().workers[0].landingResult.outcome, run().workers[0].landingResult.report], ['landing', reportAt]);
+  assert.deepStrictEqual([view(a).state, view(a).base, view(a).sha], ['landing', 'main', null]);
+
+  // Landed: the merge sha and base on the record and in both views.
+  await orch.landingOf(a.worker);
+  const merge = g('rev-parse', 'main');
+  const rec = run().workers[0].landingResult;
+  assert.deepStrictEqual([rec.outcome, rec.sha, rec.base, rec.report], ['landed', merge, 'main', reportAt]);
+  assert.deepStrictEqual(view(a), { state: 'landed', base: 'main', sha: merge, reason: null, at: rec.at, current: true, undone: null });
+  assert.deepStrictEqual(listed(a), view(a), 'list_workers shows it too');
+  assert.doesNotMatch(toWorker(a), /landing|landed/i, 'a success sends the worker nothing');
+
+  // Undone: the view names the revert.
+  const u = await orch.undoLanding(orchSession.instanceId, { landing: merge });
+  assert.strictEqual(view(a).undone, u.revertSha);
+
+  // Not landed: a conflict, with its reason; the worker is told as before.
+  const b = launch('b');
+  commitAll(b.cwd, { 'f.txt': 'worker\n' });
+  commitAll(repo, { 'f.txt': 'owner\n' });
+  orch.report(b.session.instanceId, { status: 'done', summary: 'mine' });
+  await orch.landingOf(b.worker);
+  const vb = view(b);
+  assert.deepStrictEqual([vb.state, vb.sha, vb.current], ['not-landed', null, true]);
+  assert.match(vb.reason, /conflicts with main in f\.txt/);
+  assert.match(toWorker(b), /\[vistaclair landing\] Your branch was not landed/);
+
+  // A later report: the landing stays shown, no longer current.
+  orch.report(b.session.instanceId, { status: 'update', summary: 'rebasing' });
+  assert.strictEqual(view(b).current, false);
+});
+
+test('landing state: a landing queued when the server stopped (never started) is reported not landed on the next load', async (t) => {
+  const { orch, launch, events, run } = await landingRun(t);
+  const w = launch();
+  const file = path.join(run().runDir, 'run.json');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const at = new Date().toISOString();
+  saved.workers[0].lastReport = { status: 'done', summary: 'did it', filesChanged: [], verified: '', open: '', at };
+  saved.workers[0].landingResult = { outcome: 'landing', report: at, at, base: 'main' };
+  fs.writeFileSync(file, JSON.stringify(saved));
+
+  const fresh = orch.getRun(run().runId);
+  assert.strictEqual(fresh.workers[0].landingResult.outcome, 'not landed');
+  assert.match(events('not landed')[0], new RegExp(`^${w.worker} reported done: did it — not landed: the landing was cut off by a restart before it started`));
+  const v = orch.describeRun(run()).workers[0].landing;
+  assert.deepStrictEqual([v.state, v.current], ['not-landed', true]);
+  assert.match(v.reason, /before it started/);
+});
+
 // --- Worker areas and overlap warnings ---
 
 test('launch_cli area: an overlap with a running worker in the same repo is named in the result; none, no mention', async (t) => {

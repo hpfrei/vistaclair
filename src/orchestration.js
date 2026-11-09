@@ -110,6 +110,7 @@ const { execFileSync } = require('child_process');
 const folders = require('./session-folders');
 const toolPacks = require('./tool-packs');
 const landing = require('./worktree-landing');
+const { landingView } = require('./landing-state');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
 const { transcriptTotals, MODEL_RE } = require('./sdk-session');
 
@@ -580,7 +581,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function loadRun(runDir) {
     const run = readJsonOr(runFile(runDir), null);
     if (run) runDirs.set(run.runId, runDir);
-    if (run?.workers?.some(w => w.landing)) recoverLandings(run);
+    if (run?.workers?.some(w => w.landing || lostLanding(run, w))) recoverLandings(run);
     if (run?.workers?.some(w => lostLaunch(run, w))) recoverRemote(run);
     // After a restart the valve's timer is gone; its due time is in run.json.
     if (run?.quietValve && !run.quietValve.fired) armValve(run);
@@ -1749,6 +1750,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       worker: w.worker, name: w.name, id: w.id, title: w.title, state: w.state, closedAt: w.closedAt,
       lastReport: w.lastReport ? { status: w.lastReport.status, summary: clip(w.lastReport.summary, 160) } : null,
       branch: w.branch, todo: w.todo, notes: w.notes,
+      ...(w.landing ? { landing: w.landing } : {}),
       ...(w.grants ? { grants: w.grants } : {}),
       ...(w.host ? { host: w.host, remote: w.remote } : {}),
     };
@@ -1840,6 +1842,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           state: memberState(live?.session, w),
           cost: costOf(live?.session, w.costUsd, run.engine === 'sdk' ? w.sessionDir : null),
           cwd: w.cwd, branch: w.branch, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: w.lastReport,
+          landing: landingOfWorker(run, w),
           paused: !!w.paused, abandoned: !!w.abandoned,
           closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
           ...(w.turnStopped ? { turnStopped: w.turnStopped } : {}),
@@ -2062,10 +2065,20 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     addEvent(run, { worker: w.name, kind, text: [head, outcome, ...rest].join(' — ') });
   }
 
-  // What the landing of a done report (by its `at`) came to: landed | nothing
-  // | not landed. A queued launch's `after` reads it (depFinished).
-  function noteLanding(w, outcome, reportAt, reason = '') {
-    w.landingResult = { outcome, report: reportAt || null, at: new Date().toISOString(), ...(reason ? { reason: clip(reason, 300) } : {}) };
+  // What the landing of a done report (by its `at`) came to: landing (queued
+  // or running) | landed (with its merge sha) | nothing | not landed. A queued
+  // launch's `after` reads it (depFinished); the worker's box shows it
+  // (landingOfWorker, src/landing-state.js).
+  function noteLanding(w, outcome, reportAt, reason = '', sha = null) {
+    w.landingResult = {
+      outcome, report: reportAt || null, at: new Date().toISOString(), base: w.base || null,
+      ...(sha ? { sha } : {}), ...(reason ? { reason: clip(reason, 300) } : {}),
+    };
+  }
+
+  // A worker's landing as describeRun shows it, or null.
+  function landingOfWorker(run, w) {
+    return landingView(w, { inFlight: landingJobs.has(jobKey(run, w)), landings: run.landings || [] });
   }
 
   // Record a landing in run.landings.
@@ -2108,7 +2121,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       return;
     }
     if (r.outcome === 'landed') {
-      noteLanding(w, 'landed', reportAt);
+      noteLanding(w, 'landed', reportAt, '', r.mergeSha);
       recordLanding(run, w, r, summary);
       landingEvent(run, w, parts, `landed ${r.mergeSha} (${w.branch} merged into ${w.base})${landedOverlaps(run, w, r)}`, 'landed');
       // Already gone (closed, exited): its worktree goes now.
@@ -2185,6 +2198,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       console.error('[orchestration] landing error:', e.message);
     });
     landingJobs.set(key, job);
+    // In run.json (saved by report) until it settles: the worker's box shows
+    // "landing…"; one a restart cuts off before it starts is recovered.
+    noteLanding(w, 'landing', reportAt);
     return { note: 'your branch is being landed: you will hear back only if something stops it', evented: true };
   }
 
@@ -2217,13 +2233,27 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return null;
   }
 
+  // A landing recorded as queued (landingResult `landing`) that no job in
+  // this process runs and that never started (no w.landing).
+  function lostLanding(run, w) {
+    return w.landingResult?.outcome === 'landing' && !w.landing && !landingJobs.has(jobKey(run, w));
+  }
+
   // Landings a restart cut off (w.landing set, no job in this process): abort
   // their rebase (and a half-done merge). A merge already made counts as
   // landed; anything else is reported not landed. Either way the report's one
   // event. Called by loadRun.
   function recoverLandings(run) {
     for (const w of run.workers) {
-      if (!w.landing || landingJobs.has(jobKey(run, w))) continue;
+      if (landingJobs.has(jobKey(run, w))) continue;
+      if (!w.landing && lostLanding(run, w)) {
+        // Queued behind another landing when the server stopped: never started.
+        const reportAt = w.landingResult.report;
+        noteLanding(w, 'not landed', reportAt, 'the landing was cut off by a restart before it started');
+        landingEvent(run, w, null, `not landed: the landing was cut off by a restart before it started; ${w.base || 'the base'} is as before. Have ${w.name} report done again`, 'not landed');
+        continue;
+      }
+      if (!w.landing) continue;
       const { report: parts, summary = w.lastReport?.summary || '', reportAt = w.lastReport?.at } = w.landing;
       let aborted = [];
       if (w.worktree) {
@@ -2238,7 +2268,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         continue;
       }
       if (made) {
-        noteLanding(w, 'landed', reportAt);
+        noteLanding(w, 'landed', reportAt, '', made.mergeSha);
         recordLanding(run, w, made, summary);
         landingEvent(run, w, parts, `landed ${made.mergeSha} (${w.branch} merged into ${w.base}; its landing was cut off by a restart after the merge)`, 'landed');
         continue;

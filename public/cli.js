@@ -762,6 +762,19 @@
 
   const DELETE_HINT = 'Removes the conversation history and TODO/NOTES. Your code, commits and merged work are not touched.';
 
+  // A done worktree worker's landing after its report's status (the run's
+  // record, src/landing-state.js): " · landed 1a2b3c4", " · landing…",
+  // " · not landed (reason)"; '' otherwise.
+  function landingWord(x) {
+    const l = x.landing;
+    if (x.lastReport?.status !== 'done' || !l?.current) return '';
+    if (l.state === 'landed') return ` · landed${l.sha ? ` ${String(l.sha).slice(0, 7)}` : ''}${l.undone ? ' (undone)' : ''}`;
+    if (l.state === 'landing') return ' · landing…';
+    if (l.state === 'not-landed') return ` · not landed${l.reason ? ` (${l.reason})` : ''}`;
+    if (l.state === 'nothing') return ' · nothing to land';
+    return '';
+  }
+
   function runCardHtml(r, bySess, cardName) {
     const tabId = runTabId(r, bySess);
     const oldName = r.title || r.orchestrator || `Run ${r.runId}`;
@@ -778,7 +791,7 @@
     const prefix = r.orchestrator ? `${r.orchestrator}-` : '';
     const workers = SC.workerList(w.list.map(x => {
       const wTab = x.sessId ? bySess.get(x.sessId) : null;
-      const report = x.lastReport ? `${x.lastReport.status}: ${x.lastReport.summary}` : '';
+      const report = x.lastReport ? `${x.lastReport.status}${landingWord(x)}: ${x.lastReport.summary}` : '';
       return {
         name: x.name.startsWith(prefix) ? x.name.slice(prefix.length) : x.name,
         state: x.state,
