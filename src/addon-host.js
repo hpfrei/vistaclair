@@ -63,8 +63,9 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     // The non-text (speech / transcription / image / …) model catalog — what
     // Pro's media calls resolve a `model` against. No secrets.
     listNativeModels: () => require('./native-models').listNativeModels(),
-    // The registry refresh the Models page runs (provider scan + models.dev
-    // catalog), for Pro's daily model review. Resolves { scan, catalog, catalogError }.
+    // The registry refresh the Models page runs (provider scan, models.dev
+    // catalog, Anthropic's own docs/Models API), for Pro's daily model review.
+    // Resolves { scan, catalog, catalogError, anthropic, timings }.
     refreshModels: () => caps.refreshModelRegistry(home),
     resolveAuth: (authMode) => caps.resolveAuth(home, { authMode }),
     // The `claude` CLI's login: hasSubscription, the dashboard's auth pref, and

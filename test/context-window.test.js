@@ -36,7 +36,7 @@ test('built-in catalogue: ids with or without claude-, dated, [1m] and extended'
 test('aliases: the family\'s newest non-retired entry; unknowns are null', () => {
   const base = tmpBase();
   try {
-    assert.strictEqual(caps.contextWindowFor(base, 'haiku'), 200000);
+    assert.strictEqual(caps.contextWindowFor(base, 'haiku'), 1000000, 'claude-haiku-5-5, not 4-5');
     assert.strictEqual(caps.contextWindowFor(base, 'opus'), 1000000);
     assert.strictEqual(caps.contextWindowFor(base, 'opusplan'), 1000000);
     assert.strictEqual(caps.contextWindowFor(base, 'sonnet[1m]'), 1000000);
@@ -45,8 +45,8 @@ test('aliases: the family\'s newest non-retired entry; unknowns are null', () =>
     }
     // A newer haiku in the pricing file wins the alias; a retired one never does.
     writeCaps(base, 'anthropic-pricing.json', {
-      'claude-haiku-5': { lifecycle: 'current', contextWindow: 400000 },
-      'claude-haiku-9': { lifecycle: 'retired', contextWindow: 50000 },
+      'claude-haiku-9': { lifecycle: 'current', contextWindow: 400000 },
+      'claude-haiku-10': { lifecycle: 'retired', contextWindow: 50000 },
       'claude-3-haiku-20240307': { lifecycle: 'current', contextWindow: 100000 },
     });
     assert.strictEqual(caps.contextWindowFor(base, 'haiku'), 400000);

@@ -515,7 +515,7 @@ test('status: the main agent\'s context from each reply\'s usage, the window fro
   await tick();
   assert.strictEqual(statuses(events).at(-1).context.tokens, 20000);
   // A switch: the catalogue's window for the new model until its first result.
-  await s.setModel('haiku');
+  await s.setModel('claude-haiku-4-5');
   assert.deepStrictEqual(statuses(events).at(-1).context, { tokens: 20000, window: 200000, compactAt: null, windowEstimated: true });
   // A model the catalogue does not know: no window at all.
   await s.setModel('default');
