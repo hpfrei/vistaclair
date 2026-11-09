@@ -597,6 +597,12 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
       console.log(`  Hooks: removed project-scope reporter copies from ${swept.removed} dir(s) (reporters now live in ~/.claude/settings.json)`);
     }
 
+    // The shipped Anthropic catalog lands in the registry at boot, so a model
+    // this release adds is selectable without a manual Models-page refresh.
+    const anthModels = caps.ensureAnthropicModels(DATA_HOME);
+    if (anthModels.added?.length) console.log(`  Models: added ${anthModels.added.join(', ')}`);
+    if (anthModels.error) console.warn(`  Models: Anthropic catalog reconcile failed — ${anthModels.error}`);
+
     // The CLI tabs the previous process left open go to the saved sessions (the
     // "+" menu), marked interrupted when they were mid-turn. Nothing reopens by
     // itself unless the owner opted into reopening plain tabs.

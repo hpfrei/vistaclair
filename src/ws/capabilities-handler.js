@@ -325,31 +325,51 @@ function handleModelRefresh(ws, bc) {
   const broadcastModels = () => bc.broadcast({ type: 'model:list', models: caps.listModelsWithAvailability(PROJECT_ROOT) });
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+  const t0 = Date.now();
   send({ type: 'model:refresh:status', text: 'Scanning providers for new models...' });
-  // Phases 1+2 (provider scan, models.dev catalog) are the shared registry
-  // refresh — Pro's daily model review runs the same function.
-  caps.refreshModelRegistry(PROJECT_ROOT).then(async ({ scan: scanResults, catalog: applied, catalogError }) => {
+  // Phases 1+2 (provider scan, models.dev catalog, Anthropic's own docs and
+  // Models API, all fetched at once) are the shared registry refresh — Pro's
+  // daily model review runs the same function.
+  caps.refreshModelRegistry(PROJECT_ROOT).then(async ({ scan: scanResults, catalog: applied, catalogError, anthropic: anthSrc }) => {
     send({ type: 'model:refresh:scanned', results: scanResults });
     broadcastModels();
 
     const providers = caps.listProviders(PROJECT_ROOT);
     const labelOf = (key) => providers.find(p => p.key === key)?.label || key;
 
+    const describe = (r, withNames) => {
+      const bits = [];
+      if (r.added.length) bits.push(`+${r.added.length} new${withNames ? ` (${r.added.join(', ')})` : ''}`);
+      if (r.repriced.length) bits.push(`${r.repriced.length} repriced`);
+      if (r.deprecated.length) bits.push(`${r.deprecated.length} deprecated`);
+      const otherOnly = r.updated.length - new Set([...r.repriced, ...r.deprecated]).size;
+      if (otherOnly > 0) bits.push(`${otherOnly} detail${otherOnly === 1 ? '' : 's'}`);
+      return bits;
+    };
+    // Anthropic is reported on its own line when its own sources answered:
+    // the merged result is mostly theirs (the vendor wins over models.dev).
+    const anth = anthSrc || { listed: 0, priced: 0, errors: [], added: [] };
+    const vendorOk = anth.listed > 0 || anth.priced > 0;
+
     if (catalogError) pushStatus(`models.dev: catalog lookup failed — ${catalogError}`);
     if (applied) {
       const parts = [];
       for (const [key, r] of Object.entries(applied)) {
-        const bits = [];
-        if (r.added.length) bits.push(`+${r.added.length} new`);
-        if (r.repriced.length) bits.push(`${r.repriced.length} repriced`);
-        if (r.deprecated.length) bits.push(`${r.deprecated.length} deprecated`);
-        const otherOnly = r.updated.length - new Set([...r.repriced, ...r.deprecated]).size;
-        if (otherOnly > 0) bits.push(`${otherOnly} detail${otherOnly === 1 ? '' : 's'}`);
+        if (key === 'anthropic' && vendorOk) continue;
+        const bits = describe(r, false);
         parts.push(`${labelOf(key)} ${bits.length ? bits.join(', ') : 'current'}`);
       }
-      pushStatus(`models.dev: ${parts.join('; ') || 'no supported provider configured'}`);
+      if (parts.length || !vendorOk) pushStatus(`models.dev: ${parts.join('; ') || 'no supported provider configured'}`);
+      if (vendorOk) {
+        const r = applied.anthropic || { added: [], repriced: [], deprecated: [], updated: [] };
+        const bits = [`${anth.listed} listed`, `${anth.priced} priced`];
+        if (anth.added?.length) bits.push(`+${anth.added.length} new (${anth.added.join(', ')})`);
+        bits.push(...describe({ ...r, added: [] }, false));
+        pushStatus(`Anthropic ${anth.usedApi ? 'docs + Models API' : 'docs'}: ${bits.join(', ')}`);
+      }
       broadcastModels();
     }
+    if (anth.errors?.length) pushStatus(`Anthropic docs: lookup failed for ${anth.errors.join('; ')}${vendorOk ? '' : ' — using models.dev only'}`);
 
     // Phase 3: decide whether a lookup is needed at all. Only an enabled model
     // the catalog could not price justifies spawning anything, and then it is
@@ -384,7 +404,9 @@ function handleModelRefresh(ws, bc) {
       }
     }
 
-    send({ type: 'model:refresh:done', text: 'Refresh complete.', lines: [...lines] });
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    console.log(`  Models: Models-page refresh done in ${secs} s${gaps.length ? ` (with a pricing lookup for ${gaps.length})` : ''}`);
+    send({ type: 'model:refresh:done', text: `Refresh complete in ${secs} s.`, lines: [...lines] });
     broadcastModels();
   }).catch(err => {
     send({ type: 'model:refresh:error', error: err.message });

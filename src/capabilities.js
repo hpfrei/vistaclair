@@ -4,6 +4,7 @@ const { ensureDir, safeJoin, readJSON, writeJSON, tryRm, PACKAGE_ROOT, DATA_HOME
 const secretStore = require('./secret-store');
 const { nativeModelsFor } = require('./native-models');
 const claudeAuth = require('./claude-auth');
+const anthropicCatalog = require('./anthropic-catalog');
 
 const KNOWN_TOOLS = [
   'Read', 'Write', 'Edit', 'NotebookEdit',
@@ -1440,8 +1441,18 @@ function applyModelsDevCatalog(baseDir, catalog) {
       const entry = { ...(out[id] || {}) };
       if (!entry.label && meta.label) entry.label = meta.label;
       if (!entry.description && meta.description) entry.description = meta.description;
-      if (typeof entry.reasoning !== 'boolean') entry.reasoning = meta.reasoning;
-      if (meta.deprecated && (entry.lifecycle || 'current') === 'current') entry.lifecycle = 'deprecated';
+      if (typeof entry.reasoning !== 'boolean' && typeof meta.reasoning === 'boolean') entry.reasoning = meta.reasoning;
+      // Retirement only on an explicit vendor statement (lifecycle 'retired');
+      // deprecation never reverts to current.
+      if (meta.lifecycle === 'retired') {
+        entry.lifecycle = 'retired';
+        delete entry.retiresAt;
+      } else if (meta.deprecated && (entry.lifecycle || 'current') === 'current') {
+        entry.lifecycle = 'deprecated';
+      }
+      if (entry.lifecycle === 'deprecated' && typeof meta.retiresAt === 'string' && !Number.isNaN(Date.parse(meta.retiresAt))) {
+        entry.retiresAt = new Date(meta.retiresAt).toISOString();
+      }
       if (!entry.lifecycle) entry.lifecycle = 'current';
       if (meta.contextWindow != null) {
         entry.contextWindow = meta.contextWindow;
@@ -1496,21 +1507,32 @@ const ANTHROPIC_DATED_RE = /-(\d{8})$/;
 
 const PRICING_FIELDS = ['inputCostPerMTok', 'outputCostPerMTok', 'cacheReadCostPerMTok', 'cacheCreateCostPerMTok'];
 
-// Hardcoded safety net of currently-offered Anthropic models. Guarantees these
-// exist in models.json even when the Claude pricing subprocess is unavailable
-// (e.g. subscription-only auth with no Anthropic API key). To support a new
-// release, add it here (lifecycle 'current'); the refresh subprocess also adds
-// newly-released models automatically by editing anthropic-pricing.json.
+// Hardcoded safety net of currently-offered Anthropic models, with list prices
+// (USD per MTok: input, output, cache hit, 5-minute cache write) as of the
+// vendor's pricing page. Guarantees these exist, priced, in models.json even
+// with no refresh at all: the server reconciles this catalog at boot
+// (ensureAnthropicModels). anthropic-pricing.json overrides it field by field,
+// and a refresh keeps that file current from Anthropic's docs and models.dev,
+// adding newly released models. To ship a new release, add it here too.
 // `context1m` marks the models whose name the CLI accepts with a `[1m]` suffix.
+const _anthPrice = (input, output, cacheRead, cacheCreate) => ({
+  inputCostPerMTok: input, outputCostPerMTok: output, cacheReadCostPerMTok: cacheRead, cacheCreateCostPerMTok: cacheCreate,
+});
 const ANTHROPIC_CATALOG_FALLBACK = {
-  'claude-fable-5': { label: 'Claude Fable 5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: "Anthropic's most capable model — hardest reasoning and longest-running agentic work" },
-  'claude-opus-5': { label: 'Claude Opus 5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: 'For complex agentic coding and enterprise work' },
-  'claude-opus-4-8': { label: 'Claude Opus 4.8', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current' },
-  'claude-opus-4-7': { label: 'Claude Opus 4.7', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current' },
-  'claude-opus-4-6': { label: 'Claude Opus 4.6', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current' },
-  'claude-sonnet-5': { label: 'Claude Sonnet 5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: 'The best combination of speed and intelligence' },
-  'claude-sonnet-4-6': { label: 'Claude Sonnet 4.6', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current' },
-  'claude-haiku-4-5': { label: 'Claude Haiku 4.5', reasoning: false, context1m: false, contextWindow: 200000, maxOutputTokens: 64000, lifecycle: 'current' },
+  'claude-fable-5-2': { label: 'Claude Fable 5.2', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: 'For demanding reasoning and long-horizon agentic work', ..._anthPrice(8, 40, 0.2, 10) },
+  'claude-fable-5-1': { label: 'Claude Fable 5.1', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', ..._anthPrice(10, 50, 0.25, 12.5) },
+  'claude-fable-5': { label: 'Claude Fable 5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: "Anthropic's most capable model — hardest reasoning and longest-running agentic work", ..._anthPrice(10, 50, 1, 12.5) },
+  'claude-opus-5-5': { label: 'Claude Opus 5.5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: 'For long-running agentic coding and knowledge work', ..._anthPrice(4, 20, 0.2, 5) },
+  'claude-opus-5': { label: 'Claude Opus 5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: 'For complex agentic coding and enterprise work', ..._anthPrice(5, 25, 0.5, 6.25) },
+  'claude-opus-4-8': { label: 'Claude Opus 4.8', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', ..._anthPrice(5, 25, 0.5, 6.25) },
+  'claude-opus-4-7': { label: 'Claude Opus 4.7', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', ..._anthPrice(5, 25, 0.5, 6.25) },
+  'claude-opus-4-6': { label: 'Claude Opus 4.6', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', ..._anthPrice(5, 25, 0.5, 6.25) },
+  'claude-opus-4-5': { label: 'Claude Opus 4.5', reasoning: true, context1m: false, contextWindow: 200000, maxOutputTokens: 64000, lifecycle: 'current', ..._anthPrice(5, 25, 0.5, 6.25) },
+  'claude-sonnet-5-5': { label: 'Claude Sonnet 5.5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: 'The best combination of speed and intelligence', ..._anthPrice(2, 10, 0.1, 2.5) },
+  'claude-sonnet-5': { label: 'Claude Sonnet 5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', ..._anthPrice(2, 10, 0.2, 2.5) },
+  'claude-sonnet-4-6': { label: 'Claude Sonnet 4.6', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', ..._anthPrice(3, 15, 0.3, 3.75) },
+  'claude-haiku-5-5': { label: 'Claude Haiku 5.5', reasoning: true, context1m: true, contextWindow: 1000000, maxOutputTokens: 128000, lifecycle: 'current', description: 'For high-volume, latency-sensitive tasks such as classification, extraction, and routing', ..._anthPrice(0.1, 0.5, 0.01, 0.125) },
+  'claude-haiku-4-5': { label: 'Claude Haiku 4.5', reasoning: false, context1m: false, contextWindow: 200000, maxOutputTokens: 64000, lifecycle: 'current', ..._anthPrice(1, 5, 0.1, 1.25) },
 };
 
 // Reconcile models.json against the Anthropic catalog (hardcoded fallback merged
@@ -1711,13 +1733,14 @@ async function scanProviderModels(baseDir) {
         const apiKey = secrets.providerKeys?.[key] || '';
         if (!apiKey) return { key, skipped: 'No API key configured' };
         const adapter = PROVIDER_ADAPTER_MAP[key] || 'openai';
+        const t0 = Date.now();
         try {
           const raw = adapter === 'gemini'
             ? await _fetchGeminiModels(prov.apiBaseUrl || '', apiKey)
             : await _fetchOpenAICompatModels(prov.apiBaseUrl || '', apiKey, _scanExclude(key, adapter));
-          return { key, adapter, raw };
+          return { key, adapter, raw, ms: Date.now() - t0 };
         } catch (err) {
-          return { key, error: err.message || String(err) };
+          return { key, error: err.message || String(err), ms: Date.now() - t0 };
         }
       })
   );
@@ -1731,7 +1754,7 @@ async function scanProviderModels(baseDir) {
       continue;
     }
     if (res.error) {
-      results[key] = { status: 'error', error: res.error, added: [] };
+      results[key] = { status: 'error', error: res.error, added: [], ms: res.ms };
       continue;
     }
     const exclude = _scanExclude(key, adapter);
@@ -1774,7 +1797,7 @@ async function scanProviderModels(baseDir) {
       data.models.push(entry);
       added.push({ name, label: entry.label, modelId: m.modelId });
     }
-    results[key] = { status: 'ok', total: raw.length, added, retired };
+    results[key] = { status: 'ok', total: raw.length, added, retired, ms: res.ms };
   }
 
   writeModelsFile(baseDir, data);
@@ -1783,20 +1806,106 @@ async function scanProviderModels(baseDir) {
   return results;
 }
 
-// The registry refresh without a UI: the provider scan, then the models.dev
-// catalog. The Models page (ws/capabilities-handler.js) and Pro's daily model
-// review both run this; the page adds its pricing-gap lookup after it.
-// A catalog failure is reported, never thrown — the scan already landed.
-async function refreshModelRegistry(baseDir) {
-  const scan = await scanProviderModels(baseDir);
-  let catalog = null;
-  let catalogError = null;
-  try {
-    catalog = applyModelsDevCatalog(baseDir, await fetchModelsDevCatalog());
-  } catch (err) {
-    catalogError = err.message || String(err);
+// The ids the registry already knows for Anthropic (models.json, the hardcoded
+// fallback, anthropic-pricing.json, models.dev): the vendor pages may describe
+// these, but only list new ones through the overview or the Models API.
+function _knownAnthropicIds(baseDir, devAnthropic) {
+  const ids = new Set(Object.keys(ANTHROPIC_CATALOG_FALLBACK));
+  for (const m of readModelsFile(baseDir).models) {
+    if (m.providerKey === 'anthropic' && m.modelId) ids.add(m.modelId.replace(ANTHROPIC_DATED_RE, ''));
   }
-  return { scan, catalog, catalogError };
+  try {
+    const file = JSON.parse(fs.readFileSync(path.join(baseDir, 'capabilities', 'anthropic-pricing.json'), 'utf-8')) || {};
+    for (const k of Object.keys(file)) ids.add(k);
+  } catch {}
+  for (const k of Object.keys(devAnthropic || {})) ids.add(k);
+  return ids;
+}
+
+// Overlay Anthropic's own data on models.dev's anthropic part: the vendor wins
+// wherever it gives a value; a field it lacks keeps models.dev's.
+function mergeAnthropicCatalog(devCatalog, vendorCatalog) {
+  const merged = { ...(devCatalog || {}) };
+  if (!vendorCatalog || !Object.keys(vendorCatalog).length) return merged;
+  const anthropic = { ...(merged.anthropic || {}) };
+  for (const [id, meta] of Object.entries(vendorCatalog)) {
+    if (UNSAFE_KEY_RE.test(id)) continue;
+    const entry = { ...(anthropic[id] || {}) };
+    for (const [k, v] of Object.entries(meta)) if (v !== undefined && v !== null) entry[k] = v;
+    anthropic[id] = entry;
+  }
+  merged.anthropic = anthropic;
+  return merged;
+}
+
+// The registry refresh without a UI: the provider scan, models.dev and
+// Anthropic's own sources (docs pages, plus the Models API with a stored key).
+// The Models page (ws/capabilities-handler.js) and Pro's daily model review
+// both run this; the page adds its pricing-gap lookup after it.
+// The network fetches all start at once; the writes then land in order (scan,
+// then the merged catalog). A catalog or Anthropic-source failure is reported,
+// never thrown — the scan already landed and nothing existing is removed.
+// `opts.fetchModelsDev` / `opts.fetchAnthropic` replace the fetchers (tests).
+async function refreshModelRegistry(baseDir, opts = {}) {
+  const t0 = Date.now();
+  const timings = {};
+  const timed = (name, p) => Promise.resolve(p).finally(() => { timings[name] = Date.now() - t0; });
+  const fetchDev = opts.fetchModelsDev || fetchModelsDevCatalog;
+  const fetchAnth = opts.fetchAnthropic || anthropicCatalog.fetchAnthropicSources;
+
+  const devP = timed('modelsDevMs', Promise.resolve().then(() => fetchDev()))
+    .then(c => ({ catalog: c }), err => ({ error: err?.message || String(err) }));
+  const anthP = timed('anthropicMs', Promise.resolve().then(() => fetchAnth({ apiKey: getAnthropicApiKey(baseDir) })))
+    .catch(err => ({ errors: [err?.message || String(err)] }));
+  const scan = await timed('scanMs', scanProviderModels(baseDir));
+  const [dev, sources] = await Promise.all([devP, anthP]);
+
+  const vendor = anthropicCatalog.buildAnthropicCatalog(sources || {}, _knownAnthropicIds(baseDir, dev.catalog?.anthropic));
+  const anthropic = {
+    listed: vendor.listed.length,
+    priced: vendor.priced.length,
+    errors: Array.isArray(sources?.errors) ? sources.errors.slice(0, 8) : [],
+    usedApi: !!sources?.api,
+    added: [],
+  };
+
+  let catalog = null;
+  let catalogError = dev.error || null;
+  const merged = mergeAnthropicCatalog(dev.catalog, vendor.catalog);
+  if (Object.keys(merged).length) {
+    try {
+      catalog = applyModelsDevCatalog(baseDir, merged);
+      // The additions this refresh made (the scan's reconcile adds what the
+      // shipped catalog knows, the catalog merge the rest) that Anthropic's own
+      // sources list — a models.dev-only addition is models.dev's to report.
+      const vendorLabels = new Set(vendor.listed.map(id => vendor.catalog[id]?.label || id));
+      const added = [...(scan.anthropic?.added || []), ...(catalog.anthropic?.added || [])];
+      anthropic.added = [...new Set(added.filter(l => vendorLabels.has(l)))];
+    } catch (err) {
+      catalogError = err.message || String(err);
+    }
+  }
+  timings.totalMs = Date.now() - t0;
+  const perProvider = Object.entries(scan).filter(([, r]) => typeof r.ms === 'number').map(([k, r]) => `${k} ${r.ms}`).join(', ');
+  console.log(`  Models: refresh scan ${timings.scanMs} ms${perProvider ? ` (${perProvider})` : ''}, models.dev ${timings.modelsDevMs} ms, Anthropic sources ${timings.anthropicMs} ms, total ${timings.totalMs} ms`);
+  return { scan, catalog, catalogError, anthropic, timings };
+}
+
+// Make sure the shipped Anthropic catalog is in the registry without a manual
+// refresh: the server runs this at boot, so a model added to the fallback (or
+// the shipped anthropic-pricing.json) is selectable on the next start. Adds the
+// Anthropic provider row when a fresh data dir has none. Never throws.
+function ensureAnthropicModels(baseDir) {
+  try {
+    const data = readModelsFile(baseDir);
+    if (!data.providers.anthropic) {
+      data.providers.anthropic = { label: 'Anthropic', apiBaseUrl: '' };
+      writeModelsFile(baseDir, data);
+    }
+    return reconcileAnthropicCatalog(baseDir, { clearNew: false });
+  } catch (err) {
+    return { status: 'error', error: err.message || String(err), added: [], deprecated: [], retired: [], total: 0 };
+  }
 }
 
 module.exports = {
@@ -1828,6 +1937,8 @@ module.exports = {
   contextWindowFor,
   scanProviderModels,
   refreshModelRegistry,
+  mergeAnthropicCatalog,
+  ensureAnthropicModels,
   reconcileAnthropicCatalog,
   applyProviderPricing,
   applyAnthropicCatalog,

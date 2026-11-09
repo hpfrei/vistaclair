@@ -2185,6 +2185,29 @@
       "lifecycle": "current",
       "retiresAt": null,
       "isNew": false
+    },
+    {
+      "name": "claude-fable-5-2",
+      "label": "Claude Fable 5.2",
+      "description": "For demanding reasoning and long-horizon agentic work",
+      "providerKey": "anthropic",
+      "provider": "anthropic",
+      "modelId": "claude-fable-5-2",
+      "systemPromptMode": "passthrough",
+      "toolOverrides": {},
+      "reasoning": true,
+      "context1m": true,
+      "disabled": false,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "useMaxCompletionTokens": false,
+      "inputCostPerMTok": 8,
+      "outputCostPerMTok": 40,
+      "cacheReadCostPerMTok": 0.2,
+      "cacheCreateCostPerMTok": 10,
+      "lifecycle": "current",
+      "retiresAt": null,
+      "isNew": true
     }
   ]
 }

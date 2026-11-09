@@ -307,5 +307,18 @@
     "outputCostPerMTok": 0.5,
     "cacheReadCostPerMTok": 0.01,
     "cacheCreateCostPerMTok": 0.125
+  },
+  "claude-fable-5-2": {
+    "label": "Claude Fable 5.2",
+    "description": "For demanding reasoning and long-horizon agentic work",
+    "reasoning": true,
+    "lifecycle": "current",
+    "contextWindow": 1000000,
+    "context1m": true,
+    "maxOutputTokens": 128000,
+    "inputCostPerMTok": 8,
+    "outputCostPerMTok": 40,
+    "cacheReadCostPerMTok": 0.2,
+    "cacheCreateCostPerMTok": 10
   }
 }
