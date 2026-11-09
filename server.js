@@ -21,6 +21,7 @@ const { createLicensing } = require('./src/licensing');
 const addons = require('./src/addons');
 const { createAddonCtx } = require('./src/addon-host');
 const { createOrchestration } = require('./src/orchestration');
+const { createAskLifecycle } = require('./src/ask-lifecycle');
 const { createSessionControl } = require('./src/session-control');
 const { createCliIsolation } = require('./src/cli-isolation');
 const { createAuth } = require('./src/auth');
@@ -189,6 +190,8 @@ dashboardApp.post('/api/hook-report', (req, res) => {
     const id = `hook-${Date.now()}-${++hookSeq}`;
     const hookTs = hookData.timestamp || Date.now();
     const hookEvent = hookData.hook_event_name || 'unknown';
+    // An AskUserQuestion call's end on the session side expires its form.
+    askLifecycle.onHook(req.body.instanceId || null, hookData);
     const interaction = {
       id, timestamp: hookTs, isHook: true,
       instanceId: req.body.instanceId || null,
@@ -279,18 +282,14 @@ dashboardApp.post('/api/ask', async (req, res) => {
     formData: formData || {}, questions: questions || [], ctx, title, cwd, tabId, instanceId: instanceId || null,
     onPending: (id) => { askId = id; },
   });
+  askLifecycle.track(askId, { instanceId: instanceId || null, tabId });
 
-  // If the MCP tool gives up (4h timeout) it destroys the socket; reject the
-  // pending question and tell clients to close the stale modal. Listen on the
-  // response, not the request: req 'close' fires as soon as the body is read.
+  // The MCP tool gave up (an interrupt, a timeout) or its process ended: it
+  // destroys the socket. The form is expired, not live (src/ask-lifecycle.js).
+  // Listen on the response, not the request: req 'close' fires as soon as the
+  // body is read.
   res.on('close', () => {
-    if (res.writableEnded) return;
-    const pending = pendingQuestions.get(askId);
-    if (pending) {
-      pendingQuestions.delete(askId);
-      if (pending.reject) pending.reject(new Error('Question timed out'));
-      broadcaster.broadcast({ type: 'ask:timeout', askId });
-    }
+    if (!res.writableEnded) askLifecycle.requestClosed(askId);
   });
   console.log(`[api/ask] Broadcasting ask:question askId=${askId} tabId=${tabId || '(none)'}`);
 
@@ -298,9 +297,11 @@ dashboardApp.post('/api/ask', async (req, res) => {
   session?.setAwaiting?.(true);
   try {
     const answer = await promise;
+    askLifecycle.settled(askId);
     res.json({ ok: true, answer });
   } catch (err) {
-    res.json({ ok: false, error: err.message });
+    if (!err?.expired) askLifecycle.settled(askId);
+    if (!res.destroyed) res.json({ ok: false, error: err.message });
   } finally {
     session?.setAwaiting?.(false);
   }
@@ -382,6 +383,17 @@ const orchestration = createOrchestration({
   control: sessionControl,
 });
 cliSessionManager.addExitListener(orchestration.onSessionExit);
+// A pending AskUserQuestion form whose asking call ended is kept, expired
+// (src/ask-lifecycle.js): at a session's exit, close, pause or refresh too.
+const askLifecycle = createAskLifecycle({
+  pendingQuestions,
+  broadcaster: { broadcast: (...args) => broadcaster.broadcast(...args) },
+  mgr: cliSessionManager,
+  orchestration,
+  dataHome: DATA_HOME,
+});
+cliSessionManager.addExitListener((tabId, session) => askLifecycle.onSessionEnd(tabId, session, 'exit'));
+cliSessionManager.addCloseListener((tabId, session, reason) => askLifecycle.onSessionEnd(tabId, session, reason));
 // A plain session's own git worktree: landing and teardown (src/cli-isolation.js).
 const cliIsolation = createCliIsolation({
   mgr: cliSessionManager,
@@ -400,6 +412,7 @@ const wss = new WebSocketServer({ noServer: true });
 broadcaster = new DashboardBroadcaster(wss, store, { authToken: AUTH_TOKEN, proxyPort: PROXY_PORT, cliSessionManager });
 broadcaster.orchestration = orchestration;   // cli:open (src/ws/cli-handler.js)
 broadcaster.sessionControl = sessionControl; // cli:pause / cli:resumeSaved
+broadcaster.askLifecycle = askLifecycle;     // expired forms: replay, ask:late, ask:discard
 setProcessBroadcaster(broadcaster);
 store.setBroadcaster(broadcaster);
 

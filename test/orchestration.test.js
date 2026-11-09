@@ -3249,3 +3249,104 @@ test('refresh: a resume note that leaves out a running worker or an open owner i
   assert.ok(fresh);
   assert.match(seedOf(fresh), new RegExp(`### \`${w2.worker}\` \\(w2\\)`));
 });
+
+// --- A late answer to an expired form of a run member (src/ask-lifecycle.js) ---
+
+// The lifecycle on this run's fakes, wired like server.js: a quiet close
+// (pause, refresh) reaches it after the kill and before the swap.
+function lateAsks(ctx) {
+  const { createAskLifecycle } = require('../src/ask-lifecycle');
+  const lc = createAskLifecycle({ pendingQuestions: ctx.pendingQuestions, broadcaster: { broadcast: () => {} }, mgr: ctx.mgr, orchestration: ctx.orch, dataHome: tmpDir('vistaclair-late-'), closeGraceMs: 0, sweepMs: 0 });
+  const closeQuiet = ctx.mgr.closeQuiet;
+  ctx.mgr.closeQuiet = (tabId, reason) => { const s = ctx.mgr.sessions.get(tabId); closeQuiet(tabId, reason); if (s) lc.onSessionEnd(tabId, s, reason); };
+  const ask = (session, question = 'Which database?') => {
+    let askId;
+    ctx.orch.askUser({ instanceId: session.instanceId, tabId: session.tabId, questions: [{ id: 'q', question, options: [{ label: 'Postgres' }, { label: 'SQLite' }] }], onPending: (id) => { askId = id; } }).catch(() => {});
+    lc.track(askId, { instanceId: session.instanceId, tabId: session.tabId });
+    return askId;
+  };
+  return { lc, ask };
+}
+const LATE_ANSWER = [{ id: 'q', question: 'Which database?', answer: 'SQLite' }];
+const ownerLog = (run) => fs.readFileSync(path.join(run.runDir, 'owner-messages.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+
+test('late answer: the orchestrator replaced by a refresh — expired as such; sent to the NEW orchestrator, logged late once, carried by the next refresh', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const { orch, orchSession, mgr, run } = ctx;
+  const { lc, ask } = lateAsks(ctx);
+  const askId = ask(orchSession);
+  orch.refreshOrchestrator(run().runId);
+  const fresh = await finishRefresh(orch, mgr, orchSession);
+  assert.strictEqual(lc.expiredInfo(askId).reason, 'session replaced by a refresh');
+
+  const r = lc.sendLate(askId, LATE_ANSWER);
+  assert.deepStrictEqual({ ok: r.ok, how: r.how, to: r.to }, { ok: true, how: 'submitted', to: orchSession.settings.name });
+  const typed = typedInto(mgr, fresh.tabId);
+  assert.match(typed, /Late answer to your question from \d\d:\d\d:\nYour question had already ended at \d\d:\d\d \(session replaced by a refresh\)/);
+  assert.match(typed, /1\. Which database\?\n {3}Options:\n {3}- Postgres\n {3}- SQLite[\s\S]*→ SQLite/);
+  assert.doesNotMatch(typedInto(mgr, orchSession.tabId), /Late answer/, 'never to the dead session');
+
+  // Its prompt is the owner's text, recorded once (at the send), flagged late.
+  const prompt = mgr.submits.find(x => x.tabId === fresh.tabId && /^Late answer/.test(x.data)).data;
+  hook(orch, fresh, { hook_event_name: 'UserPromptSubmit', prompt });
+  const late = ownerLog(run()).filter(m => /Late answer/.test(m.text));
+  assert.strictEqual(late.length, 1);
+  assert.deepStrictEqual({ kind: late[0].kind, late: late[0].late }, { kind: 'form', late: true });
+
+  hook(orch, fresh, { hook_event_name: 'Stop' });
+  orch.refreshOrchestrator(run().runId);
+  const third = await finishRefresh(orch, mgr, fresh);
+  assert.match(seedOf(third), /answer to an orchestrator form \(late: the question had expired; sent to the orchestrator as a message\)\n+Late answer to your question/);
+});
+
+test('late answer: a busy orchestrator gets it at its next hook; discard is logged, nothing sent', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const { orch, orchSession, mgr, run } = ctx;
+  const { lc, ask } = lateAsks(ctx);
+  const askId = ask(orchSession);
+  lc.onHook(orchSession.instanceId, { hook_event_name: 'Stop' });
+  assert.strictEqual(lc.expiredInfo(askId).reason, 'turn ended');
+  orchSession.busy = true;
+  const before = mgr.submits.length;
+  const r = lc.sendLate(askId, LATE_ANSWER);
+  assert.strictEqual(r.how, 'queued');
+  assert.match(r.message, /queued for .*: it gets it at its next step/);
+  assert.strictEqual(mgr.submits.length, before, 'not typed into a busy terminal');
+  const ctxText = ctxOf(hook(orch, orchSession, { hook_event_name: 'PostToolUse', tool_name: 'Read' }));
+  assert.match(ctxText, /Late answer to your question from[\s\S]*→ SQLite/);
+
+  const second = ask(orchSession, 'Ship it?');
+  lc.onSessionEnd(orchSession.tabId, orchSession, 'exit');
+  assert.strictEqual(lc.discard(second).ok, true);
+  const last = ownerLog(run()).pop();
+  assert.deepStrictEqual({ kind: last.kind, late: last.late, discarded: last.discarded }, { kind: 'form', late: true, discarded: true });
+  assert.match(last.text, /^\(discarded\)[\s\S]*Q: Ship it\?/);
+});
+
+test('late answer: a worker not running — queued in its inbox, the owner told, taken at its next start; an idle worker\'s is an owner follow-up', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const { orch, orchSession, mgr, run } = ctx;
+  const { lc, ask } = lateAsks(ctx);
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const ws = mgr.sessions.get(w.tabId);
+  const askId = ask(ws);
+  ws.running = false;
+  lc.sweep();
+  assert.strictEqual(lc.expiredInfo(askId).reason, 'session no longer running');
+  const r = lc.sendLate(askId, LATE_ANSWER);
+  assert.deepStrictEqual({ how: r.how, to: r.to }, { how: 'queued-not-running', to: w.worker });
+  assert.match(r.message, /^No session is running at .*: the late answer is queued for its next start\.$/);
+  ws.running = true;   // it is back (a restart)
+  assert.match(ctxOf(hook(orch, ws, { hook_event_name: 'SessionStart', source: 'startup' })), /Late answer to your question from[\s\S]*→ SQLite/);
+
+  const again = ask(ws, 'Ship it?');
+  lc.onHook(ws.instanceId, { hook_event_name: 'PostToolUseFailure', tool_name: 'mcp__integrated__vista-AskUserQuestion', tool_use_id: 'toolu_9', is_interrupt: true });
+  assert.strictEqual(lc.expiredInfo(again).reason, 'tool call interrupted');
+  assert.strictEqual(lc.sendLate(again, [{ id: 'q', question: 'Ship it?', answer: 'Friday' }]).how, 'submitted');
+  const prompt = mgr.submits.filter(x => x.tabId === w.tabId).pop().data;
+  assert.match(prompt, /^Late answer to your question from/);
+  hook(orch, ws, { hook_event_name: 'UserPromptSubmit', prompt });
+  const ups = run().workers.find(x => x.name === w.worker).followUps || [];
+  const lateUps = ups.filter(u => /Late answer/.test(u.text));
+  assert.deepStrictEqual(lateUps.map(u => [u.from, /→ SQLite/.test(u.text), /→ Friday/.test(u.text)]), [['owner', true, false], ['owner', false, true]], 'each recorded once, as the owner\'s');
+});

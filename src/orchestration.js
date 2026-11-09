@@ -131,6 +131,7 @@ const landing = require('./worktree-landing');
 const { landingView } = require('./landing-state');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
 const { transcriptTotals, MODEL_RE } = require('./sdk-session');
+const { LATE_RE } = require('./ask-lifecycle');
 
 // How many workers of a run may run at once: run.maxWorkers, set by the owner
 // in the orchestrator tab's header (setRunMaxWorkers), clamped to
@@ -2733,10 +2734,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   function ownerLogFile(run) { return path.join(run.runDir, OWNER_LOG); }
 
-  function logOwner(run, kind, text) {
+  function logOwner(run, kind, text, extra = {}) {
     const t = String(text ?? '').trim();
     if (!t) return;
-    try { fs.appendFileSync(ownerLogFile(run), JSON.stringify({ at: new Date().toISOString(), kind, text: t }) + '\n'); } catch (e) { console.error('[orchestration] owner log:', e.message); }
+    try { fs.appendFileSync(ownerLogFile(run), JSON.stringify({ at: new Date().toISOString(), kind, ...extra, text: t }) + '\n'); } catch (e) { console.error('[orchestration] owner log:', e.message); }
   }
 
   function readOwnerLog(run) {
@@ -2763,6 +2764,49 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const show = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
     logOwner(run, 'form', list.map(a => (a && typeof a === 'object' && 'answer' in a)
       ? `Q: ${a.question || asked.get(a.id) || a.id || ''}\nA: ${show(a.answer)}` : show(a)).join('\n\n'));
+  }
+
+  // --- A late answer to an expired form (src/ask-lifecycle.js) ---
+
+  // The asker's run address, or null for a plain session.
+  function askAddress(session) {
+    const st = stampOf(session);
+    if (!st?.runDir) return null;
+    return { runDir: st.runDir, runId: st.runId, role: st.role, workerId: st.workerId || null, name: session.getSettings().name || st.role };
+  }
+
+  // The orchestrator is being replaced by a refresh: its end is that swap.
+  function isRefreshing(session) {
+    const st = stampOf(session);
+    return st?.role === 'orchestrator' && !!st.runDir && !!loadRun(st.runDir)?.refreshing;
+  }
+
+  // Into the CURRENT session at `address` (after a refresh, the new
+  // orchestrator): delivered like a message (deliver: idle, a turn; busy, its
+  // next hook; refreshing, the fresh one); none running, its inbox, which its
+  // next start takes. { how: submitted|queued|queued-not-running, to }.
+  function deliverLate(address, text) {
+    const run = loadRun(address.runDir);
+    if (!run) throw new Error('its run is gone');
+    const named = findByStamp(st => st.runDir === address.runDir).filter(m => m.session.getSettings().name === address.name);
+    const hit = named.find(m => m.session.running);
+    if (!hit) {
+      queueMessage(run.runDir, address.name, text);
+      return { how: 'queued-not-running', to: address.name };
+    }
+    const w = address.workerId ? run.workers.find(x => x.id === address.workerId) : null;
+    const how = w?.remote ? submitRemote(hit.session, address.name, text, 'owner') : deliver(hit.session, address.name, text, 'owner');
+    return { how, to: address.name };
+  }
+
+  // The late answer (or its discard) on the record: an orchestrator's goes to
+  // the owner log (the seed of a later refresh), flagged late; a worker's sent
+  // answer is an owner follow-up. Its prompt is not recorded again (LATE_RE).
+  function noteLate(address, text, { discarded = false } = {}) {
+    const run = loadRun(address.runDir);
+    if (!run) return;
+    if (address.role === 'orchestrator') logOwner(run, 'form', text, { late: true, ...(discarded ? { discarded: true } : {}) });
+    else if (!discarded && address.workerId) addFollowUp(run, address.workerId, text, 'owner');
   }
 
   function orchestratorSettings(run) {
@@ -3076,7 +3120,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       let cut = 0;
       for (let i = log.length - 1; i >= 0; i--) {
         const m = log[i];
-        const head = `### ${m.at} — ${KIND[m.kind] || m.kind}`;
+        const late = m.late ? (m.discarded ? ' (late: the question had expired; the owner discarded it)' : ' (late: the question had expired; sent to the orchestrator as a message)') : '';
+        const head = `### ${m.at} — ${KIND[m.kind] || m.kind}${late}`;
         const room = SEED_OWNER_CAP - used - head.length;
         let text = m.text;
         if (i < log.length - 1 && text.length > room) {
@@ -3963,7 +4008,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   const CLI_INJECTED = /^<(task-notification|system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args)[\s>]/;
   function ownerPrompt(w, prompt) {
     const text = typeof prompt === 'string' ? prompt.trim() : '';
-    if (!text || text.startsWith('[') || CLI_INJECTED.test(text)) return '';
+    if (!text || text.startsWith('[') || CLI_INJECTED.test(text) || LATE_RE.test(text)) return '';
     const brief = String(w.task || '').trim();
     if (brief && text.startsWith(brief)) return '';
     return text;
@@ -4357,7 +4402,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
         if (!run.request && prompt && !prompt.startsWith('[')) run.request = clip(prompt, 8000);
         // Every owner prompt goes to the owner log (the seed's owner messages).
-        if (prompt && !isNotice(prompt)) logOwner(run, 'prompt', prompt);
+        if (prompt && !isNotice(prompt) && !LATE_RE.test(prompt)) logOwner(run, 'prompt', prompt);
         saveRun(run);
         return ctxOut('UserPromptSubmit', joinContext(inboxOf(), events()));
       }
@@ -4509,7 +4554,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   return {
     router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, ownerDelete, sendMessage, listAgents, sendToSession, toolParams,
-    handleHook, onSessionExit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
+    handleHook, onSessionExit, askAddress, isRefreshing, deliverLate, noteLate, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged, setRunModelMap, setRunAuth, setRunModel, setRunMaxWorkers, setRunAutoRefresh, registerHostProvider, hostList, openMirrorRun,
     writeSeed,

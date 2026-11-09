@@ -961,10 +961,12 @@ function createProxyRouter(store, broadcaster, targetUrl) {
   return router;
 }
 
-/** Reject and remove all pending questions associated with a given tabId */
+/** Reject and remove all pending questions associated with a given tabId. An
+ *  /api/ask form (it has an instanceId) is left alone: its session's end
+ *  expires it and keeps it for a late answer (src/ask-lifecycle.js). */
 function clearPendingQuestionsForTab(tabId) {
   for (const [toolUseId, pending] of pendingQuestions) {
-    if (pending.ctx?.tabId === tabId) {
+    if (pending.ctx?.tabId === tabId && !pending.instanceId) {
       if (pending.reject) pending.reject(new Error('Chat stopped'));
       pendingQuestions.delete(toolUseId);
     }

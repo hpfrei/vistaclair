@@ -302,6 +302,8 @@ class DashboardBroadcaster {
         askOwner(pending, this.cliSessionManager);
         if (pending.message) ws.send(JSON.stringify(pending.message));
       }
+      // Forms whose asking call ended, kept for a late answer (ask-lifecycle).
+      this.askLifecycle?.replay((m) => ws.send(JSON.stringify(m)));
 
       ws.on('message', (data) => {
         try {
@@ -350,8 +352,10 @@ class DashboardBroadcaster {
             // A refusal goes back to the sender alone and resolves nothing.
             const pending = typeof msg.toolUseId === 'string' ? pendingQuestions.get(msg.toolUseId) : null;
             const refusal = !pending?.resolve ? 'that question is no longer waiting' : answerRefusal(pending, msg, this.cliSessionManager);
+            // Answered just as its call ended: the sender gets it back expired.
+            const expired = !pending && typeof msg.toolUseId === 'string' ? this.askLifecycle?.expiredInfo(msg.toolUseId) : null;
             if (refusal) {
-              ws.send(JSON.stringify({ type: 'ask:answerError', toolUseId: typeof msg.toolUseId === 'string' ? msg.toolUseId.slice(0, 200) : null, error: refusal }));
+              ws.send(JSON.stringify({ type: 'ask:answerError', toolUseId: typeof msg.toolUseId === 'string' ? msg.toolUseId.slice(0, 200) : null, error: expired ? 'the question had already expired' : refusal, ...(expired ? { expired } : {}) }));
             } else {
               let answer = msg.answer;
               // Process file uploads if present
@@ -361,6 +365,18 @@ class DashboardBroadcaster {
               pending.resolve(answer);
               this.broadcast({ type: 'ask:answered', askId: msg.toolUseId });
             }
+          } else if (msg.type === 'ask:late' || msg.type === 'ask:discard') {
+            // An expired form: "Send as message" / "Discard" (ask-lifecycle).
+            const askId = typeof msg.toolUseId === 'string' ? msg.toolUseId : null;
+            let r;
+            if (!askId || !this.askLifecycle) r = { ok: false, error: 'that question is no longer open' };
+            else if (msg.type === 'ask:discard') r = this.askLifecycle.discard(askId);
+            else {
+              let answer = msg.answer;
+              if (msg.files?.length && Array.isArray(answer)) answer = processUploadedFiles(askId, msg.files, answer);
+              r = this.askLifecycle.sendLate(askId, answer);
+            }
+            ws.send(JSON.stringify({ type: 'ask:lateResult', askId: askId ? askId.slice(0, 200) : null, ...r, ...(r.ok ? {} : { message: r.error }) }));
           // --- MCP Tools ---
           } else if (msg.type === 'mcp:bridge:call') {
             // Bridge reporting a tool call for inspector logging
