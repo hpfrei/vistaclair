@@ -15,6 +15,11 @@
 //                   subagent or background task left and a fresh resume note, it
 //                   is saved to history as `paused` and closed quietly (no exit
 //                   events). No timeout; interrupt() is the manual way out.
+//   handover        a pause with meta.mode 'refresh' (an orchestrator replaced
+//                   by a fresh session of the same identity) ends the same way
+//                   but is no pause: nothing is saved, no cli:paused, the
+//                   session is retired (noteRetired) and closed with reason
+//                   'refresh'; the finalize listener (orchestration) swaps it.
 //   resume          resumeSaved() reopens a saved session with its own transcript
 //                   and settings, and tells it to pick up from its folder; when
 //                   the transcript is gone, a fresh session in the same folder
@@ -321,23 +326,33 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
     return { ok: true };
   }
 
+  // A pause ends: the session is saved as paused (or interrupted), closed
+  // quietly and announced (cli:paused). A handover (meta.mode 'refresh': an
+  // orchestrator replaced by a fresh session of the same identity) is not a
+  // pause: nothing is saved or announced and the session is retired; the
+  // listener (orchestration) swaps it, and keeps it resumable only when the
+  // swap fails.
   function finalize(session, { interrupted }) {
     const p = pausing.get(session.sessId);
     if (!p || p.finalized) return;
     p.finalized = true;
     pausing.delete(session.sessId);
     session.pausing = false;
+    const handover = p.meta?.mode === 'refresh';
     const tabId = tabIdOf(session);
-    mgr.saveToHistory({
-      sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(),
-      autoMemory: session.autoMemory, flags: { paused: !interrupted, interrupted: !!interrupted, pausedAt: Date.now() },
-    });
+    if (!handover) {
+      mgr.saveToHistory({
+        sessId: session.sessId, cwd: session.cwd, title: session.title, settings: session.getSettings(),
+        autoMemory: session.autoMemory, flags: { paused: !interrupted, interrupted: !!interrupted, pausedAt: Date.now() },
+      });
+    }
     live.delete(session.instanceId);
-    if (!interrupted) session.notePaused?.();
-    if (tabId) mgr.closeQuiet(tabId, 'pause');
-    broadcaster?.broadcast({ type: 'cli:paused', sessId: session.sessId, title: session.title, interrupted: !!interrupted });
+    if (handover) session.noteRetired?.();
+    else if (!interrupted) session.notePaused?.();
+    if (tabId) mgr.closeQuiet(tabId, handover ? 'refresh' : 'pause');
+    if (!handover) broadcaster?.broadcast({ type: 'cli:paused', sessId: session.sessId, title: session.title, interrupted: !!interrupted });
     for (const fn of finalizedListeners) {
-      try { fn(session, p, { interrupted: !!interrupted }); } catch (e) { console.error('[session-control] finalize listener:', e.message); }
+      try { fn(session, p, { interrupted: !!interrupted, handover }); } catch (e) { console.error('[session-control] finalize listener:', e.message); }
     }
   }
 
