@@ -12,7 +12,7 @@ export default function register(server) {
       submitLabel: z.string().optional(),
       cancelLabel: z.string().optional(),
     },
-    async (input) => {
+    async (input, extra) => {
       const http = await import("http");
       const dashPort = process.env.VISTACLAIR_DASHBOARD_PORT || "3457";
       const token = process.env.VISTACLAIR_AUTH_TOKEN || "";
@@ -24,9 +24,16 @@ export default function register(server) {
       const body = JSON.stringify({ token, instanceId, formData, questions });
 
       return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
+        // The call ends without an answer (4 h, or Claude Code cancels it: an
+        // interrupt, its MCP tool timeout): destroy the socket, so the
+        // dashboard's res 'close' marks the form expired instead of live.
+        const giveUp = () => {
+          clearTimeout(timeout);
+          try { req.destroy(); } catch {}
           resolve({ content: [{ type: "text", text: JSON.stringify({ cancelled: true }) }] });
-        }, 600000);
+        };
+        const timeout = setTimeout(giveUp, 4 * 60 * 60 * 1000);
+        extra?.signal?.addEventListener("abort", giveUp, { once: true });
 
         const req = http.request({
           hostname: "127.0.0.1",

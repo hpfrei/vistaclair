@@ -14,9 +14,11 @@
   let _sessionsPinned = false;    // picked by the user: a tab-list sync leaves it
   let _sessionsReqTimer = null;
   let _sessionsHtml = '';
-  const pendingAskOverlays = new Map(); // askId -> { overlayEl, tabId }
-  // Answers sent and not yet confirmed: toolUseId -> { askId, forms, meta }, so
-  // a refused one (ask:answerError) shows its form again.
+  // askId -> { overlayEl, tabId, expired, expire(info), setLateBusy(busy) }:
+  // an expired one (its tool call ended) stays until sent as a message or discarded.
+  const pendingAskOverlays = new Map();
+  // Answers sent and not yet confirmed: toolUseId -> { askId, forms, meta, answer,
+  // files }, so a refused one (ask:answerError) shows its form again.
   const _sentAnswers = new Map();
   let _askCascade = 0;
   const _scrollbackLoaded = new Set();
@@ -417,7 +419,7 @@
 
     for (const [tabId, tab] of tabs) {
       const btn = document.createElement('button');
-      const hasPendingAsk = Array.from(pendingAskOverlays.values()).some(p => p.tabId === tabId);
+      const hasPendingAsk = Array.from(pendingAskOverlays.values()).some(p => p.tabId === tabId && !p.expired);
       btn.className = 'view-tab' + (tabId === activeTabId ? ' active' : '') + (hasPendingAsk ? ' has-pending-ask' : '');
       btn.dataset.tabId = tabId;
 
@@ -530,7 +532,8 @@
   }
 
   function removeTab(tabId) {
-    dismissAskModalsForTab(tabId);
+    // An expired ask stays: the owner may still send it as a message.
+    dismissAskModalsForTab(tabId, { keepExpired: true });
     _scrollbackLoaded.delete(tabId);
     const tab = tabs.get(tabId);
     if (tab) {
@@ -1754,7 +1757,7 @@
     // An external ask's answer names its tab (remoteAsk.askAnswerMsg).
     const sendAnswer = (toolUseId, answer, files) => {
       sendWs(window.remoteAsk.askAnswerMsg(meta.ask, meta.externalTab, toolUseId, answer, files));
-      _sentAnswers.set(toolUseId, { askId, forms, meta });
+      _sentAnswers.set(toolUseId, { askId, forms, meta, answer, files });
     };
     const CANCELLED = [{ id: '_cancelled', question: '', answer: 'cancelled' }];
 
@@ -1883,11 +1886,95 @@
       modal.appendChild(footer);
     }
 
+    const entry = { overlayEl: modal, tabId: meta.tabId || null, expired: false, expire: null, setLateBusy: null };
+
+    // The asking tool call ended (ask:expired, or replayed with ask:question):
+    // switched in place, so what the owner typed stays. The form's own buttons
+    // give way to "Send as message" (ask:late) and "Discard" (ask:discard).
+    let expiredText = null;
+    const expiredLine = (info) => `This question expired at ${askClock(info?.at)} — the session moved on${info?.reason ? ` (${info.reason})` : ''}`;
+    entry.expire = (info) => {
+      // Expired already: a more precise reason replaces the banner's.
+      if (entry.expired) { if (expiredText) expiredText.textContent = expiredLine(info); return; }
+      entry.expired = true;
+      modal.classList.add('cli-ask-expired-mode');
+      const banner = document.createElement('div');
+      banner.className = 'cli-ask-expired';
+      const text = document.createElement('div');
+      text.className = 'cli-ask-expired-text';
+      text.textContent = expiredLine(info);
+      expiredText = text;
+      banner.appendChild(text);
+      // Submitted just as it expired: the form is empty again, the answer sent is kept.
+      const stored = meta.sentAnswers || [];
+      if (stored.length) {
+        const parts = [];
+        for (const s of stored) {
+          for (const a of s.answer || []) parts.push(a.question ? `${a.question}: ${askAnswerText(a.answer)}` : askAnswerText(a.answer));
+        }
+        const sum = document.createElement('div');
+        sum.className = 'cli-ask-expired-answer';
+        sum.textContent = `Your answer: ${parts.join('; ')}`;
+        banner.appendChild(sum);
+        // Those forms are not what gets sent: read-only.
+        for (const { binder, form } of binders) if (stored.some(x => x.toolUseId === form.toolUseId)) binder.disableForm();
+      }
+      const actions = document.createElement('div');
+      actions.className = 'cli-ask-expired-actions';
+      const discardBtn = document.createElement('button');
+      discardBtn.className = 'ask-cancel-btn cli-ask-late-discard';
+      discardBtn.textContent = 'Discard';
+      const sendBtn = document.createElement('button');
+      sendBtn.className = 'ask-submit-btn cli-ask-late-send';
+      sendBtn.textContent = 'Send as message';
+      const setBusy = (busy) => { sendBtn.disabled = busy; discardBtn.disabled = busy; };
+      entry.setLateBusy = setBusy;
+
+      sendBtn.addEventListener('click', () => {
+        // Collected the way Submit does; not ready is still sent (partial beats none).
+        const lates = binders.map(({ binder, form }) => {
+          const s = stored.find(x => x.toolUseId === form.toolUseId);
+          return s
+            ? { toolUseId: form.toolUseId, answer: s.answer, files: s.files ?? null }
+            : { toolUseId: form.toolUseId, answer: binder.collectAnswers(), files: binder.getFileData() };
+        });
+        const go = () => {
+          setBusy(true);
+          for (const l of lates) sendWs({ type: 'ask:late', toolUseId: l.toolUseId, answer: l.answer, files: l.files });
+        };
+        const allEmpty = lates.every(l => !l.files?.length && (l.answer || []).every(a => askAnswerEmpty(a.answer)));
+        const confirm = window.dashboard.showConfirm;
+        if (!allEmpty || !confirm) { go(); return; }
+        setBusy(true);
+        confirm('Every answer is empty. Send it as a message anyway?', { confirmLabel: 'Send' })
+          .then((ok) => { if (ok) go(); else setBusy(false); });
+      });
+      discardBtn.addEventListener('click', () => {
+        setBusy(true);
+        for (const { form } of binders) sendWs({ type: 'ask:discard', toolUseId: form.toolUseId });
+      });
+      actions.appendChild(discardBtn);
+      actions.appendChild(sendBtn);
+      banner.appendChild(actions);
+      modal.insertBefore(banner, header.nextSibling);
+    };
+
     makeAskDraggable(modal, header);
     layer.appendChild(modal);
-    pendingAskOverlays.set(askId, { overlayEl: modal, tabId: meta.tabId || null });
+    pendingAskOverlays.set(askId, entry);
+    if (meta.expired) entry.expire(meta.expired);
     renderTabStrip();
   }
+
+  // "HH:MM" (local, 24h) of an ISO time; now when it does not parse.
+  function askClock(at) {
+    let d = new Date(at);
+    if (isNaN(d.getTime())) d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  const askAnswerEmpty = (v) => v == null || (typeof v === 'string' && !v.trim()) || (Array.isArray(v) && v.length === 0);
+  const askAnswerText = (v) => Array.isArray(v) ? v.join(', ') : String(v ?? '');
 
   function dismissAskModal(askId) {
     const pending = pendingAskOverlays.get(askId);
@@ -1898,9 +1985,9 @@
     }
   }
 
-  function dismissAskModalsForTab(tabId) {
+  function dismissAskModalsForTab(tabId, { keepExpired = false } = {}) {
     for (const [askId, pending] of pendingAskOverlays) {
-      if (pending.tabId === tabId) {
+      if (pending.tabId === tabId && !(keepExpired && pending.expired)) {
         pending.overlayEl.remove();
         pendingAskOverlays.delete(askId);
       }
@@ -1913,19 +2000,39 @@
       case 'ask:question': {
         const askId = msg.askId || (msg.toolUseIds && msg.toolUseIds[0]);
         if (!askId) return;
+        // Replayed as expired while its form is open: switch in place, keep what was typed.
+        const open = pendingAskOverlays.get(askId);
+        if (msg.expired && open?.expire) { open.expire(msg.expired); renderTabStrip(); break; }
         const tab = tabs.get(msg.tabId ?? msg.remote?.tabId);
         showAskModal(askId, msg.forms || [], {
           title: msg.title, cwd: msg.cwd, tabId: msg.tabId,
           remoteLabel: window.remoteAsk?.remoteAskLabel(msg) || null,
           remote: msg.host != null,
           ask: msg, externalTab: tab?.external === true || !!tab?.settings?.externalHost,
+          expired: msg.expired || null,
         });
         break;
       }
+      case 'ask:expired': {
+        // Only an open form changes; none open means nothing to show.
+        const open = pendingAskOverlays.get(msg.askId);
+        if (!open?.expire) break;
+        open.expire({ at: msg.at, reason: msg.reason });
+        renderTabStrip();
+        break;
+      }
       case 'ask:answered':
-      case 'ask:timeout': {
+      case 'ask:closed': {
         if (msg.askId) dismissAskModal(msg.askId);
         for (const [id, sent] of _sentAnswers) if (id === msg.askId || sent.askId === msg.askId) _sentAnswers.delete(id);
+        break;
+      }
+      case 'ask:lateResult': {
+        // Only to the dashboard that pressed Send as message / Discard.
+        const level = !msg.ok ? 'error' : msg.how === 'queued-not-running' ? 'warning' : 'info';
+        const message = String((msg.ok ? msg.message : msg.message || msg.error) || (msg.ok ? 'Sent' : 'Failed'));
+        window.dashboard.showToast?.({ message, level });
+        if (!msg.ok) pendingAskOverlays.get(msg.askId)?.setLateBusy?.(false);
         break;
       }
       case 'ask:answerError': {
@@ -1935,7 +2042,15 @@
         if (!sent) { window.dashboard.showToast?.({ message: `Answer not accepted: ${error}`, level: 'error' }); break; }
         _sentAnswers.delete(msg.toolUseId);
         // A multi-form ask is refused form by form: show it once.
-        if (!pendingAskOverlays.has(sent.askId)) showAskModal(sent.askId, sent.forms, { ...sent.meta, error });
+        if (pendingAskOverlays.has(sent.askId)) break;
+        if (msg.expired) {
+          // Submitted just as the call ended: back expired, with the answer that was sent.
+          const sentAnswers = [{ toolUseId: msg.toolUseId, answer: sent.answer, files: sent.files }];
+          for (const [id, s] of _sentAnswers) if (s.askId === sent.askId) sentAnswers.push({ toolUseId: id, answer: s.answer, files: s.files });
+          showAskModal(sent.askId, sent.forms, { ...sent.meta, error: null, expired: msg.expired, sentAnswers });
+          break;
+        }
+        showAskModal(sent.askId, sent.forms, { ...sent.meta, error });
         break;
       }
     }

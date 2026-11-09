@@ -93,6 +93,10 @@ class CliSessionManager {
     // Listeners for every tab's exit (addExitListener), unlike the one-shot
     // per-tab onExit callback. Called with the session before it is dropped.
     this._exitListeners = [];
+    // Listeners for a tab closed quietly (closeQuiet: a pause, a refresh, a
+    // worker closed): (tabId, session, reason). Not exit listeners: to its
+    // owner such a session has not ended, but its running calls have.
+    this._closeListeners = [];
     // Per-process identity. Tab IDs embed this so they can never collide with
     // tab IDs minted by a previous server process, and clients use it to detect
     // a restart on any reconnect (even a seamless one without a page reload).
@@ -696,6 +700,9 @@ class CliSessionManager {
     this._exitCallbacks.delete(tabId);
     this.sessions.delete(tabId);
     session.kill(reason);
+    for (const fn of this._closeListeners) {
+      try { fn(tabId, session, reason); } catch (e) { console.error('Session close listener error:', e); }
+    }
     this._persistOpenTabs();
     this.broadcastTabs();
   }
@@ -975,6 +982,10 @@ class CliSessionManager {
   // shutdown). Covers tabs restored under a new id without per-tab arming.
   addExitListener(fn) {
     this._exitListeners.push(fn);
+  }
+
+  addCloseListener(fn) {
+    this._closeListeners.push(fn);
   }
 
   _notifyExit(tabId, session) {

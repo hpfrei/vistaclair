@@ -1877,7 +1877,9 @@ function handleMessage(msg) {
     // Ask (routed to CLI tab overlay)
     case 'ask:question':
     case 'ask:answered':
-    case 'ask:timeout':
+    case 'ask:expired':
+    case 'ask:closed':
+    case 'ask:lateResult':
     case 'ask:answerError':
       window.cliModule?.handleAskMessage(msg);
       break;
