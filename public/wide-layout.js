@@ -8,10 +8,10 @@
     // Height of a turn node's header, exactly. Tool rows are placed at
     // y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT (both for stacking and for the
     // fork/merge anchors), so this must equal the rendered height of
-    // .turn-entry in style.css — 34px — or rows drift under the next node.
+    // .turn-entry in style.css — 22px — or rows drift under the next node.
     // TOOL_HEIGHT is .tool-entry's (15px + 2×1px padding + 1px hairline), HOOK_HEIGHT a
     // hook or endpoint node's (.hook-call-entry, .endpoint-call-entry).
-    MIN_ENTRY_HEIGHT: 34,
+    MIN_ENTRY_HEIGHT: 22,
     NODE_BORDER: 2,
     TOOL_HEIGHT: 18,
     HOOK_HEIGHT: 22,

@@ -844,25 +844,27 @@ aside#timeline {
 .timeline-entry.selected { background: var(--bg-selected); }
 
 /* ============================================================
-   TURN NODE HEADER — fixed 34px, two lines
+   TURN NODE HEADER — fixed 22px, one line
    ------------------------------------------------------------
-   3 + 14 (identity) + 1 (gap) + 13 (instruments) + 3 = 34px, which is
+   22px border-box (14px row + its 1px .timeline-entry hairline), which is
    wide-layout's D3_CONST.MIN_ENTRY_HEIGHT. The parallel view places tool
    rows at y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT and anchors the fork/merge
-   curves there too, so this box must not grow. New data goes on the hover
-   deck (.turn-tip), never on a third line.
+   curves there too, so this box must not grow. New data (token counts too)
+   goes on the hover deck (.turn-tip), never on a second line.
 
-     line 1   #123  opus-5  [chips]      ▰▰▱ 11.0s   ● STREAMING
-     line 2   ↑2 ↓738 ⊞1.4kw ⊟91.5kr                 ▰▱▱ $0.073
+     #123  opus-5  [chips]          11.0s  $0.073  ● STREAMING
+
+   Duration and cost are plain text in the colour their gauge would have.
 
    Vocabulary is the Apps tab's: mono tabular numerals so peer nodes in
    parallel lanes line up digit-for-digit, .vc-chip-shaped tags, a status
    lamp instead of a full-width badge.
    ============================================================ */
-.timeline-entry.turn-entry:not(.endpoint-call-entry):not(.mcp-call-entry) {
-  height: 34px;
+.timeline-entry.turn-entry:not(.endpoint-call-entry):not(.mcp-call-entry):not(.hook-call-entry) {
+  height: 22px;
+  flex-shrink: 0;
   box-sizing: border-box;
-  padding: 3px 8px;
+  padding: 0 8px;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -904,13 +906,17 @@ aside#timeline {
   min-width: 0;
 }
 
-/* the gauges keep their hue ramp but move onto the header rows; both are
-   pushed to the right edge so elapsed and price sit in one vertical column */
+/* duration and cost: coloured plain text, pushed to the right edge */
 .turn-entry .entry-idrow .entry-duration {
   margin-left: auto;
   flex: none;
   font-size: 10px;
   color: var(--vc-dim);
+}
+.turn-entry .entry-idrow .entry-cost {
+  flex: none;
+  min-width: 42px;
+  text-align: right;
 }
 .entry-duration-gauge,
 .entry-cost-gauge {
@@ -982,8 +988,8 @@ aside#timeline {
   animation: badge-pulse 1.5s infinite;
 }
 
-/* --- line 2: instruments --- */
-/* MCP rows reuse .entry-meta at their own 42px budget — leave them alone */
+/* --- endpoint/clamped rows' token label --- */
+/* MCP rows use .entry-meta at their own 42px budget — leave them alone */
 .turn-entry:not(.mcp-call-entry) .entry-meta {
   display: flex;
   align-items: center;
@@ -1146,26 +1152,35 @@ aside#timeline {
 .mcp-call-entry.selected { background: color-mix(in srgb, var(--green) 15%, transparent); }
 .mcp-label { color: var(--green); font-weight: 700; font-size: 10px; letter-spacing: 0.5px; }
 .mcp-tool-name { color: var(--green); font-weight: 600; font-size: 12px; }
+/* A hook-only node: ONE row, ▸ + event name (+ tool/agent name). 20px
+   border-box (hairline included) + the group's 1px top/bottom border = 22px,
+   wide-layout's D3_CONST.HOOK_HEIGHT. The event name never shrinks; only the
+   trailing tool name may ellipsize when the lane is too narrow. */
 .hook-call-group {
   max-height: 22px;
   overflow: hidden;
 }
-.hook-call-entry {
+.timeline-entry.hook-call-entry {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 6px;
-  padding: 2px 10px;
+  height: 20px;
+  min-height: 20px;
+  max-height: 20px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  padding: 0 10px;
+  line-height: 14px;
   background: color-mix(in srgb, var(--magenta, #c084fc) 5%, transparent);
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
-  max-height: 22px;
 }
 .hook-call-entry:hover { background: color-mix(in srgb, var(--magenta, #c084fc) 10%, transparent); }
 .hook-call-entry.selected { background: color-mix(in srgb, var(--magenta, #c084fc) 15%, transparent); }
 .hook-arrow { color: var(--magenta, #c084fc); font-size: 12px; flex-shrink: 0; }
 .hook-label { color: var(--magenta, #c084fc); font-weight: 700; font-size: 10px; letter-spacing: 0.5px; flex-shrink: 0; }
-.hook-tool-name { color: var(--text-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.hook-tool-name { color: var(--text-dim); font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .hook-tool-entry .hook-connector { background: var(--magenta, #c084fc); }
 .hook-tool-entry .hook-entry-name { color: var(--magenta, #c084fc); }
 .hook-tool-entry.selected .hook-entry-name { color: var(--magenta, #c084fc); }
@@ -6514,7 +6529,7 @@ aside#timeline.parallel-mode {
 /* --- the node: an Apps-tab instrument, sized by the layout ---
    Glass + hairline + tick corners, the same shell the app cards use. The tick
    brackets are background layers rather than pseudo-elements.
-   overflow:hidden is a guard, not the fix: computeNodeHeight and the 34px
+   overflow:hidden is a guard, not the fix: computeNodeHeight and the 22px
    header agree, so nothing should ever need clipping — but if they ever drift
    again, a node clips its own tail instead of drawing over its neighbour. */
 .tl-nodes-layer > .turn-group {
@@ -7761,7 +7776,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ============================================================
    TURN HOVER DECK
-   Everything the 34px header can't carry. Fixed-position (the trick Pro's
+   Everything the 22px header can't carry. Fixed-position (the trick Pro's
    .vc-remote-tip uses) so it costs the timeline zero vertical space and no
    node box, lane, or scroll container can clip it.
    ============================================================ */
