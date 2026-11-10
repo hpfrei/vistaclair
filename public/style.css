@@ -844,9 +844,9 @@ aside#timeline {
 .timeline-entry.selected { background: var(--bg-selected); }
 
 /* ============================================================
-   TURN NODE HEADER — fixed 44px, two lines
+   TURN NODE HEADER — fixed 34px, two lines
    ------------------------------------------------------------
-   6 + 16 (identity) + 2 (gap) + 14 (instruments) + 6 = 44px, which is
+   3 + 14 (identity) + 1 (gap) + 13 (instruments) + 3 = 34px, which is
    wide-layout's D3_CONST.MIN_ENTRY_HEIGHT. The parallel view places tool
    rows at y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT and anchors the fork/merge
    curves there too, so this box must not grow. New data goes on the hover
@@ -860,12 +860,12 @@ aside#timeline {
    lamp instead of a full-width badge.
    ============================================================ */
 .timeline-entry.turn-entry:not(.endpoint-call-entry):not(.mcp-call-entry) {
-  height: 44px;
+  height: 34px;
   box-sizing: border-box;
-  padding: 6px 10px;
+  padding: 3px 8px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   justify-content: center;
   overflow: hidden;
 }
@@ -875,7 +875,7 @@ aside#timeline {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 16px;
+  height: 14px;
   margin-bottom: 0;
   min-width: 0;
   overflow: hidden;
@@ -988,7 +988,7 @@ aside#timeline {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 14px;
+  height: 13px;
   margin-top: 0;
   font-size: 11px;
   color: var(--vc-dim);
@@ -1075,15 +1075,18 @@ aside#timeline {
 }
 
 .tool-entry {
-  padding: 2px 12px 2px 20px;
+  padding: 1px 10px 1px 16px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: 5px;
+  font-size: 10.5px;
+  line-height: 15px;
   color: var(--text-dim);
   border-top: none;
-  height: 20px;
-  max-height: 20px;
+  /* 15 + 2×1 padding + the 1px hairline (.timeline-entry, below) = 18px,
+     wide-layout's TOOL_HEIGHT */
+  height: 15px;
+  max-height: 15px;
   box-sizing: content-box;
   overflow: hidden;
 }
@@ -1144,19 +1147,19 @@ aside#timeline {
 .mcp-label { color: var(--green); font-weight: 700; font-size: 10px; letter-spacing: 0.5px; }
 .mcp-tool-name { color: var(--green); font-weight: 600; font-size: 12px; }
 .hook-call-group {
-  max-height: 28px;
+  max-height: 22px;
   overflow: hidden;
 }
 .hook-call-entry {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
+  padding: 2px 10px;
   background: color-mix(in srgb, var(--magenta, #c084fc) 5%, transparent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-height: 28px;
+  max-height: 22px;
 }
 .hook-call-entry:hover { background: color-mix(in srgb, var(--magenta, #c084fc) 10%, transparent); }
 .hook-call-entry.selected { background: color-mix(in srgb, var(--magenta, #c084fc) 15%, transparent); }
@@ -1191,7 +1194,7 @@ aside#timeline {
 .clamped-endpoint-entry .endpoint-label { font-size: 10px; }
 .clamped-endpoint-entry .entry-tokens { color: var(--text-dim); font-size: 10px; }
 .clamped-hooks-group.collapsed .clamped-hook-entry { display: none; }
-/* the collapse affordance: one 24px row standing in for every ambient hook
+/* the collapse affordance: one 18px row standing in for every ambient hook
    the turn caused, so a `cd` that fires CwdChanged + PostToolUse + PreToolUse
    + PostToolBatch costs one row instead of four full-width nodes */
 .clamped-hooks-summary { cursor: pointer; }
@@ -1222,19 +1225,19 @@ aside#timeline {
 .tag-hook { color: var(--magenta, #c084fc); background: color-mix(in srgb, var(--magenta, #c084fc) 12%, transparent); border: 1px solid color-mix(in srgb, var(--magenta, #c084fc) 20%, transparent); }
 /* Endpoint call entries (count_tokens etc.) */
 .endpoint-call-group {
-  max-height: 28px;
+  max-height: 22px;
   overflow: hidden;
 }
 .endpoint-call-entry {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
+  padding: 2px 10px;
   background: color-mix(in srgb, var(--yellow) 5%, transparent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-height: 28px;
+  max-height: 22px;
   font-size: 11px;
 }
 .endpoint-call-entry:hover { background: color-mix(in srgb, var(--yellow) 10%, transparent); }
@@ -1348,30 +1351,14 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  /* Tool/MCP/hook details are a free-flowing document and scroll here.
-     The request/response inspector mounts a .vc-detail, which is a fixed
-     frame that manages its own scrolling — see VC DETAIL FRAME below. */
-  overflow-y: auto;
-}
-#detail-content:has(> .vc-detail),
-#detail-content.lanes-active {
+  /* The live lanes; each lane scrolls itself. */
   overflow: hidden;
 }
-/* #detail-content is a bounded flex column now, so a free-flowing tool/MCP/
-   hook detail would have its blocks squashed to fit. Keep them at their
-   natural height and let the container scroll instead. */
-#detail-content:not(:has(> .vc-detail)):not(.lanes-active) > * {
-  flex-shrink: 0;
-}
-/* Tool/MCP/hook details render bare blocks with no panel wrapper — give the
-   scroll container the padding the old .detail-panel used to supply. */
-#detail-content:not(:has(> .vc-detail)):not(.lanes-active) {
-  padding: 14px 16px;
-}
 
-/* --- Live lanes: the detail panel while live mode is on ---------------
+/* --- Live lanes: the detail panel ------------------------------------
    One column per agent (public/inspector.js, LIVE LANES), each a feed of
-   that agent's turns in its own colour (--ln-color). */
+   that agent's turns in its own colour (--ln-color). A click on a turn
+   opens it whole in the detail modal (.turn-modal). */
 .ln-strip {
   flex: 1;
   min-height: 0;
@@ -1489,6 +1476,25 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
 .ln-turn:hover .ln-sep { border-top-color: color-mix(in srgb, var(--ln-color) 70%, var(--text-bright)); color: var(--text); }
 .ln-turn.is-live .ln-sep-cap { color: var(--ln-color); }
 .ln-sep-cap { flex-shrink: 0; }
+/* Duration and cost, as the timeline's cards show them. */
+.ln-sep-dur, .ln-sep-cost { flex-shrink: 0; display: inline-flex; align-items: center; }
+.ln-sep-dur:empty, .ln-sep-cost:empty { display: none; }
+.ln-turn.is-live .ln-sep-dur { color: var(--ln-color); }
+.ln-sep .entry-duration-label, .ln-sep .entry-cost-label { font-size: 10px; }
+
+/* A turn is a click target (its detail modal); hovering its timeline card
+   lights it up, a jump from the timeline flashes it. */
+.ln-turn {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background .12s, box-shadow .12s;
+}
+.ln-turn:hover { background: color-mix(in srgb, var(--ln-color) 4%, transparent); }
+.ln-turn.is-hover, .ln-tool.is-hover {
+  background: color-mix(in srgb, var(--ln-color) 10%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ln-color) 45%, transparent);
+}
+.ln-turn.is-flash, .ln-tool.is-flash { animation: ln-flash 1.4s ease-out; }
 /* Thinking chips, usage and spinner on the header line: desktop only (below). */
 .ln-sep-think, .ln-sep-use, .ln-sep > .ln-spin { display: none; }
 
@@ -1725,21 +1731,26 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
 .ln-wait span:nth-child(2) { animation-delay: .2s; }
 .ln-wait span:nth-child(3) { animation-delay: .4s; }
 
+/* "↓ live": the lane stopped following (scrolled up, or a jump from the
+   timeline); a click goes back to the newest turn and follows it. */
 .ln-pill {
   position: absolute;
-  bottom: 10px;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 2;
-  padding: 3px 10px;
+  padding: 4px 12px;
   border: 1px solid var(--ln-color);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--ln-color) 18%, var(--bg-surface));
-  box-shadow: var(--vc-shadow);
+  background: color-mix(in srgb, var(--ln-color) 22%, var(--bg-surface));
+  box-shadow: var(--vc-shadow), 0 0 0 3px color-mix(in srgb, var(--ln-color) 12%, transparent);
   font-size: 11px;
+  font-weight: 600;
   color: var(--text-bright);
   cursor: pointer;
+  animation: ln-in .15s ease-out both;
 }
+.ln-pill:hover { background: color-mix(in srgb, var(--ln-color) 35%, var(--bg-surface)); }
 .ln-rail {
   all: unset;
   display: none;
@@ -1808,28 +1819,52 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
 
 @media (prefers-reduced-motion: reduce) {
   .ln-lane, .ln-result-body { transition: none; }
-  .ln-in, .ln-lane.is-flash, .ln-lane.is-live .ln-dot, .ln-spin, .ln-wait span,
+  .ln-in, .ln-lane.is-flash, .ln-turn.is-flash, .ln-tool.is-flash, .ln-pill,
+  .ln-lane.is-live .ln-dot, .ln-spin, .ln-wait span,
   .ln-text.is-streaming > :last-child::after, .ln-text.is-streaming:empty::after { animation: none; }
 }
 
-/* Back to the lanes from a turn opened in live mode, beside the focus button. */
-.detail-lanes-btn {
+/* --- Detail modal: one turn whole (public/inspector.js, DETAIL MODAL) --
+   The request/response frame (.vc-detail) or a tool / hook / MCP detail,
+   as the detail panel used to show them. Below the cURL modal and the file
+   preview, which open from inside it. */
+.turn-modal { position: fixed; inset: 0; z-index: 900; display: flex; align-items: center; justify-content: center; }
+.turn-modal[hidden] { display: none; }
+.turn-modal-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .55); }
+.turn-modal-panel {
+  position: relative;
+  width: 92vw;
+  height: 90vh;
+  max-width: 1600px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--vc-hair);
+  border-radius: 8px;
+  box-shadow: 0 10px 48px rgba(0, 0, 0, .5);
+}
+.turn-modal-close {
   position: absolute;
-  top: 8px;
-  right: 42px;
-  z-index: 10;
-  padding: 3px 8px;
+  top: 6px;
+  right: 8px;
+  z-index: 11;
+  padding: 2px 8px;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--bg-hover);
-  font-size: 11px;
+  background: var(--bg-surface);
   color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1.2;
   cursor: pointer;
 }
-.detail-lanes-btn:hover { background: var(--bg-selected); color: var(--accent); }
-.detail-lanes-btn[hidden] { display: none; }
-/* The request/response toolbar is full at the right; its middle is free. */
-section#detail:has(.vc-detail) .detail-lanes-btn { top: 7px; right: auto; left: 50%; transform: translateX(-50%); }
+.turn-modal-close:hover { background: var(--bg-hover); color: var(--text); }
+.turn-modal-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.turn-modal-body:has(> .vc-detail) { overflow: hidden; }
+/* Tool / MCP / hook details are a free-flowing document: natural heights,
+   the body scrolls, and room on the right for the close button. */
+.turn-modal-body:not(:has(> .vc-detail)) { padding: 14px 48px 14px 16px; }
+.turn-modal-body:not(:has(> .vc-detail)) > * { flex-shrink: 0; }
 
 .detail-panel {
   padding: 16px;
@@ -6395,44 +6430,22 @@ details.model-section[open] > summary.model-section-head { border-bottom: 1px so
 /* ============================================================
    PARALLEL TIMELINE (multi-column swimlane view)
    ============================================================ */
-.timeline-view-toggle {
-  display: flex;
-  gap: 4px;
-  align-items: center;
+/* "↓ live" in the timeline header while the reader has scrolled it up. */
+#timeline-header .tl-live-chip {
   margin-left: auto;
-}
-.tl-toggle-label {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  margin-left: 3px;
-}
-.tl-toggle-btn {
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 3px 6px;
-  cursor: pointer;
-  color: var(--text-dim);
-  display: inline-flex;
-  align-items: center;
-  line-height: 0;
-  gap: 0;
-}
-.tl-toggle-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-.tl-toggle-btn.active {
+  padding: 1px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 15%, transparent);
-  border-color: var(--accent);
-  color: var(--accent);
+  color: var(--text-bright);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
 }
-.tl-toggle-btn.tl-live-btn.active {
-  background: color-mix(in srgb, var(--green) 15%, transparent) !important;
-  border-color: var(--green) !important;
-  color: var(--green) !important;
-}
+#timeline-header .tl-live-chip:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+#timeline-header .tl-live-chip[hidden] { display: none; }
 
 aside#timeline.parallel-mode {
   max-width: none;
@@ -6501,7 +6514,7 @@ aside#timeline.parallel-mode {
 /* --- the node: an Apps-tab instrument, sized by the layout ---
    Glass + hairline + tick corners, the same shell the app cards use. The tick
    brackets are background layers rather than pseudo-elements.
-   overflow:hidden is a guard, not the fix: computeNodeHeight and the 44px
+   overflow:hidden is a guard, not the fix: computeNodeHeight and the 34px
    header agree, so nothing should ever need clipping — but if they ever drift
    again, a node clips its own tail instead of drawing over its neighbour. */
 .tl-nodes-layer > .turn-group {
@@ -7281,16 +7294,6 @@ aside#timeline.parallel-mode {
   overflow: visible;
 }
 
-/* Focus button sits in the toolbar strip rather than over the content. */
-.vc-detail ~ .detail-focus-btn,
-section#detail:has(.vc-detail) .detail-focus-btn {
-  top: 7px;
-  right: 10px;
-  opacity: .7;
-  background: var(--bg-surface);
-  border-color: var(--vc-hair);
-  border-radius: var(--radius);
-}
 
 /* --- narrow viewports: side-by-side is unreadable ------------- */
 @media (max-width: 1100px) {
@@ -7758,7 +7761,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ============================================================
    TURN HOVER DECK
-   Everything the 44px header can't carry. Fixed-position (the trick Pro's
+   Everything the 34px header can't carry. Fixed-position (the trick Pro's
    .vc-remote-tip uses) so it costs the timeline zero vertical space and no
    node box, lane, or scroll container can clip it.
    ============================================================ */

@@ -69,41 +69,14 @@
     if (e.key === 'Escape' && !sheet.classList.contains('hidden')) closeSheet();
   });
 
-  // --- Inspector: timeline ⇄ detail drill-down ----------------------
-  // Desktop shows both panes side by side. On a phone the timeline is
-  // full-width and a tap slides the detail over it; "‹ Timeline" (or the
-  // browser/OS back gesture) returns. inspector.js calls mobileShowDetail
-  // from select() on user clicks; we own the class and the history entry.
-  const inspectorBody = document.querySelector('.inspector-body');
-  const detail = document.getElementById('detail');
-  if (inspectorBody && detail) {
-    const back = document.createElement('button');
-    back.className = 'mobile-detail-back';
-    back.innerHTML = '<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg><span>Timeline</span>';
-    back.addEventListener('click', () => {
-      if (history.state?.vcMobileDetail) history.back();
-      else hideDetail();
-    });
-    detail.prepend(back);
-
-    function showDetail() {
-      if (!isPhone() || inspectorBody.classList.contains('mobile-detail')) return;
-      inspectorBody.classList.add('mobile-detail');
-      history.pushState({ vcMobileDetail: true }, '');
-    }
-    function hideDetail() {
-      inspectorBody.classList.remove('mobile-detail');
-    }
-    window.addEventListener('popstate', () => {
-      if (!history.state?.vcMobileDetail) hideDetail();
-    });
-    // Leaving phone width (rotation, window resize) restores both panes.
-    phoneQuery.addEventListener('change', e => { if (!e.matches) hideDetail(); });
-    window.dashboard.mobileShowDetail = showDetail;
-    window.dashboard.mobileHideDetail = hideDetail;
-
-    // Request | Response toggle for the split frame. The frame is re-rendered
-    // on every selection, so watch for it rather than patching inspector.js.
+  // --- Inspector: timeline only; a tap opens the detail modal --------
+  // On a phone the Inspector shows its timeline alone (no lanes); a tap on
+  // an item opens inspector.js's detail modal, full-screen (mobile.css).
+  // Request | Response toggle for the modal's split frame. The frame is
+  // re-rendered on every open, so watch for it rather than patching
+  // inspector.js.
+  const modalBody = document.querySelector('#turn-modal .turn-modal-body');
+  if (modalBody) {
     let mobilePane = localStorage.getItem('mobilePane') || 'response';
     const decorateSplit = split => {
       if (split.querySelector(':scope > .mobile-pane-toggle')) return;
@@ -123,13 +96,10 @@
       paint();
       split.prepend(toggle);
     };
-    const detailContent = document.getElementById('detail-content');
-    if (detailContent) {
-      new MutationObserver(() => {
-        detailContent.querySelectorAll('.vc-split').forEach(decorateSplit);
-      }).observe(detailContent, { childList: true });
-      detailContent.querySelectorAll('.vc-split').forEach(decorateSplit);
-    }
+    new MutationObserver(() => {
+      modalBody.querySelectorAll('.vc-split').forEach(decorateSplit);
+    }).observe(modalBody, { childList: true, subtree: true });
+    modalBody.querySelectorAll('.vc-split').forEach(decorateSplit);
   }
 
   // --- Sub-nav: keep the active pill in view -----------------------

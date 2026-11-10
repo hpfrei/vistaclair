@@ -8,11 +8,14 @@
     // Height of a turn node's header, exactly. Tool rows are placed at
     // y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT (both for stacking and for the
     // fork/merge anchors), so this must equal the rendered height of
-    // .turn-entry in style.css — 44px — or rows drift under the next node.
-    MIN_ENTRY_HEIGHT: 44,
+    // .turn-entry in style.css — 34px — or rows drift under the next node.
+    // TOOL_HEIGHT is .tool-entry's (15px + 2×1px padding + 1px hairline), HOOK_HEIGHT a
+    // hook or endpoint node's (.hook-call-entry, .endpoint-call-entry).
+    MIN_ENTRY_HEIGHT: 34,
     NODE_BORDER: 2,
-    TOOL_HEIGHT: 24,
-    MIN_GAP: 6,
+    TOOL_HEIGHT: 18,
+    HOOK_HEIGHT: 22,
+    MIN_GAP: 4,
     HEADER_HEIGHT: 30,
     ZIGZAG_MIN_CUT: 10000,
     COHORT_EPSILON_MS: 300,
@@ -749,8 +752,8 @@
   // --- Node height ---
 
   function computeNodeHeight(interaction) {
-    if (interaction.isHook) return 28;
-    if (!isStandardLlm(interaction)) return 28;
+    if (interaction.isHook) return D3_CONST.HOOK_HEIGHT;
+    if (!isStandardLlm(interaction)) return D3_CONST.HOOK_HEIGHT;
     if (interaction.isMcp) return 42;
     const tools = extractToolCalls(interaction);
     const foldedCount = interaction._foldedPreHooks?.length || 0;
