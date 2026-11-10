@@ -282,3 +282,41 @@ test('a call\'s media keys match the tool detail\'s in public/inspector.js', () 
   const keys = (src, name) => src.match(new RegExp(`const ${name} = \\[([^\\]]+)\\]`))[1].replace(/\\s+/g, '');
   assert.strictEqual(keys(read('inspector-lanes.js'), 'INPUT_PATH_KEYS'), keys(read('inspector.js'), '_TOOL_PATH_KEYS'));
 });
+
+test('a jump from the timeline shows the turn: the window holding it, or one around it', () => {
+  const ids = Array.from({ length: 100 }, (_, k) => `t${k}`);
+  // Already in view: the window stays (and keeps following).
+  assert.deepStrictEqual(L.windowAround(ids, 't90'), { from: 80, to: 100 });
+  // Further back: 20 turns, 10 of them after it.
+  assert.deepStrictEqual(L.windowAround(ids, 't30'), { from: 21, to: 41 });
+  // Near the start or the end, the window stops there.
+  assert.deepStrictEqual(L.windowAround(ids, 't2', { fromId: 't80', toId: null }), { from: 0, to: 13 });
+  assert.deepStrictEqual(L.windowAround(ids, 't79', { fromId: 't80', toId: null }), { from: 80 - 20 + 10, to: 90 });
+  assert.strictEqual(L.windowAround(ids, 'gone'), null);
+});
+
+test('a lane follows its bottom until the reader scrolls up; back down resumes', () => {
+  const at = (scrollTop, extra = {}) => ({ scrollTop, expectTop: 0, scrollHeight: 1000, clientHeight: 400, ...extra });
+  // Our own scroll (where we left it) changes nothing.
+  assert.strictEqual(L.scrollIntent(at(600, { expectTop: 600 })), null);
+  assert.strictEqual(L.scrollIntent(at(601, { expectTop: 600 })), null);
+  // The reader's, up: pause.
+  assert.strictEqual(L.scrollIntent(at(300, { expectTop: 600 })), 'pause');
+  // Back to the bottom (within the slack): resume, unless paged back past the cap.
+  assert.strictEqual(L.scrollIntent(at(600, { expectTop: 300 })), 'resume');
+  assert.strictEqual(L.scrollIntent(at(560, { expectTop: 300 })), 'resume');
+  assert.strictEqual(L.scrollIntent(at(600, { expectTop: 300, paged: true })), null);
+  assert.strictEqual(L.scrollIntent(at(500, { expectTop: 300 })), 'pause');
+});
+
+test('a click in a lane turn opens its detail modal, unless it has its own click', () => {
+  const el = (...matches) => ({ closest: sel => sel.split(',').some(x => matches.includes(x.trim())) ? {} : null });
+  assert.strictEqual(L.turnClickOpens(el('.ln-turn'), ''), true);
+  for (const own of ['.ln-result', '.ln-result-body', '.file-link', 'a', 'button', '.ln-pill', '.ln-sep-chip',
+                     '.ln-think-sum', '.ln-user', '.ln-call.is-agent', '.ln-thumbs', '.ln-result-more']) {
+    assert.strictEqual(L.turnClickOpens(el('.ln-turn', own), ''), false, own);
+  }
+  assert.strictEqual(L.turnClickOpens(el('.ln-turn'), 'dragged text'), false);
+  assert.strictEqual(L.turnClickOpens(el('.ln-lane'), ''), false);
+  assert.strictEqual(L.turnClickOpens(null, ''), false);
+});

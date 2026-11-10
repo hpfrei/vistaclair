@@ -1,6 +1,6 @@
-// The live lanes: while the inspector is in live mode its detail panel shows
-// one column per agent of the session (the main thread, each subagent), each a
-// running feed of that agent's turns. These are the decisions behind it —
+// The live lanes: the inspector's detail panel shows one column per agent of
+// the session (the main thread, each subagent), each a running feed of that
+// agent's turns. These are the decisions behind it —
 // which lane a turn goes to, which result answers which tool call, how a call
 // or a result reads on one line, which turns a lane renders — kept free of the
 // DOM so test/inspector-lanes.test.js can run them. The view is in
@@ -404,10 +404,48 @@
     return { from, to };
   }
 
+  /* The window that shows turn `id`, for a jump to it from the timeline: the
+     current one if it holds it already; otherwise `initial` turns around it,
+     half of them after it (to the newest, if that is near). [from, to) into
+     ids, or null when the lane has no such turn. */
+  function windowAround(ids, id, prev = {}, opts = {}) {
+    const at = ids.indexOf(id);
+    if (at < 0) return null;
+    const cur = laneWindow(ids, prev, opts);
+    if (at >= cur.from && at < cur.to) return cur;
+    const { initial = LIMITS.INITIAL_TURNS } = opts;
+    const to = Math.min(ids.length, at + 1 + Math.floor(initial / 2));
+    return { from: Math.max(0, to - initial), to };
+  }
+
+  /* A scroll of a lane (or of the timeline): whose was it, and what follows?
+     One we made (scrollTop still where we left it, within 2px) changes
+     nothing. The reader's: back at the bottom resumes the follow — not in a
+     lane paged back past its cap (`paged`), whose bottom is not the live
+     end — and anywhere else pauses it. 'resume' | 'pause' | null. */
+  const FOLLOW_SLACK_PX = 48;
+  function scrollIntent({ scrollTop, expectTop, scrollHeight, clientHeight, paged = false }, slack = FOLLOW_SLACK_PX) {
+    if (Math.abs(scrollTop - expectTop) <= 2) return null;
+    if (scrollHeight - scrollTop - clientHeight <= slack) return paged ? null : 'resume';
+    return 'pause';
+  }
+
+  /* Does a click in a lane's turn open the turn whole in the detail modal?
+     Not on what has a click of its own — a link, a button, a result's line
+     or body, a thinking chip, the quoted prompt, an Agent call, the "live"
+     chip — and not at the end of a drag that selected text. */
+  const TURN_OWN_CLICKS = 'a, button, .file-link, .ln-thumbs, .ln-result, .ln-result-body, .ln-result-more, '
+    + '.ln-think-sum, .ln-sep-chip, .ln-user, .ln-call.is-agent, .ln-pill, .ln-older, .ln-rail';
+  function turnClickOpens(target, selectedText) {
+    if (!target?.closest?.('.ln-turn')) return false;
+    if (target.closest(TURN_OWN_CLICKS)) return false;
+    return !String(selectedText ?? '');
+  }
+
   const api = {
     LIMITS, LANE_MAIN, isLaneTurn, laneKeyOf, groupLanes, newUserText, turnUserText,
     toolResultsOf, toolResultIndex, shortPath, toolLine, resultLine, resultRows, mediaPaths, callMedia, fmtTok, usageLine, bodyClickOpens, looksLikeMarkdown, resultHolder, agentLinks, laneDone,
-    laneWindow, pageOlder,
+    laneWindow, pageOlder, windowAround, scrollIntent, turnClickOpens, FOLLOW_SLACK_PX,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.inspectorLanes = api;

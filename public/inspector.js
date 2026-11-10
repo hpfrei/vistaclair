@@ -12,8 +12,10 @@
     try { linkifyFilePaths(root, { includePre: true }); } catch {}
   }
 
-  // --- Auto-select suppression: don't jump away from user-selected turns ---
-  let _liveMode = localStorage.getItem('timelineLive') !== 'false';
+  // Phones show the timeline alone — no lanes; a tap opens the detail modal
+  // full-screen. Same breakpoint as mobile.js / mobile.css.
+  const _phoneQuery = window.matchMedia('(max-width: 640px)');
+  const _isPhone = () => _phoneQuery.matches;
 
   // --- Subagent registry: track numbering and colors for parallel subagents ---
   const _subagentRegistry = new Map();    // agentId -> { agentType, number, colorIndex }
@@ -408,13 +410,8 @@
     }
     if (_lanesView?.instanceId === instanceId) _lanesTeardown();
     const sel = state.selection;
-    if (sel && dropped.has(sel.type === 'tool' ? sel.interactionId : sel.id)) {
-      state.selection = null;
-      _detailView = null;
-      detailContent.innerHTML = '';
-      detailContent.classList.add('hidden');
-      emptyState.classList.remove('hidden');
-    }
+    if (sel && dropped.has(_selId(sel))) state.selection = null;
+    if (_modalSel && dropped.has(_selId(_modalSel))) closeDetailModal();
     _sessionTotals.delete(instanceId);
     _sessionTotalsAsked.delete(instanceId);
     _interner.drop(instanceId);
@@ -426,9 +423,7 @@
   function _trimTimeline(instanceId) {
     const tab = _openTabs.get(instanceId);
     if (!tab) return false;
-    const keep = new Set();
-    const sel = state.selection;
-    if (sel) keep.add(sel.type === 'tool' ? sel.interactionId : sel.id);
+    const keep = _keptIds();
     const drop = new Set(RET.timelineTrim(state.interactions, instanceId,
       { cap: RET.LIMITS.TIMELINE_CAP + (tab.extraCap || 0), keep }));
     if (!drop.size) return false;
@@ -478,27 +473,18 @@
     if (instanceId !== SESSIONS_TAB && !_openTabs.has(instanceId)) { openSessionTab(instanceId); return; }
     // Another tab (or a fresh snapshot of this one) starts its lanes over.
     _lanesTeardown();
-    _lanesPinned = false;
+    closeDetailModal();
     activeInstanceTab = instanceId;
-    _lanesUpdateBackBtn();
+    _tlSetFollow(true);
     // The tab left behind keeps summaries only.
     _scheduleCompaction();
     _showSessionsGrid(instanceId === SESSIONS_TAB);
     renderInspectorTabStrip();
     updateStats();
     if (instanceId === SESSIONS_TAB) { renderSessionsGrid(); return; }
+    state.selection = null;
     renderTimelineActive();
-    const filtered = state.interactions.filter(i => i.instanceId === activeInstanceTab);
-    const last = filtered[filtered.length - 1];
-    if (last) {
-      select({ type: 'turn', id: last.id });
-    } else {
-      state.selection = null;
-      document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
-      detailContent.classList.add('hidden');
-      emptyState.classList.remove('hidden');
-      renderEmptyState();
-    }
+    _lanesShow();
   }
 
   // The summary feed: cards and every busy indicator.
@@ -870,15 +856,16 @@
       }
     }
 
-    // Route SSE to detail panel — not while it is off screen: the event is
-    // buffered above, and the panel replays the buffer when it is shown.
-    // In live mode the lanes take every turn of the session.
-    const sel = state.selection;
+    // Route SSE to the lanes (every turn of the session) and to the detail
+    // modal if it shows this turn — not while off screen: the event is
+    // buffered above, and both replay the buffer when shown again.
+    const inModal = _modalSel?.type === 'turn' && _modalSel.id === interactionId;
     if (!_inspectorShown()) {
-      if (sel?.type === 'turn' && sel.id === interactionId || _lanesView) _renderOnShow = true;
-    } else if (_lanesView) {
-      _lanesOnSSE(interaction, event);
-    } else if (sel?.type === 'turn' && sel.id === interactionId) {
+      if (inModal || _lanesView) _renderOnShow = true;
+      return;
+    }
+    if (_lanesView) _lanesOnSSE(interaction, event);
+    if (inModal && _detailView?.id === interactionId && _detailView.root?.isConnected) {
       appendSSEToDetail(event, interaction);
     }
   }
@@ -910,7 +897,6 @@
   // Keep the streaming response in view. Blocks now flow at natural height
   // inside the scrollable response panel, so we follow at the panel level.
   function _followResponse(scope) {
-    if (!_liveMode) return;
     const root = scope && scope !== document ? scope : document;
     // In the .vc-detail frame the pane body has overflow:hidden and each open
     // section scrolls itself, so follow the section holding #response-blocks.
@@ -1005,7 +991,8 @@
         const bodyEl = _scopeFind(scope, `block-body-${data.index}`);
         if (!bodyEl) return;
         bodyEl.appendChild(document.createTextNode(delta.thinking || ''));
-        if (_liveMode) { _stickToBottom(bodyEl); _followResponse(scope); }
+        _stickToBottom(bodyEl);
+        _followResponse(scope);
         if (delta.estimated_tokens) {
           const total = (thinkingTokens.get(data.index) || 0) + delta.estimated_tokens;
           thinkingTokens.set(data.index, total);
@@ -1035,7 +1022,8 @@
           _deferredMarkdown.delete(bodyEl);
           renderMarkdownDebounced(bodyEl._rawText, bodyEl);
         }
-        if (_liveMode) { _stickToBottom(bodyEl); _followResponse(scope); }
+        _stickToBottom(bodyEl);
+        _followResponse(scope);
       } else if (delta.type === 'input_json_delta') {
         const inputEl = _scopeFind(scope, `tool-input-${data.index}`);
         if (inputEl) inputEl.appendChild(document.createTextNode(delta.partial_json || ''));
@@ -1133,50 +1121,42 @@
   }
 
   // ============================================================
-  // LIVE LANES — the detail panel while live mode is on
+  // LIVE LANES — the detail panel
   // ============================================================
   /* One column per agent of the open session — the main thread leftmost,
      each subagent beside it \u2014 each a running feed of that agent's turns.
      Lanes are kept in step with state.interactions by _lanesSync (batched to
      a frame): turn elements are created, moved and dropped, never rebuilt;
-     streamed events go straight to their turn's element. Live mode off, none
-     of this runs and the detail panel is the request/response view.
+     streamed events go straight to their turn's element. Each lane follows
+     its newest turn until the reader scrolls it up (or jumps to a turn from
+     the timeline); its "\u2193 live" chip resumes the follow. A click on a
+     turn opens it whole in the detail modal (DETAIL MODAL below).
+     Phones show no lanes, only the timeline.
      The decisions (grouping, pairing, windows) are in inspector-lanes.js. */
   const LANES = window.inspectorLanes;
   const LANE_MAIN = LANES.LANE_MAIN;
   let _lanesView = null;     // { instanceId, root, lanes, turns, calls, results, links, byId, built }
-  let _lanesPinned = false;  // live, but the reader opened a turn's full detail
   let _lanesSyncQueued = 0;
   let _lanesTimer = null;
   const _reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 
   function _lanesActive() {
-    return _liveMode && !_lanesPinned && activeInstanceTab !== SESSIONS_TAB;
-  }
-
-  // "Lanes" beside the focus button, while a turn opened from live mode is shown.
-  const _lanesBackBtn = document.createElement('button');
-  _lanesBackBtn.className = 'detail-lanes-btn';
-  _lanesBackBtn.title = 'Back to the live lanes';
-  _lanesBackBtn.textContent = '\u21A9 lanes';
-  _lanesBackBtn.hidden = true;
-  document.getElementById('detail')?.appendChild(_lanesBackBtn);
-  _lanesBackBtn.addEventListener('click', () => {
-    _lanesPinned = false;
-    _lanesUpdateBackBtn();
-    _lanesShow();
-  });
-
-  function _lanesUpdateBackBtn() {
-    _lanesBackBtn.hidden = !(_liveMode && _lanesPinned && activeInstanceTab !== SESSIONS_TAB);
+    return activeInstanceTab !== SESSIONS_TAB && !_isPhone();
   }
 
   function _lanesShow() {
+    if (activeInstanceTab === SESSIONS_TAB) return;
+    // Nothing to show yet: the empty state says so.
+    if (!state.interactions.some(isVisibleInTimeline)) {
+      detailContent.classList.add('hidden');
+      emptyState.classList.remove('hidden');
+      renderEmptyState();
+      return;
+    }
+    emptyState.classList.add('hidden');
     if (!_lanesActive()) return;
     if (!_inspectorShown()) { _renderOnShow = true; return; }
     if (_lanesView?.instanceId === activeInstanceTab && _lanesView.root.isConnected) {
-      // Clearing the timeline may have hidden the panel.
-      emptyState.classList.add('hidden');
       detailContent.classList.remove('hidden');
       _lanesQueueSync();
       return;
@@ -1184,10 +1164,14 @@
     _lanesBuild();
   }
 
+  // Into phone width the lanes go; out of it they come back.
+  _phoneQuery.addEventListener?.('change', () => {
+    if (_isPhone()) _lanesTeardown();
+    else _lanesShow();
+  });
+
   function _lanesBuild() {
     _lanesTeardown();
-    _detailView = null;
-    _deferredRender = null;
     emptyState.classList.add('hidden');
     detailContent.classList.remove('hidden');
     detailContent.classList.add('lanes-active');
@@ -1322,7 +1306,7 @@
     el.innerHTML = `<header class="ln-head"><span class="ln-dot"></span><span class="ln-label"></span>`
       + `<span class="ln-model"></span><span class="ln-stats"></span><span class="ln-state"></span></header>`
       + `<div class="ln-feed"><div class="ln-empty">Waiting for the first turn\u2026</div><div class="ln-older" hidden></div></div>`
-      + `<button class="ln-pill" hidden>\u2193 live</button>`
+      + `<button class="ln-pill" title="Back to the newest turn and follow it" hidden>\u2193 live</button>`
       + `<button class="ln-rail" title="Show this lane"><span class="ln-rail-label"></span></button>`;
     const lane = {
       key, el, feed: el.querySelector('.ln-feed'), older: el.querySelector('.ln-older'),
@@ -1333,12 +1317,13 @@
     const feed = lane.feed;
     feed.addEventListener('scroll', () => {
       // A scroll we did not make is the reader's: up pauses, back down resumes.
-      if (Math.abs(feed.scrollTop - lane.expectTop) > 2) {
-        const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight <= FOLLOW_SLACK_PX;
-        if (atBottom && !lane.win.toId) _laneResume(lane);
-        else if (!atBottom) _lanePause(lane);
-        lane.expectTop = feed.scrollTop;
-      }
+      const intent = LANES.scrollIntent({
+        scrollTop: feed.scrollTop, expectTop: lane.expectTop, scrollHeight: feed.scrollHeight,
+        clientHeight: feed.clientHeight, paged: !!lane.win.toId,
+      }, FOLLOW_SLACK_PX);
+      if (intent === 'resume' && !lane.follow) _laneResume(lane);
+      else if (intent === 'pause') _lanePause(lane);
+      if (Math.abs(feed.scrollTop - lane.expectTop) > 2) lane.expectTop = feed.scrollTop;
       if (feed.scrollTop < 40) _laneOlder(lane);
     }, { passive: true });
     feed.addEventListener('wheel', e => {
@@ -1514,6 +1499,8 @@
   function _laneResume(lane) {
     lane.follow = true;
     lane.pill.hidden = true;
+    cancelAnimationFrame(lane.raf);
+    lane.raf = 0;
     if (lane.win.toId) {
       // Paged back past the cap: go back to the newest turns.
       lane.win = {};
@@ -1577,7 +1564,8 @@
     el.dataset.id = i.id;
     // The header line; on a desktop it also carries the turn's thinking (one
     // chip per block), its token usage and its busy spinner (style.css).
-    el.innerHTML = `<div class="ln-sep"><span class="ln-sep-cap"></span><span class="ln-sep-think"></span>`
+    el.innerHTML = `<div class="ln-sep"><span class="ln-sep-cap"></span><span class="ln-sep-dur"></span>`
+      + `<span class="ln-sep-cost"></span><span class="ln-sep-think"></span>`
       + `<span class="ln-sep-use"></span><span class="ln-spin"></span></div>`;
     const tv = { id: i.id, el, lane, blocks: new Map(), body: null, live: false, streamed: false, calls: [], waitEl: null };
     const text = LANES.turnUserText(i);
@@ -1620,7 +1608,10 @@
     }
   }
 
-  // "#12 · 14:02:33 · 4.2s", and the usage "↑2 ⟳72.9k ↓1.3k".
+  function _setHtml(el, html) { if (el && el.innerHTML !== html) el.innerHTML = html; }
+
+  // "#12 · 14:02:33", its duration and cost as the timeline's cards show
+  // them ("live" while it streams), and the usage "↑2 ⟳72.9k ↓1.3k".
   function _turnCaption(tv, i) {
     if (!i) return;
     const parts = [];
@@ -1628,10 +1619,12 @@
     if (n) parts.push(n);
     const at = i.timing?.startedAt || i.timestamp;
     if (at) parts.push(formatWallTime(at));
-    if (_isLiveInteraction(i)) parts.push('live');
-    else if (i.timing?.duration != null) parts.push(formatDuration(i.timing.duration));
     if (i.status === 'error') parts.push('error');
     _setText(tv.el.querySelector('.ln-sep-cap'), parts.join(' \u00B7 '));
+    const live = _isLiveInteraction(i);
+    _setHtml(tv.el.querySelector('.ln-sep-dur'), live ? 'live'
+      : (i.timing?.duration != null ? durationGauge(i.timing.duration) : ''));
+    _setHtml(tv.el.querySelector('.ln-sep-cost'), turnCostGauge(computeCost(i.usage, i.pricing)));
     const use = tv.el.querySelector('.ln-sep-use');
     const u = LANES.usageLine(i.usage);
     const html = u ? u.parts.map(p => `<span class="ln-use-${p.kind}">${escHtml(p.text)}</span>`).join('') : '';
@@ -2224,14 +2217,98 @@
       target.el.classList.add('is-flash');
       return;
     }
-    if (e.target.closest('a')) return;
-    // Anything else in a turn opens it in the full detail view — not the end
-    // of a drag that selected text.
-    const turnEl = e.target.closest('.ln-turn');
-    if (!turnEl) return;
-    const s = window.getSelection();
-    if (s && !s.isCollapsed && turnEl.contains(s.anchorNode)) return;
-    select({ type: 'turn', id: turnEl.dataset.id }, { userClick: true });
+    // Anything else in a turn opens it whole in the detail modal — not the
+    // end of a drag that selected text.
+    if (!LANES.turnClickOpens(e.target, window.getSelection()?.toString())) return;
+    openDetailModal({ type: 'turn', id: e.target.closest('.ln-turn').dataset.id });
+  }
+
+  // --- Hover and jump from the timeline ---
+
+  // The lane element a timeline item stands for: a turn, or one of its calls.
+  function _laneTargetOf(sel) {
+    const v = _lanesView;
+    if (!v || !sel) return null;
+    const id = _selId(sel);
+    if (sel.type === 'tool') {
+      const i = v.byId.get(id) || state.interactions.find(x => x.id === id);
+      const tc = i ? extractToolCalls(i)[sel.toolIndex] : null;
+      const call = tc?.id ? v.calls.get(tc.id) : null;
+      if (call?.el?.isConnected) return { el: call.el, lane: call.lane, id };
+    }
+    const tv = v.turns.get(id);
+    return tv?.el?.isConnected ? { el: tv.el, lane: tv.lane, id } : null;
+  }
+
+  let _hoverEls = [];
+  function _laneHover(sel) {
+    for (const el of _hoverEls) el.classList.remove('is-hover');
+    _hoverEls = [];
+    if (!sel) return;
+    const t = _laneTargetOf(sel);
+    if (!t) return;
+    const turn = t.el.closest('.ln-turn');
+    _hoverEls = turn && turn !== t.el ? [turn, t.el] : [t.el];
+    for (const el of _hoverEls) el.classList.add('is-hover');
+  }
+
+  /* A timeline click on desktop: bring the item into view in its lane and
+     flash it. The lane stops following, so the reader can stay there; its
+     "↓ live" chip goes back. False when the lanes do not hold the item
+     (a hook, an MCP call, another endpoint). */
+  function _laneReveal(sel) {
+    const v = _lanesView;
+    if (!v || !sel) return false;
+    const id = _selId(sel);
+    const i = v.byId.get(id);
+    if (!i || !LANES.isLaneTurn(i)) return false;
+    let lane = null;
+    for (const l of v.lanes.values()) if (l.ids.includes(id)) { lane = l; break; }
+    if (!lane) return false;
+    _lanePause(lane);
+    if (lane.el.classList.contains('is-rail')) { lane.railOpened = true; lane.el.classList.remove('is-rail'); }
+    // A turn outside the rendered window: move the window to it.
+    if (!lane.views.has(id)) {
+      const w = LANES.windowAround(lane.ids, id, lane.win);
+      if (!w) return false;
+      lane.win = { fromId: lane.ids[w.from], toId: w.to >= lane.ids.length ? null : lane.ids[w.to - 1] };
+      _laneRender(lane);
+    }
+    const t = _laneTargetOf(sel);
+    if (!t) return false;
+    lane.el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    _laneScrollTo(lane, t.el);
+    t.el.classList.remove('is-flash');
+    void t.el.offsetWidth;
+    t.el.classList.add('is-flash');
+    return true;
+  }
+
+  // Ease the lane so `el` sits a little below its top; every step is ours
+  // (expectTop), so the scroll handler does not take it for the reader's.
+  function _laneScrollTo(lane, el) {
+    const feed = lane.feed;
+    cancelAnimationFrame(lane.raf);
+    const fr = feed.getBoundingClientRect(), er = el.getBoundingClientRect();
+    const max = feed.scrollHeight - feed.clientHeight;
+    const target = Math.max(0, Math.min(max, feed.scrollTop + er.top - fr.top - 12));
+    if (_reduceMotion?.matches) {
+      feed.scrollTop = target;
+      lane.expectTop = feed.scrollTop;
+      lane.raf = 0;
+      return;
+    }
+    let frames = 30;
+    const step = () => {
+      lane.raf = 0;
+      if (lane.follow || !feed.isConnected) return;
+      const d = target - feed.scrollTop;
+      if (Math.abs(d) <= 3 || --frames <= 0) { feed.scrollTop = target; lane.expectTop = feed.scrollTop; return; }
+      feed.scrollTop += Math.sign(d) * Math.max(3, Math.abs(d) * 0.3);
+      lane.expectTop = feed.scrollTop;
+      lane.raf = requestAnimationFrame(step);
+    };
+    lane.raf = requestAnimationFrame(step);
   }
 
   // --- Focus mode ---
@@ -2279,8 +2356,7 @@
     rebuildToolEntries(updated.id);
     updateStats();
 
-    const sel = state.selection;
-    if (sel?.type === 'turn' && sel.id === updated.id) {
+    if (_modalSel?.type === 'turn' && _modalSel.id === updated.id) {
       refreshDetailIfShowing(state.interactions[idx] || updated);
     }
 
@@ -2340,42 +2416,63 @@
 
   let _lastRenderedAgentId = null;
 
-  // --- Timeline view mode toggle (single column vs parallel columns) ---
   let _timelineMode = 'parallel';
 
-  function initTimelineToggle() {
+  /* The timeline follows its newest entry until the reader scrolls it up;
+     scrolling back down, or its "↓ live" chip in the header, resumes. */
+  let _tlFollow = true;
+  let _tlExpectTop = 0;
+  let _tlLiveBtn = null;
+
+  function _tlSetFollow(on) {
+    _tlFollow = on;
+    if (_tlLiveBtn) _tlLiveBtn.hidden = on;
+  }
+
+  function initTimeline() {
     const header = document.getElementById('timeline-header');
-    if (!header || header.querySelector('.timeline-view-toggle')) return;
-    const toggle = document.createElement('div');
-    toggle.className = 'timeline-view-toggle';
-
-    const liveOnSvg = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,6.5 5,9.5 10,3"/></svg>`;
-    const liveOffSvg = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="3" y1="3" x2="9" y2="9"/><line x1="9" y1="3" x2="3" y2="9"/></svg>`;
-    function liveButtonContent(on) { return (on ? liveOnSvg : liveOffSvg) + `<span class="tl-toggle-label">live</span>`; }
-
-    toggle.innerHTML = `
-      <button class="tl-toggle-btn tl-live-btn${_liveMode ? ' active' : ''}" title="${_liveMode ? 'Live mode on' : 'Live mode off'}">${liveButtonContent(_liveMode)}</button>
-    `;
-    const liveBtn = toggle.querySelector('.tl-live-btn');
-    liveBtn.addEventListener('click', () => {
-      _liveMode = !_liveMode;
-      localStorage.setItem('timelineLive', _liveMode);
-      liveBtn.classList.toggle('active', _liveMode);
-      liveBtn.innerHTML = liveButtonContent(_liveMode);
-      liveBtn.title = _liveMode ? 'Live mode on' : 'Live mode off';
-      _lanesPinned = false;
-      _lanesUpdateBackBtn();
-      if (_liveMode) selectLastAndFollow();
-      else if (_lanesView) {
-        // Off: no trace of the lanes; the panel shows the selection as always.
-        _lanesTeardown();
-        if (state.selection) select(state.selection);
-        else selectLastAndFollow();
-      }
-    });
-    header.appendChild(toggle);
+    if (!header || header.querySelector('.tl-live-chip')) return;
+    _tlLiveBtn = document.createElement('button');
+    _tlLiveBtn.className = 'tl-live-chip';
+    _tlLiveBtn.title = 'Back to the newest turn and follow it';
+    _tlLiveBtn.textContent = '\u2193 live';
+    _tlLiveBtn.hidden = _tlFollow;
+    _tlLiveBtn.addEventListener('click', () => { _tlSetFollow(true); scrollTimelineToBottom(); });
+    header.appendChild(_tlLiveBtn);
     const aside = document.getElementById('timeline');
     if (aside) aside.classList.add('parallel-mode');
+
+    timelineList.addEventListener('scroll', () => {
+      const intent = LANES.scrollIntent({
+        scrollTop: timelineList.scrollTop, expectTop: _tlExpectTop,
+        scrollHeight: timelineList.scrollHeight, clientHeight: timelineList.clientHeight,
+      }, FOLLOW_SLACK_PX);
+      if (intent === 'resume') _tlSetFollow(true);
+      else if (intent === 'pause') _tlSetFollow(false);
+      _tlExpectTop = timelineList.scrollTop;
+    }, { passive: true });
+    timelineList.addEventListener('wheel', e => {
+      if (e.deltaY < 0 && timelineList.scrollHeight > timelineList.clientHeight) _tlSetFollow(false);
+    }, { passive: true });
+
+    // Hovering a timeline item lights up its turn (and call) in the lanes.
+    timelineList.addEventListener('mouseover', e => {
+      const tool = e.target.closest?.('[data-tool-id]');
+      if (tool) {
+        const [interactionId, idx] = _splitToolId(tool.dataset.toolId);
+        _laneHover({ type: 'tool', interactionId, toolIndex: idx });
+        return;
+      }
+      const node = e.target.closest?.('.timeline-entry[data-id], .turn-group[data-turn-id]');
+      _laneHover(node ? { type: 'turn', id: node.dataset.id || node.dataset.turnId } : null);
+    });
+    timelineList.addEventListener('mouseleave', () => _laneHover(null));
+  }
+
+  // "<interactionId>-<toolIndex>" — the id itself may hold dashes.
+  function _splitToolId(s) {
+    const at = s.lastIndexOf('-');
+    return [s.slice(0, at), Number(s.slice(at + 1))];
   }
 
   function renderTimelineActive() {
@@ -2400,7 +2497,7 @@
   // --- Build node HTML elements (reusing existing patterns) ---
 
   // --- Turn node header -------------------------------------------------
-  // Two lines, FIXED at 44px (see .turn-entry in style.css). This height is a
+  // Two lines, FIXED at 34px (see .turn-entry in style.css). This height is a
   // contract with wide-layout's MIN_ENTRY_HEIGHT: the parallel view positions
   // tool rows at y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT, so a header that
   // renders taller than it budgets pushes tool rows out of their own node and
@@ -2595,7 +2692,7 @@
           if (groupEl) {
             // collapsed shows the summary row alone; expanded shows the
             // summary row plus one row per entry
-            const delta = clamped.length * 24;
+            const delta = clamped.length * D3_CONST.TOOL_HEIGHT;
             const h = parseFloat(groupEl.style.height) || 0;
             groupEl.style.height = (wasCollapsed ? h + delta : h - delta) + 'px';
           }
@@ -2981,7 +3078,7 @@
   // --- Main render ---
 
   function renderTimelineParallel() {
-    const savedScroll = _liveMode ? null : timelineList.scrollTop;
+    const savedScroll = _tlFollow ? null : timelineList.scrollTop;
     timelineList.innerHTML = '';
     _renderLoadEarlier();
     resetSubagentRegistry();
@@ -3174,8 +3271,8 @@
       }
     }
 
-    if (_liveMode) scrollTimelineToBottom();
-    else if (savedScroll != null) timelineList.scrollTop = savedScroll;
+    if (_tlFollow) scrollTimelineToBottom();
+    else if (savedScroll != null) { timelineList.scrollTop = savedScroll; _tlExpectTop = timelineList.scrollTop; }
 
     // Save state for incremental appends
     _d3State = {
@@ -3275,7 +3372,7 @@
     // only resolvable from the whole interaction list — which already contains
     // this entry by the time we get here. So hand off to a rebuild rather than
     // placing it as a standalone row. Gating this on "the previous item is a
-    // recent LLM turn" is what used to leave hook runs expanded in live mode
+    // recent LLM turn" is what used to leave hook runs expanded while following
     // whenever a SubagentStop, a user prompt, or a text-only turn landed in
     // between; the rebuild is rAF-coalesced, so a burst still costs one pass.
     if (wl.isClampCandidate(interaction)) {
@@ -3756,7 +3853,7 @@
     const interaction = state.interactions.find(i => i.id === interactionId);
     const toolEl = createToolEntryEl(interactionId, toolIdx, name, summary, null, interaction?.subagent);
     container.appendChild(toolEl);
-    if (_liveMode) scrollTimelineToBottom();
+    if (_tlFollow) scrollTimelineToBottom();
   }
 
   function createToolEntryEl(interactionId, toolIdx, name, summary, input, subagent) {
@@ -3784,7 +3881,7 @@
   }
 
   // --- Turn hover deck ----------------------------------------------------
-  // The 44px header is a hard budget, so everything that doesn't fit lives
+  // The 34px header is a hard budget, so everything that doesn't fit lives
   // here: exact token counts, the cost split, wall-clock span, full model id.
   // Fixed-position (like Pro's .vc-remote-tip) so it costs the timeline no
   // vertical space and no node box can clip it.
@@ -4085,26 +4182,95 @@
   }
 
   function scrollTimelineToBottom() {
-    const el = document.getElementById('timeline-list');
-    el.scrollTop = el.scrollHeight;
+    timelineList.scrollTop = timelineList.scrollHeight;
+    _tlExpectTop = timelineList.scrollTop;
   }
 
   // ============================================================
-  // SELECTION + DETAIL PANEL
+  // SELECTION + DETAIL MODAL
   // ============================================================
+  /* The detail panel is the live lanes. A turn's full detail — request and
+     response, thinking, tool calls with their inputs and results, hooks,
+     cURL — opens in a big modal: a click on a lane's turn, or (where the
+     lanes do not hold the item, and on phones) on the timeline. The modal
+     reuses the detail renderers below; they draw into _detailHost. */
+  const _selId = sel => (sel.type === 'tool' ? sel.interactionId : sel.id);
 
-  function selectLastAndFollow() {
-    const filtered = state.interactions.filter(i => i.instanceId === activeInstanceTab);
-    const last = filtered[filtered.length - 1];
-    if (last) {
-      select({ type: 'turn', id: last.id });
-    } else {
-      state.selection = null;
-      document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
-      detailContent.classList.add('hidden');
-      emptyState.classList.remove('hidden');
+  // What retention must not trim: the timeline's selection and the modal's.
+  function _keptIds() {
+    const keep = new Set();
+    if (state.selection) keep.add(_selId(state.selection));
+    if (_modalSel) keep.add(_selId(_modalSel));
+    return keep;
+  }
+
+  const _modalEl = document.createElement('div');
+  _modalEl.id = 'turn-modal';
+  _modalEl.className = 'turn-modal';
+  _modalEl.hidden = true;
+  _modalEl.innerHTML = `<div class="turn-modal-backdrop"></div>`
+    + `<div class="turn-modal-panel" role="dialog" aria-modal="true" aria-label="Turn detail">`
+    + `<button class="turn-modal-close" title="Close (Esc)">\u2715</button>`
+    + `<div class="turn-modal-body"></div></div>`;
+  document.body.appendChild(_modalEl);
+  const _detailHost = _modalEl.querySelector('.turn-modal-body');
+  _modalEl.querySelector('.turn-modal-backdrop').addEventListener('click', () => closeDetailModal());
+  _modalEl.querySelector('.turn-modal-close').addEventListener('click', () => closeDetailModal());
+  let _modalSel = null;
+
+  function openDetailModal(sel) {
+    _modalSel = sel;
+    _hideTipsForModal();
+    if (_modalEl.hidden) {
+      _modalEl.hidden = false;
+      document.body.classList.add('turn-modal-open');
     }
-    scrollTimelineToBottom();
+    _modalRender();
+  }
+
+  function closeDetailModal() {
+    if (!_modalSel && _modalEl.hidden) return;
+    _modalSel = null;
+    _modalEl.hidden = true;
+    document.body.classList.remove('turn-modal-open');
+    _detailView = null;
+    _deferredRender = null;
+    _detailHost.innerHTML = '';
+    _scheduleCompaction();
+  }
+
+  // Overlays opened from inside the modal (a file, a result, cURL) sit
+  // above it; Esc closes them first.
+  const _overModal = () => !!document.querySelector('.file-preview-overlay, .curl-modal-overlay');
+
+  function _hideTipsForModal() { hideTurnTip(); _thumbPopHide(); }
+
+  // The modal's interaction changed (detail fetched, an update, a layout
+  // switch): draw it again — patched in place where the renderer can.
+  function _modalRefresh(id) {
+    if (!_modalSel || (id != null && _selId(_modalSel) !== id && _modalSel.type !== 'tool')) return;
+    _modalRender();
+  }
+
+  /* Timeline selection. A user's click on desktop jumps to the item in its
+     lane (or opens the modal for what has no lane presence); on a phone it
+     opens the modal, full-screen. */
+  function select(sel, { userClick = false } = {}) {
+    state.selection = sel;
+    _markTimelineSelection(sel);
+    if (!userClick) return;
+    if (!_inspectorShown()) return;
+    if (_isPhone() || !_laneReveal(sel)) openDetailModal(sel);
+  }
+
+  function _markTimelineSelection(sel) {
+    document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
+    if (_d3State) d3UpdateSelection(_d3State.nodesLayer);
+    if (!sel) return;
+    const el = sel.type === 'turn'
+      ? document.querySelector(`.turn-entry[data-id="${CSS.escape(sel.id)}"]`)
+      : document.querySelector(`[data-tool-id="${CSS.escape(sel.interactionId + '-' + sel.toolIndex)}"]`);
+    el?.classList.add('selected');
   }
 
   // --- Focus mode button + keyboard shortcuts ---
@@ -4114,15 +4280,22 @@
   document.addEventListener('keydown', (e) => {
     const dashboardEl = document.getElementById('view-dashboard');
     if (!dashboardEl || dashboardEl.classList.contains('hidden')) return;
+    if (e.key === 'Escape' && _modalSel) {
+      if (_overModal()) return;
+      e.preventDefault();
+      closeDetailModal();
+      return;
+    }
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
 
     if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (_modalSel) return;
       e.preventDefault();
       toggleFocusMode();
       return;
     }
     if (e.key === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (!detailContent.querySelector('.vc-split')) return;
+      if (!_modalSel || !_detailHost.querySelector('.vc-split')) return;
       e.preventDefault();
       toggleDetailLayout();
       return;
@@ -4134,43 +4307,13 @@
     }
   });
 
-  // --- Arrow key navigation between LLM turns (when not in live mode) ---
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-    if (_liveMode) return;
-    const dashboardEl = document.getElementById('view-dashboard');
-    if (!dashboardEl || dashboardEl.classList.contains('hidden')) return;
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
-
-    e.preventDefault();
-    const entries = Array.from(
-      timelineList.querySelectorAll('.turn-entry:not(.hook-call-entry):not(.mcp-call-entry)')
-    );
-    if (entries.length === 0) return;
-
-    const currentId = state.selection?.id;
-    let currentIdx = currentId ? entries.findIndex(el => el.dataset.id === currentId) : -1;
-    let nextIdx;
-    if (e.key === 'ArrowUp') {
-      nextIdx = currentIdx > 0 ? currentIdx - 1 : 0;
-    } else {
-      nextIdx = currentIdx < entries.length - 1 ? currentIdx + 1 : entries.length - 1;
-    }
-    if (nextIdx === currentIdx && currentIdx >= 0) return;
-
-    const nextEl = entries[nextIdx];
-    const nextId = nextEl.dataset.id;
-    if (nextId) {
-      select({ type: 'turn', id: nextId }, { userClick: true });
-    }
-  });
-
   const _pendingSseRequests = new Set();
   const _pendingDetailRequests = new Set();
 
   /* The inspector is on screen when its view is shown and the browser tab is
-     in front. Hidden, nothing renders; hidden for a while, the detail panel
-     and every full-detail turn are dropped, summaries kept. */
+     in front. Hidden, nothing renders; hidden for a while, the lanes, the
+     detail modal's content and every full-detail turn are dropped, summaries
+     kept (an open modal is drawn again on return). */
   const _inspectorView = document.getElementById('view-dashboard');
   function _inspectorShown() {
     if (document.hidden) return false;
@@ -4194,8 +4337,8 @@
     _renderOnShow = false;
     // Lanes missed what streamed meanwhile: build them again.
     _lanesTeardown();
-    if (_lanesActive()) _lanesShow();
-    else if (state.selection) select(state.selection);
+    _lanesShow();
+    if (_modalSel) { _detailView = null; _modalRender(); }
   }
 
   function _dropHiddenDetail() {
@@ -4205,9 +4348,9 @@
     _lanesTeardown();
     _detailView = null;
     _deferredRender = null;
-    detailContent.innerHTML = '';
+    _detailHost.innerHTML = '';
     _compactInteractions({ hidden: true });
-    if (state.selection || hadLanes) _renderOnShow = true;
+    if (_modalSel || hadLanes) _renderOnShow = true;
   }
 
   document.addEventListener('visibilitychange', _onInspectorVisibility);
@@ -4241,9 +4384,7 @@
 
   function _compactInteractions({ hidden = false } = {}) {
     _recentFull.splice(0, Math.max(0, _recentFull.length - RET.LIMITS.FULL_DETAIL_BUDGET));
-    const keep = new Set();
-    const sel = state.selection;
-    if (sel) keep.add(sel.type === 'tool' ? sel.interactionId : sel.id);
+    const keep = _keptIds();
     const plan = RET.compactionPlan(state.interactions, {
       recentFull: _recentFull, keep, activeInstance: activeInstanceTab, hidden, now: Date.now(),
     });
@@ -4367,7 +4508,7 @@
     i._summary = true;
   }
 
-  /* What detailContent currently shows. A re-select of the same target patches
+  /* What the detail modal (_detailHost) currently shows. A re-select of the same target patches
      the parts that moved instead of rebuilding the panel — during a live
      session every hook, usage update and enrichment re-selects, and a rebuild
      drops the user's text selection, closes what they just opened, and replays
@@ -4404,7 +4545,7 @@
     if (_deferredRender) {
       const sel = _deferredRender;
       _deferredRender = null;
-      if (state.selection && _detailKey(state.selection) === _detailKey(sel)) select(sel);
+      if (_modalSel && _detailKey(_modalSel) === _detailKey(sel)) _modalRender();
     }
   });
 
@@ -4437,7 +4578,7 @@
     }
     // Rebuilding under an active selection would drop it mid-copy. The same
     // target is still there once the selection collapses.
-    if (same && _selectionInside(detailContent)) {
+    if (same && _selectionInside(_detailHost)) {
       _deferredRender = sel;
       return;
     }
@@ -4445,102 +4586,40 @@
     else renderTurnDetail(interaction);
   }
 
-  function select(sel, { userClick = false } = {}) {
-    state.selection = sel;
-    // Off screen (another view, a background browser tab) a selection is only
-    // recorded; its detail is fetched and rendered once the inspector shows.
+  // Draw the modal's selection: fetch what the summary lacks, then patch or
+  // build the detail. Off screen it is only recorded, drawn on return.
+  function _modalRender() {
+    const sel = _modalSel;
+    if (!sel) return;
     if (!_inspectorShown()) { _renderOnShow = true; return; }
-    // Phones show timeline and detail one at a time; a tap drills in.
-    if (userClick) window.dashboard.mobileShowDetail?.();
+    const interaction = state.interactions.find(i => i.id === _selId(sel));
+    if (!interaction) return;
 
-    document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
-
-    if (_timelineMode === 'parallel' && _d3State) {
-      d3UpdateSelection(_d3State.nodesLayer);
+    if (interaction._summary && (sel.type === 'tool' || _needsDetailOnSelect(interaction))) {
+      _requestDetail(interaction.id);
     }
-
-    // Live mode shows the lanes. A turn opened by hand shows its full detail
-    // and stays until the reader goes back to the lanes.
-    if (_liveMode) {
-      if (userClick) _lanesPinned = true;
-      _lanesUpdateBackBtn();
-      if (_lanesActive()) {
-        if (sel.type === 'turn') document.querySelector(`.turn-entry[data-id="${sel.id}"]`)?.classList.add('selected');
-        _lanesShow();
-        return;
-      }
-      _lanesTeardown();
+    // Lazy-load sseEvents for completed streaming interactions
+    if (interaction.isStreaming && !interaction.response?.sseEvents?.length && !_pendingSseRequests.has(interaction.id)) {
+      _pendingSseRequests.add(interaction.id);
+      sendWs({ type: 'interaction:getSseEvents', id: interaction.id });
     }
+    _renderDetail(sel, interaction);
+  }
 
-    if (sel.type === 'turn') {
-      const el = document.querySelector(`.turn-entry[data-id="${sel.id}"]`);
-      if (el) {
-        el.classList.add('selected');
-        if (userClick) el.scrollIntoView({ block: 'nearest' });
-      }
-
-      const interaction = state.interactions.find(i => i.id === sel.id);
-      if (!interaction) return;
-
-      if (interaction._summary && _needsDetailOnSelect(interaction)) {
-        if (!_pendingDetailRequests.has(interaction.id)) {
-          _pendingDetailRequests.add(interaction.id);
-          sendWs({ type: 'interaction:getDetail', id: interaction.id });
-        }
-        // Retry once after 3s if still pending (handles dropped messages)
-        const retryId = interaction.id;
-        setTimeout(() => {
-          const cur = state.interactions.find(i => i.id === retryId);
-          if (cur?._summary && !_pendingDetailRequests.has(retryId)) {
-            _pendingDetailRequests.add(retryId);
-            sendWs({ type: 'interaction:getDetail', id: retryId });
-          }
-        }, 3000);
-      }
-
-      // Lazy-load sseEvents for completed streaming interactions
-      if (interaction.isStreaming && !interaction.response?.sseEvents?.length && !_pendingSseRequests.has(interaction.id)) {
-        _pendingSseRequests.add(interaction.id);
-        sendWs({ type: 'interaction:getSseEvents', id: interaction.id });
-      }
-
-      emptyState.classList.add('hidden');
-      detailContent.classList.remove('hidden');
-      _renderDetail(sel, interaction);
-    } else if (sel.type === 'tool') {
-      const el = document.querySelector(`[data-tool-id="${sel.interactionId}-${sel.toolIndex}"]`);
-      if (el) {
-        el.classList.add('selected');
-        if (userClick) el.scrollIntoView({ block: 'nearest' });
-      }
-
-      const interaction = state.interactions.find(i => i.id === sel.interactionId);
-      if (!interaction) return;
-
-      if (interaction._summary) {
-        if (!_pendingDetailRequests.has(interaction.id)) {
-          _pendingDetailRequests.add(interaction.id);
-          sendWs({ type: 'interaction:getDetail', id: interaction.id });
-        }
-        const retryId2 = interaction.id;
-        setTimeout(() => {
-          const cur = state.interactions.find(i => i.id === retryId2);
-          if (cur?._summary && !_pendingDetailRequests.has(retryId2)) {
-            _pendingDetailRequests.add(retryId2);
-            sendWs({ type: 'interaction:getDetail', id: retryId2 });
-          }
-        }, 3000);
-      }
-
-      if (interaction.isStreaming && !interaction.response?.sseEvents?.length && !_pendingSseRequests.has(interaction.id)) {
-        _pendingSseRequests.add(interaction.id);
-        sendWs({ type: 'interaction:getSseEvents', id: interaction.id });
-      }
-
-      emptyState.classList.add('hidden');
-      detailContent.classList.remove('hidden');
-      _renderDetail(sel, interaction);
+  // Fetch a turn's full detail; retry once after 3s if still pending
+  // (handles dropped messages).
+  function _requestDetail(id) {
+    if (!_pendingDetailRequests.has(id)) {
+      _pendingDetailRequests.add(id);
+      sendWs({ type: 'interaction:getDetail', id });
     }
+    setTimeout(() => {
+      const cur = state.interactions.find(i => i.id === id);
+      if (cur?._summary && !_pendingDetailRequests.has(id)) {
+        _pendingDetailRequests.add(id);
+        sendWs({ type: 'interaction:getDetail', id });
+      }
+    }, 3000);
   }
 
   // jsonBlock marks a small value with its line count (data-jt-lines); a
@@ -4602,12 +4681,12 @@
       html += '<p class="info-label">No output</p>';
     }
 
-    detailContent.innerHTML = html;
-    autoExpandSmallJsonBlocks(detailContent);
-    processMarkdownBlocks(detailContent);
-    linkifyDetail(detailContent);
+    _detailHost.innerHTML = html;
+    autoExpandSmallJsonBlocks(_detailHost);
+    processMarkdownBlocks(_detailHost);
+    linkifyDetail(_detailHost);
     _detailView = { key: `turn:${interaction.id}`, kind: 'mcp', id: interaction.id,
-                    root: detailContent.firstElementChild, sig: _detailSig(interaction) };
+                    root: _detailHost.firstElementChild, sig: _detailSig(interaction) };
   }
 
   function renderHookCallDetail(interaction) {
@@ -4657,16 +4736,16 @@
     html += '<div class="section-title">Raw Hook Data</div>';
     html += jsonBlock(req);
 
-    detailContent.innerHTML = html;
-    for (const btn of detailContent.querySelectorAll('.hook-prompt-image button')) {
+    _detailHost.innerHTML = html;
+    for (const btn of _detailHost.querySelectorAll('.hook-prompt-image button')) {
       btn.addEventListener('click', () => openFilePreview(btn.dataset.filepath));
       // Claude Code's temp dir is cleared in time: the path stays, the picture goes.
       btn.querySelector('img').addEventListener('error', () => btn.closest('.hook-prompt-image').classList.add('is-gone'));
     }
-    autoExpandSmallJsonBlocks(detailContent);
-    linkifyDetail(detailContent);
+    autoExpandSmallJsonBlocks(_detailHost);
+    linkifyDetail(_detailHost);
     _detailView = { key: `turn:${interaction.id}`, kind: 'hook', id: interaction.id,
-                    root: detailContent.firstElementChild, sig: _detailSig(interaction) };
+                    root: _detailHost.firstElementChild, sig: _detailSig(interaction) };
   }
 
   /* ============================================================
@@ -5196,24 +5275,24 @@
         </div>
       </div>`;
 
-    detailContent.innerHTML = html;
+    _detailHost.innerHTML = html;
 
     // Set before the frame binds: a section opened there builds its body from
     // the turn on screen.
     _detailView = {
       key: `turn:${interaction.id}`, kind: 'llm', id: interaction.id,
-      root: detailContent.querySelector('.vc-detail'),
+      root: _detailHost.querySelector('.vc-detail'),
       sig: _detailSig(interaction), streamed: false,
     };
 
-    const splitEl = detailContent.querySelector('.vc-split');
+    const splitEl = _detailHost.querySelector('.vc-split');
     _applySplitRatio(splitEl, _detailPrefs.ratio);
-    _bindDetailFrame(detailContent, splitEl);
+    _bindDetailFrame(_detailHost, splitEl);
 
-    autoExpandSmallJsonBlocks(detailContent);
-    processMarkdownBlocks(detailContent);
-    linkifyDetail(detailContent);
-    _bindLazySections(detailContent);
+    autoExpandSmallJsonBlocks(_detailHost);
+    processMarkdownBlocks(_detailHost);
+    linkifyDetail(_detailHost);
+    _bindLazySections(_detailHost);
 
     if (_isLive && interaction.response?.sseEvents?.length > 0) {
       for (const event of interaction.response.sseEvents) {
@@ -5320,7 +5399,9 @@
   function toggleDetailLayout() {
     _detailPrefs.layout = _detailPrefs.layout === 'stacked' ? 'columns' : 'stacked';
     _saveDetailPrefs();
-    if (state.selection) select(state.selection);
+    // The frame is built for one layout: build it again.
+    _detailView = null;
+    _modalRender();
   }
 
   function _bindSplitResizer(resizer, splitEl) {
@@ -5384,7 +5465,7 @@
   function renderToolDetail(interaction, toolIndex) {
     const toolCalls = extractToolCalls(interaction);
     const tc = toolCalls[toolIndex];
-    if (!tc) { detailContent.innerHTML = '<p>Tool call not found.</p>'; return; }
+    if (!tc) { _detailHost.innerHTML = '<p>Tool call not found.</p>'; return; }
 
     let html = '';
     const isSkill = tc.name === 'Skill' && tc.input?.skill;
@@ -5457,19 +5538,19 @@
       html += `<p class="info-label">No result found (tool may still be executing or result not yet sent)</p>`;
     }
 
-    detailContent.innerHTML = html;
-    autoExpandSmallJsonBlocks(detailContent);
-    processMarkdownBlocks(detailContent);
-    linkifyDetail(detailContent);
-    bindMediaPreviews(detailContent);
+    _detailHost.innerHTML = html;
+    autoExpandSmallJsonBlocks(_detailHost);
+    processMarkdownBlocks(_detailHost);
+    linkifyDetail(_detailHost);
+    bindMediaPreviews(_detailHost);
     _detailView = { key: `tool:${interaction.id}:${toolIndex}`, kind: 'tool', id: interaction.id,
-                    toolIndex, root: detailContent.firstElementChild, sig: _detailSig(interaction) };
+                    toolIndex, root: _detailHost.firstElementChild, sig: _detailSig(interaction) };
 
-    const link = detailContent.querySelector('.turn-link');
+    const link = _detailHost.querySelector('.turn-link');
     if (link) {
       link.addEventListener('click', (e) => {
         e.preventDefault();
-        select({ type: 'turn', id: link.dataset.turnId }, { userClick: true });
+        openDetailModal({ type: 'turn', id: link.dataset.turnId });
       });
     }
   }
@@ -6009,17 +6090,6 @@
   }
 
   // --- Message handler ---
-  /* Every Claude Code hook and MCP call arrives as its own interaction, so in
-     live mode they used to yank the detail panel away from the turn that is
-     still streaming — several times per turn. They stay in the timeline and
-     stay clickable; they just don't steal the panel mid-stream. */
-  function _wouldInterruptStream(incoming) {
-    if (!incoming.isHook && !incoming.isMcp) return false;
-    const current = state.selection?.type === 'turn'
-      ? state.interactions.find(i => i.id === state.selection.id) : null;
-    return !!current && _isLiveInteraction(current);
-  }
-
   function handleMessage(msg) {
     switch (msg.type) {
       case 'init': {
@@ -6031,7 +6101,7 @@
           tab.loading = true;
           sendWs({ type: 'inspector:subscribe', instanceId: id });
         }
-        initTimelineToggle();
+        initTimeline();
         _applySessions(msg);
         switchInstanceTab(activeInstanceTab);
         break;
@@ -6105,16 +6175,11 @@
           // Past the per-session cap the oldest turns leave the page (and the
           // timeline is rebuilt without them); "Load earlier" brings them back.
           if (_trimTimeline(msg.interaction.instanceId)) renderTimelineActive();
-          // A turn opened from live mode stays put; otherwise live follows the
-          // newest (and the lanes show it).
-          if (_liveMode && !_lanesPinned && !_wouldInterruptStream(msg.interaction)) {
-            select({ type: 'turn', id: msg.interaction.id });
-            scrollTimelineToBottom();
-          } else if (_liveMode) {
-            scrollTimelineToBottom();
-          }
-          // Hooks name the agent an Agent call ran, and when it stopped.
-          if (_lanesView) _lanesQueueSync();
+          // The timeline follows the newest unless the reader scrolled it up;
+          // the lanes take the turn (hooks name the agent an Agent call ran,
+          // and when it stopped).
+          if (_tlFollow) scrollTimelineToBottom();
+          _lanesShow();
         }
         else _trimTimeline(msg.interaction.instanceId);
         updateStats();
@@ -6123,10 +6188,8 @@
       case 'interaction:update':
         if (!_openTabs.has(msg.interaction.instanceId)) break;
         updateInteraction(msg.interaction);
-        // Re-render detail if this interaction is selected
-        if (state.selection?.type === 'turn' && state.selection.id === msg.interaction.id) {
-          select({ type: 'turn', id: msg.interaction.id });
-        }
+        // Re-render the modal if it shows this interaction.
+        if (_modalSel?.type === 'turn' && _modalSel.id === msg.interaction.id) _modalRender();
         break;
 
       case 'sse_event':
@@ -6156,14 +6219,11 @@
             showCurlModal(buildCurlCommand(state.interactions[dIdx]));
           }
           // A tool's result lives in the turn after the one that called it.
-          if (state.selection?.id === msg.id || state.selection?.interactionId === msg.id
-              || state.selection?.type === 'tool') {
-            select(state.selection);
-          }
+          _modalRefresh(msg.id);
         } else if (dIdx >= 0 && !msg.interaction) {
           // Server couldn't find full data — clear _summary so we stop retrying
           delete state.interactions[dIdx]._summary;
-          for (const el of detailContent.querySelectorAll(`[data-lazy-detail="${msg.id}"]`)) {
+          for (const el of _detailHost.querySelectorAll(`[data-lazy-detail="${msg.id}"]`)) {
             const loader = el.querySelector('.json-block');
             if (loader) loader.textContent = '(data not available)';
           }
@@ -6182,9 +6242,11 @@
         state.interactions.unshift(...older);
         state.interactions.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         if (activeInstanceTab === msg.instanceId) {
-          renderTimelineActive();
           // The reader asked for what is above: show it, not the live end.
+          _tlSetFollow(false);
+          renderTimelineActive();
           timelineList.scrollTop = 0;
+          _tlExpectTop = 0;
           updateStats();
           _lanesOnEarlier();
         }
@@ -6197,9 +6259,7 @@
         if (sseIdx >= 0) {
           if (!state.interactions[sseIdx].response) state.interactions[sseIdx].response = {};
           state.interactions[sseIdx].response.sseEvents = msg.sseEvents || [];
-          if (state.selection?.id === msg.id || state.selection?.interactionId === msg.id) {
-            select(state.selection);
-          }
+          if (_modalSel && _selId(_modalSel) === msg.id) _modalRender();
         }
         break;
       }
@@ -6216,9 +6276,7 @@
         const interaction = state.interactions.find(i => i.id === msg.interactionId);
         if (interaction && msg.promptImages) {
           interaction.promptImages = msg.promptImages;
-          if (state.selection?.type === 'turn' && state.selection.id === msg.interactionId) {
-            select({ type: 'turn', id: msg.interactionId });
-          }
+          if (_modalSel?.type === 'turn' && _modalSel.id === msg.interactionId) _modalRender();
         } else if (interaction) {
           // Confirms or corrects the guess the turn started with; null puts it
           // back on the main thread.
@@ -6231,9 +6289,7 @@
             updateTurnSubagentBadge(interaction);
           }
           _lanesQueueSync();
-          if (state.selection?.type === 'turn' && state.selection.id === msg.interactionId) {
-            select({ type: 'turn', id: msg.interactionId });
-          }
+          if (_modalSel?.type === 'turn' && _modalSel.id === msg.interactionId) _modalRender();
         }
         break;
       }
@@ -6252,12 +6308,10 @@
     }
     if (toRemove.size === 0) return;
     state.interactions = state.interactions.filter(i => !toRemove.has(i.id));
-    if (state.selection && toRemove.has(state.selection.type === 'tool' ? state.selection.interactionId : state.selection.id)) {
-      state.selection = null;
-      detailContent.classList.add('hidden');
-      emptyState.classList.remove('hidden');
-    }
+    if (state.selection && toRemove.has(_selId(state.selection))) state.selection = null;
+    if (_modalSel && toRemove.has(_selId(_modalSel))) closeDetailModal();
     renderTimelineActive();
+    _lanesShow();
     updateStats();
   }
   document.getElementById('footerReset')?.addEventListener('click', clearVisibleTurns);

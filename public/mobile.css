@@ -23,7 +23,6 @@
 /* Phone-only chrome, switched on inside the width query below. */
 .mobile-tabbar,
 .mobile-sheet-backdrop,
-.mobile-detail-back,
 .mobile-pane-toggle,
 .mobile-cli-bar,
 .rule-move {
@@ -361,8 +360,9 @@
   .ref-container { padding: 0; }
   .ref-container { padding: 8px; }
 
-  /* --- Inspector: one pane at a time --------------------------- */
-  .inspector-body { position: relative; }
+  /* --- Inspector: the timeline alone ------------------------------
+     No lanes on a phone; a tap on a timeline item opens the detail modal
+     (inspector.js), full-screen. */
   .inspector-body aside#timeline {
     width: 100% !important;   /* beats the desktop drag width */
     max-width: none;
@@ -371,44 +371,16 @@
   .inspector-body #timeline-resizer,
   .inspector-body #detail,
   .detail-focus-btn { display: none; }
-  .inspector-body.mobile-detail aside#timeline { display: none; }
-  .inspector-body.mobile-detail #detail {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-width: 0;
-    animation: mobile-slide-in 0.2s ease;
-  }
-  @keyframes mobile-slide-in {
-    from { transform: translateX(24px); opacity: 0; }
-    to   { transform: none; opacity: 1; }
-  }
-  .mobile-detail-back {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    flex-shrink: 0;
-    align-self: flex-start;
-    margin: 6px 6px 0;
-    padding: 6px 10px 6px 4px;
-    background: none;
+  .turn-modal-panel {
+    width: 100vw;
+    height: var(--mobile-vh, 100dvh);
+    max-width: none;
     border: none;
-    border-radius: 8px;
-    color: var(--accent);
-    font-family: inherit;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
+    border-radius: 0;
   }
-  .mobile-detail-back svg {
-    width: 20px;
-    height: 20px;
-    fill: none;
-    stroke: currentColor;
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
+  .turn-modal-close { top: 8px; right: 8px; padding: 6px 12px; font-size: 16px; }
+  /* The split frame's toolbar keeps room for the bigger close button. */
+  .turn-modal-body .vc-detail-toolbar { padding-right: 56px; min-height: 40px; }
   /* Request/response halves are each too short on a phone. mobile.js adds
      a Request | Response toggle and sets data-mobile-pane; the other pane
      hides and the visible one takes the full height. */
