@@ -1623,8 +1623,8 @@
     _setText(tv.el.querySelector('.ln-sep-cap'), parts.join(' \u00B7 '));
     const live = _isLiveInteraction(i);
     _setHtml(tv.el.querySelector('.ln-sep-dur'), live ? 'live'
-      : (i.timing?.duration != null ? durationGauge(i.timing.duration) : ''));
-    _setHtml(tv.el.querySelector('.ln-sep-cost'), turnCostGauge(computeCost(i.usage, i.pricing)));
+      : (i.timing?.duration != null ? durationText(i.timing.duration) : ''));
+    _setHtml(tv.el.querySelector('.ln-sep-cost'), costText(computeCost(i.usage, i.pricing)));
     const use = tv.el.querySelector('.ln-sep-use');
     const u = LANES.usageLine(i.usage);
     const html = u ? u.parts.map(p => `<span class="ln-use-${p.kind}">${escHtml(p.text)}</span>`).join('') : '';
@@ -2497,20 +2497,21 @@
   // --- Build node HTML elements (reusing existing patterns) ---
 
   // --- Turn node header -------------------------------------------------
-  // Two lines, FIXED at 34px (see .turn-entry in style.css). This height is a
+  // One line, FIXED at 22px (see .turn-entry in style.css). This height is a
   // contract with wide-layout's MIN_ENTRY_HEIGHT: the parallel view positions
   // tool rows at y + MIN_ENTRY_HEIGHT + i * TOOL_HEIGHT, so a header that
   // renders taller than it budgets pushes tool rows out of their own node and
-  // under the next one. Add data here, never a third line.
-  //   line 1  #123  opus-5  [chips]        <duration gauge>  <state lamp>
-  //   line 2  in/out/cache tokens                            <cost gauge>
+  // under the next one. Add data here, never a second line; token counts
+  // live on the hover deck (.turn-tip).
+  //   #123  opus-5  [chips]        11.0s  $0.073  <state lamp>
+  // Duration and cost are plain text in their gauge's colour.
   function turnHeaderHtml(interaction, turnNum, isSubagentTurn, opts) {
     const o = opts || {};
     const statusClass = badgeClass(interaction.status);
     const status = interaction.status || 'pending';
     const model = interaction.request?.model || 'unknown';
     const shortModel = model.replace('claude-', '').split('-202')[0];
-    const durationHtml = interaction.timing?.duration ? durationGauge(interaction.timing.duration) : '--';
+    const durationHtml = interaction.timing?.duration ? durationText(interaction.timing.duration) : '--';
     const turnLabel = turnNum != null ? `${isSubagentTurn ? '#S' : '#'}${turnNum}` : '';
     const stepChip = interaction.stepId
       ? `<span class="entry-step">${escHtml(interaction.stepId)}</span>` : '';
@@ -2529,11 +2530,8 @@
         <span class="entry-model" data-model="${interaction.id}"><span class="entry-model-label" title="${escHtml(model)}">${escHtml(shortModel)}</span></span>
         ${stepChip}${subagentTag}
         <span class="entry-duration" data-duration="${interaction.id}">${durationHtml}</span>
+        <span class="entry-cost" data-costgauge="${interaction.id}">${costText(cost)}</span>
         <span class="entry-badge ${statusClass}" data-badge="${interaction.id}">${status}</span>
-      </div>
-      <div class="entry-meta" data-tokens="${interaction.id}">
-        <span class="entry-tokens" data-tokenlabel="${interaction.id}">${compactTokens(interaction.usage)}</span>
-        <span class="entry-cost" data-costgauge="${interaction.id}">${turnCostGauge(cost)}</span>
       </div>
     `;
   }
@@ -4027,7 +4025,7 @@
     const startedAt = interaction.timing?.startedAt || Date.now();
     const iv = setInterval(() => {
       const el = document.querySelector(`[data-duration="${interaction.id}"]`);
-      if (el) el.innerHTML = durationGauge(Date.now() - startedAt);
+      if (el) el.innerHTML = durationText(Date.now() - startedAt);
     }, 1000);
     _durationTimers.set(interaction.id, iv);
   }
@@ -4109,7 +4107,7 @@
   function updateTurnMeta(interaction) {
     const durationEl = document.querySelector(`[data-duration="${interaction.id}"]`);
     if (durationEl && interaction.timing?.duration) {
-      durationEl.innerHTML = durationGauge(interaction.timing.duration);
+      durationEl.innerHTML = durationText(interaction.timing.duration);
     }
     const modelEl = document.querySelector(`[data-model="${interaction.id}"]`);
     if (modelEl) {
@@ -4128,7 +4126,7 @@
     const costEl = document.querySelector(`[data-costgauge="${interaction.id}"]`);
     if (costEl) {
       const cost = computeCost(interaction.usage, interaction.pricing);
-      costEl.innerHTML = turnCostGauge(cost);
+      costEl.innerHTML = costText(cost);
     }
     updateUserTurnTotals();
   }
@@ -5837,27 +5835,34 @@
     return html;
   }
 
-  function durationGauge(ms) {
-    if (ms == null) return '--';
-    const secs = ms / 1000;
-    const pct = Math.max(0, Math.min(secs / 500, 1));
-    const w = 24, h = 7, fill = pct * w;
+  // The gauges' colour ramp: green at 0, through amber, to dark red at 1.
+  function _gaugeColor(pct) {
     const hue = Math.round((1 - pct) * 120);
     const sat = pct > 0.9 ? '80%' : '70%';
     const lit = pct > 0.9 ? '30%' : '45%';
-    const color = `hsl(${hue},${sat},${lit})`;
+    return `hsl(${hue},${sat},${lit})`;
+  }
+  const _durationPct = ms => Math.max(0, Math.min(ms / 1000 / 500, 1));  // full at 500s
+  const _costPct = cost => Math.max(0, Math.min(cost / 1, 1));           // full at $1
+
+  function durationGauge(ms) {
+    if (ms == null) return '--';
+    const pct = _durationPct(ms);
+    const w = 24, h = 7, fill = pct * w;
+    const color = _gaugeColor(pct);
     return `<span class="entry-duration-gauge"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" rx="2" fill="var(--bg)" stroke="var(--border)" stroke-width="0.5"/><rect width="${fill}" height="${h}" rx="2" fill="${color}"/></svg><span class="entry-duration-label" style="color:${color}">${formatDuration(ms)}</span></span>`;
   }
 
-  function turnCostGauge(cost) {
+  // Duration and cost as plain text in the colour their gauge would have
+  // (timeline cards, lane turns).
+  function durationText(ms) {
+    if (ms == null) return '--';
+    return `<span class="entry-duration-label" style="color:${_gaugeColor(_durationPct(ms))}">${formatDuration(ms)}</span>`;
+  }
+
+  function costText(cost) {
     if (cost == null) return '';
-    const pct = Math.min(cost / 1, 1);
-    const w = 24, h = 7, fill = pct * w;
-    const hue = Math.round((1 - pct) * 120);
-    const sat = pct > 0.9 ? '80%' : '70%';
-    const lit = pct > 0.9 ? '30%' : '45%';
-    const color = `hsl(${hue},${sat},${lit})`;
-    return `<span class="entry-cost-gauge"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" rx="2" fill="var(--bg)" stroke="var(--border)" stroke-width="0.5"/><rect width="${fill}" height="${h}" rx="2" fill="${color}"/></svg><span class="entry-cost-label" style="color:${color}">${formatCost(cost)}</span></span>`;
+    return `<span class="entry-cost-label" style="color:${_gaugeColor(_costPct(cost))}">${formatCost(cost)}</span>`;
   }
 
   function charGauge(chars, suffix) {
