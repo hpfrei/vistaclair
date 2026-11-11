@@ -804,7 +804,7 @@ The stream sends \`text\` (a delta), \`ask\` (Claude needs input), \`error\`, an
 | **:3456** | localhost | Proxy — intercepts Claude's API calls |
 | **:3457** | 0.0.0.0 | Dashboard — web UI, REST API, WebSocket |
 
-Authenticate with an \`Authorization: Bearer <token>\` header or a \`token=<token>\` cookie. The token is printed when vistaclair starts, or you can set it yourself with the \`AUTH_TOKEN\` environment variable.
+Authenticate with an \`Authorization: Bearer <token>\` header or a \`token=<token>\` cookie. The token is never printed: set it yourself with the \`AUTH_TOKEN\` environment variable, or sign in with the single-use login link vistaclair opens at start (or \`vistaclair login-link\` on the host).
 `;
 
 

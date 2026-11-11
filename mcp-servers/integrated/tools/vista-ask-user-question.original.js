@@ -15,13 +15,17 @@ export default function register(server) {
     async (input, extra) => {
       const http = await import("http");
       const dashPort = process.env.VISTACLAIR_DASHBOARD_PORT || "3457";
-      const token = process.env.VISTACLAIR_SESSION_TOKEN || "";
+      // The session token as a header; else VISTACLAIR_AUTH_TOKEN, which an older
+      // server (still running while this file is already updated) fills with the
+      // owner token and reads from the body. A current server's session environment never holds the owner token.
+      const sessionToken = process.env.VISTACLAIR_SESSION_TOKEN || "";
+      const legacyToken = sessionToken ? "" : (process.env.VISTACLAIR_AUTH_TOKEN || "");
       const instanceId = process.env.VISTACLAIR_INSTANCE_ID || "";
 
       const formData = { ...input };
       const questions = input.questions || [];
 
-      const body = JSON.stringify({ instanceId, formData, questions });
+      const body = JSON.stringify({ ...(legacyToken ? { token: legacyToken } : {}), instanceId, formData, questions });
 
       return new Promise((resolve) => {
         // The call ends without an answer (4 h, or Claude Code cancels it: an
@@ -43,7 +47,7 @@ export default function register(server) {
           headers: {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(body),
-            "x-vistaclair-session": token,
+            ...(sessionToken ? { "x-vistaclair-session": sessionToken } : {}),
           },
         }, (res) => {
           let data = "";
