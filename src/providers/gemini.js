@@ -102,8 +102,9 @@ class GeminiProvider extends BaseProvider {
 
     const headers = {
       'Content-Type': 'application/json',
-      'x-goog-api-key': modelDef.apiKey,
     };
+    // Withheld with the stored key (see the OpenAI adapter).
+    if (modelDef.apiKey) headers['x-goog-api-key'] = modelDef.apiKey;
 
     return { url, headers, body: geminiBody };
   }

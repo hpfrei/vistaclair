@@ -256,6 +256,45 @@ function getInstanceContext(instanceId) {
   return entry?.sourceContext || null;
 }
 
+// --- Proxy caller secret ---------------------------------------------------
+// The local API proxy (src/proxy.js) attaches the stored non-Anthropic provider
+// keys only for a caller that presents this per-boot random secret. Vistaclair
+// hands it to every session it starts (buildClaudeEnv), as a request header the
+// Claude CLI adds through ANTHROPIC_CUSTOM_HEADERS. A process that merely finds
+// the proxy port is still proxied, but gets no stored key.
+const PROXY_SECRET_HEADER = 'x-vistaclair-proxy-secret';
+let _proxySecret = null;
+function getProxySecret() {
+  if (!_proxySecret) _proxySecret = crypto.randomBytes(32).toString('hex');
+  return _proxySecret;
+}
+function isProxySecret(value) {
+  if (Array.isArray(value)) value = value[0];
+  if (typeof value !== 'string' || !value) return false;
+  const a = crypto.createHash('sha256').update(value).digest();
+  const b = crypto.createHash('sha256').update(getProxySecret()).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+// --- Masking of provider credentials for the inspector ---------------------
+const SENSITIVE_HEADER_RE = /authorization|api-?key|token|secret/i;
+
+/** Placeholder form (for the cURL export): `Bearer $API_KEY` / `$API_KEY`. */
+function maskSecretHeaders(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (!SENSITIVE_HEADER_RE.test(k)) out[k] = v;
+    else out[k] = k.toLowerCase().endsWith('authorization') ? 'Bearer $API_KEY' : '$API_KEY';
+  }
+  return out;
+}
+
+/** A key carried in the query string (`?key=`, `&api_key=`) of a URL. */
+function maskUrlSecrets(url) {
+  if (typeof url !== 'string' || !url.includes('?')) return url;
+  return url.replace(/([?&](?:key|api_key|apikey|access_token|token)=)[^&#]*/gi, (_, pre) => pre + '$API_KEY');
+}
+
 /**
  * Build the environment a spawned `claude` process inherits: proxy base URL
  * (instance-scoped), auto-memory toggle, and the VISTACLAIR_* handshake vars.
@@ -279,6 +318,15 @@ function buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extra
   if (dashboardPort) env.VISTACLAIR_DASHBOARD_PORT = String(dashboardPort);
   if (authToken) env.VISTACLAIR_AUTH_TOKEN = authToken;
   env.VISTACLAIR_INSTANCE_ID = instanceId;
+  // The proxy secret, as a header the Claude CLI sends on every API request to
+  // the base URL (subagents included). Any value an extraEnv/process.env
+  // already carries stays, minus a line of ours.
+  if (proxyPort) {
+    const kept = String(env.ANTHROPIC_CUSTOM_HEADERS || '').split(/\r?\n/)
+      .filter(l => l.trim() && !l.trim().toLowerCase().startsWith(`${PROXY_SECRET_HEADER}:`));
+    kept.push(`${PROXY_SECRET_HEADER}: ${getProxySecret()}`);
+    env.ANTHROPIC_CUSTOM_HEADERS = kept.join('\n');
+  }
   return env;
 }
 
@@ -598,12 +646,16 @@ function sanitizeForDashboard(interaction) {
   }
   if (interaction.requestHeaders) {
     clone.requestHeaders = { ...interaction.requestHeaders };
-    for (const key of ['x-api-key', 'authorization']) {
-      if (clone.requestHeaders[key]) {
+    for (const key of Object.keys(clone.requestHeaders)) {
+      if (SENSITIVE_HEADER_RE.test(key) && clone.requestHeaders[key]) {
         clone.requestHeaders[key] = '[redacted]';
       }
     }
   }
+  // A provider-translated turn: the headers it was sent with (cURL export) and
+  // the URL, whichever form carries the key.
+  if (interaction.translatedHeaders) clone.translatedHeaders = maskSecretHeaders(interaction.translatedHeaders);
+  if (typeof interaction.endpoint === 'string') clone.endpoint = maskUrlSecrets(interaction.endpoint);
   return clone;
 }
 
@@ -664,6 +716,11 @@ module.exports = {
   filterRequestHeaders,
   filterResponseHeaders,
   sanitizeForDashboard,
+  getProxySecret,
+  isProxySecret,
+  PROXY_SECRET_HEADER,
+  maskSecretHeaders,
+  maskUrlSecrets,
   buildClaudeArgs,
   spawnClaude,
   buildCliArgs,
