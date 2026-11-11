@@ -3,7 +3,7 @@ const path = require('path');
 const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream');
 const SSEPassthrough = require('./sse-passthrough');
-const { generateId, filterRequestHeaders, filterResponseHeaders, sanitizeForDashboard, getInstanceContext, DATA_HOME, modelFamily } = require('./utils');
+const { generateId, filterRequestHeaders, filterResponseHeaders, sanitizeForDashboard, getInstanceContext, DATA_HOME, modelFamily, isProxySecret, PROXY_SECRET_HEADER, maskSecretHeaders, maskUrlSecrets } = require('./utils');
 const { getProvider } = require('./providers/registry');
 const caps = require('./capabilities');
 const { getModelPricing } = caps;
@@ -219,6 +219,17 @@ function resolveRegistryModel(modelRef) {
   return model;
 }
 
+// The proxy listens on 127.0.0.1 only, but a web page can still reach it: DNS
+// rebinding points an attacker's name at 127.0.0.1 (the request then carries
+// that name as Host), and a page may also post to it cross-origin (a browser
+// request carries Origin). The CLI and the app spawns send a loopback Host and
+// no Origin, so a request with a foreign Host or any Origin is refused.
+const LOOPBACK_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\]):(\d+)$/i;
+function isLoopbackHost(req) {
+  const m = LOOPBACK_HOST_RE.exec(String(req.headers.host || '').trim());
+  return !!m && Number(m[2]) === req.socket.localPort;
+}
+
 function sendProxyError(res, err) {
   if (res.headersSent) {
     try { res.end(); } catch {}
@@ -380,12 +391,30 @@ function createProxyRouter(store, broadcaster, targetUrl) {
 
   const router = express.Router();
 
+  // Host / Origin check, before anything is parsed or forwarded.
+  router.use((req, res, next) => {
+    if (!isLoopbackHost(req) || req.headers.origin !== undefined) {
+      res.writeHead(403, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        type: 'error',
+        error: { type: 'permission_error', message: 'Refused: the proxy answers loopback requests without a browser Origin only' },
+      }));
+      return;
+    }
+    // Whether the caller is one of Vistaclair's own sessions: it presents the
+    // per-boot proxy secret (src/utils.js buildClaudeEnv hands it over).
+    req.isVistaclairCaller = isProxySecret(req.headers[PROXY_SECRET_HEADER]);
+    next();
+  });
+
   router.use(express.json({ limit: '50mb' }));
   router.use(express.raw({ limit: '50mb', type: () => false }));
 
-  // /i/:instanceId prefix: instance-scoped routing
+  // /i/:instanceId prefix: instance-scoped routing. The instance id picks the
+  // session's settings, rules and inspector lane, so only a caller holding the
+  // secret may name one; any other is an external client.
   router.use('/i/:instanceId', (req, res, next) => {
-    req.instanceId = decodeURIComponent(req.params.instanceId);
+    if (req.isVistaclairCaller) req.instanceId = decodeURIComponent(req.params.instanceId);
     next();
   });
 
@@ -520,21 +549,22 @@ function createProxyRouter(store, broadcaster, targetUrl) {
       // --- Translation path: route through non-Anthropic provider ---
       try {
 
-        const translated = provider.translateRequest(body, modelDef);
-        console.log(`[proxy] Translating to ${modelDef.name} (${modelDef.provider}) → ${translated.url}`);
+        // The stored provider key is attached only for a caller holding the
+        // proxy secret; any other is proxied without one.
+        if (modelDef.apiKey && !req.isVistaclairCaller) {
+          console.warn(`[proxy] Stored key for ${modelDef.name} withheld: the caller did not present the proxy secret`);
+        }
+        const translated = provider.translateRequest(body, req.isVistaclairCaller ? modelDef : { ...modelDef, apiKey: '' });
+        console.log(`[proxy] Translating to ${modelDef.name} (${modelDef.provider}) → ${maskUrlSecrets(translated.url)}`);
 
         // Update interaction to reflect what was actually sent
         interaction.request.model = modelDef.label || modelDef.name;
         interaction.request.max_tokens = translated.body.max_tokens ?? translated.body.max_completion_tokens;
-        interaction.endpoint = translated.url;
+        interaction.endpoint = maskUrlSecrets(translated.url);
         interaction.translatedFrom = body.model; // preserve original for reference
         // Store translated request for curl export (mask API key)
         interaction.translatedBody = translated.body;
-        interaction.translatedHeaders = Object.fromEntries(
-          Object.entries(translated.headers).map(([k, v]) =>
-            k.toLowerCase() === 'authorization' ? [k, 'Bearer $API_KEY'] : [k, v]
-          )
-        );
+        interaction.translatedHeaders = maskSecretHeaders(translated.headers);
         broadcaster.broadcast({
           type: 'interaction:update',
           interaction: sanitizeForDashboard(interaction),

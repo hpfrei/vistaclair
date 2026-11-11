@@ -79,8 +79,11 @@ class OpenAIResponsesProvider extends BaseProvider {
     const url = `${modelDef.apiBaseUrl.replace(/\/$/, '')}/responses`;
     const headers = {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${modelDef.apiKey}`,
     };
+    // No key, no header: the proxy blanks the stored key for a caller that did
+    // not present the proxy secret (src/proxy.js), and a keyless local server
+    // needs none.
+    if (modelDef.apiKey) headers['Authorization'] = `Bearer ${modelDef.apiKey}`;
 
     return { url, headers, body: reqBody };
   }
