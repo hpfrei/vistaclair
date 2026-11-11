@@ -286,8 +286,10 @@
 .sdk-shelf-card.open { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
 .sdk-shelf-card:focus-visible, .sdk-shelf-tab:focus-visible, .sdk-shelve:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .sdk-shelf-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sdk-shelf-meta { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
-.sdk-shelf-meta > .sdk-chip { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sdk-shelf-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; min-width: 0; white-space: nowrap; }
+/* The chip keeps its whole text (the cost wraps to a second line instead);
+   ellipsis only when the chip alone is wider than the card. */
+.sdk-shelf-meta > .sdk-chip { flex-shrink: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .sdk-shelf-ago { color: var(--text-dim); font-family: var(--vc-mono, ui-monospace, monospace); font-size: 10px; }
 .sdk-shelf-cost { margin-left: auto; color: var(--green); font-family: var(--vc-mono, ui-monospace, monospace); font-size: 10px; }
 @media (prefers-reduced-motion: reduce) {
@@ -324,7 +326,10 @@
   overflow: hidden;
 }
 .sdk-area-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 7ch; }
-.sdk-cap > :not(.sdk-area-name) { flex-shrink: 0; }
+.sdk-cap > :not(.sdk-area-name):not(.sdk-model) { flex-shrink: 0; }
+/* The chips (state, report) and the cost keep their whole text; when the
+   caption is short of room the model name gives way (full name in its tooltip). */
+.sdk-cap > .sdk-model { flex: 0 1 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A narrow box keeps name, model, state and cost; the report chip goes. */
 @container (max-width: 520px) {
   .sdk-cap { gap: 4px; }
@@ -497,6 +502,7 @@
   font: inherit;
   font-size: 11px;
   padding: 2px 10px;
+  white-space: nowrap;
   cursor: pointer;
 }
 .sdk-seg button + button { border-left: 1px solid var(--border); }
