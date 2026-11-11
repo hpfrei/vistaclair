@@ -465,7 +465,7 @@ test('ctx.login: exact shape in the dashboard profile, absent headless', (t) => 
   const { createAddonCtx } = require('../src/addon-host');
   const login = createLogin({ dataHome: tmpHome(t), log: quiet });
   const ctx = createAddonCtx({ dataHome: HOME, dashboard: { broadcaster: { broadcast() {} }, store: {}, cliSessionManager: {}, login: login.api } });
-  assert.deepStrictEqual(Object.keys(ctx.login).sort(), ['approve', 'deny', 'describe', 'listSessions', 'onLogin', 'registerProvider', 'revokeAll', 'revokeSession']);
+  assert.deepStrictEqual(Object.keys(ctx.login).sort(), ['approve', 'createOneTimeLink', 'deny', 'describe', 'listSessions', 'onLogin', 'registerProvider', 'revokeAll', 'revokeSession']);
   assert.ok(Object.isFrozen(ctx.login));
   assert.strictEqual(ctx.tgLoginConfigured, undefined);
   const headless = createAddonCtx({ dataHome: HOME });

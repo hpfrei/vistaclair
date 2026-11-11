@@ -685,9 +685,11 @@ ANTHROPIC_BASE_URL=http://localhost:3456 claude -p "your prompt"
 Works with interactive, programmatic (\`claude -p\`), and IDE sessions. On a remote machine? Tunnel the proxy port and point at the tunnel instead:
 
 \`\`\`bash
-cloudflared tunnel --url http://localhost:3456 --name proxy-tunnel
+cloudflared tunnel --url http://localhost:3456 --http-host-header localhost:3456 --name proxy-tunnel
 # then: ANTHROPIC_BASE_URL=https://proxy-tunnel.your-domain.com claude -p "prompt"
 \`\`\`
+
+The proxy only answers requests addressed to a loopback host, so \`--http-host-header localhost:3456\` makes cloudflared present one. A tunnel makes the proxy reachable from outside this machine, and stored provider keys are not attached for callers that lack the proxy secret (only sessions Vistaclair starts carry it), so a remote client must bring its own key.
 
 ---
 

@@ -132,6 +132,7 @@ const store = new InteractionStore(MAX_HISTORY);
 
 // Dashboard login: sessions, one-time links, add-on login providers (src/login.js)
 const { createLogin } = require('./src/login');
+const { openDashboard, loginLines, tightenSecretFiles } = require('./src/boot');
 const { mountLoginRoutes, mountLoginApi } = require('./src/login-routes');
 const login = createLogin({ dataHome: DATA_HOME });
 if (fs.existsSync(path.join(DATA_HOME, 'tg-login.enc'))) console.log('  Login: core Telegram login was removed; it is provided by Vistaclair Pro (tg-login.enc left untouched)');
@@ -612,24 +613,18 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
     console.log(`  Dashboard: http://localhost:${DASHBOARD_PORT}`);
     console.log(`  Upstream:  ${TARGET_URL}`);
     console.log('');
-    if (AUTH_TOKEN_SOURCE === 'generated') {
-      console.log(`  Auth token (auto-generated):`);
-    } else {
-      console.log(`  Auth token (from AUTH_TOKEN env):`);
-    }
-    console.log(`  ${AUTH_TOKEN}`);
+    tightenSecretFiles({ envFile: path.join(PACKAGE_ROOT, '.env'), logDir: path.join(DATA_HOME, 'data', 'logs') });
+    // The token itself is never printed (src/boot.js): the browser opens with a
+    // single-use login code, and the banner says where a login comes from.
+    const autoOpen = !process.env.NO_OPEN && !SERVER_MODE;
+    for (const line of loginLines({ tokenSource: AUTH_TOKEN_SOURCE, supervised: SUPERVISED, autoOpen, login, port: DASHBOARD_PORT })) console.log(line);
     console.log('');
     console.log('  Usage:');
     console.log(`    ANTHROPIC_BASE_URL=http://localhost:${PROXY_PORT} claude -p "your prompt"`);
     console.log('');
 
     // Auto-open dashboard in the default browser (skip with NO_OPEN=1 or server mode)
-    if (!process.env.NO_OPEN && !SERVER_MODE) {
-      const url = `http://localhost:${DASHBOARD_PORT}/login/auto?token=${AUTH_TOKEN}`;
-      const { execFile } = require('child_process');
-      const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-      execFile(cmd, [url]);
-    }
+    if (autoOpen) openDashboard({ port: DASHBOARD_PORT, login, execFile: require('child_process').execFile });
 
     // Re-validate license every 4 hours
     setInterval(async () => {

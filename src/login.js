@@ -305,10 +305,12 @@ function createLogin({
 
   const oneTimeLinks = new Map(); // key -> expiresAt
 
-  function createOneTimeLink() {
+  // ttlMs shortens the lifetime (never beyond LINK_TTL_MS). → the key.
+  const linkLife = (ttlMs) => (Number.isFinite(ttlMs) && ttlMs > 0 ? Math.min(Math.floor(ttlMs), LINK_TTL_MS) : LINK_TTL_MS);
+  function createOneTimeLink({ ttlMs } = {}) {
     for (const [k, exp] of oneTimeLinks) { if (exp <= now()) oneTimeLinks.delete(k); }
     const key = crypto.randomBytes(32).toString('hex');
-    oneTimeLinks.set(key, now() + LINK_TTL_MS);
+    oneTimeLinks.set(key, now() + linkLife(ttlMs));
     return key;
   }
 
@@ -332,6 +334,14 @@ function createLogin({
     revokeSession: (id) => revokeSession(String(id ?? '')),
     revokeAll: () => { revokeAll(); },
     onLogin,
+    // A single-use login code (256-bit, redeemed once at GET /login/once, never
+    // a second time): { key, path, expiresInMs }. `ttlMs` (optional) shortens
+    // the lifetime, which is at most 5 minutes. The caller builds the URL with
+    // its own public address; the permanent token is never needed to log in.
+    createOneTimeLink: ({ ttlMs } = {}) => {
+      const key = createOneTimeLink({ ttlMs });
+      return { key, path: `/login/once?k=${key}`, expiresInMs: linkLife(ttlMs) };
+    },
   });
 
   pruneSessions();
