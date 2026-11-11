@@ -854,7 +854,7 @@
             const tip = [r.description || '', r.dependsOn ? `depends on ${r.dependsOn}` : '', st].filter(Boolean).join('\n');
             return `<tr class="sdk-todo-${cls}" title="${escHtml(tip)}"><td class="sdk-todo-id">${escHtml(r.id)}</td>`
               + `<td class="sdk-todo-desc"><div class="sdk-clamp">${escHtml(r.description || '')}</div></td>`
-              + `<td class="sdk-todo-st"><span class="sdk-chip sdk-todo-chip sdk-todo-chip-${cls}">${escHtml(clip(st || '—', 40))}</span></td></tr>`;
+              + `<td class="sdk-todo-st"><span class="sdk-chip sdk-todo-chip sdk-todo-chip-${cls}" title="${escHtml(st)}">${escHtml(clip(st || '—', 40))}</span></td></tr>`;
           }).join('')}</tbody></table>`
           : '<div class="sdk-empty">No TODO.md yet.</div>';
       }
