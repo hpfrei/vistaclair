@@ -260,9 +260,13 @@ function shutdown(sig) {
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
+// Fixed-length digests: a non-ASCII value of equal char length is "not equal",
+// never a throw (same as src/auth.js).
 function safeEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const da = crypto.createHash('sha256').update(a, 'utf8').digest();
+  const db = crypto.createHash('sha256').update(b, 'utf8').digest();
+  return crypto.timingSafeEqual(da, db);
 }
 
 function cookieValue(cookieHeader, name) {
@@ -378,6 +382,18 @@ function readBody(req, cb) {
   req.on('end', () => cb(new URLSearchParams(body)));
 }
 
+const VENDOR = path.join(ROOT, 'public', 'vendor');
+const VENDOR_ASSETS = {
+  '/rescue/vendor/xterm.css': { file: 'xterm-5.5.0/xterm.css', type: 'text/css; charset=utf-8' },
+  '/rescue/vendor/xterm.js': { file: 'xterm-5.5.0/xterm.js', type: 'text/javascript; charset=utf-8' },
+  '/rescue/vendor/addon-fit.js': { file: 'addon-fit-0.10.0/addon-fit.js', type: 'text/javascript; charset=utf-8' },
+};
+function serveVendor(res, asset) {
+  let body;
+  try { body = fs.readFileSync(path.join(VENDOR, asset.file)); } catch { return sendJson(res, 404, { error: 'Not found' }); }
+  send(res, 200, asset.type, body, { 'cache-control': 'private, max-age=3600' });
+}
+
 function handleHttp(req, res) {
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
@@ -411,6 +427,11 @@ function handleHttp(req, res) {
     if (p.startsWith('/api/') || p.startsWith('/rescue/')) return sendJson(res, 401, { error: 'Unauthorized' });
     return redirect(res, '/login');
   }
+
+  // The terminal's scripts and stylesheet come from the copy this checkout
+  // ships (public/vendor, pinned in VERSIONS.json), never from a CDN: the page
+  // holds a root shell, so nothing third-party may run in it.
+  if (VENDOR_ASSETS[p]) return serveVendor(res, VENDOR_ASSETS[p]);
 
   if (p === '/rescue/status') {
     return sendJson(res, 200, { state, reason: rescue && reasonText(rescue), epoch, log: stripAnsi(logTail()) });
@@ -536,9 +557,9 @@ function loginPage(error) {
 function rescuePage() {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vistaclair — rescue</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
+<link rel="stylesheet" href="/rescue/vendor/xterm.css">
+<script src="/rescue/vendor/xterm.js"></script>
+<script src="/rescue/vendor/addon-fit.js"></script>
 <style>${STYLE}</style></head><body><div class="wrap">
 <h1>vistaclair — server is down (rescue mode)</h1>
 <div class="reason" id="reason">${esc(rescue ? reasonText(rescue) : 'The server is not running.')}</div>
