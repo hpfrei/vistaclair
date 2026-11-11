@@ -118,6 +118,47 @@ async function ensureFaststart(file, key) {
   try { return await job; } finally { faststartInFlight.delete(key); }
 }
 
+// ── User content hardening ─────────────────────────────────────────────
+// /api/raw-file and /outputs serve files from disk that the dashboard did not
+// write. Anything a browser could run or render as a document with script
+// (html, svg, xml, ...) would execute on the dashboard origin, with its
+// cookies and WebSocket. So: only an allowlist of passive types is answered
+// plain; everything else gets `Content-Security-Policy: sandbox` (opaque
+// origin, no allow-same-origin, no top navigation), and every response gets
+// nosniff so the browser cannot promote a passive type to an active one.
+const PASSIVE_MIME_RE = /^(image\/(png|jpeg|gif|webp|bmp|avif|x-icon|vnd\.microsoft\.icon)|audio\/|video\/|application\/(pdf|json|zip|x-tar|gzip)|text\/(plain|markdown|csv|css))(\s*;|$)/i;
+const USER_CONTENT_SANDBOX = 'sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads';
+
+// Extra headers (and a possible Content-Type override) for one served file.
+function userContentHeaders(mime) {
+  const type = String(mime || '').toLowerCase();
+  const headers = { 'X-Content-Type-Options': 'nosniff' };
+  // A script is shown as text, never run from here.
+  if (/^(text|application)\/(x-)?(javascript|ecmascript)(\s*;|$)/.test(type)) {
+    return { type: 'text/plain; charset=utf-8', headers };
+  }
+  if (!PASSIVE_MIME_RE.test(type)) headers['Content-Security-Policy'] = USER_CONTENT_SANDBOX;
+  return { type: null, headers };
+}
+
+// Apply to a response about to carry a user file. The sandbox is appended, so
+// the dashboard's own policy (src/csp.js) still applies on top of it.
+function applyUserContentHeaders(res, mime) {
+  const { type, headers } = userContentHeaders(mime);
+  for (const [k, v] of Object.entries(headers)) {
+    if (k === 'Content-Security-Policy') res.append(k, v); else res.setHeader(k, v);
+  }
+  if (type) res.setHeader('Content-Type', type);
+  return type || mime;
+}
+
+// express.static `setHeaders` option (the /outputs mount in server.js).
+function userContentSetHeaders(res, filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const mime = MIME_TYPES[ext] || 'application/octet-stream';
+  applyUserContentHeaders(res, String(mime));
+}
+
 // Stream a file with HTTP range support.
 function streamFile(req, res, file, mime) {
   const size = fs.statSync(file).size;
@@ -258,7 +299,7 @@ function createApiRouter({ broadcaster, store, proxyPort, dashboardPort, authTok
       if (!stat.isFile()) return res.status(400).json({ error: 'Not a file' });
       const ext = path.extname(resolved).toLowerCase();
       const mime = MIME_TYPES[ext] || 'application/octet-stream';
-      streamFile(req, res, resolved, mime);
+      streamFile(req, res, resolved, applyUserContentHeaders(res, mime));
     } catch (err) {
       res.status(404).json({ error: 'File not found', path: resolved });
     }
@@ -508,3 +549,5 @@ function createApiRouter({ broadcaster, store, proxyPort, dashboardPort, authTok
 }
 
 module.exports = createApiRouter;
+module.exports.userContentSetHeaders = userContentSetHeaders;
+module.exports.userContentHeaders = userContentHeaders;

@@ -321,7 +321,8 @@ dashboardApp.use(express.static(path.join(__dirname, 'public')));
 
 // Serve chat outputs at /outputs (directory auto-created)
 ensureDir(OUTPUTS_DIR);
-dashboardApp.use('/outputs', express.static(OUTPUTS_DIR));
+// User content: sandboxed unless passive (see userContentHeaders in src/api.js).
+dashboardApp.use('/outputs', express.static(OUTPUTS_DIR, { setHeaders: createApiRouter.userContentSetHeaders }));
 
 // Pro update check (background)
 if (fs.existsSync(proDir) && proLicenseValid) {
