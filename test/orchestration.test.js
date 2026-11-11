@@ -188,10 +188,10 @@ test('openCli without a mode: a terminal asks, and the answer decides the launch
   assert.match(st.name, /^orch-[0-9a-f]{6}$/);
   assert.match(st.appendSystemPrompt, /You are the ORCHESTRATOR/);
   // Its TODO lives in its session folder, not in the run directory.
-  assert.ok(st.appendSystemPrompt.includes(path.join(st.sessionDir, 'TODO.md')));
+  assert.ok(st.appendSystemPrompt.includes(`TODO.md, NOTES.md and ARCHIVE.md in ${st.sessionDir}`));
   assert.strictEqual(path.basename(st.sessionDir), st.name);
   // A worker's report is trusted: the card never asks for re-verification.
-  assert.match(st.appendSystemPrompt, /"done" report is trusted/);
+  assert.match(st.appendSystemPrompt, /Done is trusted\./);
   assert.ok(!/have a worker \(or a separate reviewer worker\) run the tests/.test(st.appendSystemPrompt));
 });
 
@@ -517,8 +517,8 @@ test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds it
   assert.match(st.appendSystemPrompt, /that is workers' work: put it in a brief/);
   assert.strictEqual(ws.orchestration.role, 'worker');
   assert.match(ws.name, new RegExp(`^${st.name}-w1-fix-login$`));
-  assert.deepStrictEqual(Object.keys(ws.agents), ['coder', 'explorer']);
-  assert.strictEqual(ws.agents.coder.model, 'opus');
+  assert.deepStrictEqual(Object.keys(ws.agents), ['runner', 'explorer', 'coder', 'architect']);
+  assert.strictEqual(ws.agents.coder.model, 'sonnet');
   assert.strictEqual(ws.agents.explorer.model, 'sonnet');
   assert.strictEqual(mgr.launches.at(-1).opts.autoSubmit, true);
   assert.strictEqual(mgr.launches.at(-1).opts.prompt, 'do it');
@@ -707,11 +707,11 @@ test('only a done, failed, blocked or paused report (or a message to the orchest
 
   // The worker card says so.
   const card = ws.settings.appendSystemPrompt;
-  assert.ok(card.includes('A turn ends only after a done, failed, blocked or paused report in that turn, or a message to the orchestrator. Never end a turn waiting on someone: report "blocked" naming whom you wait for and what. Their message starts your next turn.'));
+  assert.ok(card.includes('A turn ends only after one of these reports in that turn, or a message to the orchestrator; never end a turn waiting on someone. Their message starts your next turn.'));
   assert.ok(!card.includes('Never end a turn without reporting.'));
   const oCard = orchSession.settings.appendSystemPrompt;
-  assert.match(oCard, /Prefer ordering work with `after` to workers waiting on each other\./);
-  assert.match(oCard, /That is not a status request under rule 10\./);
+  assert.match(oCard, /Prefer ordering with `after`\. Peer messages only for an agreement between two workers running at the same time/);
+  assert.match(oCard, /Never message a worker just to ask how it is going/);
 });
 
 test('events reach a busy orchestrator through its hooks and wake an idle one', async (t) => {
@@ -1461,25 +1461,40 @@ test('buildCliArgs denies an orchestration role its tools; a session without a r
   assert.deepStrictEqual(disallowedToolsFor({}, ['SendMessage']), ['SendMessage']);
 });
 
+test('the worker subagents: fixed models, a read-only explorer, no "started" report in the worker card', () => {
+  const { WORKER_AGENTS, workerCard } = require('../src/orchestration');
+  assert.deepStrictEqual(Object.keys(WORKER_AGENTS), ['runner', 'explorer', 'coder', 'architect']);
+  assert.deepStrictEqual(Object.fromEntries(Object.entries(WORKER_AGENTS).map(([k, v]) => [k, v.model])), { runner: 'haiku', explorer: 'sonnet', coder: 'sonnet', architect: 'opus' });
+  assert.deepStrictEqual(WORKER_AGENTS.runner.tools, ['Bash', 'Read', 'WebFetch', 'WebSearch']);
+  assert.match(WORKER_AGENTS.coder.prompt, /at most 2 attempts[^]*failure packet[^]*git diff/);
+  assert.match(WORKER_AGENTS.architect.prompt, /failure packet[^]*reset them with git/);
+  for (const a of Object.values(WORKER_AGENTS)) assert.ok(a.prompt.includes(require('../src/session-folders').CONTROL_TRUST), 'carries the pause channel');
+  const card = workerCard({ runId: 'abc123', orchestrator: 'orch-abc123' }, { name: 'orch-abc123-w1', cwd: '/tmp/w' });
+  assert.ok(!/status "started"/.test(card));
+  assert.match(card, /No "started" or progress reports/);
+  for (const a of ['runner', 'explorer', 'coder', 'architect']) assert.ok(card.includes('`' + a + '`'), a);
+});
+
 test('the explorer subagent names only tools Claude Code offers', () => {
   const { WORKER_AGENTS } = require('../src/orchestration');
   assert.deepStrictEqual(WORKER_AGENTS.explorer.tools, ['Read', 'Bash', 'WebFetch', 'WebSearch']);
 });
 
-test('the orchestrator card: plan confirmed before fanning out, cheap workers for trivial jobs, stop_worker', () => {
+test('the orchestrator card: act first on reversible steps, ask once, cheap workers for mechanical jobs, stop_worker', () => {
   const { orchestratorCard } = require('../src/orchestration');
   const card = orchestratorCard({ runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' });
-  assert.match(card, /non-trivial request, write the plan as TODO rows and confirm it with the user \(AskUserQuestion\) before fanning out to several workers/);
-  assert.match(card, /trivial, mechanical job goes to a cheap worker: model sonnet or haiku, isolation none/);
-  assert.match(card, /`stop_worker` ends its current turn and leaves it idle; then SendMessage it new instructions, or close_worker it/);
+  assert.match(card, /clear recommendation and the step can be undone[^\n]*do it and report afterwards\. This includes plans: launch, then show the plan\./);
+  assert.match(card, /Ask the owner only about irreversible steps, spend over about \$10[^\n]*one AskUserQuestion form/);
+  assert.match(card, /haiku for mechanical jobs \(installs, device commands, file moves, searches; isolation none\), sonnet for most work/);
+  assert.match(card, /`stop_worker` ends its turn and leaves it idle; then SendMessage it or close_worker it/);
 });
 
 test('the orchestrator card (worktree and shared-directory) lists launch_cli\'s parameters and says to load its schema after a compaction', () => {
   const { orchestratorCard } = require('../src/orchestration');
   for (const isolation of ['worktree', 'none']) {
     const card = orchestratorCard({ runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation });
-    assert.match(card, /launch_cli takes title \(short name, no wN- prefix; required\), task \(the full brief; required\), area \(files\/dirs\/globs it will change; give it in every run, also isolation none\), model, isolation, after, cwd, tools \(and host\/app for remote workers\) — not the Agent tool's name\/prompt\/description\./, isolation);
-    assert.match(card, /After a compaction or resume, load its schema \(ToolSearch "select:mcp__orchestrator__launch_cli"\) before the first launch\./, isolation);
+    assert.match(card, /It takes title \(short name, no wN- prefix; required\), task \(the full brief; required\), area \(files\/dirs\/globs it will change; give it in every run, also isolation none\), model, isolation, after, cwd, tools \(and host\/app for remote workers\) — not the Agent tool's name\/prompt\/description\./, isolation);
+    assert.match(card, /After a refresh or compaction, load launch_cli's schema \(ToolSearch "select:mcp__orchestrator__launch_cli"\) before the first launch\./, isolation);
   }
 });
 
@@ -1487,11 +1502,16 @@ test('the cards: a requirement change updates TODO.md and NOTES.md first, then r
   const { orchestratorCard, workerCard } = require('../src/orchestration');
   const run = { runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' };
   const card = orchestratorCard(run);
-  assert.match(card, /\n4\. [^\n]*When the owner changes a requirement during a run, first update your TODO\.md and NOTES\.md \(replace the decisions it overrides\), then tell every affected worker: a running or idle one by SendMessage naming what the change replaces; a queued one \(its brief is fixed at launch\) by cancel_launch and a new launch with the corrected brief\./);
-  assert.deepStrictEqual(card.match(/^\d+(?=\. )/gm).map(Number), Array.from({ length: 14 }, (_, i) => i + 1), 'rules numbered 1-14');
+  assert.match(card, /\n5\. When the owner changes a requirement: update NOTES\.md and TODO\.md first\. Tell a running or idle worker by SendMessage, naming what the change replaces\. A queued one: cancel_launch and launch again with the corrected brief\./);
+  const nums = card.match(/^\d+(?=\. )/gm).map(Number);
+  assert.deepStrictEqual(nums, Array.from({ length: nums.length }, (_, i) => i + 1), 'rules numbered without gaps');
+  assert.deepStrictEqual(card.match(/^[A-H]\. .+$/gm), ['A. Ground rules', 'B. Memory', 'C. Deciding', 'D. Shaping the work', 'E. Workers talking to each other', 'F. Reports', 'G. Worker lifecycle', 'H. The owner']);
+  assert.ok(!/\bhost\b.*pending-approval/.test(card), 'no remote rule without hosts');
+  assert.match(orchestratorCard(run, { hosts: [{ name: 'hz', available: true }] }), /Remote workers: launch_cli `host` runs a worker on another machine: `hz`/);
   const wCard = workerCard(run, { name: 'orch-abc123-w1', cwd: '/tmp/w' });
-  assert.match(wCard, /\n4\. Messages from `orch-abc123`, or typed by the owner straight into this session, are new instructions\. If one changes the task, first bring TODO\.md and NOTES\.md in line with it \(rewrite the affected rows, replace the decisions it overrides\), then act on it and report\. Pass an owner instruction the orchestrator did not send on to it \(SendMessage, or in your next report\), so its plan stays right\./);
-  assert.match(wCard, /The rows of your TODO\.md are the steps of your brief and of the instructions since/);
+  assert.match(wCard, /\n7\. Messages from `orch-abc123`, or typed by the owner straight into this session, are new instructions: first bring TODO\.md and NOTES\.md in line with them \(rewrite the affected rows, replace the decisions they override\), then act\. Pass an owner instruction the orchestrator did not send on to it/);
+  assert.match(wCard, /In a live test, work with the owner directly and send the orchestrator one summary at the end, including every decision or requirement change the owner made/);
+  assert.match(wCard, /Your TODO\.md rows are your steps/);
   assert.ok(!wCard.includes('are follow-up instructions'));
 });
 
@@ -1664,7 +1684,7 @@ test('a member model switch: run.json follows, fresh restarts use it; a resumed 
   assert.strictEqual(orch.memberModelChanged(wSession, 'haiku'), true);
   assert.strictEqual(run().workers[0].model, 'haiku');
   assert.strictEqual(orch.describeRun(run()).workers[0].model, 'haiku');
-  assert.match(mgr.sessions.get(w.tabId).settings.appendSystemPrompt, /rows of your TODO\.md are the steps of your brief and of the instructions since \(short descriptions, detail in NOTES\.md\)/);
+  assert.match(mgr.sessions.get(w.tabId).settings.appendSystemPrompt, /Your TODO\.md rows are your steps \(short descriptions, detail in NOTES\.md\)/);
   assert.strictEqual(orch.memberModelChanged(orchSession, 'claude-opus-4-5[1m]'), true);
   assert.strictEqual(run().orchestratorModel, 'claude-opus-4-5[1m]');
   assert.strictEqual(orch.memberModelChanged({ getSettings: () => ({}) }, 'opus'), false, 'not a member');
@@ -2956,7 +2976,7 @@ test('launch queue: cancel_launch drops one entry; end_run drops the rest and sa
 test('launch queue: the orchestrator card and the MCP server name the queue', () => {
   const { orchestratorCard } = require('../src/orchestration');
   const card = orchestratorCard({ runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' });
-  assert.match(card, /a launch beyond that is queued and starts when a slot frees \(`after: \[worker\]` holds it/);
+  assert.match(card, /Extra launches queue and start when a slot frees; `after: \[worker\]` orders them/);
   assert.match(card, /finished, landed, clean idle worker may be closed automatically/);
   const src = fs.readFileSync(path.join(CORE, 'lib', 'orchestrator-mcp.js'), 'utf8');
   assert.match(src, /name: "cancel_launch",\s*path: "cancel-launch"/);
@@ -2989,9 +3009,9 @@ test('worker limit: default 5, clamped to 1-10, kept in run.json and shown by de
 test('worker limit: enforced at the set value; a change is one event for the orchestrator; the brief uses it', async (t) => {
   const { orchestratorCard } = require('../src/orchestration');
   const { orch, orchSession, mgr, run, stamp } = await openOrchestrator(t, { isolation: 'none' });
-  assert.match(orchestratorCard(run()), /At most 5 workers run at once/);
+  assert.match(orchestratorCard(run()), /At most 5 workers run at once \(the owner may change it/);
   orch.setRunMaxWorkers(stamp.runId, 2);
-  assert.match(orchestratorCard(run()), /At most 2 workers run at once \(the run's worker limit/);
+  assert.match(orchestratorCard(run()), /At most 2 workers run at once \(the owner may change it; an "\[orchestration\]" event says so\)/);
   const ev = run().events.filter(e => e.kind === 'owner');
   assert.strictEqual(ev.length, 1);
   assert.strictEqual(ev[0].text, 'The owner set the worker limit to 2 (was 5).');
