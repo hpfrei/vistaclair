@@ -4534,7 +4534,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           const abs = path.resolve(input.cwd || run.root, target);
           const own = orchestratorDir(run);
           if (!isInside(abs, run.runDir) && !isInside(abs, own)) {
-            return deny(`The orchestrator does not edit project files (${abs}). Delegate this change to a worker with launch_cli, or message the worker that owns it. You may only edit your TODO.md and NOTES.md under ${own}.`);
+            return deny(`The orchestrator does not edit project files (${abs}). Delegate this change to a worker with launch_cli, or message the worker that owns it. You may only edit your TODO.md, NOTES.md and ARCHIVE.md under ${own}.`);
           }
         }
         return {};
