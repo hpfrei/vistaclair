@@ -313,24 +313,9 @@ dashboardApp.use('/landing_page', express.static(path.join(__dirname, 'public', 
 // Health check (no auth — used by client to detect restart completion)
 dashboardApp.get('/api/ping', (req, res) => res.json({ ok: true }));
 
-// Auth middleware for all other routes
-dashboardApp.use((req, res, next) => {
-  // Add-on-declared public paths (e.g. OAuth callbacks) — SameSite=Lax cookies
-  // aren't sent on cross-site redirects, so these must bypass auth. Declarative
-  // per-add-on list, no hardcoded product knowledge here.
-  if (addons.isAuthExempt(req.path)) return next();
-  // PWA metadata: the browser fetches the manifest and its icons without
-  // cookies when installing to a home screen. Nothing sensitive in them.
-  if (req.path === '/manifest.webmanifest' || /^\/(icon-\d+|apple-touch-icon)\.png$/.test(req.path)) return next();
-  // App-tool-call uses ephemeral per-session tokens validated by its own handler
-  if (isLoopback(req) && req.path === '/api/app-tool-call') return next();
-  // Internal header (MCP tools), a dashboard session, or the static token —
-  // see src/auth.js.
-  if (auth.isOwnerRequest(req)) return next();
-  // API routes get 401 JSON; browser routes get redirect
-  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
-  res.redirect('/login');
-});
+// Auth middleware for all other routes (src/auth.js gateMiddleware): add-on
+// public paths, PWA metadata, then the owner decision.
+dashboardApp.use(auth.gateMiddleware({ isAuthExempt: (p) => addons.isAuthExempt(p) }));
 
 dashboardApp.use(express.static(path.join(__dirname, 'public')));
 

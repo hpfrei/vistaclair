@@ -37,6 +37,7 @@
 // wants them feature-detects (`typeof ctx.registerToolPack === 'function'`).
 
 const toolPacks = require('./tool-packs');
+const { originAllowed: defaultOriginAllowed } = require('./auth');
 
 const CONTRACT_VERSION = 2;
 
@@ -78,7 +79,27 @@ function cspBlockers() {
 // True if a request path is declared public by any add-on. Matches the exact
 // path or a path-segment prefix (p + '/...') — never a bare string prefix, so
 // '/pro/auth/google/callback' can't be widened to '/pro/auth/google/callbackX'.
+//
+// A path with an empty, "." or ".." segment (raw or percent-encoded, any case)
+// is never exempt: the match here is on the raw path while express.static
+// normalises it, so '/pro/tg-session/../../index.html' would otherwise walk
+// out of the exempt prefix. One trailing slash is allowed (an app root such
+// as '/apps/<name>/' is a legitimate public path and cannot walk anywhere).
+function hasDotSegment(reqPath) {
+  if (typeof reqPath !== 'string') return true;
+  const segs = reqPath.split('/');
+  if (segs[0] === '') segs.shift();
+  for (let i = 0; i < segs.length; i++) {
+    let seg;
+    try { seg = decodeURIComponent(segs[i]); } catch { return true; }
+    if (seg === '.' || seg === '..' || /[\\/]/.test(seg)) return true;
+    if (seg === '' && i !== segs.length - 1) return true;
+  }
+  return false;
+}
+
 function isAuthExempt(reqPath) {
+  if (hasDotSegment(reqPath)) return false;
   for (const a of addons) {
     for (const p of a.authExemptPaths || []) {
       if (reqPath === p || reqPath.startsWith(p + '/')) return true;
@@ -116,16 +137,32 @@ function exemptUpgradeOwner(req) {
   return null;
 }
 
-function rejectUpgrade(socket) {
-  try { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); } catch {}
+function rejectUpgrade(socket, status = '401 Unauthorized') {
+  try { socket.write(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`); } catch {}
   socket.destroy();
 }
 
 // The dashboard server's 'upgrade' listener. An auth-exempt upgrade path goes
 // to the add-on that declared it and nowhere else (no owner gate; that add-on
 // authenticates it). Everything else: owner gate → add-ons → dashboard wss.
-function createUpgradeHandler({ isOwnerUpgrade, wss }) {
+//
+// An upgrade that relies on the owner gate also passes the Origin check: a
+// browser always sends Origin on a WebSocket, and it must name the host the
+// request was addressed to (src/auth.js originAllowed). No Origin = a
+// non-browser client (MCP tools, node clients): allowed. Any error → the
+// socket is destroyed, never left hanging.
+function createUpgradeHandler({ isOwnerUpgrade, wss, originAllowed = defaultOriginAllowed }) {
   return (req, socket, head) => {
+    try {
+      socket.on('error', () => { try { socket.destroy(); } catch {} });
+      handle(req, socket, head);
+    } catch (e) {
+      console.error('  WebSocket upgrade error:', e.message);
+      rejectUpgrade(socket, '500 Internal Server Error');
+    }
+  };
+
+  function handle(req, socket, head) {
     const owner = exemptUpgradeOwner(req);
     if (owner) {
       let claimed = false;
@@ -140,6 +177,10 @@ function createUpgradeHandler({ isOwnerUpgrade, wss }) {
 
     // Same owner decision as the HTTP middleware, against the upgrade socket.
     if (!isOwnerUpgrade(req, socket)) return rejectUpgrade(socket);
+    if (!originAllowed(req, socket)) {
+      console.warn(`  [auth] refused WebSocket upgrade ${String(req.url).split('?')[0]}: foreign Origin ${String(req.headers.origin).slice(0, 100)} (addressed host ${String(req.headers.host).slice(0, 100)})`);
+      return rejectUpgrade(socket, '403 Forbidden');
+    }
 
     // Offer the upgrade to add-ons (e.g. Pro's VNC websockify proxy) first.
     if (handleUpgrade(req, socket, head)) return;
@@ -147,7 +188,7 @@ function createUpgradeHandler({ isOwnerUpgrade, wss }) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });
-  };
+  }
 }
 
 // Mount every add-on's router on the host app (call after the auth middleware).
