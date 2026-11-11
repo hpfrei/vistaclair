@@ -134,6 +134,8 @@
   function reportChip(r, l) {
     const rs = String(r?.status || '').toLowerCase().replace(/[^a-z]/g, '');
     const lab = rs === 'done' && l?.current ? landingLabel(l) : null;
+    // Busy again since (the server's `superseded`): an earlier report, dimmed.
+    if (r?.superseded) return { text: `earlier: ${r.status || 'report'}`, cls: 'sdk-report-superseded' };
     return lab ? { text: `done · ${lab.chip}`, cls: `sdk-report-${lab.cls}` } : { text: r?.status || 'report', cls: `sdk-report-${rs}` };
   }
 
@@ -651,7 +653,7 @@
       this.el.classList.toggle('sdk-area-is-awaiting', s === 'awaiting');
       this.el.classList.toggle('sdk-area-is-busy', s === 'busy');
       this.el.classList.toggle('sdk-area-ended', ended);
-      this.el.classList.toggle('sdk-area-is-blocked', !ended && (rs === 'blocked' || rs === 'failed'));
+      this.el.classList.toggle('sdk-area-is-blocked', !ended && !r?.superseded && (rs === 'blocked' || rs === 'failed'));
       this.reportEl.classList.toggle('hidden', !r);
       if (r) {
         const chip = reportChip(r, this.landing);
@@ -662,7 +664,7 @@
       this.renderLanding();
       // The last report heads the TODO table once ended, or when there is no TODO.
       this.finalEl.classList.toggle('hidden', !(r?.summary && (ended || !this.todo?.rows?.length)));
-      if (r?.summary) this.finalEl.textContent = `${r.status || 'report'}: ${r.summary}`;
+      if (r?.summary) this.finalEl.textContent = `${r.superseded ? 'earlier ' : ''}${r.status || 'report'}: ${r.summary}`;
       this.costEl.textContent = fmtCost(this.cost);
       this.costEl.title = this.credential ? `Billed to ${BILL_TEXT[authOf(this.credential)]}` : '';
       this.renderBill();

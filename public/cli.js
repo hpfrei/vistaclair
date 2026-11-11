@@ -794,7 +794,7 @@
     const prefix = r.orchestrator ? `${r.orchestrator}-` : '';
     const workers = SC.workerList(w.list.map(x => {
       const wTab = x.sessId ? bySess.get(x.sessId) : null;
-      const report = x.lastReport ? `${x.lastReport.status}${landingWord(x)}: ${x.lastReport.summary}` : '';
+      const report = x.lastReport ? `${x.lastReport.superseded ? 'earlier ' : ''}${x.lastReport.status}${landingWord(x)}: ${x.lastReport.summary}` : '';
       return {
         name: x.name.startsWith(prefix) ? x.name.slice(prefix.length) : x.name,
         state: x.state,

@@ -461,6 +461,7 @@
 .sdk-area-bill.pending { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
 .sdk-area-report, .sdk-shelf-rep { background: color-mix(in srgb, var(--cyan) 18%, transparent); color: var(--cyan); }
 .sdk-report-done, .sdk-report-complete { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
+.sdk-report-superseded { opacity: .6; font-style: italic; }
 .sdk-report-blocked, .sdk-report-failed { background: color-mix(in srgb, var(--red) 18%, transparent); color: var(--red); }
 /* A done worktree worker's landing (src/landing-state.js): green once merged,
    yellow while it lands, red when it did not. */

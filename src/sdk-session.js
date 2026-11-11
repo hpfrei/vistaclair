@@ -974,6 +974,7 @@ class SdkSession {
     const busy = state === 'busy' || state === 'awaiting';
     const busyChanged = this.busy !== busy;
     this.busy = busy;
+    if (busyChanged && busy) this.busySince = Date.now();   // the turn's start (orchestration: is a report older than it)
     if (changed || force) this._emitStatus();
     if (busyChanged) this.onStateChange?.(this);
     if (state === 'idle' && this._authPending) this._switchSoon();
