@@ -295,8 +295,8 @@ test('D2 hook reporter: lib/hook-reporter.js reaches /api/hook-report with the s
   assert.strictEqual(old.status, 401);
   // No variable: fails open, sends nothing.
   assert.strictEqual(await run({ VISTACLAIR_INSTANCE_ID: 'cli-hook' }), 0);
-  // The legacy variable alone (what an old session may still carry) is not read.
-  assert.strictEqual(await run({ VISTACLAIR_AUTH_TOKEN: token, VISTACLAIR_INSTANCE_ID: 'cli-hook' }), 0);
+  // The legacy variable alone is the older-server fallback (see 'skew' below): a value the gate does not know gets nothing.
+  assert.strictEqual(await run({ VISTACLAIR_AUTH_TOKEN: 'vcs_unknown', VISTACLAIR_INSTANCE_ID: 'cli-hook' }), 0);
   assert.strictEqual(g.reached.length, 1);
   g.tokens.revoke(token);
   assert.strictEqual(await run({ VISTACLAIR_SESSION_TOKEN: token, VISTACLAIR_INSTANCE_ID: 'cli-hook' }), 0, 'fails open after the session ended');
@@ -357,9 +357,9 @@ test('D2 orchestrator MCP: a worker reports with its token; an orchestrator laun
   assert.ok(/reached/.test(l), 'an orchestrator launches');
   assert.strictEqual(g.reached.at(-1).path, ORCH('launch'));
 
-  // The legacy owner-token variable carries no owner right into the tool.
-  const legacy = await mcpTool(g.port, { ...oEnv, VISTACLAIR_SESSION_TOKEN: '', VISTACLAIR_AUTH_TOKEN: OWNER }, 'launch_cli', { title: 't', task: 'x', cwd: '/tmp' });
-  assert.ok(/Unauthorized/.test(legacy), 'the owner token in the old variable is not read, and is no credential');
+  // The legacy variable alone is the older-server fallback ('skew' below); a value the gate does not know gets nothing.
+  const legacy = await mcpTool(g.port, { ...oEnv, VISTACLAIR_SESSION_TOKEN: '', VISTACLAIR_AUTH_TOKEN: 'vcs_unknown' }, 'launch_cli', { title: 't', task: 'x', cwd: '/tmp' });
+  assert.ok(/Unauthorized/.test(legacy), 'an unknown value is no credential');
 
   const before = g.reached.length;
   g.tokens.revoke(wTok); g.tokens.revoke(oTok);
@@ -726,4 +726,111 @@ test('supervisor: the rescue login text no longer claims the token is printed', 
   assert.ok(page, 'the rescue login page is served');
   assert.strictEqual(/printed in the server/i.test(page), false, 'the stale claim is gone');
   assert.ok(/never printed/.test(page));
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Version skew: the helper scripts run FROM DISK, so an older server (still in
+// memory after an update) runs the new scripts. Its session environments hold
+// only VISTACLAIR_AUTH_TOKEN (the owner token) and its gate reads the internal
+// header, or the body token on /api/hook-report and /api/ask.
+// ════════════════════════════════════════════════════════════════════════════
+const OLD_TOKEN = 'old-owner-' + crypto.randomBytes(12).toString('hex');
+async function startOldGate(t) {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', d => { raw += d; });
+    req.on('end', () => {
+      let body = {}; try { body = JSON.parse(raw || '{}'); } catch {}
+      const bodyAuth = ['/api/hook-report', '/api/ask'].includes(req.url) && body.token === OLD_TOKEN;
+      const ok = req.headers['x-vistaclair-internal'] === OLD_TOKEN || bodyAuth;
+      seen.push({ url: req.url, ok, headers: req.headers, body });
+      res.statusCode = ok ? 200 : 401;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(ok ? { ok: true, answer: ['yes'], stdout: '' } : { error: 'Unauthorized' }));
+    });
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  t.after(() => new Promise(r => { server.closeAllConnections?.(); server.close(() => r()); }));
+  return { port: server.address().port, seen };
+}
+const runScript = (script, env, stdin) => new Promise((resolve) => {
+  const p = spawn(process.execPath, [path.join(ROOT, 'lib', script)], { env: { PATH: process.env.PATH, ...env }, stdio: ['pipe', 'ignore', 'ignore'] });
+  p.on('exit', resolve);
+  p.stdin.end(stdin);
+});
+const askHandler = async (file, env) => {
+  const mod = await import(`${path.join(ROOT, 'mcp-servers', 'integrated', 'tools', file)}?v=${Math.random()}`);
+  let handler;
+  mod.default({ tool: (n, d, s, fn) => { handler = fn; } });
+  const saved = { ...process.env };
+  for (const k of ['VISTACLAIR_SESSION_TOKEN', 'VISTACLAIR_AUTH_TOKEN']) delete process.env[k];
+  Object.assign(process.env, env);
+  try { return JSON.parse((await handler({ questions: [{ question: 'ok?' }] }, {})).content[0].text); }
+  finally { for (const k of ['VISTACLAIR_DASHBOARD_PORT', 'VISTACLAIR_SESSION_TOKEN', 'VISTACLAIR_AUTH_TOKEN', 'VISTACLAIR_INSTANCE_ID']) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } }
+};
+
+test('skew: lib/hook-reporter.js and lib/orchestration-hook.js work against an older server (AUTH_TOKEN only) and send the new form with a session token', async (t) => {
+  const old = await startOldGate(t);
+  const base = { VISTACLAIR_DASHBOARD_PORT: String(old.port), VISTACLAIR_INSTANCE_ID: 'cli-skew' };
+  // Older server: only the owner token, in VISTACLAIR_AUTH_TOKEN.
+  assert.strictEqual(await runScript('hook-reporter.js', { ...base, VISTACLAIR_AUTH_TOKEN: OLD_TOKEN }, JSON.stringify({ hook_event_name: 'Stop' })), 0);
+  assert.strictEqual(await runScript('orchestration-hook.js', { ...base, VISTACLAIR_AUTH_TOKEN: OLD_TOKEN }, JSON.stringify({ hook_event_name: 'Stop' })), 0);
+  assert.deepStrictEqual(old.seen.map(s => [s.url, s.ok]), [['/api/hook-report', true], ['/api/orchestration/hook', true]], 'both accepted by the old gate');
+  assert.strictEqual(old.seen[0].body.token, OLD_TOKEN, 'the body token, as the old version sent it');
+  assert.strictEqual(old.seen[1].headers['x-vistaclair-internal'], OLD_TOKEN);
+  old.seen.length = 0;
+  // Current server: the session token (and its legacy alias, the same value).
+  const SESS = 'vcs_' + crypto.randomBytes(8).toString('hex');
+  await runScript('hook-reporter.js', { ...base, VISTACLAIR_SESSION_TOKEN: SESS, VISTACLAIR_AUTH_TOKEN: SESS }, JSON.stringify({ hook_event_name: 'Stop' }));
+  await runScript('orchestration-hook.js', { ...base, VISTACLAIR_SESSION_TOKEN: SESS, VISTACLAIR_AUTH_TOKEN: SESS }, JSON.stringify({ hook_event_name: 'Stop' }));
+  assert.strictEqual(old.seen.length, 2);
+  for (const s of old.seen) {
+    assert.strictEqual(s.headers['x-vistaclair-session'], SESS, `${s.url}: the session header`);
+    assert.strictEqual(s.headers['x-vistaclair-internal'], undefined, `${s.url}: no legacy owner header`);
+    assert.strictEqual('token' in s.body, false, `${s.url}: no body token`);
+  }
+  // Neither variable: nothing is sent.
+  old.seen.length = 0;
+  await runScript('hook-reporter.js', base, '{}');
+  await runScript('orchestration-hook.js', base, '{}');
+  assert.strictEqual(old.seen.length, 0);
+});
+
+test('skew: lib/orchestrator-mcp.js works against an older server (AUTH_TOKEN only) and sends the session form with a session token', { skip: !fs.existsSync(MCP_SDK) && 'MCP SDK not installed' }, async (t) => {
+  const old = await startOldGate(t);
+  const base = { VISTACLAIR_INSTANCE_ID: 'cli-skew', VISTACLAIR_ORCH_ROLE: 'worker' };
+  const r = await mcpTool(old.port, { ...base, VISTACLAIR_AUTH_TOKEN: OLD_TOKEN }, 'report', { status: 'done', summary: 'x' });
+  assert.strictEqual(/Unauthorized/.test(r), false, 'accepted by the old gate');
+  assert.deepStrictEqual(old.seen.map(s => [s.url, s.ok]), [['/api/orchestration/report', true]]);
+  assert.strictEqual(old.seen[0].headers['x-vistaclair-internal'], OLD_TOKEN);
+  old.seen.length = 0;
+  const SESS = 'vcs_' + crypto.randomBytes(8).toString('hex');
+  await mcpTool(old.port, { ...base, VISTACLAIR_SESSION_TOKEN: SESS, VISTACLAIR_AUTH_TOKEN: SESS }, 'report', { status: 'done', summary: 'x' });
+  assert.strictEqual(old.seen[0].headers['x-vistaclair-session'], SESS);
+  assert.strictEqual(old.seen[0].headers['x-vistaclair-internal'], undefined, 'no legacy owner header');
+});
+
+test('skew: the integrated ask tool (and its .original.js copy) works against an older server and sends the session form with a session token', async (t) => {
+  const old = await startOldGate(t);
+  for (const file of ['vista-ask-user-question.js', 'vista-ask-user-question.original.js']) {
+    old.seen.length = 0;
+    const base = { VISTACLAIR_DASHBOARD_PORT: String(old.port), VISTACLAIR_INSTANCE_ID: 'cli-skew' };
+    assert.deepStrictEqual(await askHandler(file, { ...base, VISTACLAIR_AUTH_TOKEN: OLD_TOKEN }), ['yes'], `${file}: answered by the old server`);
+    assert.deepStrictEqual(old.seen.map(s => [s.url, s.ok]), [['/api/ask', true]]);
+    assert.strictEqual(old.seen[0].body.token, OLD_TOKEN, 'the body token, as the old version sent it');
+    old.seen.length = 0;
+    const SESS = 'vcs_' + crypto.randomBytes(8).toString('hex');
+    await askHandler(file, { ...base, VISTACLAIR_SESSION_TOKEN: SESS, VISTACLAIR_AUTH_TOKEN: SESS });
+    assert.strictEqual(old.seen[0].headers['x-vistaclair-session'], SESS, `${file}: the session header`);
+    assert.strictEqual('token' in old.seen[0].body, false, `${file}: no body token`);
+    assert.strictEqual(old.seen[0].headers['x-vistaclair-internal'], undefined);
+  }
+});
+
+test('skew: the current server never puts the owner token in a session, so the fallback cannot leak it', () => {
+  // The legacy variable of a current session holds the session token (D7), and the fallback reads only that variable.
+  const env = utilsMod.buildClaudeEnv({ proxyPort: 1, dashboardPort: 2, sessionToken: 'vcs_x', instanceId: 'cli-x', autoMemory: false });
+  assert.strictEqual(env.VISTACLAIR_AUTH_TOKEN, 'vcs_x');
+  assert.strictEqual(env.VISTACLAIR_SESSION_TOKEN, 'vcs_x');
 });
