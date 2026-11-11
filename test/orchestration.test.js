@@ -3530,3 +3530,175 @@ test('owner message sent, refresh before a reply: it heads the seed as unanswere
   assert.match(typedInto(mgr, fresh.tabId), /1 owner message\(s\) went unanswered[\s\S]*Handle them first/);
   assert.strictEqual(orch.describeRun(run()).unansweredOwner, 1);
 });
+
+// --- Watch: a worker blocked on a finished peer; an owner message left unanswered ---
+
+const MIN = 60000;
+const watchEvents = (run) => run.events.filter(e => e.kind === 'watch');
+
+async function watchSetup(t, opts = {}) {
+  const ctx = await openOrchestrator(t, { isolation: 'none', engine: 'sdk', ...opts, setup: { watchCheckMs: 0 } });
+  const { orch, orchSession, mgr } = ctx;
+  const launch = (title) => {
+    const w = orch.launchWorker(orchSession.instanceId, { title, task: 'x' });
+    return { ...w, session: mgr.sessions.get(w.tabId), report: (status, summary = 's', open = '') => orch.report(mgr.sessions.get(w.tabId).instanceId, { status, summary, open }) };
+  };
+  return { ...ctx, launch, watch: (afterMs = 0) => orch.checkWatch({ now: Date.now() + afterMs }), events: () => watchEvents(ctx.run()) };
+}
+
+test('watch: a worker blocked on a peer that finished is one action event after WAIT_PEER_MS, then once more after 30 min, then never', async (t) => {
+  const { launch, watch, events, run } = await watchSetup(t);
+  const a = launch('a');
+  const b = launch('b');
+  b.report('blocked', `waiting for ${a.worker} to finish the schema`, 'then I migrate');
+  await wait(5);
+  watch(10 * MIN);
+  assert.deepStrictEqual(events(), [], 'the peer has not finished');
+  a.report('done', 'schema done');
+  watch(2 * MIN);
+  assert.deepStrictEqual(events(), [], 'within WAIT_PEER_MS of the peer\'s report');
+  watch(4 * MIN);
+  assert.strictEqual(events().length, 1);
+  assert.strictEqual(events()[0].text, `${b.worker} is blocked on ${a.worker}, which finished 4 min ago: message ${b.worker} what to do.`);
+  assert.ok(!events()[0].quiet, 'it wakes the orchestrator');
+  assert.strictEqual(events()[0].worker, null);
+
+  watch(10 * MIN);
+  watch(29 * MIN);
+  assert.strictEqual(events().length, 1, 'within the cooldown');
+  watch(35 * MIN);
+  assert.strictEqual(events().length, 2, 'repeated once after 30 min');
+  watch(70 * MIN);
+  watch(200 * MIN);
+  assert.strictEqual(events().length, 2, 'never a third time');
+  assert.ok(run().workers.length === 2);
+});
+
+test('watch: the peer is found by id too; a peer closed counts; negatives: peer running or busy again, worker busy, peer not named, not blocked', async (t) => {
+  const { launch, watch, events, orch, orchSession, run } = await watchSetup(t);
+  const a = launch('a');
+  const b = launch('b');
+  const c = launch('c');
+  const id = (w) => run().workers.find(x => x.name === w.worker).id;
+  b.report('blocked', `waiting for ${id(a)}`);   // by id
+  c.report('update', `waiting for ${a.worker}`);   // not blocked
+  await wait(5);
+  a.session.busy = false;
+  a.report('update', 'still going');
+  watch(10 * MIN);
+  assert.deepStrictEqual(events(), [], 'peer still running (last report update)');
+  a.report('done', 'done');
+  a.session.busy = true;   // resumed and working again
+  watch(10 * MIN);
+  assert.deepStrictEqual(events(), [], 'peer busy again');
+  a.session.busy = false;
+  b.session.busy = true;
+  watch(10 * MIN);
+  assert.deepStrictEqual(events(), [], 'the blocked worker is busy');
+  b.session.busy = false;
+  watch(10 * MIN);
+  assert.strictEqual(events().length, 1, 'by id once all is quiet');
+  assert.match(events()[0].text, new RegExp(`^${b.worker} is blocked on ${a.worker},`));
+  assert.ok(!events()[0].text.includes(c.worker + ' is'), 'the update-status worker is not reported');
+
+  // Closed peer.
+  const d = launch('d');
+  const e = launch('e');
+  e.report('blocked', `needs ${d.worker}'s output`);
+  await wait(5);
+  d.report('done', 'finished');
+  orch.closeWorker(orchSession.instanceId, { worker: d.worker });
+  watch(20 * MIN);
+  assert.ok(events().some(ev => ev.text.includes(`${e.worker} is blocked on ${d.worker}`)));
+
+  // A blocked report that names nobody.
+  const f = launch('f');
+  f.report('blocked', 'waiting for the owner');
+  watch(60 * MIN);
+  assert.ok(!events().some(ev => ev.text.includes(`${f.worker} is blocked`)));
+});
+
+test('watch: an owner message unanswered for 10 min while the orchestrator is idle — once, again after 30 min; not busy, not answered', async (t) => {
+  const { orch, orchSession, watch, events, run } = await watchSetup(t);
+  const asked = 'Why is the importer slow?';
+  ownerSend(orch, orchSession, asked);
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: asked });   // the orchestrator is in its turn
+  watch(11 * MIN);
+  assert.deepStrictEqual(events(), [], 'busy in the turn (run.busy)');
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  orchSession.busy = true;
+  watch(11 * MIN);
+  assert.deepStrictEqual(events(), [], 'the session is busy');
+  orchSession.busy = false;
+  watch(5 * MIN);
+  assert.deepStrictEqual(events(), [], 'not yet 10 min');
+  watch(11 * MIN);
+  assert.strictEqual(events().length, 1);
+  assert.match(events()[0].text, /^An owner message has been unanswered for 11 min while you are idle \(“Why is the importer slow\?”\): answer it or act on it now\.$/);
+  assert.ok(!events()[0].quiet);
+  watch(20 * MIN);
+  assert.strictEqual(events().length, 1, 'cooldown');
+  watch(45 * MIN);
+  assert.strictEqual(events().length, 2);
+  watch(100 * MIN);
+  assert.strictEqual(events().length, 2);
+
+  // Answered: nothing for a later check of a fresh message.
+  const second = 'And the exporter?';
+  ownerSend(orch, orchSession, second);
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: second });
+  await wait(5);
+  sdkReply(orchSession, 'Both are fixed.');
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  const before = events().length;
+  watch(200 * MIN);
+  assert.strictEqual(events().length, before, 'answered');
+  assert.ok(run().watchSent);
+});
+
+// A blocked worker on a finished peer and an unanswered owner message, the orchestrator idle.
+async function watchBoth(t) {
+  const ctx = await watchSetup(t);
+  const { orch, orchSession, launch } = ctx;
+  const a = launch('a');
+  const b = launch('b');
+  b.report('blocked', `waiting for ${a.worker}`);
+  await wait(5);
+  a.report('done', 'done');
+  ownerSend(orch, orchSession, 'status please');
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: 'status please' });
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  return { ...ctx, a, b };
+}
+
+test('watch: two findings of one pass are one event, one line each', async (t) => {
+  const { watch, events, a, b } = await watchBoth(t);
+  watch(11 * MIN);
+  assert.strictEqual(events().length, 1);
+  const lines = events()[0].text.split('\n');
+  assert.strictEqual(lines.length, 2);
+  assert.match(lines[0], new RegExp(`^${b.worker} is blocked on ${a.worker}, which finished 11 min ago`));
+  assert.match(lines[1], /^An owner message has been unanswered for 11 min/);
+});
+
+test('watch: off while the orchestrator is being refreshed', async (t) => {
+  const { orch, watch, events, run } = await watchBoth(t);
+  watch(11 * MIN);
+  assert.strictEqual(events().length, 1, 'both are found before the refresh');
+  const before = run().events.length;
+  orch.refreshOrchestrator(run().runId);
+  assert.ok(run().refreshing);
+  const afterRefresh = run().events.length;
+  watch(60 * MIN);
+  watch(120 * MIN);
+  assert.strictEqual(run().events.length, afterRefresh, 'no event while refreshing, not even the repeat');
+  assert.ok(afterRefresh >= before);
+});
+
+test('watch: off while the run is pausing', async (t) => {
+  const { orch, watch, events, run } = await watchBoth(t);
+  orch.pauseRun(run().runId);
+  assert.ok(run().pausing || run().paused);
+  watch(60 * MIN);
+  assert.deepStrictEqual(events(), []);
+});
