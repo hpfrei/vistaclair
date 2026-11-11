@@ -67,6 +67,9 @@ const lines = [];
 const partial = { 1: '', 2: '' };
 let logBytes = 0;
 try { fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true }); logBytes = fs.statSync(LOG_FILE).size; } catch {}
+// The log is owner-only: older versions printed the access token into it and
+// created it group/world-readable. Tighten what exists; new files are 0600.
+for (const f of [LOG_FILE, LOG_FILE + '.1']) { try { fs.chmodSync(f, 0o600); } catch {} }
 
 function appendLog(text) {
   try {
@@ -74,7 +77,7 @@ function appendLog(text) {
       fs.renameSync(LOG_FILE, LOG_FILE + '.1');
       logBytes = 0;
     }
-    fs.appendFileSync(LOG_FILE, text);
+    fs.appendFileSync(LOG_FILE, text, { mode: 0o600 });
     logBytes += Buffer.byteLength(text);
   } catch {}
 }
@@ -543,7 +546,7 @@ const STYLE = `
 function loginPage(error) {
   const body = `
     <form method="POST" action="/login">
-      <p class="muted">Enter the dashboard access token (AUTH_TOKEN, printed in the server's terminal).</p>
+      <p class="muted">Enter the dashboard access token (the AUTH_TOKEN set in the environment or .env; it is never printed). Without one, a browser already signed in to the dashboard is accepted, and the server opens your browser with a single-use login link when it starts.</p>
       <input type="password" name="token" placeholder="Access token" autofocus>
       ${error ? '<div class="err">Invalid token.</div>' : ''}
       <button type="submit">Log in</button>

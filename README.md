@@ -61,7 +61,7 @@ git clone https://github.com/hpfrei/vistaclair.git
 cd vistaclair && npm install && npm start
 ```
 
-Open **http://localhost:3457** and log in with the auth token printed to the console.
+Your browser opens on **http://localhost:3457** already signed in, through a single-use login link (the token itself is never printed). If it does not open, or on a headless machine, set `AUTH_TOKEN` in `.env` and sign in with it, or run `vistaclair login-link` on the host for a single-use URL.
 
 > [!TIP]
 > **Use Claude through the proxy** — run this in any terminal to route all traffic through vistaclair:

@@ -5,7 +5,8 @@ const caps = require('./capabilities');
 const { conventionNote } = require('./session-folders');
 const { writePrivateJson, removePrivateDir } = require('./private-tmp');
 const { toolPackContributions, releaseToolPacks, mergeMcpServers } = require('./tool-packs');
-const { buildCliArgs, spawnClaudePty, killGracefully, PACKAGE_ROOT, DATA_HOME } = require('./utils');
+const { buildCliArgs, spawnClaudePty, killGracefully, withoutOwnerToken, PACKAGE_ROOT, DATA_HOME } = require('./utils');
+const { shared: sessionTokens, scopesFor } = require('./session-tokens');
 
 const INTERACTIONS_DIR = path.join(DATA_HOME, 'interactions');
 
@@ -37,7 +38,7 @@ class CliSession {
     this._mcpConfigFile = null;
     this._mcpConfigDir = null;
     this._scrollback = '';
-    this._authToken = opts.authToken || '';
+    this._sessionToken = null; // this spawn's per-session token (src/session-tokens.js)
     this._dashboardPort = opts.dashboardPort || 3457;
     this._spawnGen = 0;
     this.hidden = false;
@@ -75,6 +76,7 @@ class CliSession {
 
     // Add-on tool packs (src/tool-packs.js), built once for this spawn.
     this._releasePacks('respawn');
+    this._sessionToken = sessionTokens.mint(this.instanceId, { scopes: scopesFor(this.settings) });
     const packs = toolPackContributions(this._mcpOpts());
     this._packs = packs;
     const mergedSettings = { ...this.settings, appendSystemPrompt: buildAppendSystemPrompt(this.settings, packs) };
@@ -98,7 +100,7 @@ class CliSession {
       cols: cols || 80,
       rows: rows || 24,
       dashboardPort: this._dashboardPort,
-      authToken: this._authToken,
+      sessionToken: this._sessionToken,
       extraEnv: { GIT_CEILING_DIRECTORIES: cwd },
       autoMemory: this.autoMemory,
       // Follows the owner's Claude credential preference (Models page), with
@@ -161,7 +163,7 @@ class CliSession {
       cols: cols || 80,
       rows: rows || 24,
       cwd,
-      env: { ...process.env },
+      env: withoutOwnerToken(process.env),
     });
 
     this.pty.onData((data) => {
@@ -275,6 +277,9 @@ class CliSession {
 
   // The current spawn's tool packs end (once; a later call is a no-op).
   _releasePacks(reason) {
+    // The spawn's session token ends with it, whatever ended it.
+    sessionTokens.revoke(this._sessionToken);
+    this._sessionToken = null;
     const packs = this._packs;
     this._packs = null;
     if (packs) releaseToolPacks(packs, reason);
@@ -343,7 +348,7 @@ function buildAppendSystemPrompt(settings = {}, packs = null) {
 }
 
 function mcpOptsOf(session) {
-  return { settings: session.settings, instanceId: session.instanceId, dashboardPort: session._dashboardPort, authToken: session._authToken, cwd: session.cwd, sessId: session.sessId };
+  return { settings: session.settings, instanceId: session.instanceId, dashboardPort: session._dashboardPort, sessionToken: session._sessionToken, cwd: session.cwd, sessId: session.sessId };
 }
 
 // Every MCP server a session gets (--mcp-config for a CLI tab, options.mcpServers
@@ -358,7 +363,7 @@ function buildMcpServers(opts, packs = toolPackContributions(opts)) {
 // session stamped with a role. The role picks the tool set; the engine adds
 // SendMessage / ListAgents where Claude Code's own cross-session messaging is
 // not available (SDK sessions).
-function orchestratorMcpServer({ settings = {}, instanceId, dashboardPort, authToken } = {}) {
+function orchestratorMcpServer({ settings = {}, instanceId, dashboardPort, sessionToken } = {}) {
   const role = settings.orchestration?.role;
   if (role !== 'orchestrator' && role !== 'worker') return {};
   return {
@@ -367,7 +372,7 @@ function orchestratorMcpServer({ settings = {}, instanceId, dashboardPort, authT
       args: [path.join(PACKAGE_ROOT, 'lib', 'orchestrator-mcp.js')],
       env: {
         VISTACLAIR_DASHBOARD_PORT: String(dashboardPort || process.env.DASHBOARD_PORT || '3457'),
-        VISTACLAIR_AUTH_TOKEN: String(authToken || process.env.AUTH_TOKEN || ''),
+        VISTACLAIR_SESSION_TOKEN: String(sessionToken || ''),
         VISTACLAIR_INSTANCE_ID: instanceId,
         VISTACLAIR_ORCH_ROLE: role,
         VISTACLAIR_ORCH_ENGINE: settings.engine === 'sdk' ? 'sdk' : 'cli',
@@ -376,7 +381,7 @@ function orchestratorMcpServer({ settings = {}, instanceId, dashboardPort, authT
   };
 }
 
-function integratedMcpServer({ instanceId, dashboardPort, authToken } = {}) {
+function integratedMcpServer({ instanceId, dashboardPort, sessionToken } = {}) {
   let mcpServers;
   try {
     mcpServers = require('./mcp/servers');
@@ -400,7 +405,9 @@ function integratedMcpServer({ instanceId, dashboardPort, authToken } = {}) {
   // spawn (via VISTACLAIR_DATA_HOME + slug), so plaintext never hits a tmp
   // config file.
   env.VISTACLAIR_DASHBOARD_PORT = String(dashboardPort || process.env.DASHBOARD_PORT || '3457');
-  env.VISTACLAIR_AUTH_TOKEN = String(authToken || process.env.AUTH_TOKEN || '');
+  // The session's own token, never the owner's: under its name, and under the
+  // legacy VISTACLAIR_AUTH_TOKEN name that user-written tools read.
+  env.VISTACLAIR_SESSION_TOKEN = env.VISTACLAIR_AUTH_TOKEN = String(sessionToken || '');
   env.VISTACLAIR_DATA_HOME = DATA_HOME;
   env.VISTACLAIR_SERVER_SLUG = mcpServers.INTEGRATED_SLUG;
   env.VISTACLAIR_INSTANCE_ID = instanceId;

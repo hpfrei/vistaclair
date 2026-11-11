@@ -129,6 +129,7 @@ test('options: the same append prompt, settings file, MCP servers and model as t
   const args = ptySpawns.at(-1).args;
   const flag = (f) => args[args.indexOf(f) + 1];
   const cliMcp = JSON.parse(fs.readFileSync(flag('--mcp-config'), 'utf8')).mcpServers;
+  const cliToken = cli._sessionToken;
   cli.kill();
 
   const { s, calls } = makeSession(settings);
@@ -152,7 +153,7 @@ test('options: the same append prompt, settings file, MCP servers and model as t
   // MCP: the CLI's --mcp-config entries, but for this session's instance and engine.
   assert.strictEqual(o.mcpServers, undefined, 'the config goes by file, not inline (argv)');
   const sdkServers = JSON.parse(fs.readFileSync(o.extraArgs['mcp-config'], 'utf8')).mcpServers;
-  const sdkMcp = JSON.parse(JSON.stringify(sdkServers).split(s.instanceId).join(cli.instanceId));
+  const sdkMcp = JSON.parse(JSON.stringify(sdkServers).split(s.instanceId).join(cli.instanceId).split(s._sessionToken).join(cliToken));
   cliMcp.orchestrator.env.VISTACLAIR_ORCH_ENGINE = 'sdk';
   assert.deepStrictEqual(sdkMcp, cliMcp);
   assert.strictEqual(sdkServers.orchestrator.env.VISTACLAIR_ORCH_ROLE, 'worker');
