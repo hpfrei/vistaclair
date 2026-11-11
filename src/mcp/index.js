@@ -376,7 +376,7 @@ function finishStart(meta) {
 
   const regResult = registrar.register(
     servers.INTEGRATED_SLUG, meta, bridgePath,
-    opts.authToken || '', opts.dashboardPort || 3457, projectDir
+    '', opts.dashboardPort || 3457, projectDir
   );
 
   serverRunning = true;
@@ -443,7 +443,9 @@ export default function register(server) {
       // Can use dynamic imports: const http = await import('http');
       // Environment variables available:
       //   process.env.VISTACLAIR_DASHBOARD_PORT — dashboard HTTP port
-      //   process.env.VISTACLAIR_AUTH_TOKEN     — auth token
+      //   process.env.VISTACLAIR_SESSION_TOKEN  — this session's token (also VISTACLAIR_AUTH_TOKEN, the older name).
+      //                                           Sent as header x-vistaclair-session; it opens only /api/ask and the
+      //                                           session's own hooks, never the owner's APIs.
       //   process.env.VISTACLAIR_INSTANCE_ID    �� instance ID
       //
       // Must return MCP content:
@@ -534,9 +536,10 @@ function spawnBridge() {
   return spawn('node', [bridgePath, servers.INTEGRATED_SLUG], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: {
-      ...process.env,
+      // Discovery / testing of a tool: no dashboard credential at all (the
+      // owner token is never handed to MCP code; a session's own token is).
+      ...require('../utils').withoutOwnerToken(process.env),
       VISTACLAIR_SERVER_SLUG: servers.INTEGRATED_SLUG,
-      VISTACLAIR_AUTH_TOKEN: opts.authToken || process.env.AUTH_TOKEN || '',
       VISTACLAIR_DASHBOARD_PORT: String(opts.dashboardPort || process.env.DASHBOARD_PORT || 3457),
     },
   });

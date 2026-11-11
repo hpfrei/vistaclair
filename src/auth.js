@@ -77,7 +77,7 @@ const originAllowed = (req, socket) => originAllowedFor(socket || req.socket, re
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-function createAuth({ authToken, login }) {
+function createAuth({ authToken, login, sessionTokens = null }) {
   function isInternalSocket(socket, req) {
     return isLoopbackSocket(socket, req) && safeEqual(req.headers['x-vistaclair-internal'], authToken);
   }
@@ -133,12 +133,21 @@ function createAuth({ authToken, login }) {
   // cross-site redirects, so these must bypass auth; declarative per-add-on
   // list, no product knowledge here), PWA metadata (the browser fetches the
   // manifest and its icons without cookies), the app-tool-call endpoint (its
-  // own ephemeral per-session tokens), then the owner decision.
+  // own ephemeral per-session tokens), a session token (session-tokens.js), then
+  // the owner decision.
   function gateMiddleware({ isAuthExempt, log = (line) => console.warn(line) }) {
     return (req, res, next) => {
       if (isAuthExempt(req.path)) return next();
       if (req.path === '/manifest.webmanifest' || /^\/(icon-\d+|apple-touch-icon)\.png$/.test(req.path)) return next();
       if (isLoopback(req) && req.path === '/api/app-tool-call') return next();
+      // A session token (src/session-tokens.js): its endpoints only, bound to
+      // its session, local callers only; never falls back to the owner decision.
+      const s = sessionTokens?.check(req);
+      if (s) {
+        if (!s.ok) return res.status(s.status).json({ error: s.error });
+        req.vcSession = s;
+        return next();
+      }
       const d = decide(req.socket, req);
       if (d.ok) return next();
       if (d.reason === 'cross-origin') {
@@ -154,7 +163,7 @@ function createAuth({ authToken, login }) {
   return {
     gateMiddleware,
     isLoopback, isLoopbackSocket, safeEqual, getTokenFromCookies, getSidFromCookies,
-    isInternal, sessionFromReq, isOwnerRequest, isOwnerUpgrade, originAllowed,
+    isInternal, sessionFromReq, isOwnerRequest, isOwnerUpgrade, originAllowed, decide: (req) => decide(req.socket, req),
   };
 }
 

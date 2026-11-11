@@ -86,6 +86,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const caps = require('./capabilities');
+const { shared: sessionTokens, scopesFor } = require('./session-tokens');
 const { buildClaudeEnv, trackInstance, disallowedToolsFor, modelFamily, DATA_HOME } = require('./utils');
 const { buildAppendSystemPrompt, buildMcpServers, writeInternalJson, DEFAULT_SETTINGS } = require('./cli-session');
 const { writePrivateJson, removePrivateDir } = require('./private-tmp');
@@ -466,7 +467,7 @@ class InputQueue {
 }
 
 class SdkSession {
-  // opts: authToken, dashboardPort (as CliSession); sdk ({ query,
+  // opts: dashboardPort (as CliSession); sdk ({ query,
   // getSessionMessages }) and claudeBin replace the real SDK and binary in tests.
   constructor(proxyPort, broadcaster, store, opts = {}) {
     this.proxyPort = proxyPort;
@@ -499,7 +500,7 @@ class SdkSession {
     this._unsent = [];             // the owner's turns cancelled before taken in (unsentInputs)
     this._echoes = false;          // this spawn's CLI echoes taken-in turns
     this.autoMemory = false;
-    this._authToken = opts.authToken || '';
+    this._sessionToken = null; // this spawn's per-session token (src/session-tokens.js)
     this._dashboardPort = opts.dashboardPort || 3457;
     this._sdk = opts.sdk || null;
     this._claudeBin = opts.claudeBin || null;
@@ -605,7 +606,12 @@ class SdkSession {
     if (this.sessionDir()) for (const id of stalePending(this.sessionDir())) this._cancelInput(id, 'ended');
 
     this._input = new InputQueue();
-    this._query = mod.query({ prompt: this._input, options });
+    try {
+      this._query = mod.query({ prompt: this._input, options });
+    } catch (e) {
+      this._releasePacks('refused'); // the spawn's session token and packs end with it
+      throw e;
+    }
     this._setState('idle', { force: true });
     this._consume(this._spawnGen, this._query);
 
@@ -644,10 +650,13 @@ class SdkSession {
     if (!credential) throw new Error('An Agent SDK session needs a Claude credential: add an Anthropic API key on the Models page, or sign in to a Claude subscription (Sign in to Claude, in the dashboard header).');
     this._credential = credential;
     this._authFailNotified = false;
+    // Minted per spawn, revoked by _releasePacks when the spawn ends or is refused.
+    sessionTokens.revoke(this._sessionToken);
+    this._sessionToken = sessionTokens.mint(this.instanceId, { scopes: scopesFor(s) });
     const env = buildClaudeEnv({
       proxyPort: this.proxyPort,
       dashboardPort: this._dashboardPort,
-      authToken: this._authToken,
+      sessionToken: this._sessionToken,
       instanceId: this.instanceId,
       extraEnv: { GIT_CEILING_DIRECTORIES: this.cwd, CLAUDE_AGENT_SDK_CLIENT_APP: 'vistaclair' },
       autoMemory: this.autoMemory,
@@ -660,7 +669,7 @@ class SdkSession {
     if (credential === 'api-key') delete env.CLAUDE_CODE_OAUTH_TOKEN;
 
     // Add-on tool packs (src/tool-packs.js), built once for this spawn.
-    const mcpOpts = { settings: s, instanceId: this.instanceId, dashboardPort: this._dashboardPort, authToken: this._authToken, cwd: this.cwd, sessId: this.sessId };
+    const mcpOpts = { settings: s, instanceId: this.instanceId, dashboardPort: this._dashboardPort, sessionToken: this._sessionToken, cwd: this.cwd, sessId: this.sessId };
     const packs = toolPackContributions(mcpOpts);
     this._builtPacks = packs;   // spawn takes it over
     const append = buildAppendSystemPrompt(s, packs);
@@ -1302,6 +1311,9 @@ class SdkSession {
   }
 
   _releasePacks(reason) {
+    // The spawn's session token ends with it, whatever ended it.
+    sessionTokens.revoke(this._sessionToken);
+    this._sessionToken = null;
     this._cleanupMcpConfig();
     const packs = this._packs;
     this._packs = null;

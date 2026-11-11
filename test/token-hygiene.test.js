@@ -65,8 +65,11 @@ test('CLI tab: the MCP config is a private file, the token is in no arg, the fil
   const file = args[args.indexOf('--mcp-config') + 1];
   assert.strictEqual(mode(file), 0o600);
   assert.strictEqual(mode(path.dirname(file)), 0o700);
-  assert.ok(fs.readFileSync(file, 'utf8').includes(TOKEN), 'the servers still get it (env)');
-  assert.strictEqual(o.authToken, TOKEN);
+  const cfg = fs.readFileSync(file, 'utf8');
+  assert.ok(cfg.includes(cli._sessionToken), 'the servers get the SESSION token (env)');
+  assert.ok(!cfg.includes(TOKEN), 'never the owner token');
+  assert.strictEqual(o.sessionToken, cli._sessionToken);
+  assert.ok(!('authToken' in o), 'the owner token is not handed to the spawn');
   cli.kill();
   assert.ok(!fs.existsSync(path.dirname(file)), 'dir removed');
 });
@@ -85,8 +88,8 @@ test('SDK session: no inline mcpServers, the token is in no arg, a private file 
   assert.strictEqual(mode(file), 0o600);
   assert.strictEqual(mode(path.dirname(file)), 0o700);
   const servers = JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers;
-  assert.strictEqual(servers.orchestrator.env.VISTACLAIR_AUTH_TOKEN, TOKEN, 'MCP servers still get the token through env');
-  assert.strictEqual(servers.integrated?.env?.VISTACLAIR_AUTH_TOKEN ?? TOKEN, TOKEN);
+  assert.strictEqual(servers.orchestrator.env.VISTACLAIR_SESSION_TOKEN, s._sessionToken, 'MCP servers get the session token through env');
+  assert.ok(!JSON.stringify(servers).includes(TOKEN), 'never the owner token');
 
   s.spawn(HOME, 80, 24, {});   // respawn: the old file goes, a new one comes
   assert.ok(!fs.existsSync(path.dirname(file)));

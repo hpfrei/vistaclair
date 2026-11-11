@@ -125,6 +125,11 @@ if (SERVER_MODE && !process.env.AUTH_TOKEN) {
 }
 const AUTH_TOKEN = process.env.AUTH_TOKEN || crypto.randomUUID();
 const AUTH_TOKEN_SOURCE = process.env.AUTH_TOKEN ? 'env' : 'generated';
+// The server process keeps the token in a constant only: every child it
+// spawns inherits process.env, and none of them may find the permanent token
+// there (a session gets its own token: src/session-tokens.js). The restart
+// path below passes AUTH_TOKEN to the new process explicitly.
+for (const name of ['AUTH_TOKEN', 'VISTACLAIR_AUTH_TOKEN', 'MCP_AUTH_TOKEN', 'VISTACLAIR_SESSION_TOKEN']) delete process.env[name];
 const DASHBOARD_HOST = process.env.DASHBOARD_HOST || (SERVER_MODE ? '127.0.0.1' : undefined);
 
 // Shared store
@@ -132,6 +137,7 @@ const store = new InteractionStore(MAX_HISTORY);
 
 // Dashboard login: sessions, one-time links, add-on login providers (src/login.js)
 const { createLogin } = require('./src/login');
+const { openDashboard, loginLines, tightenSecretFiles } = require('./src/boot');
 const { mountLoginRoutes, mountLoginApi } = require('./src/login-routes');
 const login = createLogin({ dataHome: DATA_HOME });
 if (fs.existsSync(path.join(DATA_HOME, 'tg-login.enc'))) console.log('  Login: core Telegram login was removed; it is provided by Vistaclair Pro (tg-login.enc left untouched)');
@@ -158,7 +164,8 @@ dashboardApp.use(express.urlencoded({ extended: false }));
 
 // Owner authentication — one definition (src/auth.js) shared by the HTTP
 // middleware, the WS upgrade, host-local endpoints, and the addon ctx.
-const auth = createAuth({ authToken: AUTH_TOKEN, login });
+const sessionTokens = require('./src/session-tokens').shared;
+const auth = createAuth({ authToken: AUTH_TOKEN, login, sessionTokens });
 const { isLoopback, safeEqual, getSidFromCookies, isInternal } = auth;
 
 function authCookie(name, value, extra = '') {
@@ -181,10 +188,10 @@ const loginDeps = {
 };
 mountLoginRoutes(dashboardApp, loginDeps);
 
-// Hook reporter endpoint (auth via body token, no cookie needed)
+// Hook reporter endpoint: a session's own token (header x-vistaclair-session,
+// bound to its instanceId), no cookie needed; anything else must be the owner.
 let hookSeq = 0;
-dashboardApp.post('/api/hook-report', (req, res) => {
-  if (!safeEqual(req.body?.token, AUTH_TOKEN)) return res.status(401).end();
+dashboardApp.post('/api/hook-report', sessionTokens.acceptOrOwner((req) => auth.decide(req)), (req, res) => {
   try {
     const hookData = typeof req.body.hookData === 'string' ? JSON.parse(req.body.hookData) : req.body.hookData;
     const id = `hook-${Date.now()}-${++hookSeq}`;
@@ -267,8 +274,7 @@ dashboardApp.post('/api/hook-report', (req, res) => {
 // AskUserQuestion endpoint — called by vista-AskUserQuestion MCP tool handler.
 // Broadcasts the question to the dashboard and waits for the user's answer.
 const { getInstanceContext } = require('./src/utils');
-dashboardApp.post('/api/ask', async (req, res) => {
-  if (!safeEqual(req.body?.token, AUTH_TOKEN)) return res.status(401).end();
+dashboardApp.post('/api/ask', sessionTokens.acceptOrOwner((req) => auth.decide(req)), async (req, res) => {
   const { instanceId, formData, questions } = req.body;
   const ctx = instanceId ? getInstanceContext(instanceId) : null;
   const session = instanceId ? cliSessionManager.getByInstanceId(instanceId) : null;
@@ -349,7 +355,7 @@ const dashboardServer = http.createServer(dashboardApp);
 // slave receiving a publish upload (code/data bundle) over a slow link needs longer.
 dashboardServer.requestTimeout = 10 * 60 * 1000;
 
-const cliSessionManager = new CliSessionManager(PROXY_PORT, { broadcast: (...args) => broadcaster.broadcast(...args) }, store, { authToken: AUTH_TOKEN, dashboardPort: DASHBOARD_PORT });
+const cliSessionManager = new CliSessionManager(PROXY_PORT, { broadcast: (...args) => broadcaster.broadcast(...args) }, store, { dashboardPort: DASHBOARD_PORT });
 
 // Orchestrator CLI sessions and the one "new CLI" entry, openCli (an Agent SDK
 // session is an orchestrator; a terminal asks Simple / Orchestrator when the
@@ -612,24 +618,18 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
     console.log(`  Dashboard: http://localhost:${DASHBOARD_PORT}`);
     console.log(`  Upstream:  ${TARGET_URL}`);
     console.log('');
-    if (AUTH_TOKEN_SOURCE === 'generated') {
-      console.log(`  Auth token (auto-generated):`);
-    } else {
-      console.log(`  Auth token (from AUTH_TOKEN env):`);
-    }
-    console.log(`  ${AUTH_TOKEN}`);
+    tightenSecretFiles({ envFile: path.join(PACKAGE_ROOT, '.env'), logDir: path.join(DATA_HOME, 'data', 'logs') });
+    // The token itself is never printed (src/boot.js): the browser opens with a
+    // single-use login code, and the banner says where a login comes from.
+    const autoOpen = !process.env.NO_OPEN && !SERVER_MODE;
+    for (const line of loginLines({ tokenSource: AUTH_TOKEN_SOURCE, supervised: SUPERVISED, autoOpen, login, port: DASHBOARD_PORT })) console.log(line);
     console.log('');
     console.log('  Usage:');
     console.log(`    ANTHROPIC_BASE_URL=http://localhost:${PROXY_PORT} claude -p "your prompt"`);
     console.log('');
 
     // Auto-open dashboard in the default browser (skip with NO_OPEN=1 or server mode)
-    if (!process.env.NO_OPEN && !SERVER_MODE) {
-      const url = `http://localhost:${DASHBOARD_PORT}/login/auto?token=${AUTH_TOKEN}`;
-      const { execFile } = require('child_process');
-      const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-      execFile(cmd, [url]);
-    }
+    if (autoOpen) openDashboard({ port: DASHBOARD_PORT, login, execFile: require('child_process').execFile });
 
     // Re-validate license every 4 hours
     setInterval(async () => {

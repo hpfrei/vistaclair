@@ -68,8 +68,10 @@ function spawnCli(settings) {
   cli.spawn(HOME, 80, 24, {});
   const args = ptySpawns.at(-1).args;
   const mcp = JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config') + 1], 'utf8')).mcpServers;
+  const token = cli._sessionToken;   // revoked by kill()
   cli.kill();
-  return { cli, args, mcp };
+  assert.strictEqual(cli._sessionToken, null);
+  return { cli, args, mcp, token };
 }
 
 function spawnSdk(settings) {
@@ -86,8 +88,9 @@ function spawnSdk(settings) {
   // The MCP servers go by a private file (--mcp-config <path>), removed on kill.
   const file = calls[0].extraArgs['mcp-config'];
   const servers = file ? JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers : {};
+  const token = s._sessionToken;
   s.kill();
-  return { s, o: calls[0], servers };
+  return { s, o: calls[0], servers, token };
 }
 
 // --- No pack: as before ---
@@ -96,21 +99,21 @@ test('no pack: buildMcpServers, CLI args and SDK options are what core alone bui
   clearPacks();
   for (const settings of [WORKER, ORCH, PLAIN]) {
     // The CLI tab: exactly the pre-pack argument formula.
-    const { cli, args, mcp } = spawnCli(settings);
+    const { cli, args, mcp, token: cliToken } = spawnCli(settings);
     const expected = ['--dangerously-skip-permissions', ...buildCliArgs({ ...cli.settings, appendSystemPrompt: buildAppendSystemPrompt(cli.settings) }), '--session-id', cli.sessId, '--mcp-config', args.at(-1)];
     assert.deepStrictEqual(args, expected);
     const denied = args.includes('--disallowedTools') ? args[args.indexOf('--disallowedTools') + 1] : null;
     assert.strictEqual(denied, settings === PLAIN ? null : ROLE_DISALLOWED_TOOLS[settings.orchestration.role].join(','), 'the role\'s list only');
-    const coreOpts = { settings: cli.settings, instanceId: cli.instanceId, dashboardPort: 4321, authToken: 'tok' };
+    const coreOpts = { settings: cli.settings, instanceId: cli.instanceId, dashboardPort: 4321, sessionToken: cliToken };
     assert.deepStrictEqual(mcp, buildMcpServers(coreOpts));
     assert.ok(mcp.integrated, 'the integrated bridge is there');
     assert.strictEqual(!!mcp.orchestrator, settings !== PLAIN);
 
     // The SDK session.
-    const { s, o, servers } = spawnSdk(settings);
+    const { s, o, servers, token: sdkToken } = spawnSdk(settings);
     assert.deepStrictEqual(o.disallowedTools, utils.disallowedToolsFor(settings, ['SendMessage', 'ListAgents']));
     assert.strictEqual(o.systemPrompt.append, buildAppendSystemPrompt(s.settings));
-    assert.deepStrictEqual(servers, buildMcpServers({ settings: s.settings, instanceId: s.instanceId, dashboardPort: 4321, authToken: 'tok' }));
+    assert.deepStrictEqual(servers, buildMcpServers({ settings: s.settings, instanceId: s.instanceId, dashboardPort: 4321, sessionToken: sdkToken }));
   }
   assert.deepStrictEqual(Object.keys(buildMcpServers({ settings: WORKER, instanceId: 'cli-x' })), ['integrated', 'orchestrator']);
 });
@@ -125,7 +128,9 @@ test('a pack that does not apply changes nothing', () => {
   const sdkAfter = spawnSdk(WORKER);
   const norm = (r) => JSON.parse(JSON.stringify(r.args).split(r.cli.sessId).join('<id>').replace(/vistaclair-cli-mcp-[^"]+/, '<cfg>'));
   assert.deepStrictEqual(norm(after), norm(before));
-  assert.deepStrictEqual(JSON.stringify(after.mcp).split(after.cli.sessId).join('<id>'), JSON.stringify(before.mcp).split(before.cli.sessId).join('<id>'));
+  // (each spawn has its own session token)
+  const normMcp = (r) => JSON.stringify(r.mcp).split(r.cli.sessId).join('<id>').split(r.token).join('<tok>');
+  assert.deepStrictEqual(normMcp(after), normMcp(before));
   assert.deepStrictEqual(sdkAfter.o.disallowedTools, sdkBefore.o.disallowedTools);
   assert.deepStrictEqual(Object.keys(sdkAfter.servers), Object.keys(sdkBefore.servers));
   assert.strictEqual(sdkAfter.o.systemPrompt.append.split(sdkAfter.s.sessId).join('<id>'), sdkBefore.o.systemPrompt.append.split(sdkBefore.s.sessId).join('<id>'));

@@ -47,6 +47,14 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
     // Frozen signatures — core keeps these byte-compatible.
     spawnClaude: utils.spawnClaude,
     buildClaudeArgs: utils.buildClaudeArgs,
+    // The per-boot proxy caller secret and the request header that carries it
+    // (src/proxy.js attaches stored non-Anthropic provider keys only for a
+    // caller presenting it). For an add-on that starts its own `claude` with
+    // ANTHROPIC_BASE_URL: send `${proxySecretHeader}: ${getProxySecret()}` (the
+    // CLI takes it through ANTHROPIC_CUSTOM_HEADERS). The secret is per
+    // dashboard process: a headless runner's own value is not the dashboard's.
+    getProxySecret: utils.getProxySecret,
+    proxySecretHeader: utils.PROXY_SECRET_HEADER,
     secretStore,
     resolveHeadlessAuth: (authMode) => caps.resolveHeadlessAuth(home, authMode),
     resolveProviderKey: (providerKey) => caps.getProviderKey(home, providerKey),

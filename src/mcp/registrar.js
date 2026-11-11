@@ -33,9 +33,9 @@ function writeConfig(filePath, data) {
   fs.renameSync(tmp, filePath);
 }
 
-// The owner token is NOT written: the bridge reads VISTACLAIR_AUTH_TOKEN from
-// the environment of the session that starts it (set for every dashboard
-// session). `authToken` stays a parameter for callers; it is unused.
+// No token is written: the bridge reads VISTACLAIR_SESSION_TOKEN from the
+// environment of the session that starts it (set for every dashboard session;
+// src/session-tokens.js). `authToken` stays a parameter for callers; unused.
 function register(slug, meta, bridgePath, authToken, dashboardPort, projectDir) {
   const scope = meta.scope || 'user';
   const filePath = resolveConfigPath(scope, projectDir);
@@ -55,6 +55,7 @@ function register(slug, meta, bridgePath, authToken, dashboardPort, projectDir) 
   if (meta.env) Object.assign(env, meta.env);
   delete env.MCP_AUTH_TOKEN;
   delete env.VISTACLAIR_AUTH_TOKEN;
+  delete env.VISTACLAIR_SESSION_TOKEN;
 
   config.mcpServers[slug] = {
     command: 'node',

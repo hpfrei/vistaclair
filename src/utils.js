@@ -300,8 +300,20 @@ function maskUrlSecrets(url) {
  * (instance-scoped), auto-memory toggle, and the VISTACLAIR_* handshake vars.
  * Shared by spawnClaude and spawnClaudePty.
  */
-function buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly }) {
-  const env = { ...process.env, ...extraEnv };
+// The permanent owner token never reaches a session: every name it can travel
+// under is dropped from the inherited environment (an explicit extraEnv value,
+// such as Pro's per-call tool token, is the caller's own and stays). What a
+// session gets is its per-session token (src/session-tokens.js), under its own
+// name and under the legacy VISTACLAIR_AUTH_TOKEN name older scripts read.
+const OWNER_TOKEN_ENV = ['AUTH_TOKEN', 'VISTACLAIR_AUTH_TOKEN', 'MCP_AUTH_TOKEN', 'VISTACLAIR_SESSION_TOKEN'];
+function withoutOwnerToken(base) {
+  const env = { ...base };
+  for (const k of OWNER_TOKEN_ENV) delete env[k];
+  return env;
+}
+
+function buildClaudeEnv({ proxyPort, dashboardPort, sessionToken, instanceId, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly }) {
+  const env = { ...withoutOwnerToken(process.env), ...extraEnv };
   delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
   // Only set the API key when core's resolveAuth chose the 'api-key' credential.
   // An empty string means it chose 'subscription': leave the env untouched so the
@@ -316,7 +328,7 @@ function buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extra
   }
   if (!autoMemory) env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
   if (dashboardPort) env.VISTACLAIR_DASHBOARD_PORT = String(dashboardPort);
-  if (authToken) env.VISTACLAIR_AUTH_TOKEN = authToken;
+  if (sessionToken) { env.VISTACLAIR_SESSION_TOKEN = sessionToken; env.VISTACLAIR_AUTH_TOKEN = sessionToken; }
   env.VISTACLAIR_INSTANCE_ID = instanceId;
   // The proxy secret, as a header the Claude CLI sends on every API request to
   // the base URL (subagents included). Any value an extraEnv/process.env
@@ -356,9 +368,9 @@ function _trackProcess(instanceId, proc, sourceContext, cwd, autoMemory) {
   };
 }
 
-function spawnClaude(args, { cwd, proxyPort, dashboardPort, authToken, instanceId, sourceContext, extraEnv, autoMemory, anthropicApiKey }) {
+function spawnClaude(args, { cwd, proxyPort, dashboardPort, sessionToken, instanceId, sourceContext, extraEnv, autoMemory, anthropicApiKey }) {
   if (!instanceId) throw new Error('spawnClaude requires instanceId');
-  const env = buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extraEnv, autoMemory, anthropicApiKey });
+  const env = buildClaudeEnv({ proxyPort, dashboardPort, sessionToken, instanceId, extraEnv, autoMemory, anthropicApiKey });
   const proc = spawn('claude', args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
   proc.on('exit', _trackProcess(instanceId, proc, sourceContext, cwd, autoMemory));
   return proc;
@@ -367,9 +379,9 @@ function spawnClaude(args, { cwd, proxyPort, dashboardPort, authToken, instanceI
 /**
  * Spawn `claude` in interactive PTY mode with the proxy URL injected.
  */
-function spawnClaudePty(args, { cwd, proxyPort, instanceId, sourceContext, cols, rows, dashboardPort, authToken, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly }) {
+function spawnClaudePty(args, { cwd, proxyPort, instanceId, sourceContext, cols, rows, dashboardPort, sessionToken, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly }) {
   if (!instanceId) throw new Error('spawnClaudePty requires instanceId');
-  const env = buildClaudeEnv({ proxyPort, dashboardPort, authToken, instanceId, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly });
+  const env = buildClaudeEnv({ proxyPort, dashboardPort, sessionToken, instanceId, extraEnv, autoMemory, anthropicApiKey, subscriptionOnly });
 
   const ptyProc = getPty().spawn('claude', args, {
     name: 'xterm-256color',
@@ -717,6 +729,7 @@ module.exports = {
   filterResponseHeaders,
   sanitizeForDashboard,
   getProxySecret,
+  withoutOwnerToken,
   isProxySecret,
   PROXY_SECRET_HEADER,
   maskSecretHeaders,

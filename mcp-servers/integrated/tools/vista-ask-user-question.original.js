@@ -15,13 +15,13 @@ export default function register(server) {
     async (input, extra) => {
       const http = await import("http");
       const dashPort = process.env.VISTACLAIR_DASHBOARD_PORT || "3457";
-      const token = process.env.VISTACLAIR_AUTH_TOKEN || "";
+      const token = process.env.VISTACLAIR_SESSION_TOKEN || "";
       const instanceId = process.env.VISTACLAIR_INSTANCE_ID || "";
 
       const formData = { ...input };
       const questions = input.questions || [];
 
-      const body = JSON.stringify({ token, instanceId, formData, questions });
+      const body = JSON.stringify({ instanceId, formData, questions });
 
       return new Promise((resolve) => {
         // The call ends without an answer (4 h, or Claude Code cancels it: an
@@ -43,6 +43,7 @@ export default function register(server) {
           headers: {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(body),
+            "x-vistaclair-session": token,
           },
         }, (res) => {
           let data = "";
