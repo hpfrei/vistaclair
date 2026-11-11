@@ -125,6 +125,7 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
   function setBusy(session, busy) {
     if (session.busy === busy) return;
     session.busy = busy;
+    if (busy) session.busySince = Date.now();   // the turn's start (orchestration: is a report older than it)
     mgr.noteSessionState?.(session);
   }
 

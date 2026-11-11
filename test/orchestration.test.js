@@ -3702,3 +3702,46 @@ test('watch: off while the run is pausing', async (t) => {
   watch(60 * MIN);
   assert.deepStrictEqual(events(), []);
 });
+
+// --- A "blocked" report is earlier news only while the worker works again in a later turn ---
+
+test('blocked report: superseded only while the worker is busy in a turn that began after it; idle again (follow-up or not) it is blocked; a new report counts', async (t) => {
+  const { launch, orch, orchSession, run } = await watchSetup(t);
+  const b = launch('b');
+  const view = () => orch.describeRun(run()).workers.find(x => x.worker === b.worker).lastReport;
+  const compact = () => orch.listWorkers(orchSession.instanceId).workers.find(x => x.worker === b.worker).lastReport;
+  const startTurn = () => { b.session.busy = true; b.session.busySince = Date.now(); };   // what the session does at a turn's start
+  const endTurn = () => { b.session.busy = false; };
+
+  b.report('blocked', 'need the schema');
+  endTurn();
+  assert.ok(!view().superseded, 'blocked and idle: still blocked');
+  await wait(5);
+
+  // (2) a follow-up alone changes nothing: the worker is idle, nothing delivered it a turn.
+  orch.sendMessage(orchSession.instanceId, { to: b.worker, message: 'FYI the schema is in review' });
+  assert.ok(!view().superseded, 'idle with a later follow-up: still blocked');
+  assert.strictEqual(run().workers[0].followUps.length, 1);
+
+  // (1) it is busy again, in a turn that began after the report.
+  startTurn();
+  assert.strictEqual(view().superseded, true, 'busy after the report: working, the report is earlier');
+  assert.strictEqual(view().status, 'blocked', 'the report itself is kept');
+  assert.strictEqual(compact().superseded, true, 'list_workers too');
+  assert.strictEqual(run().workers[0].lastReport.superseded, undefined, 'the stored record is not marked');
+
+  // The turn ends without a new report (only a message to the orchestrator): blocked again.
+  endTurn();
+  assert.ok(!view().superseded, 'idle again without a new report: blocked again');
+
+  // (3) busy, then a new blocked report: that one is current, busy or idle.
+  await wait(5);
+  startTurn();
+  assert.strictEqual(view().superseded, true);
+  await wait(5);
+  b.report('blocked', 'still need the schema (new)');
+  assert.ok(!view().superseded, 'a report made in the running turn is not earlier');
+  endTurn();
+  assert.ok(!view().superseded, 'idle after the new report: blocked');
+  assert.strictEqual(view().summary, 'still need the schema (new)');
+});

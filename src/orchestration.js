@@ -361,6 +361,22 @@ function clip(s, n) {
 
 // The orchestrator's own folder: its session folder for a run created with
 // one, the run directory for an older run.
+// A "blocked" / "failed" report is superseded while the worker is busy again
+// in a turn that began after it: that report is earlier news, and the worker
+// shows as working. Idle again, it counts as usual (a message alone, a
+// follow-up the worker did not act on, does not clear it; a new report
+// replaces it). The stored lastReport is never changed; only the view is.
+function reportSuperseded(w, live) {
+  const rep = w?.lastReport;
+  if (!rep || !['blocked', 'failed'].includes(rep.status)) return false;
+  const s = live?.session;
+  if (!s?.running || s.busy !== true || !s.busySince) return false;
+  return s.busySince > (Date.parse(rep.at) || 0);
+}
+
+// lastReport as describeRun / list_workers show it: a superseded one is marked.
+const reportView = (w, live) => (reportSuperseded(w, live) ? { ...w.lastReport, superseded: true } : w.lastReport);
+
 function orchestratorDir(run) {
   return run.orchestratorDir || run.runDir;
 }
@@ -1845,7 +1861,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function compactWorker(w) {
     return {
       worker: w.worker, name: w.name, id: w.id, title: w.title, state: w.state, closedAt: w.closedAt,
-      lastReport: w.lastReport ? { status: w.lastReport.status, summary: clip(w.lastReport.summary, 160) } : null,
+      lastReport: w.lastReport ? { status: w.lastReport.status, summary: clip(w.lastReport.summary, 160), ...(w.lastReport.superseded ? { superseded: true } : {}) } : null,
       branch: w.branch, todo: w.todo, notes: w.notes,
       ...(w.landing ? { landing: w.landing } : {}),
       ...(w.grants ? { grants: w.grants } : {}),
@@ -1949,7 +1965,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           model: w.model || live?.session.getSettings().model || null,
           state: memberState(live?.session, w),
           cost: costOf(live?.session, w.costUsd, run.engine === 'sdk' ? w.sessionDir : null),
-          cwd: w.cwd, branch: w.branch, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: w.lastReport,
+          cwd: w.cwd, branch: w.branch, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: reportView(w, live),
           landing: landingOfWorker(run, w),
           paused: !!w.paused, abandoned: !!w.abandoned,
           closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
@@ -1982,7 +1998,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       model: w.model || live?.session.getSettings().model || null,
       state: remoteState(run, w, live),
       cost: costOf(live?.session, w.costUsd, null),
-      cwd: null, branch: null, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: w.lastReport,
+      cwd: null, branch: null, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: reportView(w, live),
       paused: false, abandoned: false,
       closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
       ...(w.turnStopped ? { turnStopped: w.turnStopped } : {}),
@@ -3363,14 +3379,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const dir = w.remote ? live?.session.getSettings().sessionDir || null : w.sessionDir;
     const f = dir ? folders.readFolder(dir) : null;
     const rep = w.lastReport;
-    const blocked = rep?.status === 'blocked' && (running || w.paused);
+    const superseded = reportSuperseded(w, live);
+    const blocked = rep?.status === 'blocked' && !superseded && (running || w.paused);
     const awaiting = running && !busy && !!rep && ['done', 'failed', 'paused'].includes(rep.status);
     const lastActivity = Math.max(Date.parse(rep?.at || '') || 0, f?.todoUpdatedAt || 0, f?.notesUpdatedAt || 0,
       dir ? mtimeMs(path.join(dir, 'transcript.jsonl')) : 0, Date.parse(w.exitedAt || '') || 0, Date.parse(w.launchedAt || '') || 0);
     const stale = busy && f?.todoUpdatedAt && Date.now() - f.todoUpdatedAt > NOTES_STALE_MS;
     const ctx = running ? contextOf(live.session) : null;
     return {
-      w, live, running, busy, state, f, rep, blocked, awaiting, lastActivity, stale, ctx,
+      w, live, running, busy, state, f, rep, superseded, blocked, awaiting, lastActivity, stale, ctx,
       active: running || !!w.paused,
       rank: blocked ? 0 : awaiting ? 1 : running ? 2 : w.paused ? 3 : 4,
     };
@@ -3481,7 +3498,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       if (f) lines.push(`- TODO: ${f.progress.done}/${f.progress.total} done${f.progress.doing ? `, doing ${f.progress.doing.id}: ${clip(f.progress.doing.description, 160)}` : ''}; updated ${isoOf(f.todoUpdatedAt) || 'never'}${s.stale ? ` — NOTES STALE: unchanged for ${Math.round((Date.now() - f.todoUpdatedAt) / 60000)} min while busy` : ''}`);
       lines.push(`- Last activity: ${isoOf(s.lastActivity) || 'unknown'}${s.ctx ? `; context ${s.ctx.percent ?? '?'}% of its window${s.ctx.compactAt ? ` (${Math.round((s.ctx.tokens / s.ctx.compactAt) * 100)}% of its compaction threshold)` : ''}` : ''}`);
       if (!w.remote) lines.push(`- Working tree: ${w.worktree ? `${w.cwd}: ${treeLine(treeStatus(w.cwd))}` : 'the shared tree (above)'}`);
-      lines.push(`- Last report: ${rep ? `${rep.status} at ${rep.at}: ${clip(rep.summary, 1500)}` : '(none)'}`);
+      lines.push(`- Last report: ${rep ? `${rep.status} at ${rep.at}${s.superseded ? ' (earlier: it is working again)' : ''}: ${clip(rep.summary, 1500)}` : '(none)'}`);
       if (rep?.filesChanged?.length) lines.push(`  - files: ${rep.filesChanged.join(', ')}`);
       if (rep?.verified) lines.push(`  - verified: ${clip(rep.verified, 400)}`);
       if (rep?.open) lines.push(`  - open: ${clip(rep.open, 3000)}`);
