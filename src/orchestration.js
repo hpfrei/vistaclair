@@ -168,6 +168,10 @@ const MAX_SUBAGENTS = 3;
 const PUSH_DEBOUNCE_MS = 2000;
 const RELAY_FALLBACK_MS = 120000;
 const OVERLAP_CHECK_MS = 180000;     // how often files changed in two live worktrees of a repo are looked for    // a worker the orchestrator has not told to pause by then hears it from the server
+const WATCH_CHECK_MS = 60000;        // how often stuck coordination is looked for (checkWatch)
+const WAIT_PEER_MS = 180000;         // a blocked worker idle this long after the peer it names finished is reported
+const OWNER_UNANSWERED_MS = 600000;  // an owner message unanswered this long, the orchestrator idle, is reported
+const WATCH_REPEAT_MS = 1800000;     // a finding reported once may be reported one more time after this, if still true
 const REFRESH_SUGGESTED_AFTER = 3;   // orchestrator compactions (the "↻ Fresh" highlight, auto-refresh off)
 const AUTO_REFRESH_AT = 0.8;         // of the orchestrator's compaction threshold: refreshed when idle
 const AUTO_REFRESH_BUSY_AT = 0.9;    // … during a turn: the instruction comes with its next tool call
@@ -456,7 +460,7 @@ function workerCard(run, worker) {
   ].join('\n');
 }
 
-function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS, overlapCheckMs = OVERLAP_CHECK_MS, quietValveMs = QUIET_VALVE_MS, refreshTimeoutMs = REFRESH_TIMEOUT_MS }) {
+function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS, overlapCheckMs = OVERLAP_CHECK_MS, watchCheckMs = WATCH_CHECK_MS, waitPeerMs = WAIT_PEER_MS, ownerUnansweredMs = OWNER_UNANSWERED_MS, watchRepeatMs = WATCH_REPEAT_MS, quietValveMs = QUIET_VALVE_MS, refreshTimeoutMs = REFRESH_TIMEOUT_MS }) {
   // Which Claude credentials exist: { apiKey, subscription }. Read per ask.
   const claudeCredentials = credentials || (() => require('./capabilities').claudeCredentials(dataHome));
   // The engine of a new session nobody named one for: 'sdk' | 'terminal'
@@ -2449,6 +2453,89 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     try { checkOverlaps(); } catch (e) { console.error('[orchestration] overlap check error:', e.message); }
   }, overlapCheckMs) : null;
   overlapTimer?.unref?.();
+
+  // --- Watch: stuck coordination ---
+  //
+  // Plain code, no model: every watchCheckMs each live run is looked at for
+  //  1. a worker whose last report is "blocked" and names a peer (its id or
+  //     name in the summary / open text) that has since finished (reported
+  //     done or failed, landed, or closed), the blocked worker idle for more
+  //     than waitPeerMs since then;
+  //  2. an owner message to the orchestrator unanswered for more than
+  //     ownerUnansweredMs while the orchestrator is idle (unansweredOwner).
+  // All findings of one pass are ONE "watch" event that wakes the
+  // orchestrator, worded as an action; workers are never messaged from here.
+  // run.watchSent keeps { at, n } per finding: reported once, and once more
+  // after watchRepeatMs if still true. Off for mirror runs (no orchestrator
+  // session here), paused runs, and while the orchestrator is being refreshed
+  // or paused (the fresh one gets the events anyway).
+  const mins = (ms) => Math.max(1, Math.round(ms / 60000));
+  const nameRe = (n) => new RegExp(`(?<![\\w-])${String(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`, 'i');
+
+  // When a peer finished (ms), or 0 while it has not: its done / failed
+  // report, its landing, or its closing - the earliest.
+  function peerFinishedAt(p) {
+    const t = [];
+    if (['done', 'failed'].includes(p.lastReport?.status)) t.push(Date.parse(p.lastReport.at || '') || 0);
+    if (p.landingResult?.outcome === 'landed') t.push(Date.parse(p.landingResult.at || '') || 0);
+    if (p.closed) t.push(Date.parse(p.closedAt || '') || 0);
+    const ok = t.filter(Boolean);
+    return ok.length ? Math.min(...ok) : 0;
+  }
+
+  function watchFindings(run, orch, now) {
+    const found = [];   // { key, text }
+    for (const w of run.workers) {
+      const rep = w.lastReport;
+      if (rep?.status !== 'blocked' || w.deleted || w.closed || w.abandoned || w.paused) continue;
+      const live = liveOf(run, w);
+      if (!live?.session.running || live.session.busy) continue;
+      const blockedAt = Date.parse(rep.at || '') || 0;
+      const text = `${rep.summary || ''}\n${rep.open || ''}`;
+      const idleSince = workerSnapshot(run, w).lastActivity;
+      for (const p of run.workers) {
+        if (p === w || p.deleted || (!nameRe(p.id).test(text) && !nameRe(p.name).test(text))) continue;
+        const plive = liveOf(run, p);
+        if (plive?.session.running && plive.session.busy) continue;   // working again
+        const at = peerFinishedAt(p);
+        if (!at || at <= blockedAt || now - Math.max(at, idleSince) <= waitPeerMs) continue;
+        found.push({ key: `peer:${w.id}:${p.id}:${rep.at}`, text: `${w.name} is blocked on ${p.name}, which finished ${mins(now - at)} min ago: message ${w.name} what to do.` });
+      }
+    }
+    const idle = orch.session.running && !orch.session.busy && !run.busy;
+    if (idle) {
+      for (const m of unansweredOwner(run, { previous: orch.session })) {
+        const at = Date.parse(m.startedAt || m.at) || 0;
+        if (!at || now - at <= ownerUnansweredMs) continue;
+        found.push({ key: `owner:${m.id || m.at}`, text: `An owner message has been unanswered for ${mins(now - at)} min while you are idle (“${clip(String(m.text).replace(/\s+/g, ' '), 160)}”): answer it or act on it now.` });
+      }
+    }
+    return found;
+  }
+
+  function checkWatch({ now = Date.now() } = {}) {
+    const dirs = new Set(findByStamp(st => st.role === 'orchestrator' || st.role === 'worker').filter(m => m.session.running).map(m => m.stamp.runDir));
+    for (const dir of dirs) {
+      const run = loadRun(dir);
+      if (!run || run.mirror || run.paused || run.pausing || run.refreshing || run.closed) continue;
+      const orch = orchestratorSession(run);
+      if (!orch?.session.running || control?.isPausing(orch.session)) continue;
+      const sent = run.watchSent || {};
+      const fresh = watchFindings(run, orch, now).filter(f => {
+        const s = sent[f.key];
+        return !s || (s.n < 2 && now - s.at >= watchRepeatMs);
+      });
+      if (!fresh.length) continue;
+      for (const f of fresh) sent[f.key] = { at: now, n: (sent[f.key]?.n || 0) + 1 };
+      run.watchSent = Object.fromEntries(Object.entries(sent).sort((a, b) => a[1].at - b[1].at).slice(-200));
+      addEvent(run, { worker: null, kind: 'watch', text: fresh.map(f => f.text).join('\n') });
+    }
+  }
+
+  const watchTimer = watchCheckMs > 0 ? setInterval(() => {
+    try { checkWatch(); } catch (e) { console.error('[orchestration] watch check error:', e.message); }
+  }, watchCheckMs) : null;
+  watchTimer?.unref?.();
 
   // undo_landing (orchestrator tool): revert a landing's merge on its base, a
   // new commit. `landing` is its merge sha (a prefix will do), else the newest
@@ -4837,7 +4924,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   try { dropRetiredEntries(); } catch (e) { console.error('[orchestration] retired entries:', e.message); }
 
   return {
-    router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, ownerDelete, sendMessage, listAgents, sendToSession, toolParams,
+    router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, checkWatch, report, ownerItems, ownerList, ownerResolve, ownerDelete, sendMessage, listAgents, sendToSession, toolParams,
     handleHook, onSessionExit, askAddress, isRefreshing, deliverLate, noteLate, ownerSubmit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged, setRunModelMap, setRunAuth, setRunModel, setRunMaxWorkers, setRunAutoRefresh, registerHostProvider, hostList, openMirrorRun,
