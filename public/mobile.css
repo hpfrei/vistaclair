@@ -325,6 +325,10 @@
     animation: mobile-sheet-up 0.22s ease;
   }
   .dir-overlay-panel { height: 92dvh; }
+  .dir-md-rendered.md-with-gutter { padding: 12px 10px 12px 4px; }
+  .md-with-gutter > .md-src-block { padding-left: 3.1em; }
+  .md-with-gutter > .md-src-block::before { width: 2.3em; padding-right: 0.5em; font-size: 10px; }
+  .file-preview-md-toggle button { padding: 2px 8px; }
   .cap-modal { max-height: 92dvh; }
   .cap-modal-body,
   .modal-body { overflow-y: auto; }
