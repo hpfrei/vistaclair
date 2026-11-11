@@ -600,12 +600,14 @@
 .sdk-area-final { padding: 6px 12px; font-size: 12px; color: var(--text-dim); white-space: pre-wrap; border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent); }
 .sdk-todo { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
 .sdk-todo-c-id { width: 3.2em; }
-.sdk-todo-c-st { width: 7.5em; }
+.sdk-todo-c-st { width: 17em; }
+/* A narrow box gives the status column back to the description. */
+@container (max-width: 420px) { .sdk-todo-c-st { width: 9em; } }
 .sdk-todo td { padding: 3px 8px; border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); vertical-align: top; }
 .sdk-todo-id { font-family: var(--vc-mono, ui-monospace, monospace); color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sdk-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; line-height: 1.35; }
 .sdk-todo-st { text-align: right; overflow: hidden; }
-.sdk-todo-st .sdk-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
+.sdk-todo-st .sdk-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: top; white-space: normal; overflow-wrap: anywhere; border-radius: 9px; }
 .sdk-todo-doing td { background: color-mix(in srgb, var(--yellow) 9%, transparent); }
 .sdk-todo-doing .sdk-todo-desc { font-weight: 600; }
 .sdk-todo-done td { color: var(--text-dim); }
