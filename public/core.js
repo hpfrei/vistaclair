@@ -242,7 +242,9 @@ function openFilePreview(filePath) {
   const ext = _fileExt(filePath);
   const rawUrl = '/api/raw-file?path=' + encodeURIComponent(filePath);
 
+  const isMd = _MD_EXTS.has(ext);
   const preview = _previewShell(name, filePath, `
+        ${isMd ? `<span class="dir-md-toggle file-preview-md-toggle"><button data-view="raw" title="Raw markdown, with line numbers">Raw</button><button data-view="rendered" title="Rendered markdown, source line numbers in the gutter">Rendered</button></span>` : ''}
         <button class="dir-download-btn file-preview-reload" title="Reload from disk">⟳</button>
         <a class="dir-download-btn" href="${rawUrl}" target="_blank" rel="noopener" title="Open in new tab">↗</a>
         <a class="dir-download-btn" href="${rawUrl}" download="${escHtml(name)}" title="Download">⬇</a>`);
@@ -250,6 +252,21 @@ function openFilePreview(filePath) {
   const overlay = preview.el;
 
   const content = overlay.querySelector('.dir-overlay-content');
+  if (isMd) {
+    preview.mdView = 'rendered';
+    const syncToggle = () => overlay.querySelectorAll('.file-preview-md-toggle button')
+      .forEach(b => b.classList.toggle('active', b.dataset.view === preview.mdView));
+    syncToggle();
+    overlay.querySelectorAll('.file-preview-md-toggle button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (preview.mdView === btn.dataset.view) return;
+        // Before the text has loaded there is nothing to switch: remember the choice.
+        if (preview.setMdView) preview.setMdView(btn.dataset.view);
+        else preview.mdView = btn.dataset.view;
+        syncToggle();
+      });
+    });
+  }
   const sizeEl = overlay.querySelector('.file-preview-size');
 
   // Each load takes a fresh token so a slow earlier load can't land on top.
@@ -282,9 +299,12 @@ function openFilePreview(filePath) {
   // Reload re-reads the file in place, keeping the text scroll position.
   overlay.querySelector('.file-preview-reload').addEventListener('click', () => {
     if (_activePreview !== preview) return;
-    preview.scrollTop = preview.editor ? preview.editor.getScrollTop() : content.querySelector('.file-preview-plain') ? content.scrollTop : null;
+    preview.scrollTop = preview.mdView === 'rendered' ? content.scrollTop
+      : preview.editor ? preview.editor.getScrollTop() : content.querySelector('.file-preview-plain') ? content.scrollTop : null;
     try { preview.editor?.dispose(); } catch {}
     preview.editor = null;
+    preview.setMdView = null;
+    preview.rawPlain = null;
     content.innerHTML = '';
     if (sizeEl) sizeEl.textContent = '';
     load(Date.now());
@@ -414,6 +434,11 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
   }
   if (_previewToken !== token) return;
 
+  if (_MD_EXTS.has(ext) && _activePreview?.mdView && !_activePreview.asText) {
+    _renderMarkdownPreview(filePath, ext, content, token, text);
+    return;
+  }
+
   content.innerHTML = '';
   const editorDiv = document.createElement('div');
   editorDiv.style.cssText = 'position:absolute;inset:0;';
@@ -433,7 +458,15 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
     return;
   }
 
-  const editor = monaco.editor.create(editorDiv, {
+  const editor = _createPreviewEditor(editorDiv, text, ext);
+  if (_activePreview && _activePreview.token === token) {
+    _activePreview.editor = editor;
+    if (_activePreview.scrollTop != null) editor.setScrollTop(_activePreview.scrollTop);
+  } else editor.dispose();
+}
+
+function _createPreviewEditor(host, text, ext) {
+  return monaco.editor.create(host, {
     value: text,
     language: _MONACO_LANGS[ext] || 'plaintext',
     theme: 'vs',
@@ -448,10 +481,134 @@ async function _renderTextPreview(filePath, ext, content, token, size) {
     overviewRulerLanes: 0,
     scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
   });
-  if (_activePreview && _activePreview.token === token) {
-    _activePreview.editor = editor;
-    if (_activePreview.scrollTop != null) editor.setScrollTop(_activePreview.scrollTop);
-  } else editor.dispose();
+}
+
+/* A markdown file: Rendered (default) shows the document with the source line
+   of each top-level block in a left gutter; Raw is the read-only Monaco view
+   with real line numbers. The toggle sits in the header (openFilePreview).
+   Switching keeps the top visible line. */
+const _MD_EXTS = new Set(['md', 'markdown']);
+
+function _renderMarkdownPreview(filePath, ext, content, token, text) {
+  const preview = _activePreview;
+  content.innerHTML = '';
+  const rendered = document.createElement('div');
+  rendered.className = 'dir-md-rendered markdown-body md-with-gutter';
+  const rawHost = document.createElement('div');
+  rawHost.className = 'file-preview-md-raw';
+  rawHost.style.cssText = 'position:absolute;inset:0;display:none;';
+  content.append(rendered, rawHost);
+
+  renderMarkdown(text, rendered, { file: true, lineNumbers: true });
+  _fixMdRelativeUrls(rendered, filePath);
+
+  const blocks = () => Array.from(rendered.children).filter(el => el.dataset && el.dataset.line);
+  const renderedTopLine = () => {
+    const bs = blocks();
+    let line = 1;
+    for (const b of bs) {
+      if (b.offsetTop > content.scrollTop + 4) break;
+      line = parseInt(b.dataset.line, 10) || line;
+    }
+    return line;
+  };
+  const scrollRenderedTo = line => {
+    let target = null;
+    for (const b of blocks()) {
+      if ((parseInt(b.dataset.line, 10) || 1) > line) break;
+      target = b;
+    }
+    content.scrollTop = target ? Math.max(0, target.offsetTop - 4) : 0;
+  };
+
+  let rawStarted = false;
+  const startRaw = async () => {
+    if (rawStarted) return;
+    rawStarted = true;
+    await _ensureMonaco();
+    if (_previewToken !== token || _activePreview !== preview) return;
+    if (typeof monaco === 'undefined') {
+      // Monaco unavailable (offline) — a plain <pre> is still a usable Raw view.
+      const pre = document.createElement('pre');
+      pre.className = 'file-preview-plain';
+      pre.style.cssText = 'height:100%;box-sizing:border-box;overflow:auto;';
+      pre.textContent = text;
+      rawHost.appendChild(pre);
+      preview.rawPlain = pre;
+      return;
+    }
+    preview.editor = _createPreviewEditor(rawHost, text, ext);
+  };
+  const rawTopLine = () => {
+    const r = preview.editor?.getVisibleRanges?.()[0];
+    return r ? r.startLineNumber : 1;
+  };
+  const scrollRawTo = line => {
+    const ed = preview.editor;
+    if (ed) ed.setScrollTop(ed.getTopForLineNumber(line));
+    else if (preview.rawPlain) preview.rawPlain.scrollTop = 0;
+  };
+
+  preview.setMdView = async view => {
+    if (_activePreview !== preview || _previewToken !== token) return;
+    const wasRaw = preview.mdView === 'raw';
+    const line = wasRaw ? rawTopLine() : renderedTopLine();
+    preview.mdView = view;
+    if (view === 'rendered') {
+      rawHost.style.display = 'none';
+      rendered.style.display = '';
+      scrollRenderedTo(line);
+    } else {
+      rendered.style.display = 'none';
+      rawHost.style.display = '';
+      content.scrollTop = 0;
+      await startRaw();
+      if (_activePreview === preview && preview.mdView === 'raw') scrollRawTo(line);
+    }
+    preview.el.querySelectorAll('.file-preview-md-toggle button')
+      .forEach(b => b.classList.toggle('active', b.dataset.view === preview.mdView));
+  };
+
+  // Start in the view picked before the text arrived (or kept across Reload).
+  if (preview.mdView === 'raw') {
+    const keep = preview.scrollTop;
+    preview.mdView = 'rendered';   // setMdView switches from the view that is showing
+    preview.setMdView('raw').then(() => {
+      if (keep != null && preview.editor) preview.editor.setScrollTop(keep);
+    });
+  } else if (preview.scrollTop != null) {
+    content.scrollTop = preview.scrollTop;
+  }
+}
+
+// Relative images and links in a rendered file point next to the file on disk,
+// not at the dashboard URL (same rules as the file browser's rendered view).
+function _resolveMdRelPath(dir, rel) {
+  rel = rel.split(/[?#]/)[0];
+  try { rel = decodeURIComponent(rel); } catch {}
+  const parts = dir.split('/').filter(Boolean);
+  for (const seg of rel.split('/')) {
+    if (seg === '..') parts.pop();
+    else if (seg && seg !== '.') parts.push(seg);
+  }
+  return '/' + parts.join('/');
+}
+
+function _fixMdRelativeUrls(el, filePath) {
+  const dir = filePath.slice(0, filePath.lastIndexOf('/')) || '/';
+  const isRelative = u => u && !/^([a-z][a-z0-9+.-]*:|\/|#)/i.test(u);
+  const rawUrl = rel => '/api/raw-file?path=' + encodeURIComponent(_resolveMdRelPath(dir, rel));
+  el.querySelectorAll('img[src]').forEach(img => {
+    const src = img.getAttribute('src');
+    if (isRelative(src)) img.src = rawUrl(src);
+  });
+  el.querySelectorAll('a[href]').forEach(a => {
+    const href = a.getAttribute('href');
+    if (href.startsWith('#')) return;
+    if (isRelative(href)) a.href = rawUrl(href);
+    a.target = '_blank';
+    a.rel = 'noopener';
+  });
 }
 
 // --- Markdown rendering (with HTML/SVG pass-through and MathJax) ---
@@ -480,7 +637,19 @@ function renderMarkdown(text, targetEl, opts = {}) {
   };
 
   marked.setOptions({ renderer, breaks: !opts.file, gfm: true });
-  targetEl.innerHTML = renderSafe.sanitizeHtml(marked.parse(text), DOMPurify);
+  // opts.lineNumbers: every top-level block in a wrapper that carries the
+  // source line it starts on (the preview's gutter). The blocks are the lexer
+  // tokens parsed one by one, so the HTML inside matches marked.parse(text).
+  let html;
+  if (opts.lineNumbers && typeof mdLines !== 'undefined') {
+    html = mdLines.mdBlocks(text, marked).map(({ token, line }) => {
+      const inner = marked.parser([token]);
+      return inner.trim() ? `<div class="md-src-block" data-line="${line}">${inner}</div>` : '';
+    }).join('\n');
+  } else {
+    html = marked.parse(text);
+  }
+  targetEl.innerHTML = renderSafe.sanitizeHtml(html, DOMPurify);
 
   // Wire up copy buttons on code blocks
   targetEl.querySelectorAll('.code-copy-btn').forEach(btn => {
