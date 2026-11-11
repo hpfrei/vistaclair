@@ -362,6 +362,8 @@
       this.gotStatus = false;
       this.cost = null;
       this.lastReport = null;
+      this.lastActivityAt = null;    // ms: a worker's last sign of work (describeRun)
+      this.idleSince = null;         // ms: when this box last saw it go idle
       this.landing = null;           // describeRun's `landing` (a worktree worker)
       this.closed = false;           // closed by its orchestrator (run membership)
       this.closedAt = null;          // ms
@@ -579,6 +581,7 @@
 
     setState(s) {
       if (!s || s === this.state) return;
+      if (s === 'idle' && this.state) this.idleSince = serverNow();
       this.state = s;
       // Out of its turn, no call of it runs; ended, nothing of it does.
       if (ENDED.has(s)) this.act.clear();
@@ -609,6 +612,30 @@
       this.panel.renderToolbar();
     }
 
+    // The caption's ages, every tick: the last report's ("done · 5m") and,
+    // idle, since the last sign of work ("idle 12m", from a minute on).
+    renderAges() {
+      const now = serverNow();
+      const r = this.lastReport;
+      if (r) {
+        const at = Date.parse(r.at || '');
+        const text = `${reportChip(r, this.landing).text}${at ? ` · ${fmtAgo(now - at)}` : ''}`;
+        if (this.reportEl.textContent !== text) this.reportEl.textContent = text;
+      }
+      const since = Math.max(this.lastActivityAt || 0, this.idleSince || 0);
+      const idle = (this.state || 'idle') === 'idle' && !this.closed && !this.ended() && since && now - since >= 60000;
+      if (!idle && !this._idleShown) return;
+      this._idleShown = !!idle;
+      if (idle) {
+        const text = `idle ${fmtAgo(now - since)}`;
+        if (this.stateEl.textContent !== text) this.stateEl.textContent = text;
+        this.stateEl.classList.remove('hidden');
+        this.stateEl.title = `No sign of work since ${new Date(since).toLocaleString()}`;
+      } else {
+        this.stateEl.title = '';
+      }
+    }
+
     renderHeader() {
       this.nameEl.textContent = this.label;
       this.nameEl.title = this.name;
@@ -628,10 +655,10 @@
       this.reportEl.classList.toggle('hidden', !r);
       if (r) {
         const chip = reportChip(r, this.landing);
-        this.reportEl.textContent = chip.text;
-        this.reportEl.title = r.summary || '';
+        this.reportEl.title = [r.summary || '', r.at ? `Reported at ${new Date(r.at).toLocaleString()}` : ''].filter(Boolean).join('\n');
         this.reportEl.className = `sdk-chip sdk-area-report ${chip.cls}`;
       }
+      this.renderAges();
       this.renderLanding();
       // The last report heads the TODO table once ended, or when there is no TODO.
       this.finalEl.classList.toggle('hidden', !(r?.summary && (ended || !this.todo?.rows?.length)));
@@ -657,7 +684,10 @@
         : 'Thinking hidden. Click to show the model\'s thinking summaries in Live, from its next request (billed the same either way).';
       const t = this.todo?.rows || [];
       const done = t.filter(x => isDone(x.status)).length;
-      this.segBtns.live.textContent = t.length ? `Live ${done}/${t.length}` : 'Live';
+      // The row it is on: its id beside the count, its description as the tip.
+      const doing = t.find(x => isDoing(x.status));
+      this.segBtns.live.textContent = t.length ? `Live ${done}/${t.length}${doing ? ` ▸ ${clip(String(doing.id), 6)}` : ''}` : 'Live';
+      this.segBtns.live.title = doing ? `Doing ${doing.id}: ${doing.description || ''}` : '';
       this.renderContext();
       this.renderNow();
     }
@@ -2122,6 +2152,7 @@
         a.label = w.id ? `${w.id}${w.title && w.title !== w.id ? ` · ${w.title}` : ''}` : shortName(a.name, run);
         a.addAliases([w.name, w.worker, w.id, shortName(w.name || w.worker, run)]);
         a.lastReport = w.lastReport || null;
+        a.lastActivityAt = Date.parse(w.lastActivityAt || '') || null;
         a.landing = w.landing || null;
         a.closed = !!w.closed || w.state === 'closed';
         a.closedAt = Date.parse(w.closedAt) || null;
@@ -2656,6 +2687,15 @@
       const meta = [];
       if (this.runId) meta.push(`run ${this.runId}`);
       if (this.workers.size) meta.push(`${this.workers.size} worker${this.workers.size === 1 ? '' : 's'}`);
+      const board = this.run?.runId === this.runId ? this.run : null;
+      const queued = board?.queue?.length || 0;
+      if (queued) meta.push(`${queued} queued`);
+      const unanswered = board?.unansweredOwner || 0;
+      if (unanswered) meta.push(`${unanswered} unanswered`);
+      this.metaEl.title = [
+        ...(board?.queue || []).map(q => `Queued: ${q.id} ${q.title || ''} — waiting for ${(q.waitingFor || []).join(', ') || 'nothing'}`),
+        unanswered ? `${unanswered} of your messages to the orchestrator ${unanswered === 1 ? 'has' : 'have'} no reply yet` : '',
+      ].filter(Boolean).join('\n');
       if (info.pausing) meta.push('pausing…');
       if (info.status === 'exited') meta.push('exited');
       this.metaEl.textContent = meta.join(' · ');
@@ -2806,7 +2846,10 @@
     }
 
     tick() {
-      for (const a of this.allAreas()) if (a._nowTicks) a.renderNow();
+      for (const a of this.allAreas()) {
+        if (a._nowTicks) a.renderNow();
+        a.renderAges();
+      }
       if (this.cards.size) this.renderShelfAges();
     }
 

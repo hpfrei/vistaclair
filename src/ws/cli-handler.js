@@ -377,7 +377,16 @@ function handleMessage(ws, msg, bc) {
       }
       try {
         if (!session) throw new Error('that Agent SDK session is not running');
-        session.submit(String(msg.text || ''), { images: Array.isArray(msg.images) ? msg.images : [] });
+        const text = String(msg.text || '');
+        const images = Array.isArray(msg.images) ? msg.images : [];
+        // A run's orchestrator: the owner log records it at the send, and
+        // during a refresh it waits for the fresh orchestrator instead.
+        const out = bc.orchestration?.ownerSubmit ? bc.orchestration.ownerSubmit(session, text, { images }) : null;
+        if (!out) session.submit(text, { images });
+        else if (out.how === 'queued-refresh') {
+          const gist = text.trim().replace(/\s+/g, ' ');
+          sendNotice(send, msg.sessId, `The orchestrator is being refreshed: your message${gist ? ` “${gist.length > 120 ? `${gist.slice(0, 120)}…` : gist}”` : ''} goes to the fresh orchestrator, which gets it first.${out.imagesDropped ? ' The image(s) were not kept: send them again once it is up.' : ''}`, 'info');
+        }
       } catch (e) {
         sendNotice(send, msg.sessId, `Not sent: ${e.message}`);
       }
@@ -521,8 +530,8 @@ function cursorOf(v) {
   return v != null && v !== '' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
 }
 
-function sendNotice(send, sessId, text) {
-  send({ type: 'sdk:event', sessId: sessId || null, ts: Date.now(), ev: { platform: { kind: 'notice', level: 'error', text } } });
+function sendNotice(send, sessId, text, level = 'error') {
+  send({ type: 'sdk:event', sessId: sessId || null, ts: Date.now(), ev: { platform: { kind: 'notice', level, text } } });
 }
 
 // Run one pause/resume action and answer the requester with its result or error.

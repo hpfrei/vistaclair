@@ -3468,3 +3468,65 @@ test('late answer: a worker not running — queued in its inbox, the owner told,
   const lateUps = ups.filter(u => /Late answer/.test(u.text));
   assert.deepStrictEqual(lateUps.map(u => [u.from, /→ SQLite/.test(u.text), /→ Friday/.test(u.text)]), [['owner', true, false], ['owner', false, true]], 'each recorded once, as the owner\'s');
 });
+
+// --- Owner messages across a refresh: none lost, the unanswered ones head the seed ---
+
+// The SDK panel's send (ws sdk:send) into the orchestrator.
+const ownerSend = (orch, session, text) => orch.ownerSubmit(session, text, { images: [] });
+// A final reply in an SDK orchestrator's transcript (lastReplies reads it).
+const sdkReply = (session, text, ts = Date.now()) => fs.appendFileSync(path.join(session.settings.sessionDir, 'transcript.jsonl'),
+  JSON.stringify({ ts, ev: { sdk: { type: 'result', result: text } } }) + '\n');
+
+test('owner message typed during a refresh: never into the old session; the fresh orchestrator gets it verbatim; logged once', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  orch.refreshOrchestrator(run().runId);
+  const text = 'STOP the deploy, the DB migration is wrong\nsee ticket 42';
+  const out = ownerSend(orch, orchSession, text);
+  assert.strictEqual(out.how, 'queued-refresh');
+  assert.ok(!mgr.submits.some(x => x.tabId === orchSession.tabId && x.data.includes('STOP the deploy')), 'not submitted into the old session');
+  assert.deepStrictEqual(ownerLog(run()).filter(m => m.text === text).map(m => [m.kind, m.queued]), [['prompt', 'refresh']], 'on the owner log at the send');
+
+  // A pending turn the old session never took in (an SdkSession's queued turn,
+  // dropped by its close) is carried over too.
+  orchSession.unsentInputs = () => [{ id: 'u-1', text: 'QUEUED WHILE BUSY: also rename the table', at: Date.now() }];
+  const fresh = await finishRefresh(orch, mgr, orchSession);
+  const first = ctxOf(hook(orch, fresh, { hook_event_name: 'SessionStart', source: 'startup' }));
+  assert.ok(first.includes(text), 'the fresh orchestrator receives the text verbatim');
+  assert.ok(first.includes('QUEUED WHILE BUSY: also rename the table'));
+  const seed = seedOf(fresh);
+  assert.match(seed, /^## Unanswered owner messages\n[\s\S]*STOP the deploy, the DB migration is wrong\nsee ticket 42[\s\S]*QUEUED WHILE BUSY/m);
+  assert.ok(seed.indexOf('## Unanswered owner messages') < seed.indexOf('## The original request'), 'the first section');
+  assert.match(typedInto(mgr, fresh.tabId), /2 owner message\(s\) went unanswered[\s\S]*Handle them first/);
+  assert.strictEqual(ownerLog(run()).filter(m => m.text === text).length, 1);
+  assert.deepStrictEqual(ownerLog(run()).filter(m => /QUEUED WHILE BUSY/.test(m.text)).map(m => [m.id, m.carried]), [['u-1', true]]);
+  // After the swap the owner's text goes straight to the fresh one again.
+  assert.strictEqual(ownerSend(orch, fresh, 'next').how, 'submitted');
+});
+
+test('owner message sent, refresh before a reply: it heads the seed as unanswered; an answered one does not; logged once at the send', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
+  const asked = 'What is the plan for the importer?';
+  assert.strictEqual(ownerSend(orch, orchSession, asked).how, 'submitted');
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: asked });
+  await wait(5);
+  sdkReply(orchSession, 'The plan: parse, then load.');
+  await wait(5);
+  const pending = 'ALSO add a CSV export please';
+  ownerSend(orch, orchSession, pending);
+  hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt: pending });
+  const log = ownerLog(run());
+  assert.deepStrictEqual(log.filter(m => m.kind === 'prompt').map(m => m.text), [asked, pending], 'each logged once, at the send');
+  assert.strictEqual(log.filter(m => m.kind === 'started').length, 2, 'its turn start is a marker');
+
+  hook(orch, orchSession, { hook_event_name: 'Stop' });   // its turn ends without a reply (interrupted, say)
+  orch.refreshOrchestrator(run().runId);
+  await wait(5);
+  sdkReply(orchSession, 'Notes written. PAUSED');   // the refresh's PAUSED is no answer
+  const fresh = await finishRefresh(orch, mgr, orchSession);
+  const seed = seedOf(fresh);
+  const head = seed.slice(seed.indexOf('## Unanswered owner messages'), seed.indexOf('## The original request'));
+  assert.match(head, /ALSO add a CSV export please/);
+  assert.doesNotMatch(head, /plan for the importer/);
+  assert.match(typedInto(mgr, fresh.tabId), /1 owner message\(s\) went unanswered[\s\S]*Handle them first/);
+  assert.strictEqual(orch.describeRun(run()).unansweredOwner, 1);
+});

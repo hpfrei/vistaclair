@@ -495,7 +495,8 @@ class SdkSession {
     this.actualModel = null;  // the model of the last main-agent reply
     this.context = { tokens: null, window: null, compactAt: null, windowEstimated: false };   // the main agent's
     this._fileTools = new Map();   // tool_use id -> { todo, notes } it writes
-    this._pending = new Map();     // the owner's turns not yet taken in: uuid -> { text, images }
+    this._pending = new Map();     // the owner's turns not yet taken in: uuid -> { text, images, at }
+    this._unsent = [];             // the owner's turns cancelled before taken in (unsentInputs)
     this._echoes = false;          // this spawn's CLI echoes taken-in turns
     this.autoMemory = false;
     this._authToken = opts.authToken || '';
@@ -867,6 +868,8 @@ class SdkSession {
   // reason: 'interrupted' (the interrupt cancelled it) | 'ended' (the
   // session stopped before taking it in).
   _cancelInput(id, reason) {
+    const u = this._pending.get(id);
+    if (u) this._unsent = [...this._unsent, { id, text: u.text, images: u.images, at: u.at, cancelledAt: Date.now(), reason }].slice(-20);
     this._pending.delete(id);
     this.emitEvent({ user: { id, cancelled: true, reason } });
   }
@@ -1218,12 +1221,20 @@ class SdkSession {
     if (from) {
       this.emitEvent({ user: { text: body, images: saved, from } });
     } else {
-      this._pending.set(id, { text: body, images: saved });
+      this._pending.set(id, { text: body, images: saved, at: Date.now() });
       this.emitEvent({ user: { id, text: body, images: saved, pending: true } });
     }
     this._input.push(message);
     if (this.state === 'idle') this._setState('busy');
     return { ok: true, id, images: saved };
+  }
+
+  // The owner's turns this session never took in: still waiting, or
+  // cancelled (its end, an interrupt) at or after `since` (ms). A refresh's
+  // swap hands them to the fresh orchestrator (src/orchestration.js).
+  unsentInputs(since = 0) {
+    const waiting = [...this._pending].map(([id, u]) => ({ id, text: u.text, images: u.images, at: u.at }));
+    return [...this._unsent.filter(u => u.cancelledAt >= since), ...waiting];
   }
 
   // A CLI that lists the queued turns its interrupt cancelled (the receipt's

@@ -94,7 +94,12 @@
 //                        the swap: the owner log (<runDir>/owner-messages.jsonl),
 //                        the last replies (the predecessor's transcript, by
 //                        cwd + sessId), every worker's snapshot and open
-//                        items, all events since the last refresh.
+//                        items, all events since the last refresh; it opens
+//                        with the owner messages left unanswered. Owner text
+//                        sent from the SDK panel is logged at the send
+//                        (ownerSubmit); during a refresh it goes to the run
+//                        inbox for the fresh session, and at the swap the old
+//                        session's never-taken-in owner turns follow it there.
 //                        A refresh is a handover inside one orchestrator
 //                        identity, never a pause: session-control saves no
 //                        paused entry and sends no cli:paused for it, the old
@@ -170,6 +175,7 @@ const REFRESH_TIMEOUT_MS = 300000;   // no PAUSED by then: the swap goes on from
 const NOTES_STALE_MS = 1800000;      // a busy worker's TODO unchanged this long: its notes are stale (the seed)
 const OWNER_LOG = 'owner-messages.jsonl';   // <runDir>/: every owner message of the run
 const SEED_OWNER_CAP = 40000;        // owner messages inline in RESTART.md (the newest whole; the log has all)
+const SEED_UNANSWERED_CAP = 20000;   // the unanswered ones at the head of RESTART.md (each clipped past it)
 const CONTEXT_LIMIT = 9000;          // hook additionalContext is capped at 10k chars
 const QUIET_VALVE_MS = 600000;       // quiet events undelivered this long push the orchestrator once
 const QUIET_SHOWN = 15;              // quiet events listed in one delivery (the newest); the rest are counted
@@ -1924,6 +1930,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       retiredOrchestrators: [...retiredIds(run)],
       pendingEvents: run.events.filter(e => e.seq > run.delivered).length,
       ownerItems: ownerItemsView(run),
+      // Owner messages the orchestrator has not replied to yet (or that wait
+      // for the fresh one of a refresh).
+      unansweredOwner: run.mirror ? 0 : unansweredOwner(run, { previous: orch?.session || null, refresh: run.refreshing }).length,
       // Launches waiting for a slot or their `after` workers (launch_cli).
       queue: queueList(run),
       workers: run.workers.map(w => {
@@ -1947,6 +1956,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           todo: w.sessionDir ? path.join(w.sessionDir, 'TODO.md') : null,
           notes: w.sessionDir ? path.join(w.sessionDir, 'NOTES.md') : null,
           progress: folderSummary(w.sessionDir),
+          // Its last sign of work (report, TODO/NOTES, transcript): the run board's idle time.
+          lastActivityAt: isoOf(workerSnapshot(run, w).lastActivity),
           live: live && control ? control.liveOf(live.session) : null,
         };
       }),
@@ -2722,7 +2733,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     refreshTimers.delete(run.runId);
     const r = run.refreshing;
     if (!r) return null;   // swapped already
-    return freshOrchestrator(run, { settings, title, replaces, refresh: r, previous });
+    const carried = carryUnsent(run, previous, r);
+    return freshOrchestrator(run, { settings, title, replaces, refresh: r, previous, carried });
   }
 
   // The orchestrator's context against its compaction threshold (an SDK
@@ -2785,7 +2797,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // --- The owner's messages (<runDir>/owner-messages.jsonl) ---
   // Every owner message of the run, for a fresh orchestrator's seed: prompts
   // typed to the orchestrator, answers to its forms, owner-item answers. One
-  // JSON object per line: { at, kind: prompt|form|owner-item, text }.
+  // JSON object per line: { at, kind: prompt|form|owner-item, text, id? }.
+  // A prompt from the dashboard's SDK panel is logged when it is sent
+  // (ownerSubmit), with its id; the UserPromptSubmit of its turn then adds a
+  // marker { at, kind: 'started', id } instead of a second entry. A prompt
+  // typed during a refresh (queued: 'refresh') or carried over at the swap
+  // (carried: true) went to the fresh orchestrator's inbox.
 
   // Vistaclair's own texts typed into an orchestrator, by their prefixes;
   // anything else (an "[Image: …]" prompt too) is the owner's.
@@ -2794,21 +2811,145 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   function ownerLogFile(run) { return path.join(run.runDir, OWNER_LOG); }
 
+  function appendOwnerLine(run, obj) {
+    try { fs.appendFileSync(ownerLogFile(run), JSON.stringify(obj) + '\n'); } catch (e) { console.error('[orchestration] owner log:', e.message); }
+  }
+
   function logOwner(run, kind, text, extra = {}) {
     const t = String(text ?? '').trim();
     if (!t) return;
-    try { fs.appendFileSync(ownerLogFile(run), JSON.stringify({ at: new Date().toISOString(), kind, ...extra, text: t }) + '\n'); } catch (e) { console.error('[orchestration] owner log:', e.message); }
+    appendOwnerLine(run, { at: new Date().toISOString(), kind, ...extra, text: t });
   }
 
+  // The messages, oldest first; a started marker becomes its entry's startedAt.
   function readOwnerLog(run) {
     let raw = '';
     try { raw = fs.readFileSync(ownerLogFile(run), 'utf8'); } catch { return []; }
     const out = [];
+    const started = new Map();
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
-      try { const m = JSON.parse(line); if (m && typeof m.text === 'string') out.push(m); } catch { /* a torn line */ }
+      try {
+        const m = JSON.parse(line);
+        if (m?.kind === 'started' && m.id) { if (!started.has(m.id)) started.set(m.id, m.at); } else if (m && typeof m.text === 'string') out.push(m);
+      } catch { /* a torn line */ }
     }
+    for (const m of out) if (m.id && started.has(m.id)) m.startedAt = started.get(m.id);
     return out;
+  }
+
+  // An owner prompt worth recording: none of the server's notices, nor a late
+  // answer (noteLate records it).
+  const ownerText = (text) => { const t = String(text ?? '').trim(); return t && !isNotice(t) && !LATE_RE.test(t) ? t : ''; };
+
+  // Prompts logged at their send whose turn has not started yet: runDir ->
+  // [{ id, text }], oldest first. Matched (and marked started) by the
+  // UserPromptSubmit of their turn; in memory only, like the sessions.
+  const sentOwner = new Map();
+
+  function noteSent(run, id, text) {
+    sentOwner.set(run.runDir, [...(sentOwner.get(run.runDir) || []), { id, text }].slice(-50));
+  }
+
+  // The sent prompt this UserPromptSubmit starts (its id), taken off the list.
+  function takeSent(run, prompt) {
+    const list = sentOwner.get(run.runDir) || [];
+    const i = list.findIndex(x => x.text === prompt || prompt.includes(x.text));
+    if (i < 0) return null;
+    const [hit] = list.splice(i, 1);
+    return hit.id;
+  }
+
+  function dropSent(run, id) {
+    const list = sentOwner.get(run.runDir);
+    if (list) sentOwner.set(run.runDir, list.filter(x => x.id !== id));
+  }
+
+  const queuedLabel = (how, images) => `[owner message — ${how === 'refresh' ? 'typed while your predecessor was being refreshed' : 'sent to your predecessor, which never took it in before the refresh'}: it is for you; answer it${images ? `; its ${images} image(s) could not be carried over, ask the owner to send them again if needed` : ''}]`;
+
+  // The owner's text from the dashboard's SDK panel (ws sdk:send) into a
+  // run's orchestrator: logged now, with its id. While a refresh runs it
+  // never reaches the old session: it waits in the run inbox for the fresh
+  // orchestrator (its first hook brings it), labelled. null: not a run
+  // orchestrator (the caller submits). { how: submitted|queued-refresh, id }.
+  function ownerSubmit(session, text, { images = [] } = {}) {
+    const st = stampOf(session);
+    if (st?.role !== 'orchestrator' || !st.runDir) return null;
+    const run = loadRun(st.runDir);
+    if (!run || run.mirror) return null;
+    const body = String(text ?? '');
+    const t = ownerText(body);
+    const imgs = Array.isArray(images) ? images : [];
+    if (run.refreshing) {
+      if (!body.trim()) throw new Error('the orchestrator is being refreshed: send the image(s) again once the fresh one is up');
+      const id = crypto.randomUUID();
+      queueMessage(run.runDir, run.orchestrator, `${queuedLabel('refresh', imgs.length)}\n${body.trim()}`);
+      if (t) logOwner(run, 'prompt', t, { id, queued: 'refresh' });
+      return { how: 'queued-refresh', id, ...(imgs.length ? { imagesDropped: imgs.length } : {}) };
+    }
+    const r = session.submit(body, { images: imgs });
+    const id = r?.id || crypto.randomUUID();
+    if (t) {
+      logOwner(run, 'prompt', t, { id });
+      noteSent(run, id, t);
+    }
+    return { how: 'submitted', ...(r && typeof r === 'object' ? r : {}), id };
+  }
+
+  // At a refresh's swap: the owner's turns the old session never took in
+  // (still queued, or cancelled by its close or the timeout's interrupt) go
+  // to the fresh orchestrator's inbox verbatim, on the log. Their ids.
+  function carryUnsent(run, previous, refresh) {
+    const list = typeof previous?.unsentInputs === 'function' ? previous.unsentInputs(Date.parse(refresh?.at || '') || 0) : [];
+    if (!list.length) return [];
+    const logged = new Set(readOwnerLog(run).map(m => m.id).filter(Boolean));
+    const ids = [];
+    for (const u of list) {
+      const body = String(u?.text ?? '').trim();
+      if (!body || isNotice(body) || LATE_RE.test(body) || ids.includes(u.id)) continue;
+      queueMessage(run.runDir, run.orchestrator, `${queuedLabel('carried', u.images?.length || 0)}\n${body}`);
+      if (!u.id || !logged.has(u.id)) logOwner(run, 'prompt', body, { id: u.id || crypto.randomUUID(), carried: true });
+      dropSent(run, u.id);
+      ids.push(u.id);
+    }
+    return ids;
+  }
+
+  // The time of the orchestrator's last final reply (ms; 0: none; null: no
+  // transcript to tell): a turn's closing text. A pause's or refresh's
+  // PAUSED does not count (one ending in PAUSED, or naming it after `refresh` began). Cached per transcript file (size, mtime).
+  const replyCache = new Map();
+  function lastReplyAt(run, previous, refresh) {
+    const sdk = (run.engine || 'cli') === 'sdk';
+    const file = sdk ? path.join(orchestratorDir(run), 'transcript.jsonl')
+      : previous?.sessId && typeof mgr.transcriptFile === 'function' ? mgr.transcriptFile(previous.cwd || run.root, previous.sessId) : null;
+    if (!file) return null;
+    let stat;
+    try { stat = fs.statSync(file); } catch { return null; }
+    const key = `${file}|${refresh?.at || ''}`;
+    const hit = replyCache.get(key);
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.at;
+    const from = refresh ? Date.parse(refresh.at) || Infinity : Infinity;
+    let at = 0;
+    for (const r of lastReplies(run, previous, Infinity)) {
+      const t = Date.parse(r.at || '') || 0;
+      if ((t >= from && /\bPAUSED\b/.test(r.text)) || /\bPAUSED\W*$/.test(r.text)) continue;
+      at = Math.max(at, t);
+    }
+    if (replyCache.size > 50) replyCache.clear();
+    replyCache.set(key, { size: stat.size, mtimeMs: stat.mtimeMs, at });
+    return at;
+  }
+
+  // Owner messages the orchestrator has not answered: prompts and form
+  // answers whose turn started after its last final reply (no transcript to
+  // tell: since the last refresh), and the ones `carried` (ids) at a swap,
+  // oldest first.
+  function unansweredOwner(run, { previous = null, refresh = null, carried = [] } = {}) {
+    const after = lastReplyAt(run, previous, refresh) ?? (Date.parse(run.lastRefresh?.at || '') || 0);
+    const keep = new Set(carried);
+    return readOwnerLog(run).filter(m => (m.kind === 'prompt' || m.kind === 'form') && !m.discarded
+      && ((m.id && keep.has(m.id)) || (Date.parse(m.startedAt || m.at) || 0) > after));
   }
 
   // The owner answered a form an orchestrator asked (askUser).
@@ -3148,7 +3289,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
   }
 
-  function seedText(run, { reason = 'paused', refresh = null, previous = null } = {}) {
+  function seedText(run, { reason = 'paused', refresh = null, previous = null, unanswered = null } = {}) {
     const now = new Date().toISOString();
     const dir = orchestratorDir(run);
     const own = folders.readFolder(dir);
@@ -3165,6 +3306,23 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const noteFresh = !!own?.resume && (!refresh || (own.notesUpdatedAt || 0) >= Date.parse(refresh.at));
     if (refresh?.timedOut) lines.push('', `**The resume note is missing or partial**: your predecessor did not reply PAUSED within ${Math.round(refreshTimeoutMs / 60000)} min and was stopped. Rebuild the picture from the records below.`);
     else if (!noteFresh) lines.push('', '**No resume note was written for this restart**: the one below (if any) is older. Rebuild the picture from the records below.');
+
+    h('Unanswered owner messages');
+    const open0 = unanswered || unansweredOwner(run, { previous, refresh });
+    if (!open0.length) lines.push('(none)');
+    else {
+      lines.push(`The owner's messages after which your predecessor gave no final reply, oldest first, verbatim. Handle them first.`);
+      let used = 0;
+      open0.forEach((m, i) => {
+        const how = m.carried ? ' — it never reached your predecessor; it also comes with your first prompt'
+          : m.queued === 'refresh' ? ' — typed during the refresh; it also comes with your first prompt' : '';
+        const kind = m.kind === 'form' ? 'answer to an orchestrator form' : 'typed to the orchestrator';
+        const room = Math.max(400, SEED_UNANSWERED_CAP - used);
+        const text = m.text.length > room ? `${m.text.slice(0, room)}… [clipped: the full text is in ${ownerLogFile(run)}]` : m.text;
+        used += text.length;
+        lines.push('', `### ${i + 1}. ${m.at} — ${kind}${how}`, '', text);
+      });
+    }
 
     h('The original request');
     lines.push(run.request || '(not recorded — see the owner messages below, your TODO.md and NOTES.md)');
@@ -3299,13 +3457,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return file;
   }
 
-  function freshPrompt(run, seed, { reason, refresh }) {
+  function freshPrompt(run, seed, { reason, refresh, unanswered = 0 }) {
     const dir = orchestratorDir(run);
+    const first = unanswered ? `${unanswered} owner message(s) went unanswered by your predecessor: they head ${seed} ("Unanswered owner messages"). Handle them first — answer or act on each before anything else.` : null;
     const paused = run.workers.filter(w => w.paused).length;
     const warm = 'Warm up the run: resume each paused worker with resume_worker (mode "continue" keeps its context, "fresh" starts it clean from its brief and notes), with a message saying what to do first. Never relaunch a paused worker\'s task with launch_cli.';
     if (!refresh) {
       return [
         `[vistaclair resume] You are a fresh orchestrator session continuing orchestration run ${run.runId} with a clean context; the previous orchestrator session was ${reason}.`,
+        ...(first ? [first] : []),
         `Read ${seed} first — it holds the original request, the owner's messages, every worker's state, brief, last report and resume note — then your TODO.md and NOTES.md in ${dir}.`,
         'Judge the notes against the reports and the workers\' folders rather than trusting them blindly.',
         paused ? `Then ${warm.charAt(0).toLowerCase()}${warm.slice(1)}` : 'Then continue the run from your TODO.',
@@ -3313,6 +3473,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     }
     return [
       `[vistaclair resume] You are a fresh orchestrator session taking over orchestration run ${run.runId} after refresh #${refresh.n} (${refreshWhy(refresh)}), with a clean context. Same address, same workers.`,
+      ...(first ? [first] : []),
       `1. Read ${seed} first (Vistaclair wrote it at the swap: the owner's messages, your predecessor's last replies and resume note, the open owner items, every worker's state and open items, all events since the last refresh), then your TODO.md and NOTES.md in ${dir}.`,
       '2. Call list_workers.',
       '3. Reconcile: where the notes disagree with the server\'s records and events, the records and events win — correct TODO.md and NOTES.md.',
@@ -3326,10 +3487,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // a paused run's "Resume from notes", or the swap of a refresh (`refresh`:
   // run.refreshing). A refresh whose new session does not start keeps the old
   // transcript resumable, marks nothing delivered and tells the owner.
-  function freshOrchestrator(run, { settings, title, replaces, reason = 'paused', refresh = null, previous = null } = {}) {
+  function freshOrchestrator(run, { settings, title, replaces, reason = 'paused', refresh = null, previous = null, carried = [] } = {}) {
     assertNotMirror(run);
-    const seed = writeSeed(run, { reason, refresh, previous });
-    const prompt = freshPrompt(run, seed, { reason, refresh });
+    const unanswered = unansweredOwner(run, { previous, refresh, carried });
+    const seed = writeSeed(run, { reason, refresh, previous, unanswered });
+    const prompt = freshPrompt(run, seed, { reason, refresh, unanswered: unanswered.length });
     const tabId = mgr.nextTabId();
     let failure = null;
     try {
@@ -3446,7 +3608,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const lost = !fresh && !control?.canContinue(entry);
     if (fresh || lost) {
       const reason = lost ? 'paused, and its conversation could not be restored' : 'paused';
-      const out = { runId, fresh: true, fellBack: lost, ...freshOrchestrator(run, { settings: entry?.settings, title: entry?.title, replaces: entry?.id, reason }) };
+      const previous = entry ? { sessId: entry.id, cwd: entry.cwd } : null;
+      const out = { runId, fresh: true, fellBack: lost, ...freshOrchestrator(run, { settings: entry?.settings, title: entry?.title, replaces: entry?.id, reason, previous }) };
       pumpQueue(run.runDir);
       return out;
     }
@@ -4518,7 +4681,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
         if (!run.request && prompt && !prompt.startsWith('[')) run.request = clip(prompt, 8000);
         // Every owner prompt goes to the owner log (the seed's owner messages).
-        if (prompt && !isNotice(prompt) && !LATE_RE.test(prompt)) logOwner(run, 'prompt', prompt);
+        // One sent from the SDK panel was logged at its send: only marked started.
+        const sentId = ownerText(prompt) ? takeSent(run, prompt) : null;
+        if (sentId) appendOwnerLine(run, { at: new Date().toISOString(), kind: 'started', id: sentId });
+        else if (ownerText(prompt)) logOwner(run, 'prompt', prompt);
         saveRun(run);
         return ctxOut('UserPromptSubmit', joinContext(inboxOf(), events()));
       }
@@ -4672,7 +4838,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   return {
     router, openCli, askUser, prepareRun, launchWorker, cancelLaunch, listWorkers, endRun, undoLanding, landingOf, checkOverlaps, report, ownerItems, ownerList, ownerResolve, ownerDelete, sendMessage, listAgents, sendToSession, toolParams,
-    handleHook, onSessionExit, askAddress, isRefreshing, deliverLate, noteLate, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
+    handleHook, onSessionExit, askAddress, isRefreshing, deliverLate, noteLate, ownerSubmit, getRun, describeRun, describeRunById, listRuns, findByStamp, writeSessionSettings,
     pauseRun, refreshOrchestrator, resumeRun, resumeWorker, closeWorker, stopWorker, resumeSavedWorker, deleteRun, closeCheck, noteMemberDeleted, memberDirty,
     memberModelChanged, setRunModelMap, setRunAuth, setRunModel, setRunMaxWorkers, setRunAutoRefresh, registerHostProvider, hostList, openMirrorRun,
     writeSeed, dropRetiredEntries,

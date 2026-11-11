@@ -1325,3 +1325,20 @@ test('usage limit with no API key stored: the notice says so; a limited session 
     setLogin(SIGNED_OUT);
   }
 });
+
+test('unsentInputs: the owner\'s turns never taken in (waiting, or cancelled by an interrupt or the end) are kept for a refresh\'s swap', async () => {
+  const { s, sdk, calls } = makeSession();
+  s.spawn(tmp('proj-'), 80, 24, {});
+  s.submit('a', { from: 'vistaclair' });   // a platform turn: never the owner's
+  s.submit('first');
+  s.submit('second');
+  await tick();
+  const [, first, second] = calls[0].inputs;
+  assert.deepStrictEqual(s.unsentInputs().map(u => [u.id, u.text]), [[first.uuid, 'first'], [second.uuid, 'second']]);
+  sdk.interruptReceipt = { cancelled: [first.uuid] };
+  await s.interrupt();
+  const since = Date.now();
+  s.kill();
+  assert.deepStrictEqual(s.unsentInputs().map(u => [u.text, u.reason]), [['first', 'interrupted'], ['second', 'ended']]);
+  assert.deepStrictEqual(s.unsentInputs(since + 1000).map(u => u.text), [], 'only those cancelled since `since`');
+});
