@@ -178,8 +178,7 @@ const AUTO_REFRESH_BUSY_AT = 0.9;    // … during a turn: the instruction comes
 const REFRESH_TIMEOUT_MS = 300000;   // no PAUSED by then: the swap goes on from the server's records
 const NOTES_STALE_MS = 1800000;      // a busy worker's TODO unchanged this long: its notes are stale (the seed)
 const OWNER_LOG = 'owner-messages.jsonl';   // <runDir>/: every owner message of the run
-const SEED_OWNER_CAP = 40000;        // owner messages inline in RESTART.md (the newest whole; the log has all)
-const SEED_UNANSWERED_CAP = 20000;   // the unanswered ones at the head of RESTART.md (each clipped past it)
+const SEED_CAP = 30000;               // RESTART.md's size (the unanswered owner messages and the resume note are never cut for it; the rest spills into sidecar files)
 const CONTEXT_LIMIT = 9000;          // hook additionalContext is capped at 10k chars
 const QUIET_VALVE_MS = 600000;       // quiet events undelivered this long push the orchestrator once
 const QUIET_SHOWN = 15;              // quiet events listed in one delivery (the newest); the rest are counted
@@ -1003,15 +1002,16 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // A launch's checked parameters, as a queue entry keeps them (cwd resolved,
   // `after` as worker ids). Throws, having changed nothing.
-  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app } = {}) {
+  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app, closeWhenDone } = {}) {
     title = cleanTitle(title);
-    if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after });
+    if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone });
     if (app !== undefined && app !== null && app !== '') throw new Error('app is for a remote worker (with host)');
     const target = realpathOr(cwd ? path.resolve(run.root, cwd) : run.root);
     if (!isInside(target, run.root)) throw new Error(`cwd must be inside the run root ${run.root}`);
     const spec = {
       title: title || '', task: String(task), cwd: target, isolation: isolation || run.isolation,
       ...(model ? { model } : {}), ...(tools !== undefined ? { tools } : {}),
+      ...(closeWhenDone === true ? { closeWhenDone: true } : {}),
     };
     const areas = areaOf(area);
     if (areas) spec.area = areas;
@@ -1032,7 +1032,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     checkPacks(run, probe, { toolsGiven: spec.tools !== undefined });
   }
 
-  // launch_cli `after`: addresses or ids of workers of this run, as ids.
+  // launch_cli `after`: addresses or ids of workers of this run, as ids; or the
+  // id of a queued launch (q12), kept as it is until it starts (the worker it
+  // becomes carries it as queueId; depWorker follows it).
   function afterOf(run, after) {
     if (after === undefined || after === null) return [];
     const list = Array.isArray(after) ? after : [after];
@@ -1041,6 +1043,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const want = a.trim().replace(/\s+\[[^\]]*\]$/, '');
       const w = run.workers.find(x => x.name === want || x.id === want);
       if (w) return w.id;
+      if (QUEUE_ID_RE.test(want)) {
+        const started = run.workers.find(x => x.queueId === want);
+        if (started) return started.id;
+        if ((run.queue || []).some(e => e.id === want)) return want;
+        throw new Error(`after: no queued launch ${want} in this run${run.queue?.length ? ` (queued: ${run.queue.map(e => e.id).join(', ')})` : ' (nothing is queued; it may have been cancelled)'}`);
+      }
       const other = /^orch-([0-9a-f]{6})-/.exec(want);
       if (other && other[1] !== run.runId) throw new Error(`after: ${want} is a worker of run ${other[1]}, not of this run (${run.runId})`);
       throw new Error(`after: no worker ${want} in this run`);
@@ -1058,6 +1066,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       sessionDir: path.join(run.sessionsRoot || path.join(dataHome, 'data', 'sessions'), name),
       launchedAt: new Date().toISOString(), exitedAt: null, lastReport: null, boot: BOOT,
       ...(model ? { model } : {}),
+      ...(spec.queueId ? { queueId: spec.queueId } : {}),
+      ...(spec.closeWhenDone ? { closeWhenDone: true } : {}),
     };
     const grants = grantsOf(tools);
     if (grants) worker.grants = grants;
@@ -1159,13 +1169,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // launch_cli with a host: the checked spec, or a throw having changed nothing.
-  function remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after }) {
+  function remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone }) {
     const h = checkHost(host);
     const no = (what, why) => { throw new Error(`${what}: ${why}; omit it for a remote worker`); };
     if (cwd !== undefined && cwd !== null && cwd !== '') no('cwd', 'a remote worker runs in its app\'s directory on its host');
     if (isolation !== undefined && isolation !== null && isolation !== 'none') no('isolation', 'a remote worker has no worktree on this machine');
     if (area !== undefined && area !== null) no('area', 'areas are compared between worktrees on this machine');
     if (tools !== undefined) no('tools', 'add-on tool grants are this machine\'s');
+    if (closeWhenDone === true) no('closeWhenDone', 'a remote worker is closed with close_worker');
     const theApp = app === undefined || app === null || app === '' ? runApp(run) : String(app).trim();
     if (!theApp) throw new Error('app: name the app on the host this worker runs in (this run has none of its own)');
     if (!APP_RE.test(theApp)) throw new Error('app must be an app name ([a-z0-9-])');
@@ -1176,7 +1187,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // Record the member and ask the provider. Returns at once; the outcome is an event.
-  function startRemote(run, { title, task, host, app, model }) {
+  function startRemote(run, { title, task, host, app, model, queueId }) {
     checkHost(host);
     const id = `w${++run.workerSeq}`;
     const name = `${run.orchestrator}-${id}-${slugify(title)}`;
@@ -1186,6 +1197,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       host, app, remote: { state: 'pending-approval', since: now },
       launchedAt: now, exitedAt: null, lastReport: null, boot: BOOT,
       ...(model ? { model } : {}),
+      ...(queueId ? { queueId } : {}),
     };
     run.workers.push(worker);
     run.closed = false;
@@ -1589,8 +1601,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return !!r && r.report === w.lastReport.at && (r.outcome === 'landed' || r.outcome === 'nothing');
   }
 
+  // The worker a launch's `after` entry stands for: a worker id, or the worker a
+  // queued launch (q12) became; undefined while it is still queued, or gone.
+  const QUEUE_ID_RE = /^q\d+$/;
+  function depWorker(run, id) {
+    return QUEUE_ID_RE.test(id) ? run.workers.find(w => w.queueId === id) : run.workers.find(w => w.id === id);
+  }
+
   function depsMet(run, entry) {
-    return (entry.after || []).every(id => depFinished(run.workers.find(w => w.id === id)));
+    return (entry.after || []).every(id => depFinished(depWorker(run, id)));
   }
 
   // Ran in an earlier server process and was live when it stopped (no exit
@@ -1625,11 +1644,13 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   function warnDependencies(run) {
     for (const e of run.queue || []) {
       for (const id of e.after || []) {
-        const w = run.workers.find(x => x.id === id);
-        const p = w && depProblem(run, w);
+        const w = depWorker(run, id);
+        // A queued launch that was cancelled never starts.
+        const gone = !w && QUEUE_ID_RE.test(id) && !(run.queue || []).some(x => x.id === id);
+        const p = gone ? { key: `${id}:cancelled`, what: 'was cancelled' } : w && depProblem(run, w);
         if (!p || (e.warned || []).includes(p.key)) continue;
         e.warned = [...(e.warned || []), p.key].slice(-50);
-        addEvent(run, { worker: w.name, kind: 'queue', text: `queued launch ${e.id} (${e.title || 'untitled'}) waits on ${w.name} which ${p.what}: cancel_launch it or let it wait` });
+        addEvent(run, { worker: w?.name || null, kind: 'queue', text: `queued launch ${e.id} (${e.title || 'untitled'}) waits on ${w?.name || `queued launch ${id}`} which ${p.what}: cancel_launch it or let it wait` });
       }
     }
   }
@@ -1642,6 +1663,40 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (w.landing || landingJobs.has(jobKey(run, w))) return false;
     if ((w.followUps || []).some(f => f.at > w.lastReport.at)) return false;
     return worktreeChanges(w).length === 0;
+  }
+
+  // launch_cli `closeWhenDone`: a running worker with the flag is closed by the
+  // platform when it is idle, its last report is done, its branch landed (or had
+  // nothing to land; no branch: isolation none), no follow-up came since, and its
+  // worktree is clean. Never on blocked, failed, not landed or a stopped turn.
+  function closeWhenDoneReady(run, w) {
+    if (!w.closeWhenDone || w.closed || w.remote || w.turnStopped) return false;
+    if (w.branch) return autoClosable(run, w);
+    return workerAvailable(run, w) && w.lastReport?.status === 'done' && !(w.followUps || []).some(f => f.at > w.lastReport.at);
+  }
+
+  function sweepCloseWhenDone(runDir) {
+    if (mgr._shuttingDown) return [];
+    const closed = [];
+    for (;;) {
+      const run = loadRun(runDir);
+      if (!run || run.pausing || run.paused) break;
+      const w = runningWorkers(run).find(x => closeWhenDoneReady(run, x));
+      if (!w) break;
+      closeLive(run, w, workerSession(run, w.id), { auto: 'closeWhenDone' });
+      addEvent(run, { worker: w.name, kind: 'closed', quiet: true, text: `${w.name} was closed automatically (closeWhenDone: idle, last report done, ${w.branch ? 'landed, ' : ''}clean); resume_worker brings it back` });
+      closed.push(w.name);
+    }
+    return closed;
+  }
+
+  // A worker's turn ends after its report, not before: the sweep runs again a
+  // moment later, when it is idle.
+  function scheduleCloseSweep(runDir) {
+    for (const ms of [1500, 6000, 20000]) {
+      const t = setTimeout(() => { try { if (sweepCloseWhenDone(runDir).length) pumpQueue(runDir); } catch (e) { console.error('[orchestration] closeWhenDone:', e.message); } }, ms);
+      if (t.unref) t.unref();
+    }
   }
 
   // The landings recorded since a queued launch was queued, as one line of
@@ -1657,15 +1712,19 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const restoring = run.workers.filter(w => awaitingRestore(run, w)).map(w => w.name);
     const free = freeSlots(run);
     return (run.queue || []).map((e, i) => {
-      const unmet = (e.after || []).map(id => run.workers.find(w => w.id === id)).filter(w => !depFinished(w));
-      const waitingFor = unmet.map(w => `${w ? w.name : 'a deleted worker'} to ${w?.branch ? 'land' : 'report done'}`);
+      const unmet = (e.after || []).filter(id => !depFinished(depWorker(run, id)));
+      const waitingFor = unmet.map((id) => {
+        const w = depWorker(run, id);
+        if (!w && QUEUE_ID_RE.test(id)) return (run.queue || []).some(x => x.id === id) ? `queued launch ${id} to start and finish` : `queued launch ${id} (cancelled)`;
+        return `${w ? w.name : 'a deleted worker'} to ${w?.branch ? 'land' : 'report done'}`;
+      });
       if (!unmet.length) {
         if (run.pausing || run.paused) waitingFor.push('the run to be resumed');
         else if (free <= 0) waitingFor.push(restoring.length ? `a free slot (not back since the restart: ${restoring.join(', ')})` : 'a free slot');
       }
       return {
         id: e.id, position: i + 1, title: e.title, waitingFor, queuedAt: e.at,
-        after: (e.after || []).map(id => run.workers.find(w => w.id === id)?.name || id),
+        after: (e.after || []).map(id => depWorker(run, id)?.name || id),
         brief: clip(e.task, 300), ...(e.host ? { host: e.host, app: e.app } : { cwd: e.cwd }), ...(e.model ? { model: e.model } : {}), ...(e.area ? { area: e.area } : {}),
       };
     });
@@ -1682,6 +1741,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     pumping.add(runDir);
     const started = [];
     try {
+      sweepCloseWhenDone(runDir);
       do {
         pumpAgain.delete(runDir);
         started.push(...pumpOnce(runDir, silent));
@@ -1718,7 +1778,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       saveRun(run);
       let result;
       try {
-        result = startWorker(run, { ...entry, task: `${entry.task}${landedSince(run, entry)}` });
+        result = startWorker(run, { ...entry, queueId: entry.id, task: `${entry.task}${landedSince(run, entry)}` });
       } catch (e) {
         // launch_cli's own entry: its caller gets the error.
         if (entry.id === silent) { out.push({ entry, error: e, autoClosed }); continue; }
@@ -1849,13 +1909,68 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return tabId;
   }
 
-  // list_workers: describeRun, with a compact entry for every worker that is
-  // gone (closed, stopped, exited) and not paused, so a long run stays readable.
-  // The GUI reads describeRun itself (GET /run), never this.
-  function listWorkers(instanceId) {
+  // list_workers. Default: the run header and ONE short line per worker (every
+  // worker the run has had, closed ones too, so a closed one can be found and
+  // resumed): "address | state | model | [earlier ]status: summary | [branch X |] landing".
+  // `detail` (addresses or ids, "open" = every running or paused worker, "all"
+  // = every worker, the closed ones compact) answers with the full entries of
+  // exactly those workers instead of the lines. The GUI reads describeRun
+  // itself (GET /run), never this.
+  const LIST_SUMMARY = 100;      // chars of a running worker's last report in its line
+  const LIST_SUMMARY_GONE = 40;  // ... of a closed, stopped or exited worker's
+
+  function listWorkers(instanceId, { detail } = {}) {
     const { run } = callerRun(instanceId);
     const d = describeRun(run);
-    return { ...d, workers: d.workers.map(w => (w.running || w.paused ? w : compactWorker(w))) };
+    const counts = { total: d.workers.length };
+    for (const w of d.workers) counts[w.state] = (counts[w.state] || 0) + 1;
+    const header = {
+      runId: d.runId, orchestrator: d.orchestrator, engine: d.engine, root: d.root, isolation: d.isolation, closed: d.closed,
+      pausing: d.pausing, paused: d.paused, maxWorkers: d.maxWorkers, maxWorkersRange: d.maxWorkersRange,
+      todo: d.todo, notes: d.notes,
+      orchestratorState: d.orchestratorState, orchestratorCost: d.orchestratorCost, compactions: d.compactions, refreshSuggested: d.refreshSuggested,
+      refreshing: d.refreshing, pendingEvents: d.pendingEvents,
+      openOwnerItems: d.ownerItems.filter(i => i.state === 'open').length, unansweredOwner: d.unansweredOwner,
+      counts,
+    };
+    const asked = detail === undefined || detail === null || detail === '' ? null : (Array.isArray(detail) ? detail : [detail]).map(x => String(x ?? '').trim().replace(/\s+\[[^\]]*\]$/, '')).filter(Boolean);
+    if (asked && !asked.length) throw new Error('detail must name workers (addresses or ids), "open" or "all"');
+    if (!asked) {
+      return {
+        ...header,
+        queue: d.queue.map(q => ({ id: q.id, position: q.position, title: q.title, waitingFor: q.waitingFor, ...(q.after.length ? { after: q.after } : {}) })),
+        workers: d.workers.map(w => shortWorker(run, w)),
+        note: 'workers: one line each, "address | state | model | last report | [branch, when not orch/<runId>/<id> |] landing". Full entries (paths of TODO.md and NOTES.md, brief, progress, cost): list_workers({ detail: ["<address or id>", …] }) or detail "open" (every running or paused worker).',
+      };
+    }
+    const picked = [];
+    const notFound = [];
+    const add = (w, full) => { if (!picked.some(p => p.w === w)) picked.push({ w, full }); };
+    for (const x of asked) {
+      if (x === 'open') d.workers.filter(w => w.running || w.paused).forEach(w => add(w, true));
+      else if (x === 'all') d.workers.forEach(w => add(w, w.running || w.paused));
+      else {
+        const w = d.workers.find(y => y.name === x || y.id === x);
+        if (w) add(w, true); else notFound.push(x);
+      }
+    }
+    return {
+      ...header, queue: d.queue,
+      detail: picked.map(p => (p.full ? p.w : compactWorker(p.w))),
+      ...(notFound.length ? { notFound } : {}),
+    };
+  }
+
+  // One worker's line for list_workers.
+  function shortWorker(run, w) {
+    const gone = !w.running && !w.paused;
+    const r = w.lastReport;
+    const last = r ? `${r.superseded ? 'earlier ' : ''}${r.status}: ${clip(String(r.summary || '').replace(/\s+/g, ' ').trim(), gone ? LIST_SUMMARY_GONE : LIST_SUMMARY)}` : 'no report';
+    const l = w.landing;
+    const landed = !w.branch ? '' : !l ? '' : l.state === 'not-landed' ? `NOT LANDED${l.reason ? ` (${clip(l.reason, 60)})` : ''}` : `${l.state}${l.undone ? ' (undone)' : ''}${l.current === false ? ' (older report)' : ''}`;
+    const branch = w.branch && w.branch !== `orch/${run.runId}/${w.id}` ? `branch ${w.branch}` : '';
+    const flags = [w.turnStopped ? 'stopped turn' : '', w.available ? 'can close' : '', w.closeWhenDone && !w.closed ? 'closeWhenDone' : '', w.host ? `host ${w.host}` : ''].filter(Boolean).join(', ');
+    return [w.name, flags ? `${w.state} (${flags})` : w.state, w.model || '-', last, branch, landed].filter((x, i) => i < 4 || x).join(' | ');
   }
 
   function compactWorker(w) {
@@ -1970,6 +2085,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           paused: !!w.paused, abandoned: !!w.abandoned,
           closed: !!w.closed, closedAt: w.closedAt || null, available: workerAvailable(run, w),
           ...(w.turnStopped ? { turnStopped: w.turnStopped } : {}),
+          ...(w.closeWhenDone ? { closeWhenDone: true } : {}),
           brief: clip(w.task, 300),
           ...(w.grants ? { grants: w.grants } : {}),
           ...(run.engine === 'sdk' ? { context: live?.session.running ? contextOf(live.session) : null } : {}),
@@ -3393,171 +3509,270 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     };
   }
 
-  function seedText(run, { reason = 'paused', refresh = null, previous = null, unanswered = null } = {}) {
+  // The seed is RESTART.md, held to about SEED_CAP: what the owner typed that
+  // went unanswered and the predecessor's resume note are never cut; the bulky
+  // rest is cut in steps (SEED_LEVELS) and its full text goes to sidecar files
+  // next to it, which RESTART.md lists with one line each.
+  const SEED_SIDECARS = {
+    owner: ['RESTART-owner.md', 'the original request in full, every owner message verbatim (oldest first) and the open owner items in full'],
+    events: ['RESTART-events.md', 'every event since the last refresh, in order'],
+    workers: ['RESTART-workers.md', 'every worker in full: brief, last report, files, open items, resume note, follow-ups; closed ones with a longer summary'],
+  };
+  const SEED_LEVELS = (() => {
+    const detail = [
+      { brief: 2000, report: 1500, verified: 400, open: 3000, resume: 3000, ups: 3000 },
+      { brief: 500, report: 600, verified: 300, open: 800, resume: 800, ups: 600 },
+      { brief: 200, report: 300, verified: 0, open: 400, resume: 0, ups: 0 },
+    ];
+    const base = { events: 6000, owner: 6000, replies: 3, replyChars: 2000, todo: 8000, closed: 120, request: 4000, opens: 1500, opensTotal: 8000, why: 300, itemsMax: 1e9, detail: detail[0] };
+    const steps = [{}, { events: 1500, owner: 2500 }, { replies: 1, replyChars: 1500, todo: 3000, closed: 60, opensTotal: 4000, why: 200 }, { events: 0, owner: 0 },
+      { detail: detail[1], why: 150, opensTotal: 2000, itemsMax: 30 }, { closed: 0, request: 1500, replies: 0, opens: 600, opensTotal: 1000 }, { detail: detail[2], todo: 1500, why: 0, itemsMax: 15 }];
+    let cur = base;
+    return steps.map(s => (cur = { ...cur, ...s }));
+  })();
+
+  function seedParts(run, { reason = 'paused', refresh = null, previous = null, unanswered = null } = {}) {
     const now = new Date().toISOString();
     const dir = orchestratorDir(run);
     const own = folders.readFolder(dir);
     const last = run.lastRefresh || null;   // the previous refresh: { at, seq, n }
     const sinceWhat = last ? `the last refresh (#${last.n}, ${last.at})` : 'the run started';
-    const lines = [];
-    const h = (t) => lines.push('', `## ${t}`, '');
-    lines.push(`# Fresh restart — orchestration run ${run.runId}`, '');
-    lines.push(refresh
-      ? `Written by Vistaclair at ${now}, at the swap of refresh #${refresh.n} (${refreshWhy(refresh)}; started ${refresh.at}).`
-      : `Written by Vistaclair at ${now} (the previous orchestrator session was ${reason}).`);
-    lines.push(`Generated from the server's run record (${runFile(run.runDir)}), the owner log and the session folders — no model wrote it. Where your notes disagree with it, it wins. Your own TODO.md and NOTES.md are in ${dir}.`);
-    if (refresh?.afterCompaction) lines.push('', '**Your predecessor wrote its notes after a compaction**: its memory of the run was already a summary. Check its notes against the records below.');
-    const noteFresh = !!own?.resume && (!refresh || (own.notesUpdatedAt || 0) >= Date.parse(refresh.at));
-    if (refresh?.timedOut) lines.push('', `**The resume note is missing or partial**: your predecessor did not reply PAUSED within ${Math.round(refreshTimeoutMs / 60000)} min and was stopped. Rebuild the picture from the records below.`);
-    else if (!noteFresh) lines.push('', '**No resume note was written for this restart**: the one below (if any) is older. Rebuild the picture from the records below.');
-
-    h('Unanswered owner messages');
     const open0 = unanswered || unansweredOwner(run, { previous, refresh });
-    if (!open0.length) lines.push('(none)');
-    else {
-      lines.push(`The owner's messages after which your predecessor gave no final reply, oldest first, verbatim. Handle them first.`);
-      let used = 0;
-      open0.forEach((m, i) => {
-        const how = m.carried ? ' — it never reached your predecessor; it also comes with your first prompt'
-          : m.queued === 'refresh' ? ' — typed during the refresh; it also comes with your first prompt' : '';
-        const kind = m.kind === 'form' ? 'answer to an orchestrator form' : 'typed to the orchestrator';
-        const room = Math.max(400, SEED_UNANSWERED_CAP - used);
-        const text = m.text.length > room ? `${m.text.slice(0, room)}… [clipped: the full text is in ${ownerLogFile(run)}]` : m.text;
-        used += text.length;
-        lines.push('', `### ${i + 1}. ${m.at} — ${kind}${how}`, '', text);
-      });
-    }
-
-    h('The original request');
-    lines.push(run.request || '(not recorded — see the owner messages below, your TODO.md and NOTES.md)');
-
-    h('Owner messages since the run started');
     const log = readOwnerLog(run);
     const logFile = ownerLogFile(run);
-    if (!log.length) lines.push(`(none recorded in ${logFile})`);
-    else {
-      const KIND = { prompt: 'typed to the orchestrator', form: 'answer to an orchestrator form', 'owner-item': 'owner item resolved' };
-      const shown = [];
-      let used = 0;
-      let cut = 0;
-      for (let i = log.length - 1; i >= 0; i--) {
-        const m = log[i];
-        const late = m.late ? (m.discarded ? ' (late: the question had expired; the owner discarded it)' : ' (late: the question had expired; sent to the orchestrator as a message)') : '';
-        const head = `### ${m.at} — ${KIND[m.kind] || m.kind}${late}`;
-        const room = SEED_OWNER_CAP - used - head.length;
-        let text = m.text;
-        if (i < log.length - 1 && text.length > room) {
-          if (room < 400) { cut = i + 1; break; }
-          text = `${text.slice(0, room)}… [clipped: the full text is in ${logFile}]`;
-        }
-        shown.unshift(head, '', text, '');
-        used += head.length + text.length + 2;
-      }
-      lines.push(`All ${log.length}, oldest first; full text in ${logFile} (one JSON object per line).`, '');
-      if (cut) lines.push(`(${cut} older message(s) not shown here: read them in ${logFile})`, '');
-      lines.push(...shown);
-    }
-
-    h('Your predecessor\'s last replies (verbatim, oldest first)');
     const replies = lastReplies(run, previous);
-    if (!replies.length) lines.push('(not available)');
-    for (const r of replies) lines.push(`### ${r.at || '(time unknown)'}`, '', clip(r.text, 8000), '');
-
-    h('Your predecessor\'s resume note');
-    lines.push(own?.resume || '(none written)');
-
-    h('Open owner items');
-    const open = orderedOwnerItems(run);
-    if (!open.length) lines.push('(none)');
-    for (const i of open) {
-      lines.push(`- ${i.id} [${i.kind}${i.blocking ? ', blocking' : ''}] ${i.what}${i.worker ? ` (from ${i.worker})` : ''}${i.why ? ` — why: ${i.why}` : ''}${i.options?.length ? ` — options: ${i.options.join(' | ')}` : ''}${i.recommended ? ` — recommended: ${i.recommended}` : ''}`);
-    }
-    const resolved = (run.ownerItems || []).filter(i => i.state !== 'open' && (!last || String(i.resolvedAt) > last.at));
-    if (resolved.length) {
-      lines.push('', `Resolved since ${sinceWhat}:`);
-      for (const i of resolved) lines.push(`- ${i.id} ${i.state} by ${i.resolvedBy || 'owner'} at ${i.resolvedAt}: ${i.what}${i.answer ? ` — ${i.answer}` : ''}`);
-    }
-
-    const inbox = readJsonOr(inboxFile(run.runDir), {})[run.orchestrator] || [];
-    if (inbox.length) {
-      h('Messages waiting for you (they also come with your first prompt)');
-      for (const m of inbox) lines.push(`- ${clip(m, 3000)}`);
-    }
-
     const snaps = run.workers.map(w => workerSnapshot(run, w)).sort((a, b) => a.rank - b.rank);
     const shared = (run.isolation === 'none' || snaps.some(s => !s.w.worktree && !s.w.remote)) ? treeStatus(run.root) : null;
-    h('Workers');
-    lines.push('Blocked and waiting-on-you first, then running, paused; the finished ones condensed at the end.');
-    if (shared !== null || run.isolation === 'none') lines.push('', `Shared working tree ${run.root} (workers without a worktree): git status ${treeLine(shared)}`);
-    for (const s of snaps.filter(x => x.active || x.blocked)) {
-      const { w, f, rep } = s;
-      const flag = s.blocked ? ' — BLOCKED, waiting on you' : s.awaiting ? ` — idle after "${rep.status}", waiting on you` : '';
-      lines.push('', `### \`${w.name}\` (${w.id}) — ${s.state}${flag}`, '');
-      lines.push(`- Title: ${w.title || '(none)'}; area: ${areaText(w.area)}`);
-      lines.push(`- Folder: ${w.remote ? `on ${w.host}` : w.sessionDir || '(none)'}${w.branch ? `; branch ${w.branch}` : ''}`);
-      if (f) lines.push(`- TODO: ${f.progress.done}/${f.progress.total} done${f.progress.doing ? `, doing ${f.progress.doing.id}: ${clip(f.progress.doing.description, 160)}` : ''}; updated ${isoOf(f.todoUpdatedAt) || 'never'}${s.stale ? ` — NOTES STALE: unchanged for ${Math.round((Date.now() - f.todoUpdatedAt) / 60000)} min while busy` : ''}`);
-      lines.push(`- Last activity: ${isoOf(s.lastActivity) || 'unknown'}${s.ctx ? `; context ${s.ctx.percent ?? '?'}% of its window${s.ctx.compactAt ? ` (${Math.round((s.ctx.tokens / s.ctx.compactAt) * 100)}% of its compaction threshold)` : ''}` : ''}`);
-      if (!w.remote) lines.push(`- Working tree: ${w.worktree ? `${w.cwd}: ${treeLine(treeStatus(w.cwd))}` : 'the shared tree (above)'}`);
-      lines.push(`- Last report: ${rep ? `${rep.status} at ${rep.at}${s.superseded ? ' (earlier: it is working again)' : ''}: ${clip(rep.summary, 1500)}` : '(none)'}`);
-      if (rep?.filesChanged?.length) lines.push(`  - files: ${rep.filesChanged.join(', ')}`);
-      if (rep?.verified) lines.push(`  - verified: ${clip(rep.verified, 400)}`);
-      if (rep?.open) lines.push(`  - open: ${clip(rep.open, 3000)}`);
-      lines.push('- Brief:', '', '```', clip(w.task, 2000), '```');
-      const ups = followUpsText(w, '- Follow-ups since its brief, oldest first:', 3000);
-      if (ups) lines.push('', ups);
-      if (f?.resume) lines.push('', '- Resume note:', '', clip(f.resume, 3000));
-    }
-    const rest = snaps.filter(x => !x.active && !x.blocked);
-    if (rest.length) {
-      lines.push('', '### Finished or stopped', '');
-      for (const { w, state, rep } of rest) {
-        lines.push(`- \`${w.name}\` (${w.id}) — ${state}; area: ${areaText(w.area)}; last report: ${rep ? `${rep.status} at ${rep.at}: ${clip(String(rep.summary || '').replace(/\s+/g, ' '), 300)}` : 'none'}`);
-      }
-    }
-
-    const queue = queueList(run);
-    if (queue.length) {
-      h('Queued launches');
-      for (const q of queue) lines.push(`- ${q.id} ${q.title} — waiting for: ${q.waitingFor.join(', ') || 'nothing'}; area: ${areaText(q.area)} — ${q.brief}`);
-    }
-
-    h(`Open items from worker reports since ${sinceWhat}`);
-    let opens = 0;
-    for (const w of run.workers) {
-      const list = (w.opens || []).filter(o => !last || o.at > last.at);
-      const rep = w.lastReport;
-      if (rep?.open && (!last || rep.at > last.at) && !list.some(o => o.at === rep.at)) list.push({ at: rep.at, status: rep.status, open: rep.open });
-      if (!list.length) continue;
-      lines.push('', `### \`${w.name}\``, '');
-      for (const o of list) { lines.push(`- ${o.at} (${o.status}): ${clip(o.open, 4000)}`); opens++; }
-    }
-    if (!opens) lines.push('(none)');
-
-    h('Your TODO.md');
+    const trees = new Map(snaps.filter(s => (s.active || s.blocked) && !s.w.remote && s.w.worktree).map(s => [s.w.id, treeLine(treeStatus(s.w.cwd))]));
+    const inbox = readJsonOr(inboxFile(run.runDir), {})[run.orchestrator] || [];
     const todo = readTodo(run);
-    lines.push(todo.length > 30000 ? `${todo.slice(0, 30000)}\n… [clipped: read ${path.join(dir, 'TODO.md')}]` : todo);
-
     const cursor = refresh ? refresh.cursor : run.delivered;
     const evs = run.events.filter(e => !last || e.seq > last.seq);
-    h(`Events since ${sinceWhat}`);
-    const from = (last?.seq || 0) + 1;
-    if (evs.length && evs[0].seq > from) lines.push(`(events #${from}–#${evs[0].seq - 1} are no longer kept in run.json)`);
-    if (!evs.length) lines.push('(none)');
     const evLine = (e) => (e.quiet
       ? `- #${e.seq} ${e.at} [${e.kind}, quiet] ${clip(String(e.text || '').replace(/\s+/g, ' '), 200)}`
       : `- #${e.seq} ${e.at} [${e.kind}] ${clip(e.text, 1500)}`);
-    const before = evs.filter(e => e.seq <= cursor);
-    const after = evs.filter(e => e.seq > cursor);
-    if (before.length) lines.push(`Delivered to your predecessor (${before.length}):`, '', ...before.map(evLine));
-    if (after.length) lines.push('', `Not delivered to your predecessor — they also come with your first prompt (${after.length}):`, '', ...after.map(evLine));
-    return lines.join('\n') + '\n';
+    const side = (k) => path.join(dir, SEED_SIDECARS[k][0]);
+    const KIND = { prompt: 'typed to the orchestrator', form: 'answer to an orchestrator form', 'owner-item': 'owner item resolved' };
+    const lateOf = (m) => (m.late ? (m.discarded ? ' (late: the question had expired; the owner discarded it)' : ' (late: the question had expired; sent to the orchestrator as a message)') : '');
+
+    // One worker's detail block (a running, paused or blocked one) as `d` caps its parts.
+    const workerBlock = (s, d) => {
+      const { w, f, rep } = s;
+      const out = [];
+      const flag = s.blocked ? ' — BLOCKED, waiting on you' : s.awaiting ? ` — idle after "${rep.status}", waiting on you` : '';
+      out.push('', `### \`${w.name}\` (${w.id}) — ${s.state}${flag}`, '');
+      out.push(`- Title: ${w.title || '(none)'}; area: ${areaText(w.area)}`);
+      out.push(`- Folder: ${w.remote ? `on ${w.host}` : w.sessionDir || '(none)'}${w.branch ? `; branch ${w.branch}` : ''}`);
+      if (f) out.push(`- TODO: ${f.progress.done}/${f.progress.total} done${f.progress.doing ? `, doing ${f.progress.doing.id}: ${clip(f.progress.doing.description, 160)}` : ''}; updated ${isoOf(f.todoUpdatedAt) || 'never'}${s.stale ? ` — NOTES STALE: unchanged for ${Math.round((Date.now() - f.todoUpdatedAt) / 60000)} min while busy` : ''}`);
+      out.push(`- Last activity: ${isoOf(s.lastActivity) || 'unknown'}${s.ctx ? `; context ${s.ctx.percent ?? '?'}% of its window${s.ctx.compactAt ? ` (${Math.round((s.ctx.tokens / s.ctx.compactAt) * 100)}% of its compaction threshold)` : ''}` : ''}`);
+      if (!w.remote) out.push(`- Working tree: ${w.worktree ? `${w.cwd}: ${trees.get(w.id)}` : 'the shared tree (above)'}`);
+      out.push(`- Last report: ${rep ? `${rep.status} at ${rep.at}${s.superseded ? ' (earlier: it is working again)' : ''}: ${clip(rep.summary, d.report)}` : '(none)'}`);
+      if (rep?.filesChanged?.length) out.push(`  - files: ${clip(rep.filesChanged.join(', '), d.report)}`);
+      if (rep?.verified && d.verified) out.push(`  - verified: ${clip(rep.verified, d.verified)}`);
+      if (rep?.open) out.push(`  - open: ${clip(rep.open, d.open)}`);
+      out.push('- Brief:', '', '```', clip(w.task, d.brief), '```');
+      const ups = d.ups ? followUpsText(w, '- Follow-ups since its brief, oldest first:', d.ups) : '';
+      if (ups) out.push('', ups);
+      if (f?.resume && d.resume) out.push('', '- Resume note:', '', clip(f.resume, d.resume));
+      return out;
+    };
+    const closedLine = (s, n) => (n
+      ? `- \`${s.w.name}\` (${s.w.id}) — ${s.state}; area: ${areaText(s.w.area)}; last report: ${s.rep ? `${s.rep.status} at ${s.rep.at}: ${clip(String(s.rep.summary || '').replace(/\s+/g, ' '), n)}` : 'none'}`
+      : `- \`${s.w.name}\` — ${s.state}; ${s.rep ? s.rep.status : 'no report'}`);
+    const full0 = SEED_LEVELS[0].detail;
+    const shrunk = (s, d) => d !== full0 && [['report', s.rep?.summary], ['open', s.rep?.open], ['brief', s.w.task]].some(([k, v]) => String(v || '').length > d[k]);
+
+    // The whole seed at one level of SEED_LEVELS: { main, spill }.
+    function build(L) {
+      const spill = { owner: false, events: false, workers: false };
+      const lines = [];
+      const h = (t) => lines.push('', `## ${t}`, '');
+      lines.push(`# Fresh restart — orchestration run ${run.runId}`, '');
+      lines.push(refresh
+        ? `Written by Vistaclair at ${now}, at the swap of refresh #${refresh.n} (${refreshWhy(refresh)}; started ${refresh.at}).`
+        : `Written by Vistaclair at ${now} (the previous orchestrator session was ${reason}).`);
+      lines.push(`Generated from the server's run record (${runFile(run.runDir)}), the owner log and the session folders — no model wrote it. Where your notes disagree with it, it wins. Your own TODO.md and NOTES.md are in ${dir}.`);
+      if (refresh?.afterCompaction) lines.push('', '**Your predecessor wrote its notes after a compaction**: its memory of the run was already a summary. Check its notes against the records below.');
+      const noteFresh = !!own?.resume && (!refresh || (own.notesUpdatedAt || 0) >= Date.parse(refresh.at));
+      if (refresh?.timedOut) lines.push('', `**The resume note is missing or partial**: your predecessor did not reply PAUSED within ${Math.round(refreshTimeoutMs / 60000)} min and was stopped. Rebuild the picture from the records below.`);
+      else if (!noteFresh) lines.push('', '**No resume note was written for this restart**: the one below (if any) is older. Rebuild the picture from the records below.');
+      const sidecarAt = lines.length;   // the sidecar list goes here once known
+
+      h('Unanswered owner messages');
+      if (!open0.length) lines.push('(none)');
+      else {
+        lines.push(`The owner's messages after which your predecessor gave no final reply, oldest first, verbatim and whole. Handle them first.`);
+        open0.forEach((m, i) => {
+          const how = m.carried ? ' — it never reached your predecessor; it also comes with your first prompt'
+            : m.queued === 'refresh' ? ' — typed during the refresh; it also comes with your first prompt' : '';
+          const kind = m.kind === 'form' ? 'answer to an orchestrator form' : 'typed to the orchestrator';
+          lines.push('', `### ${i + 1}. ${m.at} — ${kind}${how}`, '', m.text);
+        });
+      }
+
+      h('The original request');
+      const req = run.request || '';
+      if (!req) lines.push('(not recorded — see the owner messages below, your TODO.md and NOTES.md)');
+      else if (req.length > L.request) { spill.owner = true; lines.push(`${req.slice(0, L.request)}… [clipped: the full text is in ${side('owner')}]`); }
+      else lines.push(req);
+
+      h('Owner messages since the run started');
+      if (!log.length) lines.push(`(none recorded in ${logFile})`);
+      else {
+        const shown = [];
+        let used = 0;
+        let cut = 0;
+        for (let i = log.length - 1; i >= 0; i--) {
+          const m = log[i];
+          const head = `### ${m.at} — ${KIND[m.kind] || m.kind}${lateOf(m)}`;
+          const room = L.owner - used - head.length;
+          let text = m.text;
+          if (room < 400 && i < log.length - 1) { cut = i + 1; break; }
+          if (i === log.length - 1 && L.owner === 0) { cut = i + 1; break; }
+          if (text.length > Math.max(room, 400)) text = `${text.slice(0, Math.max(room, 400))}… [clipped: the full text is in ${side('owner')}]`;
+          shown.unshift(head, '', text, '');
+          used += head.length + text.length + 2;
+        }
+        const clipped = shown.some(x => x.includes('[clipped: the full text is in'));
+        if (cut || clipped) spill.owner = true;
+        lines.push(`All ${log.length}, oldest first${spill.owner ? `; ${cut || clipped ? 'the newest here, ' : ''}all of them verbatim in ${side('owner')}` : ''}; the log is ${logFile} (one JSON object per line).`, '');
+        if (cut) lines.push(`(${cut} older message(s) not shown here: read them in ${side('owner')})`, '');
+        lines.push(...shown);
+      }
+
+      h('Your predecessor\'s last replies (verbatim, oldest first)');
+      const reps = replies.slice(-L.replies);
+      if (!replies.length) lines.push('(not available)');
+      else if (!reps.length) lines.push(`(${replies.length} not shown: your resume note below says where it stood)`);
+      for (const r of reps) lines.push(`### ${r.at || '(time unknown)'}`, '', clip(r.text, L.replyChars), '');
+
+      h('Your predecessor\'s resume note');
+      lines.push(own?.resume || '(none written)');
+
+      h('Open owner items');
+      const open = orderedOwnerItems(run);
+      if (!open.length) lines.push('(none)');
+      if (open.length > L.itemsMax) { spill.owner = true; lines.push(`(${L.itemsMax} of ${open.length} shown, blocking first; all of them: owner_items list, or ${side('owner')})`); }
+      for (const i of open.slice(0, L.itemsMax)) {
+        if (i.why && i.why.length > L.why) spill.owner = true;
+        lines.push(`- ${i.id} [${i.kind}${i.blocking ? ', blocking' : ''}] ${i.what}${i.worker ? ` (from ${i.worker})` : ''}${i.why && L.why ? ` — why: ${clip(i.why, L.why)}` : ''}${i.options?.length ? ` — options: ${i.options.join(' | ')}` : ''}${i.recommended ? ` — recommended: ${i.recommended}` : ''}`);
+      }
+      const resolved = (run.ownerItems || []).filter(i => i.state !== 'open' && (!last || String(i.resolvedAt) > last.at));
+      if (resolved.length) {
+        lines.push('', `Resolved since ${sinceWhat}:`);
+        for (const i of resolved) lines.push(`- ${i.id} ${i.state} by ${i.resolvedBy || 'owner'} at ${i.resolvedAt}: ${i.what}${i.answer ? ` — ${i.answer}` : ''}`);
+      }
+
+      if (inbox.length) {
+        h('Messages waiting for you (they also come with your first prompt)');
+        for (const m of inbox) lines.push(`- ${clip(m, 3000)}`);
+      }
+
+      h('Workers');
+      lines.push('Blocked and waiting-on-you first, then running, paused; the finished ones one line each at the end.');
+      if (shared !== null || run.isolation === 'none') lines.push('', `Shared working tree ${run.root} (workers without a worktree): git status ${treeLine(shared)}`);
+      for (const s of snaps.filter(x => x.active || x.blocked)) {
+        if (shrunk(s, L.detail)) spill.workers = true;
+        lines.push(...workerBlock(s, L.detail));
+        if (L.detail.resume === 0 && s.f?.resume) { spill.workers = true; lines.push('', `- Resume note: in ${side('workers')} and in its folder`); }
+      }
+      const rest = snaps.filter(x => !x.active && !x.blocked);
+      if (rest.length) {
+        lines.push('', `### Finished or stopped (${rest.length})`, '');
+        for (const s of rest) {
+          if (L.closed < 300 && s.rep?.summary && String(s.rep.summary).replace(/\s+/g, ' ').length > L.closed) spill.workers = true;
+          lines.push(closedLine(s, L.closed));
+        }
+      }
+
+      const queue = queueList(run);
+      if (queue.length) {
+        h('Queued launches');
+        for (const q of queue) lines.push(`- ${q.id} ${q.title} — waiting for: ${q.waitingFor.join(', ') || 'nothing'}; area: ${areaText(q.area)} — ${q.brief}`);
+      }
+
+      h(`Open items from worker reports since ${sinceWhat}`);
+      let opens = 0;
+      let omitted = 0;
+      let usedOpens = 0;
+      for (const w of run.workers) {
+        const list = (w.opens || []).filter(o => !last || o.at > last.at);
+        const rep = w.lastReport;
+        if (rep?.open && (!last || rep.at > last.at) && !list.some(o => o.at === rep.at)) list.push({ at: rep.at, status: rep.status, open: rep.open });
+        if (!list.length) continue;
+        const block = [];
+        for (const o of list) {
+          const line = `- ${o.at} (${o.status}): ${clip(o.open, L.opens)}`;
+          if (o.open.length > L.opens) spill.workers = true;
+          if (usedOpens + line.length > L.opensTotal) { omitted++; spill.workers = true; continue; }
+          usedOpens += line.length;
+          block.push(line);
+          opens++;
+        }
+        if (block.length) lines.push('', `### \`${w.name}\``, '', ...block);
+      }
+      if (omitted) lines.push('', `(${omitted} more open item(s): ${side('workers')})`);
+      if (!opens && !omitted) lines.push('(none)');
+
+      h('Your TODO.md');
+      lines.push(todo.length > L.todo ? `${todo.slice(0, L.todo)}\n… [clipped: read ${path.join(dir, 'TODO.md')}]` : todo);
+
+      h(`Events since ${sinceWhat}`);
+      const from = (last?.seq || 0) + 1;
+      if (evs.length && evs[0].seq > from) lines.push(`(events #${from}–#${evs[0].seq - 1} are no longer kept in run.json)`);
+      if (!evs.length) lines.push('(none)');
+      else {
+        const all = evs.map(e => ({ e, line: evLine(e) }));
+        let used = 0;
+        let first = all.length;
+        while (first > 0 && used + all[first - 1].line.length + 1 <= L.events) { first--; used += all[first].line.length + 1; }
+        if (first > 0) { spill.events = true; lines.push(`(the ${all.length - first} newest of ${all.length} events are here; all of them in ${side('events')})`); }
+        const shownEv = all.slice(first);
+        const before = shownEv.filter(x => x.e.seq <= cursor);
+        const after = shownEv.filter(x => x.e.seq > cursor);
+        if (before.length) lines.push(`Delivered to your predecessor (${before.length}):`, '', ...before.map(x => x.line));
+        if (after.length) lines.push('', `Not delivered to your predecessor — they also come with your first prompt (${after.length}):`, '', ...after.map(x => x.line));
+      }
+
+      const sidecars = Object.keys(SEED_SIDECARS).filter(k => spill[k]);
+      if (sidecars.length) lines.splice(sidecarAt, 0, '', '## Sidecar files (read them only when you need the detail)', '', ...sidecars.map(k => `- ${side(k)} — ${SEED_SIDECARS[k][1]}`));
+      return { main: lines.join('\n') + '\n', spill };
+    }
+
+    let built;
+    for (const L of SEED_LEVELS) { built = build(L); if (built.main.length <= SEED_CAP) break; }
+    const files = {};
+    if (built.spill.owner) {
+      const o = ['# Owner words — orchestration run ' + run.runId, '', '## The original request', '', run.request || '(not recorded)', '', `## Owner messages (${log.length}, oldest first)`, ''];
+      for (const m of log) o.push(`### ${m.at} — ${KIND[m.kind] || m.kind}${lateOf(m)}`, '', m.text, '');
+      const items = orderedOwnerItems(run);
+      if (items.length) o.push(`## Open owner items in full (${items.length})`, '', ...items.map(i => `- ${i.id} [${i.kind}${i.blocking ? ', blocking' : ''}] ${i.what}${i.worker ? ` (from ${i.worker})` : ''}${i.why ? ` — why: ${i.why}` : ''}${i.options?.length ? ` — options: ${i.options.join(' | ')}` : ''}${i.recommended ? ` — recommended: ${i.recommended}` : ''}`), '');
+      files[SEED_SIDECARS.owner[0]] = o.join('\n');
+    }
+    if (built.spill.events) files[SEED_SIDECARS.events[0]] = [`# Events since ${sinceWhat} — orchestration run ${run.runId}`, '', ...evs.map(evLine), ''].join('\n');
+    if (built.spill.workers) {
+      const o = [`# Workers in full — orchestration run ${run.runId}`];
+      for (const s of snaps.filter(x => x.active || x.blocked)) o.push(...workerBlock(s, full0));
+      const rest = snaps.filter(x => !x.active && !x.blocked);
+      if (rest.length) o.push('', `## Finished or stopped (${rest.length})`, '', ...rest.map(s => closedLine(s, 300)));
+      const opensAll = run.workers.flatMap(w => (w.opens || []).map(x => ({ w, ...x })));
+      if (opensAll.length) o.push('', '## Every open item reported (last 20 per worker)', '', ...opensAll.map(x => `- ${x.w.name} ${x.at} (${x.status}): ${clip(x.open, 4000)}`));
+      files[SEED_SIDECARS.workers[0]] = o.join('\n') + '\n';
+    }
+    return { main: built.main, files };
   }
+
+  function seedText(run, opts = {}) { return seedParts(run, opts).main; }
 
   function writeSeed(run, opts = {}) {
     const dir = orchestratorDir(run);
     const file = path.join(dir, 'RESTART.md');
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(file, seedText(run, opts));
+    const { main, files } = seedParts(run, opts);
+    // The sidecars of an earlier seed are stale now: only this one's stay.
+    for (const [name] of Object.values(SEED_SIDECARS)) { if (!files[name]) fs.rmSync(path.join(dir, name), { force: true }); }
+    for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
+    fs.writeFileSync(file, main);
     return file;
   }
 
@@ -3579,7 +3794,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       `[vistaclair resume] You are a fresh orchestrator session taking over orchestration run ${run.runId} after refresh #${refresh.n} (${refreshWhy(refresh)}), with a clean context. Same address, same workers.`,
       ...(first ? [first] : []),
       `1. Read ${seed} first (Vistaclair wrote it at the swap: the owner's messages, your predecessor's last replies and resume note, the open owner items, every worker's state and open items, all events since the last refresh), then your TODO.md and NOTES.md in ${dir}.`,
-      '2. Call list_workers.',
+      '2. Call list_workers (one short line per worker, closed ones too; list_workers({ detail: ["<address>", …] }) or detail "open" gives the full entries of just those workers).',
       '3. Reconcile: where the notes disagree with the server\'s records and events, the records and events win — correct TODO.md and NOTES.md.',
       '4. Act on the events and messages that arrived since your predecessor\'s notes (they come with this prompt; some may already be in the notes).',
       ...(paused ? [`5. ${warm}`] : []),
@@ -4227,23 +4442,38 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // The orchestrator's owner_items tool: list | add | resolve | drop | reorder.
-  function ownerItems(instanceId, { action = 'list', items, item, id, answer, order } = {}) {
+  // Only `list` returns the whole checklist: every other action answers with
+  // what it changed (ids) and openCount, so a burst of calls stays small.
+  const ownerBrief = (i) => ({ id: i.id, what: clip(i.what, 100), state: i.state, ...(i.kind === 'decision' ? { kind: 'decision' } : {}), ...(i.answer ? { answer: clip(i.answer, 100) } : {}) });
+  const openCountOf = (run) => (run.ownerItems || []).filter(i => i.state === 'open').length;
+
+  function ownerItems(instanceId, { action = 'list', items, item, id, ids, answer, order } = {}) {
     const { session, run } = callerRun(instanceId, 'orchestrator');
     const from = session.getSettings().name || 'orchestrator';
     switch (action) {
       case 'list':
-        return { ok: true, ownerItems: ownerItemsView(run) };
+        return { ok: true, openCount: openCountOf(run), ownerItems: ownerItemsView(run) };
       case 'add': {
         const list = Array.isArray(items) ? items : item ? [item] : null;
         if (!list) throw new Error('add needs `items` (an array of { what, why, kind, options, recommended, key })');
         const r = addOwnerItems(run, list, { worker: from });
         saveRun(run);
-        return { ok: true, added: r.added, updated: r.updated, ignored: r.ignored, ownerItems: ownerItemsView(run) };
+        return { ok: true, added: r.added, updated: r.updated, ignored: r.ignored, items: r.touched.map(ownerBrief), openCount: openCountOf(run) };
       }
       case 'resolve':
       case 'drop': {
-        resolveOwnerItem(run, id, { state: action === 'drop' ? 'dropped' : 'done', answer, by: 'orchestrator' });
-        return { ok: true, ownerItems: ownerItemsView(run) };
+        const want = Array.isArray(ids) ? ids : id !== undefined && id !== null ? [id] : [];
+        const list = [...new Set(want.map(x => String(x ?? '').trim()).filter(Boolean))];
+        if (!list.length) throw new Error(`${action} needs \`id\` or \`ids\` (the items' ids, o1, o2, …)`);
+        const done = [];
+        const errors = [];
+        for (const one of list) {
+          try { done.push(ownerBrief(resolveOwnerItem(run, one, { state: action === 'drop' ? 'dropped' : 'done', answer, by: 'orchestrator' }))); }
+          catch (e) { errors.push({ id: one, error: e.message }); }
+        }
+        if (!done.length) throw new Error(errors.map(e => e.error).join('; '));
+        saveRun(run);
+        return { ok: true, [action === 'drop' ? 'dropped' : 'resolved']: done, ...(errors.length ? { errors } : {}), openCount: openCountOf(run) };
       }
       case 'reorder': {
         if (!Array.isArray(order)) throw new Error('reorder needs `order`: the open items\' ids, first to last');
@@ -4255,7 +4485,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         run.ownerItems = [...sorted, ...run.ownerItems.filter(i => i.state !== 'open')];
         run.ownerManual = true;
         saveRun(run);
-        return { ok: true, ownerItems: ownerItemsView(run) };
+        return { ok: true, order: sorted.map(i => i.id), openCount: sorted.length };
       }
       default:
         throw new Error('action must be list, add, resolve, drop or reorder');
@@ -4859,6 +5089,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         }
         // The orchestrator stopped this turn (stop_worker): it ends here.
         if (v.stopping) { v.stopping = false; return {}; }
+        if (run.workers.find(x => x.id === stamp.workerId)?.closeWhenDone) scheduleCloseSweep(run.runDir);
         // A message arrived during the turn: it continues with it.
         const msgs = inboxOf();
         if (msgs) return { stdout: JSON.stringify({ decision: 'block', reason: msgs }) };
@@ -4898,7 +5129,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const tool = (name, fn) => call((b) => { checkParams(name, b); return fn(b); });
     r.post('/launch', tool('launch_cli', b => launchWorker(b.instanceId, b)));
     r.post('/cancel-launch', tool('cancel_launch', b => cancelLaunch(b.instanceId, b)));
-    r.post('/workers', tool('list_workers', b => listWorkers(b.instanceId)));
+    r.post('/workers', tool('list_workers', b => listWorkers(b.instanceId, b)));
     r.post('/end', tool('end_run', b => endRun(b.instanceId)));
     r.post('/undo-landing', tool('undo_landing', b => undoLanding(b.instanceId, b)));
     r.post('/report', tool('report', b => report(b.instanceId, b)));

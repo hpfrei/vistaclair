@@ -526,7 +526,7 @@ test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds it
   // launch_cli `model`: the worker runs on it (kept for a fresh relaunch); anything else is refused.
   const h = orch.launchWorker(orchSession.instanceId, { title: 'Docs', task: 'x', model: 'haiku' });
   assert.strictEqual(mgr.sessions.get(h.tabId).settings.model, 'haiku');
-  assert.strictEqual(orch.listWorkers(orchSession.instanceId).workers.find(x => x.name === h.worker).model, 'haiku');
+  assert.strictEqual(orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail.find(x => x.name === h.worker).model, 'haiku');
   assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'bad', task: 'x', model: 'gpt' }), /model must be one of fable, opus, sonnet, haiku/);
 });
 
@@ -1139,7 +1139,7 @@ test('close_worker: refuses a busy or unfinished worker, closes a done idle one 
   const dw = d.workers[0];
   assert.deepStrictEqual({ state: dw.state, closed: dw.closed, closedAt: dw.closedAt, sessId: dw.sessId, available: dw.available },
     { state: 'closed', closed: true, closedAt: w1.closedAt, sessId: s1.sessId, available: false });
-  const lw = orch.listWorkers(orchSession.instanceId).workers;
+  const lw = orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail;
   assert.strictEqual(lw.length, 6, 'the queued launch started in the freed slot');
   assert.deepStrictEqual(lw[0].lastReport, { status: 'done', summary: 'parser done' });
   assert.strictEqual(lw[0].state, 'closed');
@@ -1856,7 +1856,7 @@ test('tool grants: launch_cli tools persist on the worker, resume keeps, replace
   assert.deepStrictEqual(s1.settings.grants, grants, 'on the session settings');
   assert.deepStrictEqual(run().workers[0].grants, grants, 'on the run record');
   assert.deepStrictEqual(mgr.findSaved(s1.sessId).settings.grants, grants, 'in its saved entry');
-  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId).workers[0].grants, grants);
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail[0].grants, grants);
 
   const close = () => {
     const live = [...mgr.sessions.values()].find(x => x.settings.orchestration?.workerId === 'w1');
@@ -1866,7 +1866,7 @@ test('tool grants: launch_cli tools persist on the worker, resume keeps, replace
   };
   close();
   assert.strictEqual(mgr.closeReasons.at(-1), 'close_worker');
-  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId).workers[0].grants, grants, 'a compact entry shows them too');
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail[0].grants, grants, 'a compact entry shows them too');
 
   // Continue without tools: kept.
   let r = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue' });
@@ -1883,7 +1883,7 @@ test('tool grants: launch_cli tools persist on the worker, resume keeps, replace
   assert.strictEqual(r.mode, 'fresh');
   assert.ok(!('grants' in mgr.sessions.get(r.tabId).settings));
   assert.ok(!('grants' in run().workers[0]));
-  assert.ok(!('grants' in orch.listWorkers(orchSession.instanceId).workers[0]));
+  assert.ok(!('grants' in orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail[0]));
   close();
   // Continue after a clear: the saved session had none, none come back.
   r = orch.resumeWorker(orchSession.instanceId, { worker: 'w1', mode: 'continue', tools: ['crm__find'] });
@@ -1987,7 +1987,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     const port = server.address().port;
     const plain = await list(port);
     const props = (tools, name) => Object.keys(tools.find(t => t.name === name).inputSchema.properties);
-    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after']);
+    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'closeWhenDone']);
     assert.deepStrictEqual(props(plain, 'resume_worker'), ['worker', 'mode', 'message']);
     // No dashboard at all: the same schemas.
     const closed = http.createServer();
@@ -2001,7 +2001,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     params = setup().orch.toolParams().params;
     clearPacks();
     const granted = await list(port);
-    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'tools']);
+    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'closeWhenDone', 'tools']);
     assert.deepStrictEqual(props(granted, 'resume_worker'), ['worker', 'mode', 'message', 'tools']);
     assert.deepStrictEqual(granted.find(t => t.name === 'launch_cli').inputSchema.required, ['title', 'task']);
     assert.deepStrictEqual(granted.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)), plain.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)));
@@ -2265,7 +2265,7 @@ test('landing: one cut off by a restart has its rebase aborted and is reported n
 test('landing state: recorded on the worker in run.json and shown by describeRun / list_workers — landing, landed, not landed; no message to the worker on success', async (t) => {
   const { orch, orchSession, repo, g, launch, toWorker, run } = await landingRun(t);
   const view = (w) => orch.describeRun(run()).workers.find(x => x.name === w.worker).landing;
-  const listed = (w) => orch.listWorkers(orchSession.instanceId).workers.find(x => x.name === w.worker).landing;
+  const listed = (w) => orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail.find(x => x.name === w.worker).landing;
   const a = launch('a');
   assert.strictEqual(view(a), null, 'nothing reported yet');
 
@@ -2641,11 +2641,11 @@ test('owner_items: list, add, resolve, drop and reorder; blocking items first by
   assert.strictEqual(items().find(i => i.what === 'fourth').worker, orchSession.settings.name, 'proposed by the orchestrator');
   assert.throws(() => tool({ action: 'add' }), /needs `items`/);
 
-  assert.deepStrictEqual(tool({ action: 'reorder', order: ['o2', 'o4'] }).ownerItems.map(i => i.id), ['o2', 'o4', 'o3', 'o1'], 'the rest keep their default order');
-  assert.strictEqual(tool({ action: 'drop', id: 'o2' }).ownerItems.find(i => i.id === 'o2').state, 'dropped');
+  assert.deepStrictEqual(tool({ action: 'reorder', order: ['o2', 'o4'] }).order, ['o2', 'o4', 'o3', 'o1'], 'the rest keep their default order');
+  assert.strictEqual(tool({ action: 'drop', id: 'o2' }).dropped[0].state, 'dropped');
   assert.throws(() => tool({ action: 'drop', id: 'o2' }), /already dropped/);
   assert.throws(() => tool({ action: 'resolve', id: 'o4' }), /needs an answer/);
-  assert.strictEqual(tool({ action: 'resolve', id: 'o4', answer: 'x' }).ownerItems.find(i => i.id === 'o4').answer, 'x');
+  assert.strictEqual(tool({ action: 'resolve', id: 'o4', answer: 'x' }).resolved[0].answer, 'x');
   assert.throws(() => tool({ action: 'resolve', id: 'nope' }), /no owner item/);
   assert.throws(() => tool({ action: 'bogus' }), /action must be/);
   // A worker cannot use the tool.
@@ -2798,7 +2798,7 @@ test('launch queue: a full run queues the launch, a freed slot starts it with a 
   const q2 = orch.launchWorker(orchSession.instanceId, { title: 'seven', task: 'brief seven' });
   assert.strictEqual(q2.position, 2);
   assert.strictEqual(mgr.launches.length, 6, 'nothing spawned (the orchestrator and 5 workers)');
-  const listed = orch.listWorkers(orchSession.instanceId).queue;
+  const listed = orch.listWorkers(orchSession.instanceId, { detail: 'open' }).queue;
   assert.deepStrictEqual(listed.map(e => [e.id, e.position, e.title, e.waitingFor]), [['q1', 1, 'six', ['a free slot']], ['q2', 2, 'seven', ['a free slot']]]);
   assert.deepStrictEqual([listed[0].brief, listed[0].model, listed[0].area], ['brief six', 'haiku', ['src']]);
   assert.deepStrictEqual(orch.describeRun(run()).queue.map(e => e.id), ['q1', 'q2'], 'the run board too');
@@ -3343,11 +3343,13 @@ test('owner messages: typed prompts (an "[Image: …]" one too), form answers an
   orch.refreshOrchestrator(run().runId);
   const fresh = await finishRefresh(orch, mgr, orchSession);
   const seed = seedOf(fresh);
-  for (const s of ['Build the importer', '[Image: source: /tmp/shot.png] the wall looks wrong here', 'A: Yes, Friday', 'o1 decided: Pick the port — 3458']) assert.ok(seed.includes(s), s);
+  const sidecar = fs.readFileSync(path.join(fresh.settings.sessionDir, 'RESTART-owner.md'), 'utf8');
+  for (const s of ['Build the importer', '[Image: source: /tmp/shot.png] the wall looks wrong here', 'A: Yes, Friday', 'o1 decided: Pick the port — 3458']) assert.ok(sidecar.includes(s), `${s} (sidecar)`);
   assert.doesNotMatch(seed, /owner-messages[\s\S]*Run resumed\./);
-  // The 50k one does not fit whole beside the run's other text: clipped, with the pointer.
-  assert.match(seed, /OLD x+… \[clipped: the full text is in .*owner-messages\.jsonl\]/);
-  assert.doesNotMatch(seed, /END-OF-OLD/);
+  // The owner's unanswered words are never cut for the size cap: the 50k one is whole in RESTART.md, and the seed says where the sidecar is.
+  assert.match(seed, /OLD x{50000} END-OF-OLD/);
+  assert.match(seed, /RESTART-owner\.md — the original request in full, every owner message verbatim/);
+  assert.match(sidecar, /OLD x{50000} END-OF-OLD/);
   assert.match(seed, /Resolved since the run started:\n- o1 done by owner/);
 });
 
@@ -3709,7 +3711,7 @@ test('blocked report: superseded only while the worker is busy in a turn that be
   const { launch, orch, orchSession, run } = await watchSetup(t);
   const b = launch('b');
   const view = () => orch.describeRun(run()).workers.find(x => x.worker === b.worker).lastReport;
-  const compact = () => orch.listWorkers(orchSession.instanceId).workers.find(x => x.worker === b.worker).lastReport;
+  const compact = () => orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail.find(x => x.worker === b.worker).lastReport;
   const startTurn = () => { b.session.busy = true; b.session.busySince = Date.now(); };   // what the session does at a turn's start
   const endTurn = () => { b.session.busy = false; };
 
@@ -3744,4 +3746,259 @@ test('blocked report: superseded only while the worker is busy in a turn that be
   endTurn();
   assert.ok(!view().superseded, 'idle after the new report: blocked');
   assert.strictEqual(view().summary, 'still need the schema (new)');
+});
+
+// --- Smaller orchestrator payloads: list_workers lines, owner_items returns, the RESTART.md cap, `after` a queue id, closeWhenDone ---
+
+// A run with `n` closed workers and `items` open owner items written into run.json (nothing is launched).
+function bulkRun(ctx, { n = 100, items = 50, running = 0 } = {}) {
+  const r = ctx.run();
+  r.ownerItems ||= [];
+  const base = r.workerSeq || 0;
+  const now = new Date().toISOString();
+  for (let i = 1; i <= n; i++) {
+    const id = `w${base + i}`;
+    const slug = `task-number-${i}-with-a-realistic-title`;
+    r.workers.push({
+      id, name: `${r.orchestrator}-${id}-${slug}`, title: slug, task: `Brief ${i}. ${'Do the thing and keep going. '.repeat(40)}`, cwd: r.root,
+      branch: `orch/${r.runId}/${id}`, worktree: null, sessionDir: path.join(r.runDir, 'sessions', id), launchedAt: now, exitedAt: now, closed: i > running, closedAt: now, ...(i > running ? {} : { exitedAt: null }),
+      model: i % 3 ? 'sonnet' : 'opus', area: ['src/**'], base: 'main',
+      lastReport: { status: 'done', summary: `Worker ${i} finished the parser change. ${'It touched many files and verified them with the whole suite. '.repeat(8)}`, filesChanged: ['a.js', 'b.js'], verified: 'npm test passes', open: i % 4 ? '' : `open question ${i} ${'x'.repeat(300)}`, at: now },
+      landingResult: { outcome: 'landed', report: now, at: now, sha: 'abcdef0123456789', base: 'main' },
+    });
+  }
+  r.workerSeq = base + n;
+  for (let i = 1; i <= items; i++) {
+    r.ownerItems.push({ id: `o${i}`, what: `Owner item number ${i}: decide something`, why: `Because the worker needs it. ${'More reasoning here. '.repeat(15)}`, kind: i % 2 ? 'decision' : 'action', options: i % 2 ? ['yes', 'no', 'later'] : undefined, recommended: i % 2 ? 'yes' : undefined, worker: r.workers[0]?.name || null, at: now, state: 'open', key: `k${i}` });
+  }
+  r.ownerSeq = items;
+  fs.writeFileSync(path.join(r.runDir, 'run.json'), JSON.stringify(r));
+}
+
+test('list_workers: short by default (one line per worker, closed ones too, under 15K for 100 workers); detail gives the full entries of exactly those', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const { orch, orchSession } = ctx;
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'live', task: 'x' });
+  bulkRun(ctx, { n: 100, items: 5 });
+  const out = orch.listWorkers(orchSession.instanceId);
+  const text = JSON.stringify(out);
+  assert.ok(text.length < 15000, `100+ workers listed in ${text.length} chars`);
+  assert.strictEqual(out.workers.length, 101, 'every worker, the closed ones too');
+  assert.ok(out.workers.every(l => typeof l === 'string' && !l.includes('\n')), 'one line each');
+  assert.ok(out.workers.some(l => l.startsWith(`${w1.worker} | `)), 'the running one');
+  const closed = out.workers.find(l => l.includes('task-number-7-with'));
+  assert.match(closed, /\| closed \| sonnet \| done: Worker 7 finished the parser change\./);
+  assert.match(closed, /\| landed$/);
+  assert.strictEqual(out.counts.closed, 100);
+  assert.strictEqual(out.openOwnerItems, 5);
+  assert.strictEqual(out.maxWorkers, 5);
+  assert.ok(!('ownerItems' in out) && !JSON.stringify(out).includes('Because the worker needs it'), 'no item bodies');
+  assert.ok(!text.includes('Do the thing and keep going'), 'no briefs');
+
+  // detail: the full entries of exactly those workers.
+  const one = orch.listWorkers(orchSession.instanceId, { detail: ['w8', w1.worker, 'w999'] });
+  assert.strictEqual(one.workers, undefined);
+  assert.deepStrictEqual(one.detail.map(d => d.id), ['w8', 'w1']);
+  assert.ok(one.detail[0].brief && one.detail[0].todo && one.detail[0].cwd, 'the full entry, a closed worker too');
+  assert.deepStrictEqual(one.notFound, ['w999']);
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId, { detail: 'open' }).detail.map(d => d.id), ['w1'], 'open: running or paused only');
+  assert.strictEqual(orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail.length, 101);
+  assert.throws(() => orch.listWorkers(orchSession.instanceId, { detail: [' '] }), /detail must name workers/);
+});
+
+test('owner_items: add, resolve, drop and reorder return only what changed and openCount; ids resolves or drops several at once; list is the full list', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const { orch, orchSession } = ctx;
+  bulkRun(ctx, { n: 3, items: 50 });
+  const tool = (args) => orch.ownerItems(orchSession.instanceId, args);
+  assert.ok(JSON.stringify(tool({ action: 'list' })).length > 15000, 'the full list is long');
+  assert.strictEqual(tool({ action: 'list' }).openCount, 50);
+
+  const added = tool({ action: 'add', items: [{ what: 'A new one', key: 'new' }] });
+  assert.deepStrictEqual([added.added, added.openCount, added.items.map(i => i.id)], [1, 51, ['o51']]);
+  assert.ok(JSON.stringify(added).length < 500);
+  const one = tool({ action: 'resolve', id: 'o2', answer: 'ok' });
+  assert.deepStrictEqual(one.resolved.map(i => [i.id, i.state]), [['o2', 'done']]);
+  assert.strictEqual(one.openCount, 50);
+  assert.strictEqual(one.ownerItems, undefined);
+  assert.ok(JSON.stringify(one).length < 500);
+
+  // Batch: ids; the same answer for each, a bad id is reported and the rest are done.
+  const batch = tool({ action: 'resolve', ids: ['o1', 'o3', 'o2', 'nope'], answer: 'fine' });
+  assert.deepStrictEqual(batch.resolved.map(i => i.id), ['o1', 'o3']);
+  assert.deepStrictEqual(batch.errors.map(e => e.id), ['o2', 'nope']);
+  assert.match(batch.errors[0].error, /already done/);
+  assert.strictEqual(batch.openCount, 48);
+  const dropped = tool({ action: 'drop', ids: ['o4', 'o6', 'o8'] });
+  assert.deepStrictEqual(dropped.dropped.map(i => i.id), ['o4', 'o6', 'o8']);
+  assert.strictEqual(dropped.openCount, 45);
+  assert.deepStrictEqual(ctx.run().ownerItems.filter(i => i.state === 'dropped').map(i => i.id), ['o4', 'o6', 'o8'], 'saved');
+  assert.throws(() => tool({ action: 'drop', ids: ['o4'] }), /already dropped/);
+  assert.throws(() => tool({ action: 'drop', ids: [] }), /needs `id` or `ids`/);
+  assert.strictEqual(tool({ action: 'drop', id: 'o10' }).dropped[0].id, 'o10', 'id still works');
+
+  const re = tool({ action: 'reorder', order: ['o20', 'o19'] });
+  assert.deepStrictEqual(re.order.slice(0, 3), ['o20', 'o19', 'o5']);
+  assert.strictEqual(re.openCount, 44);
+  assert.strictEqual(tool({ action: 'list' }).ownerItems.length, 44 + 7, 'open ones, then the latest resolved');
+});
+
+test('RESTART.md: held near 30 KB for a 100-worker run; sidecars list what they hold; the unanswered owner words and the resume note are whole', async (t) => {
+  const ctx = await openOrchestrator(t, { isolation: 'none' });
+  const { orch, orchSession, mgr, run } = ctx;
+  const p = (prompt) => hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit', prompt });
+  for (let i = 0; i < 30; i++) p(`Owner message ${i} ${'blah '.repeat(20)}`);
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  p(`Unanswered request START ${'z'.repeat(5000)} END-OF-UNANSWERED`);
+  const live = orch.launchWorker(orchSession.instanceId, { title: 'live', task: `LIVE BRIEF ${'b'.repeat(800)}` });
+  bulkRun(ctx, { n: 100, items: 50 });
+  const r = run();
+  const seq0 = r.events.at(-1)?.seq || 0;
+  for (let i = 0; i < 200; i++) r.events.push({ seq: seq0 + i + 1, at: new Date().toISOString(), kind: 'report', text: `event ${i} ${'detail '.repeat(60)}`, worker: null });
+  r.delivered = r.events.at(-1).seq;
+  fs.writeFileSync(path.join(r.runDir, 'run.json'), JSON.stringify(r));
+  const resume = `RESUME NOTE START ${'important state '.repeat(300)} RESUME NOTE END`;
+  writeResume(orchSession, resume);
+  orch.writeSeed(run(), { reason: 'paused' });
+  const dir = orchSession.settings.sessionDir;
+  const seed = fs.readFileSync(path.join(dir, 'RESTART.md'), 'utf8');
+  assert.ok(seed.length < 31000, `RESTART.md is ${seed.length} chars`);
+  assert.ok(seed.includes('END-OF-UNANSWERED') && seed.includes(`Unanswered request START ${'z'.repeat(5000)}`), 'unanswered words whole');
+  assert.ok(seed.includes('RESUME NOTE START') && seed.includes('RESUME NOTE END'), 'the resume note whole');
+  for (const [name, what] of [['RESTART-owner.md', /original request in full, every owner message verbatim/], ['RESTART-events.md', /every event since the last refresh/], ['RESTART-workers.md', /every worker in full/]]) {
+    assert.ok(fs.existsSync(path.join(dir, name)), `${name} written`);
+    assert.match(seed, new RegExp(`${name} — .*${what.source}`), `RESTART.md lists ${name} with a line`);
+  }
+  assert.ok(fs.readFileSync(path.join(dir, 'RESTART-owner.md'), 'utf8').includes('Owner message 3 '), 'the whole history is in the sidecar');
+  assert.ok(fs.readFileSync(path.join(dir, 'RESTART-events.md'), 'utf8').includes('event 0 '));
+  const workers = fs.readFileSync(path.join(dir, 'RESTART-workers.md'), 'utf8');
+  assert.ok(workers.includes('Worker 50 finished the parser change'), 'a closed worker in the sidecar');
+  // Workers: open ones in full, closed ones one line each.
+  assert.ok(seed.includes(`### \`${live.worker}\` (w1) — `) && seed.includes('LIVE BRIEF'), 'the running worker has its block');
+  const closedLines = seed.split('\n').filter(l => /^- `[^`]*-w\d+-task-number-\d+/.test(l));
+  assert.strictEqual(closedLines.length, 100, 'one line per closed worker');
+  assert.ok(!seed.includes('Brief 50.'), 'no closed worker brief');
+
+  // A small run keeps one file: no sidecars, and the stale ones are removed.
+  fs.writeFileSync(path.join(dir, 'RESTART-events.md'), 'stale');
+  const small = await openOrchestrator(t, { isolation: 'none' });
+  fs.writeFileSync(path.join(small.orchSession.settings.sessionDir, 'RESTART-events.md'), 'stale');
+  small.orch.writeSeed(small.run(), {});
+  assert.ok(!fs.existsSync(path.join(small.orchSession.settings.sessionDir, 'RESTART-events.md')), 'a stale sidecar is removed');
+  assert.ok(fs.statSync(path.join(small.orchSession.settings.sessionDir, 'RESTART.md')).size < 5000);
+});
+
+test('refresh prompt: list_workers is called for the short lines and detail', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  orch.refreshOrchestrator(run().runId);
+  hook(orch, orchSession, { hook_event_name: 'Stop' });
+  const fresh = await finishRefresh(orch, mgr, orchSession);
+  assert.match(typedInto(mgr, fresh.tabId), /2\. Call list_workers \(one short line per worker, closed ones too; list_workers\(\{ detail: \["<address>", …\] \}\)/);
+});
+
+test('launch queue: `after` accepts a queued launch id; it waits until that one started and landed', async (t) => {
+  const { orch, orchSession, mgr, launch, run, events } = await landingRun(t);
+  const ws = Array.from({ length: 4 }, (_, i) => launch(`f${i}`));    // 5 slots, 4 used
+  const a = launch('a');                                              // the 5th
+  const qa = orch.launchWorker(orchSession.instanceId, { title: 'qa', task: 'second', area: ['x'] });
+  assert.strictEqual(qa.queued, true);
+  const qb = orch.launchWorker(orchSession.instanceId, { title: 'qb', task: 'third', area: ['y'], after: [qa.id] });
+  assert.deepStrictEqual([qb.queued, qb.waitingFor], [true, [`queued launch ${qa.id} to start and finish`]]);
+  assert.deepStrictEqual(run().queue.find(e => e.id === qb.id).after, [qa.id]);
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId).queue.find(q => q.id === qb.id).after, [qa.id]);
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'x', task: 'x', after: ['q99'] }), /after: no queued launch q99/);
+
+  // A slot frees: qa starts, but qb still waits (qa has not landed).
+  exitWorker(mgr, orch, a.tabId);
+  const started = run().workers.find(w => w.title === 'qa');
+  assert.ok(started, 'qa started');
+  assert.strictEqual(started.queueId, qa.id);
+  assert.deepStrictEqual(run().queue.map(e => e.id), [qb.id]);
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId).queue[0].waitingFor, [`${started.name} to land`]);
+  // Free another slot: still not started, qa has not reported.
+  exitWorker(mgr, orch, ws[0].tabId);
+  assert.strictEqual(run().queue.length, 1, 'waits for qa to finish, not just to start');
+
+  // After it started, `after: [qa id]` maps to the worker.
+  const later = orch.launchWorker(orchSession.instanceId, { title: 'later', task: 'x', after: [qa.id] });
+  assert.strictEqual(later.queued, true);
+  assert.deepStrictEqual(run().queue.find(e => e.id === later.id).after, [started.id]);
+
+  // qa lands: qb starts.
+  const qaSession = mgr.sessions.get([...mgr.sessions.values()].find(s => s.settings.name === started.name).tabId);
+  commitAll(started.cwd, { 'qa.txt': 'qa' });
+  orch.report(qaSession.instanceId, { status: 'done', summary: 'qa did it' });
+  await orch.landingOf(started.name);
+  assert.ok(events('landed').length >= 1);
+  assert.ok(run().workers.some(w => w.title === 'qb'), 'qb started once qa landed');
+  assert.ok(run().workers.some(w => w.title === 'later'));
+
+  // A cancelled queued dependency is an event; the launch keeps waiting.
+  const q1 = orch.launchWorker(orchSession.instanceId, { title: 'c1', task: 'x' });
+  const q2 = orch.launchWorker(orchSession.instanceId, { title: 'c2', task: 'x', after: [q1.id] });
+  assert.ok(q1.queued && q2.queued);
+  orch.cancelLaunch(orchSession.instanceId, { id: q1.id });
+  assert.deepStrictEqual(orch.listWorkers(orchSession.instanceId).queue.find(q => q.id === q2.id).waitingFor, [`queued launch ${q1.id} (cancelled)`]);
+  exitWorker(mgr, orch, ws[1].tabId);
+  assert.ok(queueEvents(run()).some(e => new RegExp(`queued launch ${q2.id} \\(c2\\) waits on queued launch ${q1.id} which was cancelled`).test(e.text)), 'a cancelled dependency is an event');
+  assert.ok(run().queue.some(e => e.id === q2.id), 'it keeps waiting');
+});
+
+test('launch_cli closeWhenDone: closed automatically only when idle, done, landed and clean; never blocked, failed, busy, dirty or not landed; off by default', async (t) => {
+  const { orch, orchSession, mgr, repo, launch, done, run } = await landingRun(t);
+  orch.setRunMaxWorkers(run().runId, 10);
+  const L = (title, flag = true) => {
+    const w = orch.launchWorker(orchSession.instanceId, { title, task: 'x', ...(flag ? { closeWhenDone: true } : {}) });
+    return { ...w, session: mgr.sessions.get(w.tabId) };
+  };
+  const rec = (w) => run().workers.find(x => x.name === w.worker);
+  const sweep = () => { const x = L('sweeper', false); orch.report(x.session.instanceId, { status: 'update', summary: 'tick' }); };   // any report pumps the queue and so sweeps
+  assert.strictEqual(rec(L('flagged')).closeWhenDone, true, 'recorded on the worker');
+  assert.strictEqual(rec(L('plain', false)).closeWhenDone, undefined, 'off by default');
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'r', task: 'x', host: 'nohost', closeWhenDone: true }), /./);
+
+  const landed = L('landed'), plain = L('plain2', false), failed = L('failed'), blocked = L('blocked'), busy = L('busy');
+  for (const w of [landed, plain, busy]) commitAll(w.cwd, { [`${w.worker.slice(-6)}.txt`]: 'x' });
+  busy.session.busy = true;
+  await done(plain);
+  await done(busy);
+  orch.report(failed.session.instanceId, { status: 'failed', summary: 'no' });
+  orch.report(blocked.session.instanceId, { status: 'blocked', summary: 'need x' });
+  assert.ok(!rec(landed).closed, 'not done yet');
+  await done(landed);
+  assert.strictEqual(rec(landed).closed, true, 'done + landed + idle + clean: closed');
+  assert.strictEqual(rec(landed).autoClosed.for, 'closeWhenDone');
+  assert.ok(run().events.some(e => e.kind === 'closed' && /closed automatically \(closeWhenDone/.test(e.text)));
+  assert.ok(mgr.closed.length >= 1);
+  sweep();
+  for (const [w, why] of [[plain, 'no flag'], [failed, 'failed'], [blocked, 'blocked'], [busy, 'busy']]) assert.ok(!rec(w).closed, `${why}: not closed`);
+  assert.strictEqual(rec(busy).landingResult.outcome, 'landed', 'landed, yet still busy');
+
+  // Its turn ends, but its worktree is dirty: it stays; clean, the Stop hook's delayed sweep closes it.
+  fs.writeFileSync(path.join(busy.cwd, 'junk.txt'), 'x');
+  busy.session.busy = false;
+  sweep();
+  assert.ok(!rec(busy).closed, 'dirty worktree: not closed');
+  fs.rmSync(path.join(busy.cwd, 'junk.txt'));
+  hook(orch, busy.session, { hook_event_name: 'Stop' });
+  await waitFor(() => rec(busy).closed, { what: 'the idle, landed, clean worker closed after its Stop', timeout: 5000 });
+
+  // Not landed (a conflict): never closed.
+  const nl = L('conflict');
+  commitAll(nl.cwd, { 'f.txt': 'one\nTWO-worker\nthree\n' });
+  commitAll(repo, { 'f.txt': 'one\nTWO-owner\nthree\n' });
+  await done(nl);
+  assert.strictEqual(rec(nl).landingResult.outcome, 'not landed');
+  sweep();
+  assert.ok(!rec(nl).closed, 'not landed: stays open');
+});
+
+test('launch_cli closeWhenDone without a worktree: closed on a done report once idle', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x', closeWhenDone: true });
+  const s = mgr.sessions.get(w.tabId);
+  orch.report(s.instanceId, { status: 'blocked', summary: 'wait' });
+  assert.ok(!run().workers[0].closed);
+  orch.report(s.instanceId, { status: 'done', summary: 'ok' });
+  assert.strictEqual(run().workers[0].closed, true);
 });
