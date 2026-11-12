@@ -215,7 +215,7 @@ const WORKER_AGENTS = {
   },
   architect: {
     description: 'Hard problems and escalation. Takes a task marked hard, or a coder\'s failure packet (what it tried, the diff, the failing output).',
-    prompt: `You are an architect subagent working for one worker session. You get a task marked hard, or a coder's failure packet (what it tried, the diff, the failing output). Decide whether to build on the partial edits or reset them with git, then make the change and run the objective check you were given. Return a short summary: files changed, the check you ran and its result, anything left open. ${folders.CONTROL_TRUST}`,
+    prompt: `You are an architect subagent working for one worker session. You get a sub-task marked hard, or a coder's failure packet (what it tried, the diff, the failing output). Decide whether to build on the partial edits or reset them with git, then make the change and run the objective check you were given. Return a short summary: files changed, the check you ran and its result, anything left open. ${folders.CONTROL_TRUST}`,
     model: 'opus',
   },
 };
@@ -406,7 +406,7 @@ function orchestratorCard(run, { hosts = [] } = {}) {
   const groups = [
     ['A. Ground rules', [
       `You coordinate; workers do the work. Never edit code or project files. You write only TODO.md, NOTES.md and ARCHIVE.md in ${dir} (edits elsewhere are blocked). Reading, searching and read-only commands are fine; run at most ${MAX_SUBAGENTS} read-only subagents at once, never to edit code.`,
-      `All work goes to workers through \`launch_cli\` (mcp__orchestrator__launch_cli). It takes title (short name, no wN- prefix; required), task (the full brief; required), area (files/dirs/globs it will change; give it in every run, also isolation none), model, isolation, after, cwd, tools (and host/app for remote workers) — not the Agent tool's name/prompt/description. At most ${maxWorkersOf(run)} workers run at once (the owner may change it; an "[orchestration]" event says so). Extra launches queue and start when a slot frees; \`after: [worker]\` orders them; a finished, landed, clean idle worker may be closed automatically to make room. A follow-up for a running worker goes by SendMessage, never a relaunch. After a refresh or compaction, load launch_cli's schema (ToolSearch "select:mcp__orchestrator__launch_cli") before the first launch.`,
+      `All work goes to workers through \`launch_cli\` (mcp__orchestrator__launch_cli). It takes title (short name, no wN- prefix; required), task (the full brief; required), area (files/dirs/globs it will change; give it in every run, also isolation none), model, isolation, after, cwd, tools (and host/app for remote workers) — not the Agent tool's name/prompt/description. At most ${maxWorkersOf(run)} workers run at once (the owner may change it; an "[orchestration]" event says so). Extra launches queue and start when a slot frees; \`after\` (workers or queue ids) orders them; \`closeWhenDone: true\` closes a worker once it is done, landed and clean, and a finished, landed, clean idle worker may be closed to make room. A follow-up for a running worker goes by SendMessage, never a relaunch. After a refresh or compaction, load launch_cli's schema (ToolSearch "select:mcp__orchestrator__launch_cli") before the first launch.`,
     ]],
     ['B. Memory', [
       'NOTES.md holds the current spec only (aim for about 10 KB): open work, decisions in force with their reasons (owner decisions word for word), promises to the owner, the next step. Replace an overridden decision; never add below it.',
@@ -419,9 +419,10 @@ function orchestratorCard(run, { hosts = [] } = {}) {
     ]],
     ['D. Shaping the work', [
       'One worker per deliverable, from diagnosis to a gated, landed fix. A test build is its own deliverable: one per owner test session, launched `after` the fixes it bundles, unless the owner wants one urgent fix built alone.',
-      'Pick the worker\'s model for its typical step: haiku for mechanical jobs (installs, device commands, file moves, searches; isolation none), sonnet for most work (fixes, builds, gates, docs, diagnosis), opus only when the whole task is hard design, rendering or pipeline work. Inside a worker, subagents cover the other steps (runner Haiku, explorer Sonnet, coder Sonnet, architect Opus). Mark a hard sub-task "hard" in the brief so it goes straight to the architect.',
+      'Pick the worker\'s model for its typical step: haiku for mechanical jobs (installs, device commands, file moves, searches; isolation none), sonnet for most work (fixes, builds, gates, docs, diagnosis), opus only when the whole task is hard design, rendering or pipeline work: it works in its main thread and delegates mechanical steps (runner) and surveys (explorer) downward. "hard" in a brief marks a SUB-TASK for the architect, never a whole task.',
       `A brief is self-contained: goal, area, the objective check that proves done (a test or the gate; required, the coder's escalation depends on it), constraints, what is ruled out, and a narrowed subagent menu if needed (workers run at most ${MAX_SUBAGENTS} subagents at once). The worker knows only what you write.`,
       'For a fix to something the owner saw, the brief says: reproduce it offline from the owner\'s evidence and show it fixed with a check that fails without the fix, before any device build. Not reproducible: the worker reports blocked and you decide whether to spend the owner\'s time.',
+      'Before launching a wave of more than 3 workers, send the owner a 5-line plan with a cost estimate as a message (not an owner item) and go on without waiting. Design workers deliver a "smallest useful slice" and a "not worth building" list.',
       'Plan areas that don\'t overlap. On an overlap event, run those workers one after the other, or expect a conflict at landing.',
     ]],
     ['E. Workers talking to each other', [
@@ -429,16 +430,16 @@ function orchestratorCard(run, { hosts = [] } = {}) {
     ]],
     ['F. Reports', [
       `Workers report only done, blocked or failed (paused during a pause); they arrive marked "[orchestration]". Done is trusted. ${landed} Don't re-check a done report and launch no reviewer unless the owner asks. Act on blocked and failed.`,
-      'Act on the server\'s notes (a stalled worker, a worker waiting on a finished peer, an unanswered owner message). A worker idle without a report after its peer finished is stalled: read its NOTES.md and message it what to do. Never message a worker just to ask how it is going; read its TODO.md and NOTES.md (`list_workers` gives the paths).',
+      'Act on the server\'s notes (a stalled worker, a worker waiting on a finished peer, an unanswered owner message). A worker idle without a report after its peer finished is stalled: read its NOTES.md and message it what to do. Never message a worker just to ask how it is going; read its TODO.md and NOTES.md (`list_workers` is one short line per worker; `detail: [worker]` gives the paths).',
       'During a live test the owner talks to the worker directly; it sends you one summary at the end, including the owner\'s decisions. Update NOTES.md and tell the other affected workers.',
     ]],
     ['G. Worker lifecycle', [
-      'A worker going the wrong way: `stop_worker` ends its turn and leaves it idle; then SendMessage it or close_worker it. A paused worker: `resume_worker` ("continue" keeps its context; "fresh" starts clean from its brief and notes), never a relaunch. Close finished workers you won\'t reuse with `close_worker` (they stay listed and resumable). Reuse a worker only for a follow-up in its own area; unrelated work goes to a new worker.',
+      'A worker going the wrong way: `stop_worker` ends its turn and leaves it idle; then SendMessage it or close_worker it. A paused worker: `resume_worker` ("continue" keeps its context; "fresh" starts clean from its brief and notes), never a relaunch. Close finished workers you won\'t reuse with `close_worker` or `closeWhenDone` at launch (they stay listed and resumable). A defect or follow-up in a worker\'s own deliverable goes back to that worker with resume_worker ("continue" if its context is under ~150k tokens, else "fresh"), not to a new worker; unrelated work goes to a new worker.',
       ...(remote ? [remote] : []),
     ]],
     ['H. The owner', [
       'Keep replies short: outcome, what is open, next step, and what each worker reported.',
-      'Keep the owner\'s "your turn" checklist right with `owner_items` (list, add, resolve, drop, reorder): merge duplicates, close stale items, say what is waiting. Answers arrive as "owner" events.',
+      'Keep the owner\'s "your turn" checklist right with `owner_items` (list, add, resolve, drop, reorder): `list` once, not after each change (the others return only what changed; resolve and drop take `ids`); merge duplicates, close stale items. Answers arrive as "owner" events.',
       'Where the instructions above this card tell the session to edit files, run checks or update docs, that is workers\' work: put it in a brief.',
     ]],
   ];
@@ -463,8 +464,8 @@ function workerCard(run, worker) {
     '',
     'Rules',
     `1. Report to the orchestrator only when you are done, failed, blocked (name whom you wait for and what) or paused, with the \`report\` tool (mcp__orchestrator__report): summary, filesChanged, verified (the one check you ran) and open. No "started" or progress reports. A turn ends only after one of these reports in that turn, or a message to the orchestrator; never end a turn waiting on someone. Their message starts your next turn. Your TODO.md rows are your steps (short descriptions, detail in NOTES.md); the orchestrator reads them.`,
-    `2. Subagents, at most ${MAX_SUBAGENTS} running at once (your brief may narrow this list): \`runner\` (Haiku) for commands, logs, screenshots and installs; it returns a conclusion plus an excerpt. \`explorer\` (Sonnet, read-only) for searches across many files; use it rather than the built-in Explore. \`coder\` (Sonnet) for code changes, one at a time; you don't edit files while it runs. \`architect\` (Opus) for hard problems and escalation. Do small edits and single lookups yourself: a subagent's overhead costs more. A subagent's summary is trusted: do not repeat its checks.`,
-    '3. Escalation: give the coder the objective check from your brief. After 2 failed attempts it returns a failure packet (what it tried, the diff, the failing output). Give that packet once to the architect. If the architect fails too, report failed or blocked with the packet. A task your brief marks "hard" goes straight to the architect. Before you report done, run the check yourself.',
+    `2. Subagents, at most ${MAX_SUBAGENTS} running at once (your brief may narrow this list): \`runner\` (Haiku) for commands, logs, screenshots and installs; it returns a conclusion plus an excerpt. \`explorer\` (Sonnet, read-only) for searches across many files; use it rather than the built-in Explore. \`coder\` (Sonnet) for code changes, one at a time; you don't edit files while it runs. \`architect\` (Opus) for hard problems and escalation. Do small edits and single lookups yourself. A subagent's summary is trusted: do not repeat its checks.`,
+    '3. Escalation: give the coder the objective check from your brief. After 2 failed attempts it returns a failure packet (what it tried, the diff, the failing output). Give that packet once to the architect. If the architect fails too, report failed or blocked with the packet. Never hand your whole task to the architect; only a sub-task marked "hard" goes to it. A hard whole task is yours: work in your main thread, delegate mechanical steps to runner, surveys to explorer. Before you report done, run the check yourself.',
     '4. A fix for something the owner saw: first reproduce it offline from the owner\'s evidence, and prove the fix with a check that fails without it, before any device build. Not reproducible: report blocked and say why.',
     '5. Stay within your brief. If the scope must grow, ask the orchestrator.',
     '6. Peers: message only the peers your brief names, about what it names. Send on every outcome (success and failure). While you wait, report blocked naming the peer.',
@@ -472,6 +473,8 @@ function workerCard(run, worker) {
     `8. ${where}`,
     `9. Where the instructions above this card tell the session to ask the user, ask \`${run.orchestrator}\` instead (SendMessage, report "blocked"). Project-wide finishing steps they ask for (a check that rewrites shared files, a docs update) are yours only when your brief assigns them; otherwise list what they need in your "done" report. Anything only the owner can do (Stop→Start, Build, Make live, Rebuild client, an approval) or decide goes into report's \`ownerItems\` ({ what, why, kind: "action" | "decision", options, recommended }), never only in prose: it lands on the owner's "your turn" checklist, and you are told when the owner has done or decided it.`,
     `10. A shared machine resource (GPU, a memory-heavy job) is taken with a lock, not by message: run the command as \`node ${path.join(__dirname, '..', 'bin', 'vistaclair-lock.js')} <name> -- <cmd>\` (\`-s\` for a shared hold; names are [a-z0-9._-]; it waits its turn and releases when the command exits).`,
+    '11. Keep context small (aim under ~150k): clip command output (`| tail -40`, grep), read big files in slices, batch independent tool calls in one turn, send multi-file surveys to parallel explorers and long builds or gate runs to runner.',
+    '12. If the task looks unnecessary, mismatched to the use case, more complex than needed, or a simpler route exists, say so in one message to the orchestrator, then continue with the part that is safe either way.',
   ].join('\n');
 }
 

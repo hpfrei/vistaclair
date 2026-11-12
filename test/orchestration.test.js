@@ -2976,8 +2976,8 @@ test('launch queue: cancel_launch drops one entry; end_run drops the rest and sa
 test('launch queue: the orchestrator card and the MCP server name the queue', () => {
   const { orchestratorCard } = require('../src/orchestration');
   const card = orchestratorCard({ runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run', isolation: 'none' });
-  assert.match(card, /Extra launches queue and start when a slot frees; `after: \[worker\]` orders them/);
-  assert.match(card, /finished, landed, clean idle worker may be closed automatically/);
+  assert.match(card, /Extra launches queue and start when a slot frees; `after` \(workers or queue ids\) orders them/);
+  assert.match(card, /finished, landed, clean idle worker may be closed to make room/);
   const src = fs.readFileSync(path.join(CORE, 'lib', 'orchestrator-mcp.js'), 'utf8');
   assert.match(src, /name: "cancel_launch",\s*path: "cancel-launch"/);
 });
@@ -4001,4 +4001,45 @@ test('launch_cli closeWhenDone without a worktree: closed on a done report once 
   assert.ok(!run().workers[0].closed);
   orch.report(s.instanceId, { status: 'done', summary: 'ok' });
   assert.strictEqual(run().workers[0].closed, true);
+});
+
+test('the cards: "hard" marks a sub-task, defects go back to their author, early objection, output discipline; length budget', () => {
+  const { orchestratorCard, workerCard, WORKER_AGENTS } = require('../src/orchestration');
+  const run = { runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run' };
+  // Lengths of the cards before this change (+600 chars allowed).
+  const oldOrch = { worktree: 6724, none: 6284 };
+  const oldWorker = { branch: 4142, shared: 3799 };
+  for (const isolation of ['worktree', 'none']) {
+    const o = orchestratorCard({ ...run, isolation });
+    assert.ok(o.length <= oldOrch[isolation] + 600, `orchestrator card ${isolation}: ${o.length}`);
+    assert.match(o, /"hard" in a brief marks a SUB-TASK for the architect, never a whole task/);
+    assert.match(o, /it works in its main thread and delegates mechanical steps \(runner\) and surveys \(explorer\) downward/);
+    assert.match(o, /A defect or follow-up in a worker's own deliverable goes back to that worker with resume_worker \("continue" if its context is under ~150k tokens, else "fresh"\), not to a new worker/);
+    assert.match(o, /`closeWhenDone: true` closes a worker once it is done, landed and clean/);
+    assert.match(o, /or `closeWhenDone` at launch/);
+    assert.match(o, /`after` \(workers or queue ids\) orders them/);
+    assert.match(o, /`list_workers` is one short line per worker; `detail: \[worker\]` gives the paths/);
+    assert.match(o, /`list` once, not after each change \(the others return only what changed; resolve and drop take `ids`\)/);
+    assert.match(o, /more than 3 workers, send the owner a 5-line plan with a cost estimate as a message \(not an owner item\) and go on without waiting/);
+    assert.match(o, /"smallest useful slice" and a "not worth building" list/);
+    assert.ok(!/goes straight to the architect/.test(o));
+  }
+  for (const [kind, worker, max] of [['branch', { name: 'orch-abc123-w1', cwd: '/tmp/w', branch: 'b', base: 'main' }, oldWorker.branch], ['shared', { name: 'orch-abc123-w1', cwd: '/tmp/w' }, oldWorker.shared]]) {
+    const w = workerCard(run, worker);
+    assert.ok(w.length <= max + 600, `worker card ${kind}: ${w.length}`);
+    assert.match(w, /Never hand your whole task to the architect; only a sub-task marked "hard" goes to it\. A hard whole task is yours: work in your main thread, delegate mechanical steps to runner, surveys to explorer/);
+    assert.ok(!/goes straight to the architect/.test(w));
+    assert.match(w, /clip command output \(`\| tail -40`, grep\), read big files in slices, batch independent tool calls in one turn, send multi-file surveys to parallel explorers and long builds or gate runs to runner/);
+    assert.match(w, /aim under ~150k/);
+    assert.match(w, /If the task looks unnecessary, mismatched to the use case, more complex than needed, or a simpler route exists, say so in one message to the orchestrator, then continue with the part that is safe either way/);
+  }
+  assert.match(WORKER_AGENTS.architect.prompt, /You get a sub-task marked hard/);
+});
+
+test('the report tool description matches the worker card: no "started" report', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'lib', 'orchestrator-mcp.js'), 'utf8');
+  assert.ok(!/Call it when you start/.test(src));
+  assert.match(src, /name: "report"[^]*?never to say you started or for progress/);
+  assert.match(src, /defect or follow-up in this worker's own deliverable use continue while its context is under ~150k tokens/);
+  assert.match(src, /Launch with closeWhenDone to skip this call/);
 });
