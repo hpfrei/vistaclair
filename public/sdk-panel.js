@@ -810,6 +810,8 @@
       const shown = lines.slice(0, NOW_ROWS);
       const more = lines.length - shown.length;
       const tall = inTurn || rows.length > 0;
+      // One line of it for the send dialog (pickEntries / openPicker).
+      this.nowLine = cls === 'idle' ? (rows[0]?.text || '') : (lines[0]?.text || '');
       this._nowTicks = rows.some(r => r.age);
       // The maximized dialog's header says the same in one line.
       this._nowLine = rows.length ? `${rows[0].text}${rows.length > 1 ? ` +${rows.length - 1}` : ''}`
@@ -1988,6 +1990,37 @@
 
   // ---- pick a session and send (one dialog at a time) ----------------------
 
+  // The sessions the dialog offers: only those that can take a message now
+  // (not ended, closed, paused or pausing). The orchestrator / plain session
+  // (the first box) is pinned first; the workers follow: awaiting an answer,
+  // then busy, then idle, then by name (w2 before w10).
+  const PICK_RANK = { awaiting: 0, busy: 1 };
+  const pickable = (a) => !a.ended() && a.state !== 'paused' && a.state !== 'pausing';
+  const byName = (a, b) => String(a.label ?? '').localeCompare(String(b.label ?? ''), undefined, { numeric: true, sensitivity: 'base' });
+  function pickEntries(areas) {
+    const live = (areas || []).filter(a => a && pickable(a));
+    const head = live.filter(a => a.role !== 'worker');
+    const rank = (a) => PICK_RANK[a.state] ?? 2;
+    const workers = live.filter(a => a.role === 'worker').sort((a, b) => rank(a) - rank(b) || byName(a, b));
+    return [...head, ...workers];
+  }
+  // Selection moves one step, wrapping round.
+  const pickStep = (sel, step, n) => n ? (((sel + step) % n) + n) % n : -1;
+  // The key hint: 0 is the orchestrator, 1-9 the Nth worker in list order.
+  // Entries without a key (the 10th worker on) return ''.
+  function pickKeyOf(entries, i) {
+    const orch = entries[0]?.role !== 'worker';
+    if (orch && i === 0) return '0';
+    const n = orch ? i : i + 1;
+    return n >= 1 && n <= 9 ? String(n) : '';
+  }
+  // The entry a digit key selects, -1 for none.
+  function pickIndexForKey(entries, key) {
+    if (!/^[0-9]$/.test(key)) return -1;
+    const i = entries.findIndex((_, j) => pickKeyOf(entries, j) === key);
+    return i;
+  }
+
   let _pick = null;
   function closePicker() {
     if (!_pick) return;
@@ -2519,16 +2552,18 @@
 
     // ---- sending ----
 
-    // Submit → one dialog: the session map, the message, a Send button. There
-    // is no remembered target: every message names its session. The
-    // orchestrator (the first box) is selected; Tab / Shift+Tab moves the
-    // selection, Enter or the button sends.
+    // Submit → one dialog: who gets it, the message, a Send button. There is
+    // no remembered target: every message names its session. Only sessions
+    // that can take a message are listed (pickEntries): the orchestrator
+    // pinned on top and selected, the workers below it in a scrolling list.
+    // Tab / Shift+Tab / ↑ ↓ move the selection (wrapping), 0 picks the
+    // orchestrator and 1-9 the Nth worker, a click selects, a double click
+    // sends, Enter or the button sends, Esc cancels.
     openPicker(payload = {}) {
       closePicker();
       closeMenu();
-      const list = this.allAreas();
+      const list = pickEntries(this.allAreas());
       if (!list.length) return;
-      const pickable = (a) => !a.ended();
       const backdrop = el('div', 'alert-modal-backdrop sdk-pick-backdrop');
       const modal = el('div', 'alert-modal sdk-pick');
       modal.setAttribute('role', 'dialog');
@@ -2537,21 +2572,21 @@
       backdrop.appendChild(modal);
       document.body.appendChild(backdrop);
       backdrop.addEventListener('mousedown', (e) => { if (e.target === backdrop) closePicker(); });
-      const sel = list.findIndex(pickable);
-      const pick = _pick = { panel: this, backdrop, modal, payload, list, pickable, sel, armed: false };
+      const pick = _pick = { panel: this, backdrop, modal, payload, list, sel: 0, armed: false, nodes: [] };
       pick.onKeyUp = () => { pick.armed = true; };
       pick.onKey = (e) => {
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closePicker(); return; }
-        if (e.key === 'Tab') {
-          // Focus stays in the dialog: Tab only walks the selection, wrapping
-          // round and skipping the boxes that cannot take a message.
+        const move = e.key === 'Tab' ? (e.shiftKey ? -1 : 1) : e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+        if (move) {
+          // Focus stays in the dialog: these keys only walk the selection.
           e.preventDefault();
           e.stopPropagation();
-          const step = e.shiftKey ? -1 : 1;
-          for (let k = 1; k <= list.length; k++) {
-            const j = ((pick.sel + step * k) % list.length + list.length) % list.length;
-            if (pickable(list[j])) { this._picked(list[j]); break; }
-          }
+          this._picked(list[pickStep(pick.sel, move, list.length)]);
+        } else if (/^[0-9]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          const i = pickIndexForKey(list, e.key);
+          if (i >= 0) this._picked(list[i]);
         } else if (e.key === 'Enter') {
           // The Enter that submitted (or one held down) never sends: it
           // takes a fresh key press.
@@ -2569,70 +2604,101 @@
       return [fmtModel(a.shownModel()), STATE_TEXT[a.state || 'idle'] || a.state].filter(Boolean).join(' · ');
     }
 
-    // Drawn again on every change of selection.
+    // Built once; a change of selection only moves the marks (_syncPick), so
+    // the list keeps its scroll position and a double click lands on one node.
     _renderPick() {
       const pick = _pick;
-      const { modal, list, pickable, payload } = pick;
-      const target = list[pick.sel];
-      const node = (a) => {
-        const b = el('button', `sdk-pick-node sdk-pick-${a.role}${pickable(a) ? '' : ' off'}${a === target ? ' sel' : ''}`);
+      const { modal, list, payload } = pick;
+      const orch = list[0].role !== 'worker';
+      const node = (a, i) => {
+        const st = a.state || 'idle';
+        const b = el('button', `sdk-pick-item sdk-pick-${a.role === 'worker' ? 'worker' : 'orch'} sdk-pick-s-${st}`);
         b.type = 'button';
-        b.disabled = !pickable(a);
-        b.setAttribute('aria-pressed', String(a === target));
         b.title = a.label;
-        b.appendChild(el('span', 'sdk-pick-name', a.label));
-        b.appendChild(el('span', 'sdk-pick-meta', this._nodeMeta(a)));
+        const key = pickKeyOf(list, i);
+        b.appendChild(el('span', 'sdk-pick-dot'));
+        const body = el('span', 'sdk-pick-body');
+        const line = el('span', 'sdk-pick-line');
+        line.appendChild(el('span', 'sdk-pick-name', a.label));
+        if (a.role !== 'worker') line.appendChild(el('span', 'sdk-pick-tag', 'default'));
+        line.appendChild(el('span', 'sdk-pick-meta', this._nodeMeta(a)));
+        body.appendChild(line);
+        const now = String(a.nowLine || '').replace(/\s+/g, ' ').trim();
+        if (now) { const n = el('span', 'sdk-pick-now', now); n.title = now; body.appendChild(n); }
+        b.appendChild(body);
+        if (key) b.appendChild(el('kbd', 'sdk-pick-key', key));
         b.addEventListener('click', () => this._picked(a));
+        b.addEventListener('dblclick', () => { this._picked(a); this._confirmSend(); });
+        pick.nodes[i] = b;
         return b;
       };
       modal.innerHTML = '';
       modal.appendChild(el('div', 'sdk-pick-title', 'Send to which session?'));
-      const map = el('div', 'sdk-pick-map');
-      const [first, ...rest] = list;
-      map.appendChild(node(first));
-      if (rest.length) {
-        const row = el('div', 'sdk-pick-row');
-        row.style.setProperty('--n', rest.length);
-        rest.forEach(a => row.appendChild(node(a)));
-        map.appendChild(row);
+      const body = el('div', 'sdk-pick-body-wrap');
+      if (orch) body.appendChild(node(list[0], 0));
+      const workers = list.slice(orch ? 1 : 0);
+      if (workers.length) {
+        body.appendChild(el('div', 'sdk-pick-sub', `Workers · ${workers.length} active`));
+        const scroll = el('div', 'sdk-pick-list');
+        scroll.setAttribute('role', 'group');
+        workers.forEach((a, k) => scroll.appendChild(node(a, k + (orch ? 1 : 0))));
+        body.appendChild(scroll);
       }
-      modal.appendChild(map);
+      modal.appendChild(body);
+      pick.noteEl = el('div', 'sdk-pick-note');
+      modal.appendChild(pick.noteEl);
       const text = String(payload.text || '');
       const lines = text.split('\n');
       const preview = lines.slice(0, 3).join('\n') + (lines.length > 3 ? '\n…' : '');
       const nImg = (payload.images || []).length;
-      if (target && (target.state === 'busy' || target.state === 'awaiting')) {
-        modal.appendChild(el('div', 'sdk-pick-note', `${target.label} is busy: it reads this after its current tool calls.`));
-      }
       if (text) modal.appendChild(el('pre', 'sdk-pick-preview', clip(preview, 600)));
       if (nImg) modal.appendChild(el('div', 'sdk-pick-imgs', `+ ${nImg} image${nImg === 1 ? '' : 's'}`));
-      modal.appendChild(el('div', 'sdk-pick-hint', 'Tab picks the box, Enter sends. Ended sessions cannot take messages.'));
+      modal.appendChild(el('div', 'sdk-pick-hint', 'Enter sends · ↑ ↓ or Tab picks · 0 orchestrator, 1–9 a worker · double-click sends · Esc cancels. Only sessions that can take a message are listed.'));
       const actions = el('div', 'sdk-pick-actions');
       const cancel = el('button', 'sdk-tb-btn', 'Cancel');
       cancel.type = 'button';
       cancel.addEventListener('click', closePicker);
       actions.appendChild(cancel);
-      const send = el('button', 'alert-modal-ok sdk-pick-send', target ? `Send to ${clip(target.label, 32)}` : 'Send');
-      send.type = 'button';
-      send.disabled = !target;
-      send.addEventListener('click', () => this._confirmSend());
-      actions.appendChild(send);
+      pick.sendBtn = el('button', 'alert-modal-ok sdk-pick-send', 'Send');
+      pick.sendBtn.type = 'button';
+      pick.sendBtn.addEventListener('click', () => this._confirmSend());
+      actions.appendChild(pick.sendBtn);
       modal.appendChild(actions);
+      this._syncPick();
       modal.focus();
     }
 
-    // Sending: a box (click or Tab) is selected, not sent to.
+    // The marks follow the selection; the chosen entry scrolls into view.
+    _syncPick() {
+      const pick = _pick;
+      const { list, nodes } = pick;
+      const target = list[pick.sel];
+      nodes.forEach((b, i) => {
+        const on = i === pick.sel;
+        b.classList.toggle('sel', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+      pick.noteEl.textContent = target && (target.state === 'busy' || target.state === 'awaiting')
+        ? `${target.label} is busy: it reads this after its current tool calls.` : '';
+      pick.noteEl.hidden = !pick.noteEl.textContent;
+      pick.sendBtn.textContent = target ? `Send to ${clip(target.label, 32)}` : 'Send';
+      pick.sendBtn.disabled = !target;
+      nodes[pick.sel]?.scrollIntoView?.({ block: 'nearest' });
+    }
+
+    // Sending: an entry (click, key or Tab) is selected, not sent to.
     _picked(a) {
       const pick = _pick;
-      if (!pick || !pick.pickable(a)) return;
-      pick.sel = pick.list.indexOf(a);
-      this._renderPick();
+      const i = pick ? pick.list.indexOf(a) : -1;
+      if (i < 0) return;
+      pick.sel = i;
+      this._syncPick();
     }
 
     _confirmSend() {
       const pick = _pick;
       const target = pick?.list[pick.sel];
-      if (!target || !pick.pickable(target)) return;
+      if (!target || !pickable(target)) return;
       sendWs({ type: 'sdk:send', sessId: target.sessId, text: pick.payload.text, images: pick.payload.images || [] });
       // The draft stays in the composer until a message is really sent.
       this.composer.clear();
@@ -3064,5 +3130,6 @@
     _Panel: Panel,
     _Area: Area,
     _landing: { landingLabel, reportChip },
+    _pick: { pickEntries, pickStep, pickKeyOf, pickIndexForKey, pickable, current: () => _pick },
   };
 })();
