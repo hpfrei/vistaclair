@@ -163,7 +163,7 @@ test('options: the same append prompt, settings file, MCP servers and model as t
   assert.strictEqual(o.allowDangerouslySkipPermissions, true);
   // The engine's own denials, then the worker role's: the CLI twin's --disallowedTools.
   assert.deepStrictEqual(o.disallowedTools, ['SendMessage', 'ListAgents', ...flag('--disallowedTools').split(',')]);
-  assert.deepStrictEqual(o.disallowedTools.slice(2), ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion', 'mcp__integrated__vista-AskUserQuestion']);
+  assert.deepStrictEqual(o.disallowedTools.slice(2), ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion', 'mcp__integrated__vista-AskUserQuestion', 'ScheduleWakeup', 'ReportFindings']);
   assert.strictEqual(o.includePartialMessages, true);
   assert.strictEqual(o.forwardSubagentText, true, 'subagents stream their text and thinking too');
   assert.strictEqual(o.pathToClaudeCodeExecutable, '/opt/claude');
@@ -187,7 +187,8 @@ test('options: disallowedTools by orchestration role; a session without one keep
   assert.ok(!orch.some(t => /AskUserQuestion/.test(t)), 'the orchestrator keeps AskUserQuestion');
   const worker = denied({ runId: 'r1', role: 'worker', workerId: 'w1' });
   assert.ok(worker.includes('AskUserQuestion') && worker.includes('mcp__integrated__vista-AskUserQuestion'), 'a worker loses both forms');
-  assert.ok(!worker.includes('Monitor') && !worker.includes('ReportFindings'));
+  assert.ok(!worker.includes('Monitor'));
+  assert.ok(worker.includes('ScheduleWakeup') && worker.includes('ReportFindings'), 'a worker loses both unused schemas');
 });
 
 test('options: env is the whole buildClaudeEnv, with API-key auth (no subscription) and no OAuth', () => {
