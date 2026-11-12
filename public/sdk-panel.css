@@ -982,37 +982,90 @@
 .sdk-models-go:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 28%, var(--bg)); }
 
 /* --- send: pick the session, then confirm --- */
-.sdk-pick { width: min(960px, 92vw); max-width: none; text-align: left; outline: none; }
+.sdk-pick {
+  width: min(560px, 92vw);
+  max-width: none;
+  max-height: 80vh;
+  box-sizing: border-box;
+  gap: 12px;
+  overflow: hidden;
+  text-align: left;
+  outline: none;
+}
+/* title, preview, hint and the buttons stay put; only the worker list scrolls */
+.sdk-pick > * { flex: none; }
 .sdk-pick-title { font-size: 15px; font-weight: 600; }
-.sdk-pick-map { display: flex; flex-direction: column; align-items: stretch; }
-.sdk-pick-row { position: relative; display: flex; justify-content: center; gap: 12px; margin-top: 26px; }
-/* the tree: a stem down from the orchestrator, a bar, a drop to each worker */
-.sdk-pick-row::before { content: ''; position: absolute; top: -14px; left: calc(100% / (2 * var(--n, 1))); right: calc(100% / (2 * var(--n, 1))); border-top: 1.5px solid var(--border); }
-.sdk-pick-row::after { content: ''; position: absolute; top: -26px; left: 50%; height: 12px; border-left: 1.5px solid var(--border); }
-.sdk-pick-row > .sdk-pick-node { flex: 1 1 0; min-width: 0; max-width: 50%; }
-.sdk-pick-row > .sdk-pick-node::before { content: ''; position: absolute; top: -15px; left: 50%; height: 13px; border-left: 1.5px solid var(--border); }
-.sdk-pick-node {
-  position: relative;
+.sdk-pick > .sdk-pick-body-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.sdk-pick-sub { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim); }
+.sdk-pick-list {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 10px 12px;
+  gap: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 4px 2px 2px;
+  margin-right: -4px;
+}
+.sdk-pick-item {
+  --sdk-pick-c: var(--green);
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 12px;
   border: 1.5px solid var(--border);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--bg);
   color: var(--text);
   font: inherit;
   text-align: left;
   cursor: pointer;
 }
-.sdk-pick-node:hover:not(:disabled), .sdk-pick-node:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg)); outline: none; }
-.sdk-pick-node.off { opacity: .45; cursor: not-allowed; }
-.sdk-pick-node.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--bg)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
-/* names wrap rather than cut off: with five workers a box is ~170px wide */
-.sdk-pick-name { font-weight: 600; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-.sdk-pick-meta { white-space: normal; overflow-wrap: anywhere; }
+.sdk-pick-item:hover, .sdk-pick-item:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg)); outline: none; }
+.sdk-pick-item.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--bg)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+/* the orchestrator: a header card above the list, the default target */
+.sdk-pick-orch { padding: 11px 14px; border-radius: 12px; background: color-mix(in srgb, var(--accent) 7%, var(--bg)); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.sdk-pick-orch .sdk-pick-name { font-size: 14px; }
+.sdk-pick-tag { font-size: 10px; padding: 0 7px; line-height: 16px; border-radius: 999px; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border)); white-space: nowrap; }
+/* state: awaiting answer / busy / idle, by the dot's colour */
+.sdk-pick-s-busy { --sdk-pick-c: var(--busy); }
+.sdk-pick-s-awaiting { --sdk-pick-c: var(--orange); }
+.sdk-pick-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--sdk-pick-c); }
+.sdk-pick-s-busy .sdk-pick-dot { animation: sdk-pulse 1.2s ease-in-out infinite; box-shadow: 0 0 0 3px color-mix(in srgb, var(--busy) 25%, transparent); }
+.sdk-pick-s-awaiting .sdk-pick-dot { box-shadow: 0 0 0 3px color-mix(in srgb, var(--orange) 30%, transparent); }
+.sdk-pick-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sdk-pick-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sdk-pick-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sdk-pick-meta { margin-left: auto; flex: none; white-space: nowrap; }
 .sdk-pick-meta, .sdk-pick-meta-line { font-size: 11px; color: var(--text-dim); font-family: var(--vc-mono, ui-monospace, monospace); }
+.sdk-pick-now { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sdk-pick-s-awaiting .sdk-pick-now { color: var(--orange); }
+.sdk-pick-key {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  line-height: 17px;
+  text-align: center;
+  font: 600 11px/17px var(--vc-mono, ui-monospace, monospace);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-surface);
+}
+.sdk-pick-item.sel .sdk-pick-key { color: var(--accent); border-color: var(--accent); }
+@media (max-width: 640px) {
+  /* one column on a phone: taller rows to tap, the meta under the name */
+  .sdk-pick-item { padding: 12px 12px; min-height: 48px; }
+  .sdk-pick-line { flex-wrap: wrap; row-gap: 0; }
+  .sdk-pick-meta { margin-left: 0; }
+  .sdk-pick-key { display: none; }
+  .sdk-pick-actions .sdk-tb-btn, .sdk-pick-actions .alert-modal-ok { min-height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) { .sdk-pick-s-busy .sdk-pick-dot { animation: none; } }
 .sdk-pick-hint { font-size: 11px; color: var(--text-dim); }
 .sdk-pick-note { font-size: 12px; color: var(--orange); }
 .sdk-pick-preview {
@@ -1025,7 +1078,7 @@
   font-size: 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  max-height: 120px;
+  max-height: 84px;
   overflow: hidden;
 }
 .sdk-pick-imgs { font-size: 12px; color: var(--text-dim); }
