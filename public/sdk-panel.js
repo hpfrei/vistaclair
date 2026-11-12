@@ -441,7 +441,10 @@
               <button type="button" class="sdk-max-btn" title="Maximize">⤢</button>
             </div>
           </div>
-          <div class="sdk-view sdk-view-notes markdown-body"></div>
+          <div class="sdk-view sdk-view-notes">
+            <div class="sdk-notes-body markdown-body"></div>
+            <button type="button" class="sdk-max-btn" title="Maximize">⤢</button>
+          </div>
         </div>`;
       const q = (s) => root.querySelector(s);
       this.nameEl = q('.sdk-area-name');
@@ -465,7 +468,8 @@
       this.todoView = q('.sdk-todo-scroll');
       this._initSplit(q('.sdk-view-live'), q('.sdk-todo-split'));
       this.todoEl = q('.sdk-todo-wrap');
-      this.notesEl = q('.sdk-view-notes');
+      this.notesPane = q('.sdk-view-notes');
+      this.notesEl = q('.sdk-notes-body');
       this.feed = q('.sdk-feed');
       this.moreEl = q('.sdk-feed-more');
       this.moreEl.addEventListener('click', () => this.loadEarlier());
@@ -473,6 +477,7 @@
       const lite = q('.sdk-todo-lite');
       q('.sdk-todo-top > .sdk-max-btn').addEventListener('click', () => openMax(this, this.todoTop, 'TODO'));
       q('.sdk-todo-lite > .sdk-max-btn').addEventListener('click', () => openMax(this, lite, 'Live feed'));
+      q('.sdk-view-notes > .sdk-max-btn').addEventListener('click', () => openMax(this, this.notesPane, 'Notes'));
       this.segBtns = Object.fromEntries([...root.querySelectorAll('.sdk-seg button')].map(b => [b.dataset.v, b]));
 
       for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
@@ -562,6 +567,8 @@
 
     setView(v, { store = true } = {}) {
       if (!VIEWS.includes(v)) v = 'live';
+      // The notes maximized belong to the Notes view: leaving it closes them.
+      if (v !== 'notes' && _max?.area === this && _max.pane === this.notesPane) closeMax();
       this.view = v;
       if (store) storeKey(VIEW_STORE, this.sessId, v);
       this.el.dataset.view = v;
@@ -804,6 +811,11 @@
       const more = lines.length - shown.length;
       const tall = inTurn || rows.length > 0;
       this._nowTicks = rows.some(r => r.age);
+      // The maximized dialog's header says the same in one line.
+      this._nowLine = rows.length ? `${rows[0].text}${rows.length > 1 ? ` +${rows.length - 1}` : ''}`
+        : head && head !== 'idle' && head !== 'ended' ? head : '';
+      this._nowTip = lines.map(l => l.text).join('\n');
+      this.renderMaxHead();
       const sig = JSON.stringify([cls, tall, more, shown.map(l => [l.head ? 'h' : l.bg ? 'b' : 'f', l.text])]);
       if (sig === this._nowSig) return;
       this._nowSig = sig;
@@ -822,6 +834,32 @@
         return row;
       }));
       this.nowEl.title = rows.length > 1 || more ? all : '';
+    }
+
+    // The header line of the maximize dialog (one per session, whichever pane
+    // is in it): state dot and word, what it runs now, model, context, cost.
+    // Called from renderNow (so by everything that redraws the caption, and
+    // each tick); nothing of its own polls.
+    renderMaxHead() {
+      const h = _max?.area === this ? _max.head : null;
+      if (!h) return;
+      const s = this.state || 'idle';
+      const st = this.ended() ? 'ended' : s;
+      h.root.className = `sdk-max-live sdk-max-st-${st}`;
+      h.state.textContent = st === 'awaiting' ? 'awaiting' : st;
+      const set = (node, text, title) => {
+        node.textContent = text || '';
+        node.title = title || '';
+        node.classList.toggle('hidden', !text);
+      };
+      set(h.now, this._nowLine || '', this._nowTip || '');
+      const m = this.shownModel();
+      set(h.model, m ? fmtModel(m) : '', this.modelBtn.title);
+      const ctx = !this.ctxEl.classList.contains('hidden') ? this.ctxTxt.textContent : '';
+      set(h.ctx, ctx ? `ctx ${ctx}` : '', this.ctxEl.title);
+      h.ctx.classList.toggle('hot', this.ctxEl.classList.contains('hot'));
+      h.ctx.classList.toggle('warm', this.ctxEl.classList.contains('warm'));
+      set(h.cost, fmtCost(this.cost), this.costEl.title);
     }
 
     // ---- TODO.md / NOTES.md ----
@@ -864,7 +902,8 @@
 
     // Rendered only while showing; on a change it scrolls to `## Resume`.
     renderNotes({ scroll } = {}) {
-      if (this.view !== 'notes') return;
+      // Shown in the box, or maximized (the pane keeps updating in the dialog).
+      if (this.view !== 'notes' && _max?.pane !== this.notesPane) return;
       const notes = this.todo?.notes || '';
       if (this._notesShown === notes) return;
       this._notesShown = notes;
@@ -1638,22 +1677,26 @@
     }
   }
 
-  // ---- a pane of Live maximized (one at a time) ----------------------------
+  // ---- a pane of Live, or the Notes, maximized (one at a time) ----------------------------
   // The pane itself moves into the dialog, so it keeps updating (its
   // followers, "Load earlier" and the pills go with it); a comment holds its
   // place in the box, and on close it goes back there. ×, Esc or a click on
-  // the backdrop closes it; so does its box leaving the stage or going away.
+  // the backdrop closes it; so does its box leaving the stage or going away
+  // (and the Notes closing when the box goes back to Live).
+  // The dialog's header carries one live line of the session (renderMaxHead).
   // Below the pane, a composer of its own talks to that box's session only:
   // no picker, and images dropped anywhere on the dialog go to it.
 
   let _max = null;
   function closeMax() {
     if (!_max) return;
-    const { area, pane, slot, overlay, onKey } = _max;
+    const { area, pane, slot, overlay, onKey, scroller } = _max;
     _max = null;
     document.removeEventListener('keydown', onKey, true);
+    const top = scroller?.scrollTop;
     slot.replaceWith(pane);
     overlay.remove();
+    if (scroller) scroller.scrollTop = top;
     // Moved, its scrollers start at the top: back to the bottom, or the reader's place.
     area.feedFollow.settle();
     area.todoFollow.settle();
@@ -1676,6 +1719,19 @@
     return composer;
   }
 
+  // The header's parts, in the order they are dropped on a phone (last first).
+  function maxHead(root) {
+    if (!root) return null;
+    const dot = el('i', 'sdk-max-dot');
+    const state = el('span', 'sdk-max-state');
+    const now = el('span', 'sdk-max-now hidden');
+    const model = el('span', 'sdk-max-model hidden');
+    const ctx = el('span', 'sdk-max-ctx hidden');
+    const cost = el('span', 'sdk-max-cost hidden');
+    root.append(dot, state, now, model, ctx, cost);
+    return { root, dot, state, now, model, ctx, cost };
+  }
+
   function openMax(area, pane, what) {
     closeMax();
     closeMenu();
@@ -1684,16 +1740,21 @@
     const overlay = el('div', 'curl-modal-overlay sdk-max-overlay');
     overlay.innerHTML = `
       <div class="curl-modal sdk-max" role="dialog" aria-modal="true">
-        <div class="curl-modal-header"><span class="sdk-max-title"></span><button type="button" class="curl-modal-close" title="Close (Esc)">×</button></div>
+        <div class="curl-modal-header"><span class="sdk-max-title"></span><span class="sdk-max-live"></span><button type="button" class="curl-modal-close" title="Close (Esc)">×</button></div>
         <div class="sdk-max-body"></div>
       </div>`;
     const title = `${area.label} · ${what}`;
     const dialog = overlay.querySelector('.sdk-max');
     overlay.querySelector('.sdk-max-title').textContent = title;
     dialog.setAttribute('aria-label', title);
+    const head = maxHead(overlay.querySelector('.sdk-max-live'));
     const slot = document.createComment('maximized');
+    // Moved, a scroller starts at the top: the notes keep the reader's place.
+    const scroller = pane === area.notesPane ? area.notesEl : null;
+    const top = scroller?.scrollTop;
     pane.replaceWith(slot);
     overlay.querySelector('.sdk-max-body').appendChild(pane);
+    if (scroller) scroller.scrollTop = top;
     const composer = maxComposer(area, dialog);
     document.body.appendChild(overlay);
     // In the document it has built itself (vc-composer.js loads first).
@@ -1712,7 +1773,8 @@
       closeMax();
     };
     document.addEventListener('keydown', onKey, true);
-    _max = { area, pane, slot, overlay, onKey, composer };
+    _max = { area, pane, slot, overlay, onKey, composer, scroller, head };
+    area.renderMaxHead?.();
     area.feedFollow.settle();
     area.todoFollow.settle();
     // A phone's keyboard would cover the pane; there the reader taps in.
@@ -3000,6 +3062,7 @@
     _blocks: { blockFor, overtaken },
     _max: { openMax, closeMax, current: () => _max },
     _Panel: Panel,
+    _Area: Area,
     _landing: { landingLabel, reportChip },
   };
 })();
