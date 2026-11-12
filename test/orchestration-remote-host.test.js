@@ -218,7 +218,7 @@ test('happy path: pending-approval, the tab bound, SendMessage to its adapter, a
   assert.strictEqual(m.state, 'pending-approval');
   assert.strictEqual(m.host, 'hetzner-1');
   assert.strictEqual(m.running, false);
-  const listed = ctx.orch.listWorkers(h.iid).workers.find(w => w.name === r.worker);
+  const listed = ctx.orch.listWorkers(h.iid, { detail: 'all' }).detail.find(w => w.name === r.worker);
   assert.strictEqual(listed.host, 'hetzner-1');
   assert.strictEqual(listed.state, 'pending-approval');
   assert.throws(() => ctx.orch.sendMessage(h.iid, { to: r.worker, message: 'hi' }), /pending-approval: it gets its brief when the owner approves/);
