@@ -309,7 +309,7 @@ const TOOL_PARAMS = {
     isolation: 'worktree | none', area: 'repo-relative files or globs it will change',
     after: 'workers it waits for', cwd: 'directory inside the run root', tools: 'add-on tools, by name',
     host: 'another machine, for a remote worker', app: 'with host: the app it runs in',
-    closeWhenDone: 'close it once done, landed and clean', profile: 'lean | full (default lean)', connectors: 'true: keep the claude.ai connectors',
+    closeWhenDone: 'close it once done, landed and clean', profile: 'lean | full (default lean)', connectors: 'true: keep the claude.ai connectors', skills: 'true: keep skills and slash commands',
   },
   cancel_launch: { id: 'the queued launch\'s id, required' },
   list_workers: {},
@@ -1016,12 +1016,13 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // A launch's checked parameters, as a queue entry keeps them (cwd resolved,
   // `after` as worker ids). Throws, having changed nothing.
-  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app, closeWhenDone, profile, connectors } = {}) {
+  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app, closeWhenDone, profile, connectors, skills } = {}) {
     title = cleanTitle(title);
-    if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone, profile, connectors });
+    if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone, profile, connectors, skills });
     if (app !== undefined && app !== null && app !== '') throw new Error('app is for a remote worker (with host)');
     if (profile !== undefined && profile !== null && profile !== 'lean' && profile !== 'full') throw new Error('profile must be "lean" or "full"');
     if (connectors !== undefined && connectors !== null && typeof connectors !== 'boolean') throw new Error('connectors must be true or false');
+    if (skills !== undefined && skills !== null && typeof skills !== 'boolean') throw new Error('skills must be true or false');
     const target = realpathOr(cwd ? path.resolve(run.root, cwd) : run.root);
     if (!isInside(target, run.root)) throw new Error(`cwd must be inside the run root ${run.root}`);
     const spec = {
@@ -1030,6 +1031,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       ...(closeWhenDone === true ? { closeWhenDone: true } : {}),
       ...(profile === 'full' ? { profile: 'full' } : {}),
       ...(connectors === true ? { connectors: true } : {}),
+      ...(skills === true ? { skills: true } : {}),
     };
     const areas = areaOf(area);
     if (areas) spec.area = areas;
@@ -1088,6 +1090,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       ...(spec.closeWhenDone ? { closeWhenDone: true } : {}),
       ...(spec.profile === 'full' ? { profile: 'full' } : {}),
       ...(spec.connectors === true ? { connectors: true } : {}),
+      ...(spec.skills === true ? { skills: true } : {}),
     };
     const grants = grantsOf(tools);
     if (grants) worker.grants = grants;
@@ -1189,7 +1192,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // launch_cli with a host: the checked spec, or a throw having changed nothing.
-  function remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone, profile, connectors }) {
+  function remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone, profile, connectors, skills }) {
     const h = checkHost(host);
     const no = (what, why) => { throw new Error(`${what}: ${why}; omit it for a remote worker`); };
     if (cwd !== undefined && cwd !== null && cwd !== '') no('cwd', 'a remote worker runs in its app\'s directory on its host');
@@ -1199,6 +1202,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (closeWhenDone === true) no('closeWhenDone', 'a remote worker is closed with close_worker');
     if (profile !== undefined && profile !== null) no('profile', 'a remote worker has its own prompt');
     if (connectors !== undefined && connectors !== null) no('connectors', 'a remote worker has its own settings');
+    if (skills !== undefined && skills !== null) no('skills', 'a remote worker has its own settings');
     const theApp = app === undefined || app === null || app === '' ? runApp(run) : String(app).trim();
     if (!theApp) throw new Error('app: name the app on the host this worker runs in (this run has none of its own)');
     if (!APP_RE.test(theApp)) throw new Error('app must be an app name ([a-z0-9-])');
@@ -1871,6 +1875,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       appendSystemPrompt: workerPrompt ? `${workerPrompt}\n\n${card}` : card,
       settingsFile: write ? writeSessionSettings(run, worker.name, run.base.settingsFile, { worker }) : path.join(run.runDir, 'sessions', `${worker.name}.json`),
       agents: WORKER_AGENTS,
+      // No skill listing, Skill tool or slash commands (about 6K tokens of
+      // every start): run workers report and compact on their own. launch_cli
+      // `skills: true` keeps them (e.g. a security-review worker).
+      ...(worker.skills ? {} : { disableSlashCommands: true }),
       ...(worker.model || run.model ? { model: worker.model || run.model } : {}),
       ...(run.maxBudgetUsd ? { maxBudgetUsd: run.maxBudgetUsd } : {}),
       ...(worker.grants ? { grants: worker.grants } : {}),

@@ -173,6 +173,20 @@ test('options: the same append prompt, settings file, MCP servers and model as t
   s.kill();
 });
 
+test('options: disableSlashCommands maps to the CLI flag --disable-slash-commands; absent otherwise', () => {
+  const extra = (settings) => {
+    const { s, calls } = makeSession(settings);
+    s.spawn(tmp('proj-'), 80, 24, {});
+    const o = calls[0].options;
+    s.kill();
+    return o.extraArgs;
+  };
+  assert.strictEqual(extra({ disableSlashCommands: true })['disable-slash-commands'], null);
+  assert.ok(Object.hasOwn(extra({ disableSlashCommands: true }), 'disable-slash-commands'));
+  assert.ok(!Object.hasOwn(extra({}), 'disable-slash-commands'));
+  assert.ok(extra({ disableSlashCommands: true })['replay-user-messages'] === null, 'the other extraArgs stay');
+});
+
 test('options: disallowedTools by orchestration role; a session without one keeps SendMessage / ListAgents only', () => {
   const denied = (orchestration) => {
     const { s, calls } = makeSession(orchestration ? { orchestration } : {});

@@ -699,6 +699,8 @@ class SdkSession {
       extraArgs: { 'replay-user-messages': null, 'thinking-display': s.showThinking ? 'summarized' : 'omitted' },
     };
     if (s.settingsFile) options.settings = s.settingsFile;
+    // The CLI twin's --disable-slash-commands (src/utils.js): no skills, Skill tool or slash commands.
+    if (s.disableSlashCommands) options.extraArgs['disable-slash-commands'] = null;
     const mcpServers = buildMcpServers(mcpOpts, packs);
     if (s.agents && typeof s.agents === 'object') options.agents = s.agents;
     if (s.model) options.model = s.model;

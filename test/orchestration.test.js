@@ -1461,7 +1461,7 @@ test('buildCliArgs denies an orchestration role its tools; a session without a r
   assert.deepStrictEqual(disallowedToolsFor({}, ['SendMessage']), ['SendMessage']);
 });
 
-test('worker settings: no claude.ai connectors (not for the orchestrator, not with connectors:true); the lean prompt only for lean workers', async (t) => {
+test('worker settings: no claude.ai connectors (not for the orchestrator, not with connectors:true); the lean prompt only for lean workers; no skills unless skills:true', async (t) => {
   const cwd = tmpDir();
   const { orchSession, mgr, orch, stamp } = await openOrchestrator(t, {
     cwd, isolation: 'none',
@@ -1495,6 +1495,14 @@ test('worker settings: no claude.ai connectors (not for the orchestrator, not wi
   assert.strictEqual(read(conn.tabId).disableClaudeAiConnectors, undefined, 'connectors:true keeps them');
   assert.ok(mgr.sessions.get(conn.tabId).settings.appendSystemPrompt.startsWith('LEAN PROMPT'));
 
+  // Skills and slash commands: off for workers (not the orchestrator), on with skills:true.
+  assert.strictEqual(orchSession.settings.disableSlashCommands, undefined, 'the orchestrator keeps its skills');
+  assert.strictEqual(ls.disableSlashCommands, true);
+  assert.strictEqual(fs_.disableSlashCommands, true);
+  const sk = launch({ skills: true });
+  assert.strictEqual(mgr.sessions.get(sk.tabId).settings.disableSlashCommands, undefined, 'skills:true keeps them');
+  assert.strictEqual(orch.getRun(stamp.runId).workers.find(x => x.name === sk.worker).skills, true);
+  assert.throws(() => launch({ skills: 'yes' }), /skills must be true or false/);
   assert.throws(() => launch({ profile: 'huge' }), /profile must be "lean" or "full"/);
   assert.throws(() => launch({ connectors: 'yes' }), /connectors must be true or false/);
   assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'r', task: 'x', host: 'nohost', profile: 'full' }), /./);
@@ -1509,6 +1517,7 @@ test('worker settings without a lean prompt: today\'s behaviour (the full prompt
   const { orchSession, mgr, orch } = await openOrchestrator(t, { cwd: tmpDir(), isolation: 'none', settings: { appendSystemPrompt: 'FULL PROMPT' } });
   const w = orch.launchWorker(orchSession.instanceId, { title: 'w', task: 'x' });
   assert.ok(mgr.sessions.get(w.tabId).settings.appendSystemPrompt.startsWith('FULL PROMPT\n\n'));
+  assert.strictEqual(mgr.sessions.get(w.tabId).settings.disableSlashCommands, true);
   const w2 = orch.launchWorker(orchSession.instanceId, { title: 'w2', task: 'x', profile: 'full' });
   assert.ok(mgr.sessions.get(w2.tabId).settings.appendSystemPrompt.startsWith('FULL PROMPT\n\n'));
 });
@@ -2047,7 +2056,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     const port = server.address().port;
     const plain = await list(port);
     const props = (tools, name) => Object.keys(tools.find(t => t.name === name).inputSchema.properties);
-    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'closeWhenDone', 'profile', 'connectors']);
+    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'closeWhenDone', 'profile', 'connectors', 'skills']);
     assert.deepStrictEqual(props(plain, 'resume_worker'), ['worker', 'mode', 'message']);
     // No dashboard at all: the same schemas.
     const closed = http.createServer();
@@ -2061,7 +2070,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     params = setup().orch.toolParams().params;
     clearPacks();
     const granted = await list(port);
-    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'closeWhenDone', 'profile', 'connectors', 'tools']);
+    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'closeWhenDone', 'profile', 'connectors', 'skills', 'tools']);
     assert.deepStrictEqual(props(granted, 'resume_worker'), ['worker', 'mode', 'message', 'tools']);
     assert.deepStrictEqual(granted.find(t => t.name === 'launch_cli').inputSchema.required, ['title', 'task']);
     assert.deepStrictEqual(granted.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)), plain.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)));
