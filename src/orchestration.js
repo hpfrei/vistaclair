@@ -309,6 +309,7 @@ const TOOL_PARAMS = {
     isolation: 'worktree | none', area: 'repo-relative files or globs it will change',
     after: 'workers it waits for', cwd: 'directory inside the run root', tools: 'add-on tools, by name',
     host: 'another machine, for a remote worker', app: 'with host: the app it runs in',
+    closeWhenDone: 'close it once done, landed and clean', profile: 'lean | full (default lean)', connectors: 'true: keep the claude.ai connectors',
   },
   cancel_launch: { id: 'the queued launch\'s id, required' },
   list_workers: {},
@@ -787,7 +788,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // A session's --settings file: the caller's own settings file (Pro's
   // read-ledger hooks) merged with the orchestration hooks.
-  function writeSessionSettings(run, name, baseSettingsFile) {
+  // `worker` (a worker's run record, workers only): a run worker does not
+  // auto-fetch the claude.ai cloud connectors (the Docs connector's tools and
+  // instructions are in every first request); launch_cli `connectors: true`
+  // keeps them. The orchestrator and non-run sessions are unchanged.
+  function writeSessionSettings(run, name, baseSettingsFile, { worker } = {}) {
     const base = baseSettingsFile ? readJsonOr(baseSettingsFile, {}) : {};
     const hooks = { ...(base.hooks || {}) };
     const command = `node ${JSON.stringify(HOOK_SCRIPT)}`;
@@ -795,6 +800,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       hooks[ev] = [...(hooks[ev] || []), { matcher: '', hooks: [{ type: 'command', command, timeout: 10 }] }];
     }
     const settings = { ...base, hooks, crossSessionInbound: 'accept' };
+    if (worker && !worker.connectors) settings.disableClaudeAiConnectors = true;
     const dir = path.join(run.runDir, 'sessions');
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `${name}.json`);
@@ -815,7 +821,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
     // sessionDir is per session, never inherited; sessionsRoot (the caller's
     // choice of where folders live) is, through the stamps.
-    const { appendSystemPrompt, settingsFile, name: _n, orchestration: _o, model: _m, sessionDir: _d, engine: _e, auth: _a, ...stamps } = settings;
+    const { appendSystemPrompt, workerAppendSystemPrompt, settingsFile, name: _n, orchestration: _o, model: _m, sessionDir: _d, engine: _e, auth: _a, ...stamps } = settings;
     const sessionsRoot = settings.sessionsRoot || path.join(dataHome, 'data', 'sessions');
     const orchestrator = `orch-${runId}`;
     const run = {
@@ -831,7 +837,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       // The orchestrator's model, for a refresh or a fresh start (orchestratorSettings).
       orchestratorModel: settings.model || null,
       maxBudgetUsd: maxBudgetUsd || null,
-      base: { appendSystemPrompt: appendSystemPrompt || '', settingsFile: settingsFile || null, stamps },
+      base: { appendSystemPrompt: appendSystemPrompt || '', ...(typeof workerAppendSystemPrompt === 'string' && workerAppendSystemPrompt ? { workerAppendSystemPrompt } : {}), settingsFile: settingsFile || null, stamps },
       createdAt: new Date().toISOString(),
       request: null,
       closed: false,
@@ -850,8 +856,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     runDirs.set(runId, runDir);
 
     const card = orchestratorCard(run, { hosts: hostList() });
+    // `settings` still carries workerAppendSystemPrompt: the launch drops it
+    // (the orchestrator and a plain session never get the lean prompt).
+    const { workerAppendSystemPrompt: _w, ...rest } = settings;
     return {
-      ...settings,
+      ...rest,
       engine: run.engine,
       ...authOf(run),
       name: run.orchestrator,
@@ -914,6 +923,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       // orchestrator's isolation is its run's (prepareRun).
       ...(mode !== 'orchestrator' && opts.isolation === 'worktree' ? { isolation: 'worktree', landOnClose: opts.landOnClose === true } : {}),
     };
+    // The lean worker prompt is for a run's workers only: a simple session never has it.
+    if (mode !== 'orchestrator') delete launch.settings.workerAppendSystemPrompt;
     if (mode === 'orchestrator') {
       launch.settings = prepareRun({
         cwd: opts.cwd, runsDir: opts.runsDir, isolation: opts.isolation,
@@ -1005,16 +1016,20 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // A launch's checked parameters, as a queue entry keeps them (cwd resolved,
   // `after` as worker ids). Throws, having changed nothing.
-  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app, closeWhenDone } = {}) {
+  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app, closeWhenDone, profile, connectors } = {}) {
     title = cleanTitle(title);
-    if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone });
+    if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone, profile, connectors });
     if (app !== undefined && app !== null && app !== '') throw new Error('app is for a remote worker (with host)');
+    if (profile !== undefined && profile !== null && profile !== 'lean' && profile !== 'full') throw new Error('profile must be "lean" or "full"');
+    if (connectors !== undefined && connectors !== null && typeof connectors !== 'boolean') throw new Error('connectors must be true or false');
     const target = realpathOr(cwd ? path.resolve(run.root, cwd) : run.root);
     if (!isInside(target, run.root)) throw new Error(`cwd must be inside the run root ${run.root}`);
     const spec = {
       title: title || '', task: String(task), cwd: target, isolation: isolation || run.isolation,
       ...(model ? { model } : {}), ...(tools !== undefined ? { tools } : {}),
       ...(closeWhenDone === true ? { closeWhenDone: true } : {}),
+      ...(profile === 'full' ? { profile: 'full' } : {}),
+      ...(connectors === true ? { connectors: true } : {}),
     };
     const areas = areaOf(area);
     if (areas) spec.area = areas;
@@ -1071,6 +1086,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       ...(model ? { model } : {}),
       ...(spec.queueId ? { queueId: spec.queueId } : {}),
       ...(spec.closeWhenDone ? { closeWhenDone: true } : {}),
+      ...(spec.profile === 'full' ? { profile: 'full' } : {}),
+      ...(spec.connectors === true ? { connectors: true } : {}),
     };
     const grants = grantsOf(tools);
     if (grants) worker.grants = grants;
@@ -1172,7 +1189,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   // launch_cli with a host: the checked spec, or a throw having changed nothing.
-  function remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone }) {
+  function remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone, profile, connectors }) {
     const h = checkHost(host);
     const no = (what, why) => { throw new Error(`${what}: ${why}; omit it for a remote worker`); };
     if (cwd !== undefined && cwd !== null && cwd !== '') no('cwd', 'a remote worker runs in its app\'s directory on its host');
@@ -1180,6 +1197,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (area !== undefined && area !== null) no('area', 'areas are compared between worktrees on this machine');
     if (tools !== undefined) no('tools', 'add-on tool grants are this machine\'s');
     if (closeWhenDone === true) no('closeWhenDone', 'a remote worker is closed with close_worker');
+    if (profile !== undefined && profile !== null) no('profile', 'a remote worker has its own prompt');
+    if (connectors !== undefined && connectors !== null) no('connectors', 'a remote worker has its own settings');
     const theApp = app === undefined || app === null || app === '' ? runApp(run) : String(app).trim();
     if (!theApp) throw new Error('app: name the app on the host this worker runs in (this run has none of its own)');
     if (!APP_RE.test(theApp)) throw new Error('app must be an app name ([a-z0-9-])');
@@ -1424,7 +1443,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   const KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
   const ADDRESS_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
   // Settings a member's caller may not set: the run decides them.
-  const RESERVED = new Set(['name', 'orchestration', 'appendSystemPrompt', 'settingsFile', 'engine', 'auth', 'model', 'sessionDir', 'sessionsRoot', 'agents', 'grants', 'maxBudgetUsd', 'modelMap']);
+  const RESERVED = new Set(['name', 'orchestration', 'appendSystemPrompt', 'workerAppendSystemPrompt', 'settingsFile', 'engine', 'auth', 'model', 'sessionDir', 'sessionsRoot', 'agents', 'grants', 'maxBudgetUsd', 'modelMap']);
 
   function mirrorDir() { return path.join(dataHome, 'data', 'mirror-runs'); }
   function mirrorIndexFile() { return path.join(mirrorDir(), 'index.json'); }
@@ -1837,6 +1856,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // false: nothing written (a check before the launch).
   function workerSettings(run, worker, { write = true } = {}) {
     const card = workerCard(run, worker);
+    // The lean prompt (when the caller gave one) is the default; a worker
+    // launched with profile "full" gets the orchestrator's full prompt.
+    const workerPrompt = worker.profile === 'full' ? run.base.appendSystemPrompt : (run.base.workerAppendSystemPrompt || run.base.appendSystemPrompt);
     return {
       ...run.base.stamps,
       ...(worker.stamps || {}),
@@ -1846,8 +1868,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       name: worker.name,
       ...(worker.sessionDir ? { sessionDir: worker.sessionDir } : {}),
       orchestration: { runId: run.runId, role: 'worker', workerId: worker.id, orchestrator: run.orchestrator, runDir: run.runDir },
-      appendSystemPrompt: run.base.appendSystemPrompt ? `${run.base.appendSystemPrompt}\n\n${card}` : card,
-      settingsFile: write ? writeSessionSettings(run, worker.name, run.base.settingsFile) : path.join(run.runDir, 'sessions', `${worker.name}.json`),
+      appendSystemPrompt: workerPrompt ? `${workerPrompt}\n\n${card}` : card,
+      settingsFile: write ? writeSessionSettings(run, worker.name, run.base.settingsFile, { worker }) : path.join(run.runDir, 'sessions', `${worker.name}.json`),
       agents: WORKER_AGENTS,
       ...(worker.model || run.model ? { model: worker.model || run.model } : {}),
       ...(run.maxBudgetUsd ? { maxBudgetUsd: run.maxBudgetUsd } : {}),

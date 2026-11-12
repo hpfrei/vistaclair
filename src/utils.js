@@ -187,9 +187,11 @@ function buildClaudeArgs(opts, { skipTools, outputFormat = 'stream-json' } = {})
 // workers through events, not Monitor, and reviews nothing itself; a worker
 // asks its orchestrator, not the user — so it loses AskUserQuestion in both
 // forms (the built-in, and the integrated MCP twin the proxy rewrites it to).
+// ScheduleWakeup and ReportFindings (about 7K chars of schema in every worker's
+// first request) are not used by a run worker: it reports through `report`.
 const ROLE_DISALLOWED_TOOLS = {
   orchestrator: ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'Monitor', 'ReportFindings'],
-  worker: ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion', 'mcp__integrated__vista-AskUserQuestion'],
+  worker: ['Workflow', 'EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion', 'mcp__integrated__vista-AskUserQuestion', 'ScheduleWakeup', 'ReportFindings'],
 };
 
 // The tools a session's settings deny it: its orchestration role's list (none
