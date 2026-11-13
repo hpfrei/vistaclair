@@ -1153,6 +1153,14 @@
 .vc-composer-note { font-size: 11px; color: var(--text-dim); }
 .vc-composer-note.bad { color: var(--red); }
 
+/* A−/A+ text size: phone only (the media query below sizes the buttons). */
+.sdk-zoom { display: none; flex: none; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.sdk-zoom button { border: none; background: var(--bg); color: var(--text); font: inherit; font-weight: 600; font-size: 14px; padding: 0 10px; cursor: pointer; }
+.sdk-zoom button + button { border-left: 1px solid var(--border); }
+.sdk-zoom button:disabled { opacity: .4; cursor: default; }
+.sdk-zoom button:active:not(:disabled) { background: var(--bg-hover); }
+@media (max-width: 640px) { .sdk-zoom { display: inline-flex; } }
+
 /* --- phone: boxes stack, no lines, the composer stays docked --- */
 /* An SDK tab types through its own composer, never the terminal key row. */
 #view-claude.sdk-tab-active .mobile-cli-bar { display: none !important; }
@@ -1177,6 +1185,12 @@
   .sdk-bill-short { display: inline; }
   .vc-composer { padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px)); }
   .vc-composer textarea { font-size: 16px; } /* no iOS zoom on focus */
+  /* Text size: the toolbar's A−/A+ set --sdk-zoom (sdk-panel.js). Zoom the
+     transcript's rows, not the scroll containers, so the boxes keep their size. */
+  .sdk-feed > *,
+  .sdk-todo-scroll > *,
+  .sdk-notes-body > * { zoom: var(--sdk-zoom, 1); }
+  .sdk-zoom button { min-width: 44px; min-height: 40px; }
 }
 /* A phone held upright: an add-on's button keeps its symbol, the words are
    in its tooltip and the tab's × menu. */
