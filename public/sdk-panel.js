@@ -47,10 +47,36 @@
 // different ones show both halves part-lit. A turn the subscription's usage
 // limit stopped leaves a card in its feed (platform `usage-limit`) whose
 // button switches to API credits and continues it; the toggle lights up too.
+// Text size on a phone: the toolbar's A−/A+ scale the feed, the TODO table and
+// the notes (CSS `zoom: var(--sdk-zoom)` under 640px, sdk-panel.css); the step
+// is kept in localStorage 'sdkTextZoom'.
 // cli.js owns the tab; this file owns what is inside its wrap.
 (function () {
   const D = window.dashboard;
   const { sendWs, state, escHtml, renderMarkdown, renderMarkdownDebounced, cancelRenderDebounce, showConfirm } = D;
+
+  // ---- text size (phone): percent, kept across reloads, shared by all SDK tabs ----
+  const ZOOM_KEY = 'sdkTextZoom';
+  const ZOOM_MIN = 80, ZOOM_MAX = 200, ZOOM_STEP = 10;
+  const clampZoom = (n) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(n / ZOOM_STEP) * ZOOM_STEP));
+  let _zoom = 100;
+  try { _zoom = clampZoom(parseInt(localStorage.getItem(ZOOM_KEY), 10) || 100); } catch {}
+  const zoomListeners = new Set();
+  // The --sdk-zoom variable lives on the root so the maximized dialog (a child
+  // of <body>) follows too. It only has an effect at phone width.
+  function applyZoom() {
+    document.documentElement?.style?.setProperty('--sdk-zoom', String(_zoom / 100));
+    for (const fn of zoomListeners) fn(_zoom);
+  }
+  function stepZoom(dir) {
+    const next = clampZoom(_zoom + dir * ZOOM_STEP);
+    if (next === _zoom) return _zoom;
+    _zoom = next;
+    try { localStorage.setItem(ZOOM_KEY, String(_zoom)); } catch {}
+    applyZoom();
+    return _zoom;
+  }
+  applyZoom();
 
   const POLL_MS = 15000;           // backstop: TODO/NOTES edits normally arrive as platform.files
   const TICK_MS = 1000;            // the activity rows' elapsed times
@@ -2063,6 +2089,9 @@
             <span class="sdk-toolbar-cost"></span>
             <span class="sdk-spacer"></span>
             <span class="sdk-tb-right">
+              <span class="sdk-zoom" role="group" aria-label="Text size">
+                <button type="button" data-zoom="-1" aria-label="Smaller text">A−</button><button type="button" data-zoom="1" aria-label="Larger text">A+</button>
+              </span>
               <span class="sdk-bill" role="group" aria-label="Billing">
                 <button type="button" data-auth="subscription"><span class="sdk-bill-long">Subscription</span><span class="sdk-bill-short">Sub</span></button><button type="button" data-auth="apikey"><span class="sdk-bill-long">API credits</span><span class="sdk-bill-short">API</span></button>
               </span>
@@ -2110,6 +2139,15 @@
       this.composer = q('vc-composer');
 
       this.pauseBtn.addEventListener('click', () => this.pause());
+      // A−/A+ (phone only: sdk-panel.css hides the group elsewhere). Re-follow
+      // the feeds afterwards: the text grew or shrank under them.
+      this.zoomEl = q('.sdk-zoom');
+      const zbtns = [...this.zoomEl.querySelectorAll('button')];
+      const showZoom = (z) => { zbtns[0].disabled = z <= ZOOM_MIN; zbtns[1].disabled = z >= ZOOM_MAX; this.zoomEl.title = `Text size ${z}%`; };
+      this._onZoom = (z) => { showZoom(z); requestAnimationFrame?.(() => { for (const a of this.allAreas()) a.feedFollow?.settle?.(); }); };
+      zoomListeners.add(this._onZoom);
+      showZoom(_zoom);
+      for (const b of zbtns) b.addEventListener('click', () => stepZoom(Number(b.dataset.zoom)));
       // The run's worker limit: the server clamps it, starts the queued
       // launches a raise makes room for, and tells the orchestrator; every
       // client's select follows by the orchestration:run push.
@@ -2999,6 +3037,7 @@
     }
 
     destroy() {
+      zoomListeners.delete(this._onZoom);
       clearInterval(this._poll);
       clearInterval(this._tick);
       this._ro.disconnect();
@@ -3128,6 +3167,7 @@
     _blocks: { blockFor, overtaken },
     _max: { openMax, closeMax, current: () => _max },
     _Panel: Panel,
+    _zoom: { step: stepZoom, get: () => _zoom, KEY: ZOOM_KEY, MIN: ZOOM_MIN, MAX: ZOOM_MAX },
     _Area: Area,
     _landing: { landingLabel, reportChip },
     _pick: { pickEntries, pickStep, pickKeyOf, pickIndexForKey, pickable, current: () => _pick },

@@ -438,6 +438,8 @@
 
   /* --- CLIs: read-only terminal + key row + composer ------------ */
   .cli-terminal-wrap { touch-action: pan-y; }
+  /* An SDK tab is a page, not a terminal: it scrolls both ways and pinch-zooms. */
+  .cli-terminal-wrap.cli-sdk-wrap { touch-action: manipulation; }
   .cli-terminal-wrap .xterm { padding: 4px 2px; }
   .mobile-cli-bar {
     display: flex;
