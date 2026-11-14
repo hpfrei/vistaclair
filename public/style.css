@@ -7908,3 +7908,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   letter-spacing: .1em;
   text-transform: uppercase;
 }
+
+/* ARCHIVE.md rows on a run card: collapsed behind "▸ N done (archive)". */
+.sc-todo-arch { margin-top: 4px; }
+.sc-todo-arch > summary { cursor: pointer; list-style: none; font-size: 11px; color: var(--text-dim); }
+.sc-todo-arch > summary::-webkit-details-marker { display: none; }
+.sc-todo-arch > summary::before { content: '▸ '; }
+.sc-todo-arch[open] > summary::before { content: '▾ '; }
+.sc-todo-arch > ul { margin-top: 3px; }

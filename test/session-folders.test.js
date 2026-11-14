@@ -88,3 +88,63 @@ test('the convention note: a changed requirement rewrites the TODO rows and repl
   assert.match(note, /When an instruction changes the requirements, rewrite the rows it affects \(add, reword, or mark them dropped\) before you act on it\./);
   assert.match(note, /A decision a new instruction overrides is replaced or struck, not left in place with the new one below it: NOTES\.md always describes the current spec, and a fresh restart works from it\./);
 });
+
+// ---- ARCHIVE.md: finished rows the orchestrator moved out of TODO.md ----
+
+const FIXTURE = path.join(__dirname, 'fixtures', 'orch-archive');   // copied from a real run (7d1c23)
+
+function tmpFolder(files) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-archive-'));
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text);
+  return dir;
+}
+
+test('readFolder: ARCHIVE.md rows come back separately and count as done (11 of 16)', () => {
+  const f = folders.readFolder(FIXTURE);
+  assert.strictEqual(f.items.length, 5);
+  assert.strictEqual(f.archived.length, 11);
+  assert.deepStrictEqual(f.archived.slice(0, 2).map(r => r.id), ['t0', 't1a']);
+  assert.match(f.archived[0].description, /^Bench A–H/);
+  assert.ok(f.archived.every(r => folders.isDone(r.status)));
+  assert.deepStrictEqual([f.progressAll.done, f.progressAll.total, f.progressAll.archived], [11 + f.progress.done, 16, 11]);
+  assert.strictEqual(f.progressAll.doing?.id, f.progress.doing?.id);
+});
+
+test('readFolder: the model-facing view stays open-only (list_workers / RESTART seed read items and progress)', () => {
+  const f = folders.readFolder(FIXTURE);
+  assert.strictEqual(f.items.length, 5);
+  assert.ok(!f.items.some(i => f.archived.some(a => a.id === i.id)));
+  assert.strictEqual(f.progress.total, 5);
+  assert.strictEqual(f.progress.archived, undefined);
+});
+
+test('readFolder: no ARCHIVE.md looks exactly as before', () => {
+  const dir = tmpFolder({ 'TODO.md': '| id | description | depends on | status |\n|---|---|---|---|\n| 1 | a | | done |\n| 2 | b | | doing |\n' });
+  try {
+    const f = folders.readFolder(dir);
+    assert.deepStrictEqual(f.archived, []);
+    assert.strictEqual(f.progressAll, f.progress);
+    assert.deepStrictEqual(f.progress, { total: 2, done: 1, doing: { id: '2', description: 'b' } });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('parseArchive: no header, blank lines, a status that does not say done', () => {
+  const rows = folders.parseArchive('# ARCHIVE — run x\n| a1 | first | | landed abc |\n\n| a2 | second | a1 | merged |\n\n\n| a3 | third | | done — x |\n');
+  assert.deepStrictEqual(rows.map(r => r.id), ['a1', 'a2', 'a3']);
+  assert.strictEqual(rows[1].dependsOn, 'a1');
+  assert.strictEqual(rows[0].status, 'landed abc');
+});
+
+test('parseArchive: a header and separator row are skipped, columns follow the header; 3 cells = no depends on', () => {
+  const withHeader = folders.parseArchive('| status | id | description |\n|---|---|---|\n| done | x | desc |\n');
+  assert.deepStrictEqual(withHeader.map(r => [r.id, r.description, r.status]), [['x', 'desc', 'done']]);
+  const three = folders.parseArchive('| b1 | thing | done |\n');
+  assert.deepStrictEqual(three.map(r => [r.id, r.description, r.dependsOn, r.status]), [['b1', 'thing', '', 'done']]);
+  assert.deepStrictEqual(folders.parseArchive(''), []);
+  assert.deepStrictEqual(folders.parseArchive(null), []);
+});
+
+test('readFolder: a folder with only an ARCHIVE.md and TODO.md missing is still null without notes', () => {
+  const dir = tmpFolder({ 'ARCHIVE.md': '| a | b | | done |\n' });
+  try { assert.strictEqual(folders.readFolder(dir), null); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

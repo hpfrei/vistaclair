@@ -116,22 +116,29 @@
     return { kind: 'queued', icon: '○' };
   }
 
-  // The last TODO rows with a progress bar: `todo` is { done, total, rows }.
+  // The last TODO rows with a progress bar: `todo` is { done, total, rows,
+  // archived? }. `archived` (ARCHIVE.md rows, already counted in done/total)
+  // sits below the open rows as done rows behind "▸ 11 done (archive)".
   function todoList(todo) {
-    if (!todo?.rows?.length) return '';
+    const archived = todo?.archived || [];
+    if (!todo?.rows?.length && !archived.length) return '';
     const pct = todo.total ? Math.round((todo.done / todo.total) * 100) : 0;
     const head = todo.total
       ? `<div class="sc-todo-head"><span>TODO</span><span class="sc-progress"><span style="width:${pct}%"></span></span><span>${todo.done}/${todo.total}</span></div>`
       : '';
-    const rows = todo.rows.map(r => {
-      const k = todoKind(r.status);
+    const li = (r, forceDone) => {
+      const k = forceDone ? { kind: 'done', icon: '✓' } : todoKind(r.status);
       return `<li class="sc-todo-row is-${k.kind}" title="${esc(`${r.id}: ${r.description}\n${r.status}`)}">`
         + `<span class="sc-todo-icon">${k.icon}</span>`
         + `<span class="sc-todo-id">${esc(r.id)}</span>`
         + `<span class="sc-todo-desc">${esc(r.description || '')}</span>`
         + `<span class="sc-todo-status">${esc(String(r.status || '').split(/\s/)[0])}</span></li>`;
-    }).join('');
-    return `<div class="sc-todo">${head}<ul>${rows}</ul></div>`;
+    };
+    const rows = (todo.rows || []).map(r => li(r, false)).join('');
+    const arch = archived.length
+      ? `<details class="sc-todo-arch"><summary>${archived.length} done (archive)</summary><ul>${archived.map(r => li(r, true)).join('')}</ul></details>`
+      : '';
+    return `<div class="sc-todo">${head}<ul>${rows}</ul>${arch}</div>`;
   }
 
   // The worker list: each item is { name, state, detail, aside, title, attrs }

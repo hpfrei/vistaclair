@@ -117,10 +117,10 @@ function summarizeRuns(entries, { runs = new Map(), liveOf = () => null } = {}) 
     // orchestrator entry is gone reads the folder from the record.
     let todo = null;
     if (orchEntry?.todoTail) {
-      todo = { ...orchEntry.progress, rows: orchEntry.todoTail };
+      todo = { ...orchEntry.progress, rows: orchEntry.todoTail, archived: orchEntry.archivedRows || [] };
     } else if (run) {
       const f = folders.readFolder(run.orchestratorDir || run.runDir);
-      if (f) todo = { ...f.progress, updatedAt: f.todoUpdatedAt, rows: tailOf(f.items) };
+      if (f) todo = { ...f.progressAll, updatedAt: f.todoUpdatedAt, rows: tailOf(f.items), archived: rowsOf(f.archived) };
     }
 
     const running = workers.filter(w => w.running).length;
@@ -156,8 +156,12 @@ function summarizeRuns(entries, { runs = new Map(), liveOf = () => null } = {}) 
   return out.sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
 }
 
-function tailOf(items) {
-  return items.slice(-TODO_TAIL).map(i => ({ id: i.id, description: i.description, status: i.status }));
+function rowsOf(items) {
+  return (items || []).map(i => ({ id: i.id, description: i.description, status: i.status }));
 }
 
-module.exports = { summarizeRuns, costOf, runStatus, workerState, readRun, tailOf, TODO_TAIL };
+function tailOf(items) {
+  return (items || []).slice(-TODO_TAIL).map(i => ({ id: i.id, description: i.description, status: i.status }));
+}
+
+module.exports = { summarizeRuns, costOf, runStatus, workerState, readRun, tailOf, rowsOf, TODO_TAIL };

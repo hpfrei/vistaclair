@@ -124,6 +124,25 @@
     : ms < 86400000 ? `${Math.floor(ms / 3600000)}h` : `${Math.floor(ms / 86400000)}d`;
   const costOf = (c) => typeof c === 'number' ? c
     : c && typeof c === 'object' ? (c.usd ?? c.costUsd ?? c.totalUsd ?? c.total ?? null) : null;
+  // The TODO table: the open rows, then (a session with an ARCHIVE.md) a
+  // toggle that shows the archived rows as done rows.
+  function todoTableHtml(rows, archived, open) {
+    const tr = (r, forceDone) => {
+      const st = String(r.status || '');
+      const cls = forceDone ? 'done' : isDoing(st) ? 'doing' : isDone(st) ? 'done' : isBlocked(st) ? 'blocked' : 'open';
+      const tip = [r.description || '', r.dependsOn ? `depends on ${r.dependsOn}` : '', st].filter(Boolean).join('\n');
+      return `<tr class="sdk-todo-${cls}" title="${escHtml(tip)}"><td class="sdk-todo-id">${escHtml(r.id)}</td>`
+        + `<td class="sdk-todo-desc"><div class="sdk-clamp">${escHtml(r.description || '')}</div></td>`
+        + `<td class="sdk-todo-st"><span class="sdk-chip sdk-todo-chip sdk-todo-chip-${cls}" title="${escHtml(st)}">${escHtml(clip(st || '—', 40))}</span></td></tr>`;
+    };
+    const table = (list, forceDone) => `<table class="sdk-todo"><colgroup><col class="sdk-todo-c-id"><col><col class="sdk-todo-c-st"></colgroup><tbody>${list.map(r => tr(r, forceDone)).join('')}</tbody></table>`;
+    if (!rows.length && !archived.length) return '<div class="sdk-empty">No TODO.md yet.</div>';
+    return (rows.length ? table(rows, false) : '<div class="sdk-empty">No open rows.</div>')
+      + (archived.length
+        ? `<button type="button" class="sdk-todo-arch" aria-expanded="${open}" title="Finished rows moved to ARCHIVE.md">${open ? '▾' : '▸'} ${archived.length} done (archive)</button>${open ? table(archived, true) : ''}`
+        : '');
+  }
+
   const isDone = (s) => /^(done|complete|completed|finished|dropped|✓|✔)/i.test(String(s || '').trim());
   const isDoing = (s) => /^(doing|in[ _-]?progress|wip|active|started)/i.test(String(s || '').trim());
   const isBlocked = (s) => /^(blocked|failed|error)/i.test(String(s || '').trim());
@@ -494,6 +513,12 @@
       this.todoView = q('.sdk-todo-scroll');
       this._initSplit(q('.sdk-view-live'), q('.sdk-todo-split'));
       this.todoEl = q('.sdk-todo-wrap');
+      // "▸ 11 done (archive)": the ARCHIVE.md rows, collapsed until asked for.
+      this.todoEl.addEventListener('click', (e) => {
+        if (!e.target.closest?.('.sdk-todo-arch')) return;
+        this.archiveOpen = !this.archiveOpen;
+        this.renderTodo();
+      });
       this.notesPane = q('.sdk-view-notes');
       this.notesEl = q('.sdk-notes-body');
       this.feed = q('.sdk-feed');
@@ -717,11 +742,12 @@
       this.thinkBtn.title = this.showThinking
         ? 'Thinking shown: the model\'s thinking summaries appear in Live, from its next request. Click to hide them.'
         : 'Thinking hidden. Click to show the model\'s thinking summaries in Live, from its next request (billed the same either way).';
+      const arch = this.todo?.archived?.length || 0;   // ARCHIVE.md rows count as done
       const t = this.todo?.rows || [];
-      const done = t.filter(x => isDone(x.status)).length;
+      const done = t.filter(x => isDone(x.status)).length + arch;
       // The row it is on: its id beside the count, its description as the tip.
       const doing = t.find(x => isDoing(x.status));
-      this.segBtns.live.textContent = t.length ? `Live ${done}/${t.length}${doing ? ` ▸ ${clip(String(doing.id), 6)}` : ''}` : 'Live';
+      this.segBtns.live.textContent = t.length + arch ? `Live ${done}/${t.length + arch}${doing ? ` ▸ ${clip(String(doing.id), 6)}` : ''}` : 'Live';
       this.segBtns.live.title = doing ? `Doing ${doing.id}: ${doing.description || ''}` : '';
       this.renderContext();
       this.renderNow();
@@ -897,11 +923,12 @@
     onTodo(msg) {
       const rows = Array.isArray(msg.rows) ? msg.rows : [];
       const notes = typeof msg.notes === 'string' ? msg.notes : '';
-      const sig = JSON.stringify([rows, notes]);
+      const archived = Array.isArray(msg.archived) ? msg.archived : [];
+      const sig = JSON.stringify([rows, archived, notes]);
       if (sig === this._todoSig) return;
       this._todoSig = sig;
       const notesChanged = notes !== this.todo?.notes;
-      this.todo = { rows, notes };
+      this.todo = { rows, archived, notes };
       this.renderTodo();
       if (notesChanged) this.renderNotes({ scroll: true });
       this.renderHeader();
@@ -912,19 +939,11 @@
     // newest rows in view.
     renderTodo() {
       const rows = this.todo?.rows || [];
-      const sig = this._todoSig || '';
+      const archived = this.todo?.archived || [];
+      const sig = `${this._todoSig || ''}|${this.archiveOpen ? 1 : 0}`;
       if (this._todoDrawn !== sig) {
         this._todoDrawn = sig;
-        this.todoEl.innerHTML = rows.length
-          ? `<table class="sdk-todo"><colgroup><col class="sdk-todo-c-id"><col><col class="sdk-todo-c-st"></colgroup><tbody>${rows.map(r => {
-            const st = String(r.status || '');
-            const cls = isDoing(st) ? 'doing' : isDone(st) ? 'done' : isBlocked(st) ? 'blocked' : 'open';
-            const tip = [r.description || '', r.dependsOn ? `depends on ${r.dependsOn}` : '', st].filter(Boolean).join('\n');
-            return `<tr class="sdk-todo-${cls}" title="${escHtml(tip)}"><td class="sdk-todo-id">${escHtml(r.id)}</td>`
-              + `<td class="sdk-todo-desc"><div class="sdk-clamp">${escHtml(r.description || '')}</div></td>`
-              + `<td class="sdk-todo-st"><span class="sdk-chip sdk-todo-chip sdk-todo-chip-${cls}" title="${escHtml(st)}">${escHtml(clip(st || '—', 40))}</span></td></tr>`;
-          }).join('')}</tbody></table>`
-          : '<div class="sdk-empty">No TODO.md yet.</div>';
+        this.todoEl.innerHTML = todoTableHtml(rows, archived, !!this.archiveOpen);
       }
     }
 

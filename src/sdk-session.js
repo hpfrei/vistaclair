@@ -845,6 +845,7 @@ class SdkSession {
     if (!dir || !Array.isArray(content)) return;
     const todo = path.join(path.resolve(dir), 'TODO.md');
     const notes = path.join(path.resolve(dir), 'NOTES.md');
+    const archive = path.join(path.resolve(dir), 'ARCHIVE.md');
     const inDir = !!this.cwd && path.resolve(this.cwd) === path.resolve(dir);
     for (const b of content) {
       if (b?.type !== 'tool_use' || !b.id) continue;
@@ -852,10 +853,10 @@ class SdkSession {
       if (EDIT_TOOLS.has(b.name)) {
         const p = b.input?.file_path || b.input?.notebook_path;
         const file = typeof p === 'string' ? path.resolve(this.cwd || dir, p) : null;
-        if (file === todo || file === notes) hit = { todo: file === todo, notes: file === notes };
+        if (file === todo || file === notes || file === archive) hit = { todo: file === todo || file === archive, notes: file === notes };
       } else if (b.name === 'Bash' && typeof b.input?.command === 'string') {
         const cmd = b.input.command;
-        const t = cmd.includes(todo) || (inDir && cmd.includes('TODO.md'));
+        const t = cmd.includes(todo) || cmd.includes(archive) || (inDir && (cmd.includes('TODO.md') || cmd.includes('ARCHIVE.md')));
         const n = cmd.includes(notes) || (inDir && cmd.includes('NOTES.md'));
         if (t || n) hit = { todo: t, notes: n };
       }

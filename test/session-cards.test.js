@@ -48,3 +48,23 @@ test('missing cwd or start time: no name without cwd, oldest otherwise', () => {
   assert.strictEqual(names.get('p1'), 'p');
   assert.strictEqual(names.get('p2'), 'p 2');
 });
+
+// The run card's TODO block: archived rows sit collapsed below the open ones.
+test('todoList: archived rows are a collapsed details block; no archive looks as before', () => {
+  global.window = { dashboard: { escHtml: s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;') } };
+  delete require.cache[require.resolve('../public/session-cards.js')];
+  const { todoList } = require('../public/session-cards.js');
+  const open = [{ id: '1', description: 'open <one>', status: 'doing' }];
+  const plain = todoList({ done: 0, total: 1, rows: open });
+  assert.ok(!plain.includes('archive'));
+  assert.ok(plain.includes('0/1'));
+  const html = todoList({ done: 3, total: 4, rows: open, archived: [
+    { id: 'a', description: 'x', status: 'landed' }, { id: 'b', description: 'y', status: 'whatever' }, { id: 'c', description: 'z', status: '' }] });
+  assert.ok(html.includes('3/4'));
+  assert.match(html, /<details class="sc-todo-arch"><summary>3 done \(archive\)<\/summary>/);
+  assert.ok(!/<details[^>]* open/.test(html), 'collapsed by default');
+  assert.strictEqual((html.match(/is-done/g) || []).length, 3, 'archived rows render as done whatever their status says');
+  // Only archived rows (everything finished): still shown.
+  assert.ok(todoList({ done: 1, total: 1, rows: [], archived: [{ id: 'a', description: 'x', status: 'z' }] }).includes('1 done (archive)'));
+  delete global.window;
+});
