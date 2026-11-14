@@ -482,6 +482,8 @@ function handleMessage(ws, msg, bc) {
       send({
         type: 'sdk:todo', sessId: msg.sessId,
         rows: (folder?.items || []).map(i => ({ id: i.id, description: i.description, dependsOn: i.dependsOn, status: i.status })),
+        // ARCHIVE.md: finished rows, shown collapsed below the open ones.
+        ...(folder?.archived?.length ? { archived: folder.archived.map(i => ({ id: i.id, description: i.description, dependsOn: i.dependsOn, status: i.status })) } : {}),
         notes,
       });
       break;

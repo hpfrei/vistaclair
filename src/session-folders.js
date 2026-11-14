@@ -67,6 +67,43 @@ function parseTodo(text) {
   return items;
 }
 
+// ARCHIVE.md: the finished rows an orchestrator moved out of TODO.md. Same
+// table, but often without a header row and with blank lines between rows, so
+// every `|` line is a row: columns by a header when one is there, else
+// id | description | depends on | status (3 cells: no depends on). Every row
+// counts as done whatever its status text says; only the UI reads them.
+function parseArchive(text) {
+  const items = [];
+  let cols = null;
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line.startsWith('|')) continue;
+    const cells = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+    if (cells.every(c => /^:?-*:?$/.test(c))) continue;   // the |---| separator
+    const names = cells.map(c => c.toLowerCase());
+    const idCol = names.findIndex(n => n === 'id' || n === '#');
+    const stCol = names.findIndex(n => n.startsWith('status'));
+    if (idCol >= 0 && stCol >= 0) {                        // a header row
+      cols = {
+        id: idCol, status: stCol,
+        description: names.findIndex(n => n.startsWith('desc') || n === 'task' || n === 'item'),
+        dependsOn: names.findIndex(n => n.startsWith('depend')),
+      };
+      continue;
+    }
+    if (!cols) cols = cells.length >= 4 ? { id: 0, description: 1, dependsOn: 2, status: 3 } : { id: 0, description: 1, dependsOn: -1, status: 2 };
+    const id = cells[cols.id];
+    if (!id) continue;
+    items.push({
+      id,
+      description: cols.description >= 0 ? cells[cols.description] || '' : '',
+      dependsOn: cols.dependsOn >= 0 ? cells[cols.dependsOn] || '' : '',
+      status: cells[cols.status] || '',
+    });
+  }
+  return items;
+}
+
 const statusWord = (s) => String(s || '').toLowerCase();
 const isDone = (s) => /^(done|complete|completed|finished|dropped|✓|✔)/.test(statusWord(s));
 const isDoing = (s) => /^(doing|in[ _-]?progress|wip|active|started)/.test(statusWord(s));
@@ -106,10 +143,20 @@ function readFolder(dir) {
   const notesText = readFileOr(notesFile);
   if (todoText == null && notesText == null) return null;
   const items = parseTodo(todoText);
+  const progress = summarize(items);
+  // The archive is for the UI only: `items` and `progress` stay open-only
+  // (the orchestrator's list_workers / RESTART seed read them);
+  // `progressAll` counts the archived rows as done.
+  const archiveText = readFileOr(path.join(dir, 'ARCHIVE.md'));
+  const archived = archiveText == null ? [] : parseArchive(archiveText);
   return {
     dir,
     items,
-    progress: summarize(items),
+    archived,
+    progress,
+    progressAll: archived.length
+      ? { ...progress, total: progress.total + archived.length, done: progress.done + archived.length, archived: archived.length }
+      : progress,
     todoUpdatedAt: mtimeOf(todoFile) || null,
     notesUpdatedAt: mtimeOf(notesFile) || null,
     resume: resumeSection(notesText),
@@ -132,6 +179,6 @@ function conventionNote(dir) {
 }
 
 module.exports = {
-  mintKey, slugify, ensureFolder, parseTodo, summarize, resumeSection, readFolder,
+  mintKey, slugify, ensureFolder, parseTodo, parseArchive, summarize, resumeSection, readFolder,
   conventionNote, CONTROL_TRUST, TODO_HEADER, isDone, isDoing,
 };

@@ -188,7 +188,7 @@ function createSessionControl({ mgr, broadcaster, finalizeDelayMs = FINALIZE_DEL
         const out = [];
         const dir = folderOf(session);
         if (dir && !sub) {
-          const m = mtimeOf(path.join(dir, 'TODO.md'));
+          const m = mtimeOf(path.join(dir, 'TODO.md')) + mtimeOf(path.join(dir, 'ARCHIVE.md'));
           if (m !== st.todoMtime) {
             st.todoMtime = m;
             st.sinceTodo = 0;

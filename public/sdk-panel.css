@@ -1197,3 +1197,7 @@
 @media (max-width: 380px) {
   .sdk-tb-action:has(.sdk-tb-ico) .sdk-tb-lbl { display: none; }
 }
+
+/* The ARCHIVE.md toggle under the open rows: "▸ 11 done (archive)". */
+.sdk-todo-arch { display: block; width: 100%; padding: 4px 8px; background: none; border: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); color: var(--text-dim); font: inherit; font-size: 11.5px; text-align: left; cursor: pointer; }
+.sdk-todo-arch:hover { color: var(--text); }

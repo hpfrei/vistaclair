@@ -7,7 +7,7 @@ const SdkSession = require('./sdk-session');
 const { ExternalSession } = require('./external-session');
 const caps = require('./capabilities');
 const folders = require('./session-folders');
-const { summarizeRuns, costOf, tailOf } = require('./run-summary');
+const { summarizeRuns, costOf, tailOf, rowsOf } = require('./run-summary');
 const { readJSON, writeJSON, tryRm, DATA_HOME, PACKAGE_ROOT } = require('./utils');
 
 const HISTORY_FILE = path.join(DATA_HOME, 'data', 'cli-history.json');
@@ -457,13 +457,13 @@ class CliSessionManager {
       entry.isRunning = runningIds.has(entry.id);
       const dir = entry.settings?.sessionDir;
       const folder = dir ? folders.readFolder(dir) : null;
-      if (folder) entry.progress = { ...folder.progress, updatedAt: folder.todoUpdatedAt, hasResume: !!folder.resume };
+      if (folder) entry.progress = { ...folder.progressAll, updatedAt: folder.todoUpdatedAt, hasResume: !!folder.resume };
       // Orchestration run members make one card with their orchestrator in
       // the Sessions tab, which shows the orchestrator's last TODO rows; a
       // worker's own close/delete rules need its last report.
       const st = entry.settings?.orchestration;
       if (entry.kind === 'sdk' && dir && !st?.runId) entry.costUsd = costOf(live.get(entry.id), null, dir);
-      if (folder && st?.role === 'orchestrator') entry.todoTail = tailOf(folder.items);
+      if (folder && st?.role === 'orchestrator') { entry.todoTail = tailOf(folder.items); entry.archivedRows = rowsOf(folder.archived); }
       if (st?.runId) {
         if (!runs.has(st.runDir)) runs.set(st.runDir, readJSON(path.join(st.runDir || '', 'run.json'), null));
         const run = runs.get(st.runDir);
