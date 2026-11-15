@@ -222,6 +222,10 @@ class DashboardBroadcaster {
     this.registerHandler(cliHandler.PREFIXES, cliHandler);
     const claudeAuthHandler = require('./ws/claude-auth-handler');
     this.registerHandler(claudeAuthHandler.PREFIXES, claudeAuthHandler.create(this));
+    // Desks (src/desks.js): which tab sits on which desk, for every dashboard.
+    const desksHandler = require('./ws/desks-handler');
+    this.desks = desksHandler.create(this, opts.desks);
+    this.registerHandler(desksHandler.PREFIXES, this.desks);
 
     this.sessions = new InspectorSessions({
       store, broadcaster: this, getInstances, removeInstances,

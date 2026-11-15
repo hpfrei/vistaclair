@@ -1,0 +1,269 @@
+/* Desks (public/desks.js): the desk sub-tabs, the window manager, the
+   taskbar; plus the shared tab menu (tab-context-menu.js) and the dimmed
+   "on desk" look of a tab in its home strip (tab-host.js). */
+
+#view-desks {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.desks-nav { align-items: flex-end; }
+.desks-nav-spacer { flex: 1; }
+.desks-tile-btn {
+  align-self: center;
+  margin: 0 0 4px 8px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.desks-tile-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.24); }
+.desks-tile-btn:disabled { opacity: 0.45; cursor: default; }
+.desk-tab-count {
+  margin-left: 6px;
+  font-size: 10px;
+  opacity: 0.7;
+}
+.desk-tab-input {
+  font: inherit;
+  font-size: 12px;
+  width: 120px;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: var(--bg-surface);
+  color: var(--text);
+}
+
+.desks-area {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  background: var(--paper-bg, var(--bg));
+}
+.desk-area {
+  position: absolute;
+  inset: 0;
+}
+.desks-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* ---- windows ---- */
+.desk-win {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 9px);
+  box-shadow: var(--vc-shadow, 0 8px 24px rgba(0, 0, 0, 0.25));
+  overflow: hidden;
+}
+.desk-win.desk-win-top {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: var(--vc-shadow-hi, 0 12px 32px rgba(0, 0, 0, 0.32));
+}
+.desk-win.maximized {
+  left: 0 !important;
+  top: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 0;
+}
+.desk-win-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 4px 0 8px;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--text-bright) 5%, var(--bg-surface));
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.desk-win-top .desk-win-bar { background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface)); }
+.desk-win-icon { font-size: 13px; opacity: 0.8; }
+.desk-win-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+.desk-win-btns { display: flex; gap: 2px; }
+.desk-win-btn {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.desk-win-btn:hover { background: color-mix(in srgb, var(--text-bright) 10%, transparent); color: var(--text); }
+/* The content's own flex layout (a .cli-terminal-wrap is flex: 1). */
+.desk-win-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+/* While a window is dragged or resized, iframes and terminals below the
+   pointer must not swallow the moves. */
+.desks-dragging .desk-win-body { pointer-events: none; }
+.desks-dragging { cursor: grabbing; }
+
+.desk-rs { position: absolute; z-index: 2; }
+.desk-rs-n, .desk-rs-s { left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
+.desk-rs-n { top: -3px; }
+.desk-rs-s { bottom: -3px; }
+.desk-rs-e, .desk-rs-w { top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
+.desk-rs-e { right: -3px; }
+.desk-rs-w { left: -3px; }
+.desk-rs-ne, .desk-rs-nw, .desk-rs-se, .desk-rs-sw { width: 12px; height: 12px; }
+.desk-rs-ne { top: -3px; right: -3px; cursor: nesw-resize; }
+.desk-rs-sw { bottom: -3px; left: -3px; cursor: nesw-resize; }
+.desk-rs-nw { top: -3px; left: -3px; cursor: nwse-resize; }
+.desk-rs-se { bottom: -3px; right: -3px; cursor: nwse-resize; }
+.desk-win.maximized .desk-rs { display: none; }
+
+.desk-snap-preview {
+  position: absolute;
+  z-index: 100000;
+  border: 2px solid var(--accent);
+  border-radius: var(--radius-md, 9px);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  pointer-events: none;
+}
+
+/* ---- placeholders ---- */
+.desk-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  text-align: center;
+}
+.desk-ph-title { font-weight: 600; color: var(--text); }
+.desk-ph-text { font-size: 12px; color: var(--text-dim); max-width: 360px; }
+.desk-ph-btn {
+  padding: 5px 14px;
+  font-size: 12px;
+  border-radius: var(--radius, 6px);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.desk-ph-reopen { border-color: var(--accent); color: var(--accent); }
+.desk-ph-btn:hover { background: color-mix(in srgb, var(--text-bright) 8%, var(--bg-surface)); }
+.desk-ph-btn:disabled { opacity: 0.5; cursor: progress; }
+
+/* ---- taskbar ---- */
+.desks-taskbar {
+  display: flex;
+  gap: 4px;
+  padding: 4px 8px;
+  min-height: 32px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.desk-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--text-bright) 5%, var(--bg-surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius, 6px);
+  cursor: pointer;
+}
+.desk-task-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.desk-task.minimized { opacity: 0.6; font-style: italic; }
+.desk-task:hover { border-color: var(--accent); }
+
+/* ---- a home-strip tab that is on a desk (tab-host.js) ---- */
+.view-tab.tab-on-desk { opacity: 0.55; font-style: italic; }
+.view-tab.tab-on-desk:hover { opacity: 0.85; }
+.tab-desk-chip {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-style: normal;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  white-space: nowrap;
+}
+
+/* ---- the shared tab menu (tab-context-menu.js) ---- */
+.tab-ctx-menu { min-width: 200px; position: fixed; }
+.tab-ctx-item.tab-ctx-danger { color: var(--red); }
+.tab-ctx-item.disabled { opacity: 0.5; cursor: default; }
+.tab-ctx-item.tab-ctx-editing { padding: 6px 10px; cursor: default; }
+.tab-ctx-input {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ---- toast actions (toast.js), e.g. Undo ---- */
+.toast-item-actions { display: flex; gap: 6px; margin-top: 6px; }
+.toast-item-action {
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm, 4px);
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+}
+.toast-item-action:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+/* No desks on a phone: no header entry (the tab bar has none either). */
+@media (max-width: 640px) {
+  .header-tab[data-view="desks"], #view-desks { display: none !important; }
+}

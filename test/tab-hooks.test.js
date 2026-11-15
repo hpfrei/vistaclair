@@ -136,26 +136,32 @@ test('the dashboard wires the registry: window.dashboard, the tab strip, the × 
   assert.match(sdk, /_tabHooks\.onChange\(/);
 });
 
-// cli.js's renderTabStrip, run on a stub DOM. A throw there also stops
-// switchTab before sdkPanel.setActive, which leaves every SDK box unshown and
-// its Live feed empty (it never asks for sdk:history).
+// cli.js's decorateTab (what TabHost calls to draw each CLI tab's button),
+// run on a stub DOM. A throw there also stops the strip render inside
+// switchTab, which leaves every SDK box unshown and its Live feed empty (it
+// never asks for sdk:history).
 function renderStrip(tabList) {
   const src = read('cli.js');
-  const start = src.indexOf('  function renderTabStrip() {');
+  const start = src.indexOf('  function decorateTab(tabId, btn, label) {');
   const end = src.indexOf('\n  }\n', start);
-  assert.ok(start > 0 && end > start, 'renderTabStrip found in cli.js');
+  assert.ok(start > 0 && end > start, 'decorateTab found in cli.js');
   const node = () => ({
     children: [], dataset: {}, style: {}, classList: { add() {} },
     appendChild(c) { this.children.push(c); }, addEventListener() {},
   });
-  const strip = { ...node(), querySelectorAll: () => [], insertBefore(c) { this.children.push(c); } };
-  const run = new Function('tabStrip', 'tabNewBtn', 'tabs', 'activeTabId', 'pendingAskOverlays', 'isSdk', 'computeTabLabel', 'updateStreamingState', 'scheduleCloseMenuClose', 'document', 'window',
-    src.slice(start, end + 4) + '\nrenderTabStrip();');
+  const run = new Function('tabs', 'activeTabId', 'pendingAskOverlays', 'isSdk', 'computeTabLabel', 'scheduleCloseMenuClose', 'document', 'window',
+    src.slice(start, end + 4) + '\nreturn decorateTab;');
   const tabs = new Map(tabList.map((t, i) => [`tab-${i + 1}`, t]));
-  run(strip, null, tabs, 'tab-1', new Map(), (t) => t?.kind === 'sdk', (id) => id, () => {}, () => {},
+  const decorateTab = run(tabs, 'tab-1', new Map(), (t) => t?.kind === 'sdk', (id) => id, () => {},
     { createElement: node }, { dashboard: { _tabBadgeEl: () => null } });
-  // [Sessions, ...one button per tab]; a tab's buttons by their class.
-  return strip.children.slice(1).map(b => b.children.map(c => c.className).filter(Boolean));
+  // One button per tab (TabHost makes it with its label); its buttons by their class.
+  return [...tabs.keys()].map((id) => {
+    const btn = node();
+    const label = node();
+    btn.appendChild(label);
+    decorateTab(id, btn, label);
+    return btn.children.slice(1).map(c => c.className).filter(Boolean);
+  });
 }
 
 test('renderTabStrip draws orchestration and worktree tabs without throwing', () => {
