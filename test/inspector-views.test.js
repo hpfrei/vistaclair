@@ -197,3 +197,32 @@ test('the tab strip: open, switch, close, the Sessions grid and the footer, as b
   assert.ok(!grid.classList.contains('hidden'));
   assert.strictEqual(shownBodies().length, 0);
 });
+
+test('streaming, selection and the view\'s own buttons act on that view only', () => {
+  const { mod, dom, a, b } = twoViews();
+  const live = { ...turn('cli-a', 's1', { status: 'pending' }), isStreaming: true };
+  mod.handleMessage({ type: 'interaction:start', interaction: live });
+  const ev = (eventType, data) => mod.handleMessage({ type: 'sse_event', instanceId: 'cli-a', interactionId: 's1', event: { eventType, data } });
+  ev('message_start', { message: { usage: { input_tokens: 4 } } });
+  ev('content_block_start', { index: 0, content_block: { type: 'text' } });
+  ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'Streaming into A' } });
+  dom.flushFrames();
+  assert.strictEqual(a.root.querySelectorAll('.footer-streaming-badge').length, 1, 'A\'s footer has the live turn');
+  assert.strictEqual(b.root.querySelectorAll('.footer-streaming-badge').length, 0);
+  assert.match(a.root.querySelector('.ln-turn[data-id="s1"]').textContent, /Streaming into A/);
+  assert.doesNotMatch(b.root.textContent, /Streaming into A/);
+
+  // A click on a timeline entry selects it in its own view.
+  a.root.querySelector('.turn-entry[data-id="a1"]').click();
+  assert.ok(a.root.querySelector('.turn-entry[data-id="a1"]').classList.contains('selected'));
+  assert.strictEqual(b.root.querySelectorAll('.selected').length, 0);
+
+  // Focus mode and Clear are per view.
+  a.root.querySelector('#detail-focus-btn').click();
+  assert.ok(a.root.classList.contains('focus-active'));
+  assert.ok(!b.root.classList.contains('focus-active'));
+  b.root.querySelector('#timeline-clear-btn').click();
+  dom.flushFrames();
+  assert.deepStrictEqual(laneTurns(b.root), []);
+  assert.deepStrictEqual(laneTurns(a.root), ['a1', 's1']);
+});
