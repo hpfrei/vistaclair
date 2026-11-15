@@ -3040,6 +3040,9 @@
       if (this.cards.size) this.renderShelfAges();
     }
 
+    // Active: the panel is shown (the strip's selected tab, or a window on
+    // the selected desk). Several can be. The composer is focused only by
+    // focus() — a desk showing many windows must not move the keyboard.
     setActive(v) {
       this.active = !!v;
       this.syncShown();
@@ -3051,8 +3054,11 @@
         this._tick = setInterval(() => this.tick(), TICK_MS);
         this.pollTodos();
         this.drawLinksSoon();
-        if (!D.isPhone?.()) setTimeout(() => this.composer.focus(), 50);
       }
+    }
+
+    focus() {
+      if (!D.isPhone?.()) setTimeout(() => this.composer?.focus(), 50);
     }
 
     destroy() {
@@ -3088,9 +3094,19 @@
     panels.delete(tabId);
   }
   function isBusy(tabId) { return !!panels.get(tabId)?.busy(); }
+  // Only this panel shown (the old one-active-tab call; cli.js now uses
+  // setShown per tab, so a panel on a desk stays live).
   function setActive(tabId) {
     for (const [id, p] of panels) p.setActive(id === tabId);
+    panels.get(tabId)?.focus();
   }
+  // Shown or hidden, wherever its wrap is (the strip or a desk window): a
+  // shown panel keeps its feeds and polls; hidden for RELEASE_MS, it drops them.
+  function setShown(tabId, v) {
+    const p = panels.get(tabId);
+    if (p && p.active !== !!v) p.setActive(v);
+  }
+  function focus(tabId) { panels.get(tabId)?.focus(); }
 
   // cli.js calls this on every cli:tabs. The server sends one on each
   // (re)connect, so a new socket means events were missed: replay history.
@@ -3181,7 +3197,7 @@
   });
 
   window.sdkPanel = {
-    mount, update, unmount, setActive, isBusy, onTabs, onRunUpdate, handleMessage, onSettingsData, onCredentials, _panels: panels, _areas: areas,
+    mount, update, unmount, setActive, setShown, focus, isBusy, onTabs, onRunUpdate, handleMessage, onSettingsData, onCredentials, _panels: panels, _areas: areas,
     _feedWindow: { feedExcess, cursorAbove, capOldest, FEED_MAX, FEED_HARD_MAX, PAGE },
     _blocks: { blockFor, overtaken },
     _max: { openMax, closeMax, current: () => _max },

@@ -24,6 +24,7 @@
   <link rel="stylesheet" href="sdk-panel.css">
   <link rel="stylesheet" href="new-cli.css">
   <link rel="stylesheet" href="owner-items.css">
+  <link rel="stylesheet" href="desks.css">
   <!-- Phone skin: loads last so its narrow-viewport overrides win. -->
   <link rel="stylesheet" href="mobile.css">
   <!-- Libraries are vendored at pinned versions (public/vendor/VERSIONS.json):
@@ -46,6 +47,7 @@
       <nav class="header-tabs" id="headerTabs">
         <button class="header-tab" data-view="dashboard">Inspector</button>
         <button class="header-tab" data-view="claude">CLIs</button>
+        <button class="header-tab" data-view="desks" title="Desks: windows of CLIs (and more) side by side">Desks</button>
         <button class="header-tab" data-view="directories">Directories</button>
         <span class="header-tab-sep"></span>
         <button class="header-tab header-tab-config" data-view="models">Models</button>
@@ -151,6 +153,17 @@
     <div class="cli-container" id="cliContainer">
       <div class="cli-sessions" id="cliSessions"></div>
     </div>
+  </div>
+
+  <!-- ===== DESKS VIEW (desks.js) ===== -->
+  <div id="view-desks" class="hidden" style="display:none">
+    <div class="view-nav desks-nav" id="desksTabStrip">
+      <button class="view-tab-new" id="desksNewBtn" title="New desk">+</button>
+      <span class="desks-nav-spacer"></span>
+      <button class="desks-tile-btn" id="desksTileBtn" title="Lay every window of this desk out side by side">Tile all</button>
+    </div>
+    <div class="desks-area" id="desksArea"><div class="desks-empty" id="desksEmpty"></div></div>
+    <div class="desks-taskbar" id="desksTaskbar"></div>
   </div>
 
   <!-- CLI Settings Modal -->
@@ -994,6 +1007,9 @@ jq -r '.tool_input.command' |
 
   <script src="ws-pending.js"></script>
   <script src="tab-hooks.js"></script>
+  <script src="tab-context-menu.js"></script>
+  <script src="tab-host.js"></script>
+  <script src="desk-layout.js"></script>
   <script src="remote-ask.js"></script>
   <script src="ask-safe.js"></script>
   <script src="render-safe.js"></script>
@@ -1020,6 +1036,7 @@ jq -r '.tool_input.command' |
   <script src="rules.js"></script>
   <script src="directories.js"></script>
   <script src="mobile.js"></script>
+  <script src="desks.js"></script>
   <script src="checkout-msg.js"></script>
   <script src="pro-header.js"></script>
 </body>

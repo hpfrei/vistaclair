@@ -34,6 +34,73 @@
   // remote session (external: true, settings.externalHost) is an SDK tab.
   const kindOf = (t) => (t?.kind === 'sdk' || t?.settings?.engine === 'sdk' || t?.external === true) ? 'sdk' : 'cli';
   const isSdk = (tab) => tab?.kind === 'sdk';
+
+  // The strip, the shown tab and moving a tab to a desk window are TabHost's
+  // (public/tab-host.js); this module keeps the CLI parts. A tab's key is
+  // what survives a reboot: its session name, else its sessId; until the
+  // server has said either, a temporary `tab:<tabId>` (not movable to a desk).
+  const keyOf = (tabId, tab) => tab?.settings?.name || tab?.sessId || `tab:${tabId}`;
+  const tabIdOfKey = (key) => { for (const [id, t] of tabs) if (t.key === key) return id; return null; };
+  const tabHost = window.createTabHost({
+    kind: 'cli', label: 'CLI', icon: '\u2328', homeView: 'claude',
+    stripEl: tabStrip, beforeEl: tabNewBtn, contentEl: container,
+    reopen: (key) => reopenByKey(key),
+    canMove: (key) => !key.startsWith('tab:'),
+    extraMenuItems: (key) => { const id = tabIdOfKey(key); return id ? cliMenuItems(id) : []; },
+    decorate: (key, btn, label) => { const id = tabIdOfKey(key); if (id) decorateTab(id, btn, label); },
+    // The shown tab left for a desk (or was clicked): the CLI way to show one.
+    onSelect: (key) => { const id = key == null ? null : tabIdOfKey(key); if (id) switchTab(id); else showSessions(false); },
+    afterRender: () => updateStreamingState(),
+  });
+  // Called when a tab's wrap is shown or hidden, at home or on a desk.
+  function onTabShown(tabId, v) {
+    const tab = tabs.get(tabId);
+    if (!tab) return;
+    tab._shown = v;
+    if (isSdk(tab)) { window.sdkPanel?.setShown?.(tabId, v); return; }
+    if (!v) return;
+    if (!_scrollbackLoaded.has(tabId)) {
+      _scrollbackLoaded.add(tabId);
+      sendWs({ type: 'cli:requestScrollback', tabId });
+    }
+    setTimeout(() => { if (tab._shown) try { tab.fitAddon.fit(); } catch {} }, 50);
+  }
+  function focusTab(tabId) {
+    const tab = tabs.get(tabId);
+    // Focusing xterm's hidden textarea would raise the soft keyboard on
+    // every tab switch; phones type through the composer instead.
+    if (!tab || window.dashboard.isPhone?.()) return;
+    if (isSdk(tab)) window.sdkPanel?.focus?.(tabId);
+    else try { tab.terminal.focus(); } catch {}
+  }
+  // The tab's content for TabHost (the content contract in tab-host.js).
+  function addToHost(tabId, tab) {
+    let key = keyOf(tabId, tab);
+    if (tabHost.has(key)) key = `tab:${tabId}`;
+    tab.key = key;
+    tabHost.add({
+      key, title: computeTabLabel(tabId), root: tab.wrap,
+      setShown: (v) => onTabShown(tabId, v),
+      destroy: () => _disposeTabView(tabId, tab),
+      focus: () => focusTab(tabId),
+    });
+  }
+  // Drop a tab's view (through the host: a desk window turns into a placeholder).
+  function _dropTabView(tabId, tab) {
+    if (tab.key && tabHost.has(tab.key) && tabHost.get(tab.key).root === tab.wrap) tabHost.remove(tab.key);
+    else _disposeTabView(tabId, tab);
+  }
+  // Keys and titles follow the tab's metadata (a name or sessId that arrived).
+  function syncHostKeys() {
+    for (const [tabId, tab] of tabs) {
+      if (!tab.key || !tabHost.has(tab.key)) continue;
+      const want = keyOf(tabId, tab);
+      if (want !== tab.key && !tabHost.has(want) && tabHost.rekey(tab.key, want)) tab.key = want;
+      tabHost.update(tab.key, { title: computeTabLabel(tabId) });
+    }
+  }
+  // The first tab shown in the strip itself (not on a desk).
+  const firstHomeTabId = (list = Array.from(tabs.keys())) => list.find(id => !tabHost.isOnDesk(tabs.get(id)?.key)) || null;
   function _requestNewTab(intent) {
     const reqId = `req-${++_reqSeq}`;
     if (intent) _pendingNewTabs.set(reqId, intent);
@@ -237,8 +304,8 @@
     return { onOutput, onTabChange, fontSize: () => (window.dashboard.isPhone?.() ? fontSize : 14) };
   })();
 
-  function createTab(tabId, kind = 'cli') {
-    if (kind === 'sdk') return createSdkTab(tabId);
+  function createTab(tabId, kind = 'cli', init) {
+    if (kind === 'sdk') return createSdkTab(tabId, init);
     const wrap = document.createElement('div');
     wrap.className = 'cli-terminal-wrap';
     wrap.style.display = 'none';
@@ -303,13 +370,15 @@
 
     _setupDropOverlay(wrap, tabId);
 
-    const tab = { kind: 'cli', terminal, fitAddon, wrap, cwd: null, title: null, settings: {}, status: 'idle' };
+    const tab = { kind: 'cli', terminal, fitAddon, wrap, cwd: null, title: null, settings: {}, status: 'idle', ...init };
     tabs.set(tabId, tab);
 
-    container.appendChild(wrap);
+    addToHost(tabId, tab);
 
+    // Refit whenever it is shown and changes size: the active tab here, or
+    // a window on a desk.
     const ro = new ResizeObserver(() => {
-      if (activeTabId === tabId && wrap.offsetWidth > 0) {
+      if (tab._shown && wrap.offsetWidth > 0) {
         try { fitAddon.fit(); } catch {}
       }
     });
@@ -322,14 +391,14 @@
   // An Agent SDK tab: no terminal, no PTY size, no scrollback. sdk-panel.js
   // renders its areas into the wrap; the tab keeps the same registry fields so
   // the strip, the menus and the Inspector treat it like any other tab.
-  function createSdkTab(tabId) {
+  function createSdkTab(tabId, init) {
     const wrap = document.createElement('div');
     wrap.className = 'cli-terminal-wrap cli-sdk-wrap';
     wrap.style.display = 'none';
-    const tab = { kind: 'sdk', terminal: null, fitAddon: null, wrap, cwd: null, title: null, settings: {}, status: 'idle' };
+    const tab = { kind: 'sdk', terminal: null, fitAddon: null, wrap, cwd: null, title: null, settings: {}, status: 'idle', ...init };
     tabs.set(tabId, tab);
-    container.appendChild(wrap);
     window.sdkPanel?.mount(tabId, wrap);
+    addToHost(tabId, tab);
     return tab;
   }
 
@@ -347,47 +416,39 @@
 
   // The tab with this id, of this kind. A tab first created as a terminal
   // (before the server said what it is) is rebuilt as the right view.
-  function ensureTab(tabId, kind) {
+  // `init`: what is already known of a new tab (its key comes from it).
+  function ensureTab(tabId, kind, init) {
     const tab = tabs.get(tabId);
     if (tab && (!kind || tab.kind === kind)) return tab;
     if (tab) {
-      _disposeTabView(tabId, tab);
+      _dropTabView(tabId, tab);
       tabs.delete(tabId);
       _scrollbackLoaded.delete(tabId);
-      const fresh = createTab(tabId, kind);
+      const keep = {};
       for (const k of ['cwd', 'title', 'settings', 'status', 'pausing', 'instanceId', 'sessId', 'autoMemory']) {
-        if (tab[k] !== undefined) fresh[k] = tab[k];
+        if (tab[k] !== undefined) keep[k] = tab[k];
       }
+      const fresh = createTab(tabId, kind, keep);
       if (isSdk(fresh)) window.sdkPanel?.update(tabId, sdkInfo(fresh));
       if (activeTabId === tabId) switchTab(tabId);
       return fresh;
     }
-    return createTab(tabId, kind || 'cli');
+    return createTab(tabId, kind || 'cli', init);
   }
 
+  // Show a tab. One on a desk is shown in its window (TabHost.select); the
+  // host shows this one and hides every other home tab, never a desk's.
   function switchTab(tabId) {
-    for (const [id, tab] of tabs) {
-      tab.wrap.style.display = id === tabId ? '' : 'none';
-    }
+    const tab = tabs.get(tabId);
+    if (tab?.key && tabHost.isOnDesk(tab.key)) { tabHost.select(tab.key); return; }
     activeTabId = tabId;
     _sessionsPinned = false;
     if (sessionsView) sessionsView.style.display = 'none';
+    tabHost.activate(tab?.key ?? null);
     renderTabStrip();
-    const tab = tabs.get(tabId);
-    window.sdkPanel?.setActive(isSdk(tab) ? tabId : null);
-    if (isSdk(tab)) {
-      _mobileBar?.onTabChange(tab);
-    } else if (tab) {
-      if (!_scrollbackLoaded.has(tabId)) {
-        _scrollbackLoaded.add(tabId);
-        sendWs({ type: 'cli:requestScrollback', tabId });
-      }
-      setTimeout(() => {
-        try { tab.fitAddon.fit(); } catch {}
-        // Focusing xterm's hidden textarea would raise the soft keyboard on
-        // every tab switch; phones type through the composer instead.
-        if (!window.dashboard.isPhone?.()) tab.terminal.focus();
-      }, 50);
+    if (tab) {
+      if (!isSdk(tab)) setTimeout(() => { try { tab.fitAddon.fit(); } catch {} }, 50);
+      setTimeout(() => { if (activeTabId === tabId) focusTab(tabId); }, 50);
       _mobileBar?.onTabChange(tab);
     }
   }
@@ -407,7 +468,7 @@
 
   function renderTabStrip() {
     if (!tabStrip) return;
-    tabStrip.querySelectorAll('.view-tab').forEach(el => el.remove());
+    tabStrip.querySelectorAll('.cli-sessions-tab').forEach(el => el.remove());
 
     // The Sessions tab: always first, no close button.
     const home = document.createElement('button');
@@ -417,118 +478,119 @@
     home.addEventListener('click', () => showSessions(true));
     tabStrip.insertBefore(home, tabStrip.firstChild);
 
-    for (const [tabId, tab] of tabs) {
-      const btn = document.createElement('button');
-      const hasPendingAsk = Array.from(pendingAskOverlays.values()).some(p => p.tabId === tabId && !p.expired);
-      btn.className = 'view-tab' + (tabId === activeTabId ? ' active' : '') + (hasPendingAsk ? ' has-pending-ask' : '');
-      btn.dataset.tabId = tabId;
+    syncHostKeys();
+    tabHost.render();
+  }
 
-      const label = document.createElement('span');
-      label.className = 'cli-tab-label';
-      const isAppCli = tabId.startsWith('app-');
-      // Orchestration role from the tab's stamp: a gear marks a worker.
-      const orchRole = tab.settings?.orchestration?.role;
-      const roleBadge = orchRole === 'worker' ? '⚙️ ' : '';
-      label.textContent = roleBadge + (isAppCli ? '\u{1F528} ' : '') + computeTabLabel(tabId);
-      // A session running on another machine (settings.externalHost).
-      const hostLabel = window.remoteAsk?.hostBadgeLabel(tab.settings);
-      if (hostLabel) label.appendChild(window.remoteAsk.remoteLabelEl(document, hostLabel, 'tab-ext-badge tab-remote-badge'));
-      // An add-on's badge for this session (dashboard.setTabBadge).
-      const extBadge = window.dashboard._tabBadgeEl(tab.settings?.name, 'cli-tab-ext-badge');
-      if (extBadge) label.appendChild(extBadge);
-      let clickTimer = null;
-      label.addEventListener('click', (e) => {
+  // One tab's button in the strip, as TabHost draws it: the CLI's label,
+  // badges and buttons. The host adds the click, the right-click menu and,
+  // for a tab on a desk, the dimmed look and the desk chip.
+  function decorateTab(tabId, btn, label) {
+    const tab = tabs.get(tabId);
+    if (!tab) return;
+    const hasPendingAsk = Array.from(pendingAskOverlays.values()).some(p => p.tabId === tabId && !p.expired);
+    if (hasPendingAsk) btn.classList.add('has-pending-ask');
+    btn.dataset.tabId = tabId;
+
+    label.className = 'tab-host-label cli-tab-label';
+    const isAppCli = tabId.startsWith('app-');
+    // Orchestration role from the tab's stamp: a gear marks a worker.
+    const orchRole = tab.settings?.orchestration?.role;
+    const roleBadge = orchRole === 'worker' ? '⚙️ ' : '';
+    label.textContent = roleBadge + (isAppCli ? '\u{1F528} ' : '') + computeTabLabel(tabId);
+    // A session running on another machine (settings.externalHost).
+    const hostLabel = window.remoteAsk?.hostBadgeLabel(tab.settings);
+    if (hostLabel) label.appendChild(window.remoteAsk.remoteLabelEl(document, hostLabel, 'tab-ext-badge tab-remote-badge'));
+    // An add-on's badge for this session (dashboard.setTabBadge).
+    const extBadge = window.dashboard._tabBadgeEl(tab.settings?.name, 'cli-tab-ext-badge');
+    if (extBadge) label.appendChild(extBadge);
+    let clickTimer = null;
+    label.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (tabHost.isOnDesk(tab.key)) { tabHost.select(tab.key); return; }
+      if (activeTabId !== tabId) {
+        switchTab(tabId);
+        return;
+      }
+      if (clickTimer) return;
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        switchView('dashboard');
+        const clickedTab = tabs.get(tabId);
+        if (clickedTab?.instanceId) window.inspectorModule?.openSession?.(clickedTab.instanceId);
+      }, 250);
+    });
+
+    // Model settings and pause sit on the tab only for a terminal tab; an
+    // SDK tab has them in its own toolbar (sdk-panel.js).
+    const sdkTab = isSdk(tab);
+
+    // Model override / settings button
+    const hasOverride = tab.settings &&
+      tab.settings.modelMap && Object.values(tab.settings.modelMap).some(v => v);
+    const settingsBtn = document.createElement('span');
+    settingsBtn.className = 'cli-model-override-btn' + (hasOverride ? ' active' : '');
+    settingsBtn.innerHTML = hasOverride
+      ? '<svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 2l12 10M1 7h12M1 12l12-10"/></svg>'
+      : '<svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 3h10m-2-2l2 2-2 2"/><path d="M1 7h10m-2-2l2 2-2 2"/><path d="M1 11h10m-2-2l2 2-2 2"/></svg>';
+    settingsBtn.title = hasOverride ? 'Model override active — click to edit' : 'Model settings';
+    settingsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openSettings(tabId);
+    });
+    if (!sdkTab) btn.appendChild(settingsBtn);
+
+    // Pause: a plain tab pauses itself, an orchestrator its whole run; a
+    // worker only through its orchestrator. While pausing, it offers
+    // "Interrupt now" — a pause has no timeout.
+    if (!sdkTab && tab.status === 'running' && orchRole !== 'worker') {
+      const pauseBtn = document.createElement('span');
+      pauseBtn.className = 'cli-model-override-btn cli-pause-btn' + (tab.pausing ? ' pausing' : '');
+      pauseBtn.textContent = tab.pausing ? '⏹' : '⏸';
+      pauseBtn.title = tab.pausing
+        ? 'Pausing… (the session is writing its resume note). Click to interrupt now.'
+        : orchRole === 'orchestrator'
+          ? 'Pause the run: workers write their notes and close, then the orchestrator. Resume from the Sessions tab.'
+          : 'Pause: the session finishes its step, writes its resume note and closes. Resume from the Sessions tab.';
+      pauseBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (activeTabId !== tabId) {
-          switchTab(tabId);
+        if (tab.pausing) {
+          showConfirm('Interrupt now? The session stops mid-step and is saved as interrupted; its resume note may be missing.',
+            { confirmLabel: 'Interrupt', danger: true })
+            .then((ok) => { if (ok) sendWs({ type: 'cli:interrupt', tabId }); });
           return;
         }
-        if (clickTimer) return;
-        clickTimer = setTimeout(() => {
-          clickTimer = null;
-          switchView('dashboard');
-          const clickedTab = tabs.get(tabId);
-          if (clickedTab?.instanceId) window.inspectorModule?.openSession?.(clickedTab.instanceId);
-        }, 250);
+        sendWs({ type: 'cli:pause', tabId });
       });
-      btn.appendChild(label);
-
-      // Model settings and pause sit on the tab only for a terminal tab; an
-      // SDK tab has them in its own toolbar (sdk-panel.js).
-      const sdkTab = isSdk(tab);
-
-      // Model override / settings button
-      const hasOverride = tab.settings &&
-        tab.settings.modelMap && Object.values(tab.settings.modelMap).some(v => v);
-      const settingsBtn = document.createElement('span');
-      settingsBtn.className = 'cli-model-override-btn' + (hasOverride ? ' active' : '');
-      settingsBtn.innerHTML = hasOverride
-        ? '<svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 2l12 10M1 7h12M1 12l12-10"/></svg>'
-        : '<svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 3h10m-2-2l2 2-2 2"/><path d="M1 7h10m-2-2l2 2-2 2"/><path d="M1 11h10m-2-2l2 2-2 2"/></svg>';
-      settingsBtn.title = hasOverride ? 'Model override active — click to edit' : 'Model settings';
-      settingsBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openSettings(tabId);
-      });
-      if (!sdkTab) btn.appendChild(settingsBtn);
-
-      // Pause: a plain tab pauses itself, an orchestrator its whole run; a
-      // worker only through its orchestrator. While pausing, it offers
-      // "Interrupt now" — a pause has no timeout.
-      if (!sdkTab && tab.status === 'running' && orchRole !== 'worker') {
-        const pauseBtn = document.createElement('span');
-        pauseBtn.className = 'cli-model-override-btn cli-pause-btn' + (tab.pausing ? ' pausing' : '');
-        pauseBtn.textContent = tab.pausing ? '⏹' : '⏸';
-        pauseBtn.title = tab.pausing
-          ? 'Pausing… (the session is writing its resume note). Click to interrupt now.'
-          : orchRole === 'orchestrator'
-            ? 'Pause the run: workers write their notes and close, then the orchestrator. Resume from the Sessions tab.'
-            : 'Pause: the session finishes its step, writes its resume note and closes. Resume from the Sessions tab.';
-        pauseBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (tab.pausing) {
-            showConfirm('Interrupt now? The session stops mid-step and is saved as interrupted; its resume note may be missing.',
-              { confirmLabel: 'Interrupt', danger: true })
-              .then((ok) => { if (ok) sendWs({ type: 'cli:interrupt', tabId }); });
-            return;
-          }
-          sendWs({ type: 'cli:pause', tabId });
-        });
-        btn.appendChild(pauseBtn);
-      }
-      if (tab.pausing) btn.classList.add('cli-tab-pausing');
-
-      // Land: an isolated plain session's branch into its base, by the server.
-      const wt = tab.settings?.worktree;
-      if (wt && !wt.removed && !orchRole) {
-        const landBtn = document.createElement('span');
-        landBtn.className = 'cli-model-override-btn cli-land-btn';
-        landBtn.textContent = '⤵';
-        landBtn.title = `Land ${wt.branch} into ${wt.base} (rebase, check, merge --no-ff)` + (wt.lastLanding ? `\nLast: ${wt.lastLanding.text}` : '');
-        landBtn.addEventListener('click', (e) => {
-          e.stopPropagation();
-          sendWs({ type: 'cli:land', tabId });
-        });
-        btn.appendChild(landBtn);
-      }
-
-      const close = document.createElement('span');
-      close.className = 'tab-close';
-      close.textContent = '×';
-      // Hover opens the close menu; click opens it too, for touch screens.
-      close.addEventListener('mouseenter', () => showCloseMenu(tabId, close));
-      close.addEventListener('mouseleave', scheduleCloseMenuClose);
-      close.addEventListener('click', (e) => {
-        e.stopPropagation();
-        showCloseMenu(tabId, close);
-      });
-      btn.appendChild(close);
-
-      btn.addEventListener('click', () => switchTab(tabId));
-      tabStrip.insertBefore(btn, tabNewBtn);
+      btn.appendChild(pauseBtn);
     }
-    // The new buttons take the busy dots before the next paint.
-    updateStreamingState();
+    if (tab.pausing) btn.classList.add('cli-tab-pausing');
+
+    // Land: an isolated plain session's branch into its base, by the server.
+    const wt = tab.settings?.worktree;
+    if (wt && !wt.removed && !orchRole) {
+      const landBtn = document.createElement('span');
+      landBtn.className = 'cli-model-override-btn cli-land-btn';
+      landBtn.textContent = '⤵';
+      landBtn.title = `Land ${wt.branch} into ${wt.base} (rebase, check, merge --no-ff)` + (wt.lastLanding ? `\nLast: ${wt.lastLanding.text}` : '');
+      landBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        sendWs({ type: 'cli:land', tabId });
+      });
+      btn.appendChild(landBtn);
+    }
+
+    const close = document.createElement('span');
+    close.className = 'tab-close';
+    close.textContent = '×';
+    // Hover opens the close menu; click opens it too, for touch screens.
+    close.addEventListener('mouseenter', () => showCloseMenu(tabId, close));
+    close.addEventListener('mouseleave', scheduleCloseMenuClose);
+    close.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showCloseMenu(tabId, close);
+    });
+    btn.appendChild(close);
   }
 
   function removeTab(tabId) {
@@ -541,13 +603,14 @@
       if (tab.instanceId) {
         sendWs({ type: 'inspector:clearInstances', instanceIds: [tab.instanceId] });
       }
-      _disposeTabView(tabId, tab);
+      _dropTabView(tabId, tab);
       tabs.delete(tabId);
       updateStreamingState();
     }
     if (activeTabId === tabId) {
-      const remaining = Array.from(tabs.keys());
-      if (remaining.length > 0) switchTab(remaining[remaining.length - 1]);
+      // The last tab still in the strip itself (one on a desk stays there).
+      const next = firstHomeTabId(Array.from(tabs.keys()).reverse());
+      if (next) switchTab(next);
       else showSessions(false);
     } else if (sessionsShown()) {
       renderTabStrip();
@@ -557,6 +620,47 @@
 
   // Tab actions and badges registered or dropped: draw the strip again.
   window.dashboard._tabHooks.onChange(() => renderTabStrip());
+
+  function closeTab(tabId, forget) {
+    sendWs({ type: 'cli:closeTab', tabId, forget });
+    // A run member may be refused (cli:closeRefused); the server's tab
+    // list removes it once it is really closed.
+    if (!tabs.get(tabId)?.settings?.orchestration) removeTab(tabId);
+  }
+
+  // The CLI part of the tab's right-click menu (TabHost puts the desk items
+  // first): what the × menu offers, add-on actions included.
+  function cliMenuItems(tabId) {
+    const items = [
+      { label: 'Close', onClick: () => closeTab(tabId, false) },
+      { label: 'Close and remove interaction', danger: true, onClick: () => closeTab(tabId, true) },
+    ];
+    const info = window.tabHookInfo(tabId, tabs.get(tabId));
+    const ext = window.dashboard._tabHooks.actionsFor(info);
+    if (ext.length) items.push({ divider: true });
+    for (const action of ext) {
+      items.push({ label: action.label, title: action.title || undefined, onClick: () => window.dashboard._tabHooks.runAction(action, info) });
+    }
+    return items;
+  }
+
+  // Reopen a closed tab by its key (a desk's placeholder): resume the newest
+  // saved session with that name or sessId.
+  let _savedWaiters = [];
+  function reopenByKey(key) {
+    const find = () => (_savedData?.sessions || [])
+      .filter(x => x.settings?.name === key || x.id === key)
+      .sort((a, b) => (Date.parse(b.savedAt) || b.savedAt || 0) - (Date.parse(a.savedAt) || a.savedAt || 0))[0] || null;
+    const go = (sess) => { if (!sess) return false; resumeSaved(sess.id); return true; };
+    const hit = find();
+    if (hit) return Promise.resolve(go(hit));
+    return new Promise((resolve) => {
+      const t = setTimeout(() => { _savedWaiters = _savedWaiters.filter(w => w !== done); resolve(false); }, 5000);
+      const done = () => { clearTimeout(t); resolve(go(find())); };
+      _savedWaiters.push(done);
+      sendWs({ type: 'cli:getSavedSessions' });
+    });
+  }
 
   // --- Tab × menu: close, or close and drop the session from the resume list ---
   let _closeMenuTimer = null;
@@ -578,10 +682,7 @@
       item.addEventListener('click', (e) => {
         e.stopPropagation();
         closeCloseMenu();
-        sendWs({ type: 'cli:closeTab', tabId, forget });
-        // A run member may be refused (cli:closeRefused); the server's tab
-        // list removes it once it is really closed.
-        if (!tabs.get(tabId)?.settings?.orchestration) removeTab(tabId);
+        closeTab(tabId, forget);
       });
       menu.appendChild(item);
     };
@@ -731,10 +832,10 @@
 
   function showSessions(pinned) {
     if (pinned) _sessionsPinned = true;
-    for (const tab of tabs.values()) tab.wrap.style.display = 'none';
     activeTabId = null;
+    // Every home tab hidden; a tab on a desk stays in its window.
+    tabHost.activate(null);
     if (sessionsView) sessionsView.style.display = '';
-    window.sdkPanel?.setActive(null);
     _mobileBar?.onTabChange(null);
     renderTabStrip();
     renderSessions();
@@ -1469,6 +1570,7 @@
       case 'cli:savedSessions': {
         _savedData = { sessions: msg.sessions || [], runs: msg.runs || [] };
         renderSessions();
+        for (const w of _savedWaiters.splice(0)) w();
         break;
       }
       case 'cli:fileUploaded': {
@@ -1594,7 +1696,7 @@
     for (const [tabId, tab] of tabs) {
       dismissAskModalsForTab(tabId);
       _scrollbackLoaded.delete(tabId);
-      _disposeTabView(tabId, tab);
+      _dropTabView(tabId, tab);
     }
     tabs.clear();
     activeTabId = null;
@@ -1622,7 +1724,7 @@
       if (!serverIds.has(tabId)) removeTab(tabId);
     }
     for (const st of serverTabs) {
-      const tab = ensureTab(st.tabId, kindOf(st));
+      const tab = ensureTab(st.tabId, kindOf(st), { settings: st.settings || {}, ...(st.sessId ? { sessId: st.sessId } : {}), title: st.title || null, cwd: st.cwd });
       tab.status = st.status;
       tab.cwd = st.cwd;
       tab.title = st.title || null;
@@ -1636,8 +1738,8 @@
       if (isSdk(tab)) window.sdkPanel?.update(st.tabId, sdkInfo(tab));
     }
     if (!activeTabId && !_sessionsPinned && tabs.size > 0) {
-      const first = Array.from(tabs.keys())[0];
-      switchTab(first);
+      const first = firstHomeTabId();
+      if (first) switchTab(first);
     }
     renderTabStrip();
     if (sessionsShown()) {
@@ -2068,5 +2170,5 @@
   _mobileBar?.onTabChange(null);
 
   // Expose module
-  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, modelPickerOptions, fillModelMapSelect };
+  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, modelPickerOptions, fillModelMapSelect, tabHost };
 })();

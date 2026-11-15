@@ -1,7 +1,7 @@
 // ============================================================
 // TOAST MODULE — universal notifications (header, top-middle)
 // ============================================================
-// Exposes window.dashboard.showToast({ message, sender, level, title, ts, duration }).
+// Exposes window.dashboard.showToast({ message, sender, level, title, ts, duration, actions }).
 // Toasts pop in the header center, auto-dismiss, and click-to-open in a detail
 // modal. A header bell opens a notifications center with per-item + clear-all.
 // Server/apps push toasts via the WS message { type: 'toast:push', ... }.
@@ -45,6 +45,9 @@
       title: opts.title ? String(opts.title) : '',
       ts: opts.ts || Date.now(),
       duration: typeof opts.duration === 'number' ? opts.duration : null,
+      // Buttons on the toast itself, e.g. Undo: [{ label, onClick() }]. One
+      // click runs it and dismisses the toast.
+      actions: Array.isArray(opts.actions) ? opts.actions.filter(a => a && a.label && typeof a.onClick === 'function') : [],
       read: false,
     };
     history.push(entry);
@@ -77,6 +80,22 @@
       e.stopPropagation();
       el.remove();
     });
+    if (entry.actions.length) {
+      const row = document.createElement('div');
+      row.className = 'toast-item-actions';
+      for (const a of entry.actions) {
+        const b = document.createElement('button');
+        b.className = 'toast-item-action';
+        b.textContent = String(a.label);
+        b.addEventListener('click', (e) => {
+          e.stopPropagation();
+          el.remove();
+          try { a.onClick(); } catch (err) { console.error('[toast] action failed:', err); }
+        });
+        row.appendChild(b);
+      }
+      el.appendChild(row);
+    }
     el.addEventListener('click', () => {
       entry.read = true;
       updateBadge();
