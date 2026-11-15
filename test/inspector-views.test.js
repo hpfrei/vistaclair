@@ -143,7 +143,7 @@ test('the tab strip: open, switch, close, the Sessions grid and the footer, as b
   const { mod, dom, document, sent } = s;
   const strip = document.getElementById('inspectorTabStrip');
   const grid = document.getElementById('inspectorSessions');
-  const shownBodies = () => document.querySelectorAll('#view-dashboard .inspector-body').filter(e => !e.classList.contains('hidden'));
+  const shownBodies = () => document.querySelectorAll('#view-dashboard .inspector-body').filter(e => e.style.display !== 'none');   // the TabHost shows one home root
   mod.handleMessage({ type: 'init', sessions: [
     { instanceId: 'cli-a', kind: 'cli', status: 'running', label: 'A' },
     { instanceId: 'cli-b', kind: 'cli', status: 'running', label: 'B' },
@@ -225,4 +225,128 @@ test('streaming, selection and the view\'s own buttons act on that view only', (
   dom.flushFrames();
   assert.deepStrictEqual(laneTurns(b.root), []);
   assert.deepStrictEqual(laneTurns(a.root), ['a1', 's1']);
+});
+
+// Desks (phase 2): the strip is a TabHost of kind 'inspector'. A tab handed
+// to a desk window moves its root there (not rebuilt), stays live while the
+// desk shows it, and comes back home the same root.
+test('an Inspector tab goes to a desk window and back: the same root, live on the desk', () => {
+  const s = loadInspector();
+  const { mod, dom, document, window, sent } = s;
+  const dash = document.getElementById('view-dashboard');
+  const desksEl = document.getElementById('view-desks');
+  // switchView as core.js does it: one header view shown; the observers hear it.
+  const switched = [];
+  window.switchView = (name) => {
+    switched.push(name);
+    for (const [el, on] of [[dash, name === 'dashboard'], [desksEl, name === 'desks']]) {
+      el.classList.toggle('hidden', !on);
+      el.style.display = on ? '' : 'none';
+      for (const o of dom.observers) if (o.kind === 'mutation' && o.targets.has(el)) o.trigger();
+    }
+  };
+  const host = window.tabHosts.get('inspector');
+  const desks = window.desksView;
+  assert.ok(host && desks, 'the Inspector strip is a registered TabHost');
+  assert.strictEqual(host.homeView, 'dashboard');
+  desks.applyState({ version: 1, desks: [] });
+
+  mod.handleMessage({ type: 'init', sessions: [
+    { instanceId: 'cli-a', kind: 'cli', status: 'running', label: 'A' },
+    { instanceId: 'cli-b', kind: 'cli', status: 'running', label: 'B' },
+  ] });
+  mod.openSession('cli-a');
+  mod.handleMessage({ type: 'inspector:snapshot', instanceId: 'cli-a', interactions: [turn('cli-a', 'a1')], hasMore: false });
+  mod.openSession('cli-b');
+  mod.handleMessage({ type: 'inspector:snapshot', instanceId: 'cli-b', interactions: [turn('cli-b', 'b1')], hasMore: false });
+  mod.switchInstanceTab('cli-a');
+  dom.flushFrames();
+  assert.deepStrictEqual([...host.keys()], ['cli-a', 'cli-b']);
+  assert.strictEqual(host.activeKey(), 'cli-a');
+  const rootA = host.get('cli-a').root;
+  const strip = document.getElementById('inspectorTabStrip');
+  assert.ok(host.menuItems('cli-a').some(i => i.label === 'Move to desk'), 'a session tab can go to a desk');
+  assert.ok(!strip.querySelector('.inspector-sessions-tab').dataset.tabKey, 'Sessions is not a host tab: it stays');
+  const subscribes = () => sent.filter(m => m.type === 'inspector:subscribe' && m.instanceId === 'cli-a').length;
+  const subs = subscribes();
+
+  // Onto a desk (the server's echo of desks:move).
+  desks.applyState({ version: 1, desks: [{ id: 'd1', name: 'Work', windows: [
+    { kind: 'inspector', key: 'cli-a', title: 'A', geom: { x: 0, y: 0, w: 0.5, h: 0.5 }, z: 1 }] }] });
+  const body = document.querySelector('#desksArea .desk-win-body');
+  assert.strictEqual(rootA.parentNode, body, 'the root moved into the window');
+  assert.strictEqual(host.get('cli-a').root, rootA, 'not rebuilt');
+  assert.strictEqual(subscribes(), subs, 'no new subscription');
+  assert.strictEqual(host.activeKey(), 'cli-b', 'the strip shows the next tab');
+  assert.ok(strip.querySelector('[data-instance-id="cli-a"]').classList.contains('tab-on-desk'));
+  assert.deepStrictEqual(laneTurns(rootA), ['a1'], 'what it drew came along');
+
+  // Its tab in the strip goes to the window.
+  strip.querySelector('[data-instance-id="cli-a"]').click();
+  assert.strictEqual(switched.at(-1), 'desks');
+  assert.ok(host.isShown('cli-a'));
+  dom.counters.getElementById.length = 0;
+
+  // Live on the desk: a turn streams in.
+  mod.handleMessage({ type: 'interaction:start', interaction: { ...turn('cli-a', 'a2', { status: 'pending' }), isStreaming: true } });
+  const ev = (eventType, data) => mod.handleMessage({ type: 'sse_event', instanceId: 'cli-a', interactionId: 'a2', event: { eventType, data } });
+  ev('message_start', { message: { usage: { input_tokens: 4 } } });
+  ev('content_block_start', { index: 0, content_block: { type: 'text' } });
+  ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'Live on the desk' } });
+  dom.flushFrames();
+  assert.deepStrictEqual(laneTurns(rootA), ['a1', 'a2']);
+  assert.match(rootA.querySelector('.ln-turn[data-id="a2"]').textContent, /Live on the desk/);
+  mod.handleMessage({ type: 'interaction:start', interaction: turn('cli-a', 'a3', { status: 'pending' }) });
+  mod.handleMessage({ type: 'interaction:update', interaction: turn('cli-a', 'a3', { status: 'streaming' }) });
+  mod.handleMessage({ type: 'interaction:complete', interaction: turn('cli-a', 'a3') });
+  dom.flushFrames();
+  dom.advance(1000);
+  dom.flushFrames();
+  assert.ok(tlTurns(rootA).includes('a3'), 'the timeline has the finished turn');
+  const inA = dom.counters.getElementById.filter(id => rootA.querySelector('#' + id));
+  assert.deepStrictEqual(inA, [], 'nothing in the window looked up by id');
+
+  // Return here: home again, the same root, hidden until its tab is picked.
+  desks.returnHome('inspector', 'cli-a');
+  assert.strictEqual(rootA.parentNode, dash, 'back in the Inspector');
+  assert.strictEqual(rootA.style.display, 'none');
+  assert.ok(!host.isShown('cli-a'));
+  window.switchView('dashboard');
+  strip.querySelector('[data-instance-id="cli-a"]').click();
+  dom.flushFrames();
+  assert.strictEqual(host.get('cli-a').root, rootA);
+  assert.strictEqual(rootA.style.display, '');
+  assert.deepStrictEqual(laneTurns(rootA), ['a1', 'a2', 'a3']);
+  assert.strictEqual(subscribes(), subs);
+});
+
+test('a desk window\'s Inspector tab: its close leaves a placeholder, Reopen brings it back; a gone session can\'t', async () => {
+  const s = loadInspector();
+  const { mod, dom, document, window, sent } = s;
+  const host = window.tabHosts.get('inspector');
+  const desks = window.desksView;
+  mod.handleMessage({ type: 'init', sessions: [{ instanceId: 'cli-a', kind: 'cli', status: 'running', label: 'A' }] });
+  desks.applyState({ version: 1, desks: [{ id: 'd1', name: 'Work', windows: [
+    { kind: 'inspector', key: 'cli-a', title: 'A', geom: { x: 0, y: 0, w: 0.5, h: 0.5 }, z: 1 },
+    { kind: 'inspector', key: 'cli-gone', title: 'Gone', geom: { x: 0.5, y: 0, w: 0.5, h: 0.5 }, z: 2 }] }] });
+  const wins = () => document.querySelectorAll('#desksArea .desk-win');
+  assert.strictEqual(wins().filter(w => w.classList.contains('desk-win-placeholder')).length, 2, 'not open yet: placeholders');
+
+  assert.strictEqual(await host.reopen('cli-gone'), false, 'a session the server no longer lists');
+  assert.strictEqual(await host.reopen('cli-a'), true);
+  desks.render();
+  const rootA = host.get('cli-a').root;
+  assert.strictEqual(rootA.parentNode, document.querySelector('#desksArea .desk-win-body'), 'mounted in its window');
+  assert.ok(sent.some(m => m.type === 'inspector:subscribe' && m.instanceId === 'cli-a'));
+  assert.strictEqual(document.getElementById('inspectorSessions').classList.contains('hidden'), false, 'the strip stays on Sessions');
+
+  // Its own close: the window turns into a placeholder, the entry stays.
+  document.querySelector('#inspectorTabStrip [data-instance-id="cli-a"] .view-tab-close').click();
+  desks.render();
+  assert.ok(!host.has('cli-a'));
+  assert.ok(sent.some(m => m.type === 'inspector:unsubscribe' && m.instanceId === 'cli-a'));
+  assert.ok(!rootA.isConnected);
+  assert.strictEqual(desks.state().desks[0].windows.length, 2);
+  assert.strictEqual(wins().filter(w => w.classList.contains('desk-win-placeholder')).length, 2);
+  dom.flushFrames();
 });

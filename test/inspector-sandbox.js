@@ -1,7 +1,8 @@
 // public/inspector.js in a node:vm sandbox on the fake DOM (test/inspector-fake-dom.js):
 // the real page markup of the Inspector view (from public/index.html), the
 // real helper modules it loads after (wide-layout, retention, lanes, session
-// cards), and a stand-in for public/core.js's window.dashboard that records
+// cards), the tab layer (tab-host, its menu) and Desks (#view-desks, desks.js),
+// and a stand-in for public/core.js's window.dashboard that records
 // what is sent on the websocket. d3 is a chain that draws nothing.
 
 const fs = require('fs');
@@ -38,6 +39,8 @@ function loadInspector() {
   dom.mount('<nav><button class="header-tab" data-view="dashboard">Inspector</button></nav>');
   // Shown: the page opens on the Inspector for these tests.
   dom.mount(main.replace(' class="hidden" style="display:none"', ''));
+  // Desks (hidden, as the page opens): Inspector tabs can go into its windows.
+  dom.mount(html.match(/<div id="view-desks"[\s\S]*?<div class="desks-taskbar"[^>]*><\/div>\s*<\/div>/)[0]);
   dom.mount('<footer><div id="footerStats">0 turns</div><div id="footerTokens"></div><div id="footerCache"></div><div id="footerCost"></div><button id="footerReset"></button></footer>');
 
   const sent = [];
@@ -68,7 +71,9 @@ function loadInspector() {
   window.d3 = d3Stub();
   window.switchView = () => {};
   const ctx = vm.createContext(window);
-  for (const f of ['session-cards.js', 'wide-layout.js', 'inspector-retention.js', 'inspector-lanes.js', 'inspector.js']) {
+  // In the page's order: the tab layer before core.js's users, desks.js last.
+  for (const f of ['tab-context-menu.js', 'tab-host.js', 'desk-layout.js', 'session-cards.js', 'wide-layout.js',
+    'inspector-retention.js', 'inspector-lanes.js', 'inspector.js', 'desks.js']) {
     vm.runInContext(read(f), ctx, { filename: f });
   }
   dom.counters.getElementById.length = 0;

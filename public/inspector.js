@@ -36,6 +36,9 @@
      page overlay), the turn tooltip, the retention budget, detail prefs. */
   const _views = new Map();             // instanceId -> view
   let _v = null;                        // the view being worked on
+  let _touched = null;                  // the view last pressed (the keys act on it in Desks)
+  const _inspectorView = document.getElementById('view-dashboard');
+  const _desksView = document.getElementById('view-desks');
 
   function _in(v, fn, ...args) {
     const prev = _v;
@@ -47,8 +50,16 @@
     const v = _v;
     return (...args) => (v?.destroyed ? undefined : _in(v, fn, ...args));
   }
-  // On screen: shown by its host and the browser tab in front.
-  const _onScreen = (v = _v) => !!v && v.shown && !v.destroyed && !document.hidden;
+  // On screen: shown by its host, inside a header view that is shown (the
+  // Inspector, or Desks for a desk window; header switches don't call
+  // setShown), and the browser tab in front.
+  const _onScreen = (v = _v) => !!v && v.shown && !v.destroyed && !document.hidden && _inShownView(v.root);
+  const _visible = (el) => !!el && el.style.display !== 'none' && !el.classList.contains('hidden');
+  // A root outside every header view (a test box, a detached root) counts as shown.
+  function _inShownView(el) {
+    const view = el.closest('[id^="view-"]');
+    return !view || _visible(view);
+  }
 
   function _vFrame(fn) {
     const v = _v;
@@ -199,8 +210,11 @@
      own. Opening one subscribes this browser to the session: the server sends
      its snapshot, then its live events. Closing drops the subscription and
      everything this page held for it. Nothing here survives a reload.
-     Each open tab is an instance view (INSTANCE VIEWS above): the strip
-     shows one view's root at a time in #view-dashboard. */
+     Each open tab is an instance view (INSTANCE VIEWS above) on a TabHost
+     (public/tab-host.js, docs/desks.md): kind 'inspector', keyed by
+     instanceId. The host shows one home tab at a time in #view-dashboard and
+     hands tabs to Desks windows and back. "Sessions" is this module's own
+     fixed button, first in the strip, and never goes onto a desk. */
   const SESSIONS_TAB = 'sessions';
   const SESSION_GROUPS = [
     { kind: 'cli', title: 'CLI sessions' },
@@ -209,8 +223,7 @@
   ];
   const _sessions = new Map();          // instanceId → card from the summary feed
   let _runs = {};                       // runId → { status, orchestrator, workers } from the feed
-  const _openTabs = new Map();          // instanceId → view, the strip's tabs in opening order
-  let activeInstanceTab = SESSIONS_TAB;
+  let activeInstanceTab = SESSIONS_TAB;   // the strip's shown home tab
   const inspectorTabStrip = document.getElementById('inspectorTabStrip');
   const _sessionsGrid = document.getElementById('inspectorSessions');
   // The page's Inspector body is the template every view copies; the strip
@@ -219,6 +232,16 @@
   const _stripHost = _bodyTemplate?.parentNode || null;
   _bodyTemplate?.remove();
   _bodyTemplate?.classList.remove('hidden');
+  const _host = window.createTabHost({
+    kind: 'inspector', label: 'Inspector', icon: '\u{1F50D}', homeView: 'dashboard',
+    stripEl: inspectorTabStrip, contentEl: _stripHost,
+    reopen: (key) => _reopenTab(key),
+    canMove: (key) => key !== SESSIONS_TAB,
+    decorate: (key, btn, label, { onDesk }) => _decorateTab(key, btn, label, onDesk),
+    // A click on a home tab, or the shown one left for a desk (next or null).
+    onSelect: (key) => switchInstanceTab(key ?? SESSIONS_TAB),
+    afterRender: () => updateStreamingState(),
+  });
   const _sessionTotals = new Map();     // CLI instanceId → whole-session totals from the server
   const _sessionTotalsAsked = new Set();
 
@@ -243,65 +266,68 @@
     return _sessions.get(instanceId)?.label || instanceId;
   }
 
+  // The Sessions button, then the host's tabs (their titles follow the labels).
   function renderInspectorTabStrip() {
-    if (!inspectorTabStrip) return;
-    inspectorTabStrip.innerHTML = '';
-    const home = document.createElement('button');
-    home.className = 'view-tab inspector-sessions-tab' + (activeInstanceTab === SESSIONS_TAB ? ' active' : '');
-    home.dataset.instanceId = SESSIONS_TAB;
-    home.textContent = 'Sessions';
-    inspectorTabStrip.appendChild(home);
-
-    for (const [id, tab] of _openTabs) {
-      const card = _sessions.get(id);
-      const btn = document.createElement('button');
-      btn.className = 'view-tab' + (activeInstanceTab === id ? ' active' : '');
-      if (card?.status === 'inactive') btn.classList.add('instance-exited');
-      if (tab.loading) btn.classList.add('instance-loading');
-      btn.dataset.instanceId = id;
-      const label = document.createElement('span');
-      label.textContent = instanceDisplayLabel(id);
-      if (id.startsWith('cli-')) {
-        label.className = 'cli-tab-label';
-        // A second click on the open tab goes to its CLI tab.
-        label.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (activeInstanceTab !== id) {
-            switchInstanceTab(id);
-            return;
-          }
-          const tabId = _cliTabIdOf(id);
-          if (tabId) {
-            switchView('claude');
-            window.cliModule?.switchTab?.(tabId);
-          }
-        });
+    if (inspectorTabStrip) {
+      let home = inspectorTabStrip.querySelector(':scope > .inspector-sessions-tab');
+      if (!home) {
+        home = document.createElement('button');
+        home.className = 'view-tab inspector-sessions-tab';
+        home.dataset.instanceId = SESSIONS_TAB;
+        home.textContent = 'Sessions';
+        inspectorTabStrip.prepend(home);
       }
-      btn.appendChild(label);
+      home.classList.toggle('active', activeInstanceTab === SESSIONS_TAB);
+    }
+    let drawn = false;
+    for (const key of _host.keys()) {
+      const title = instanceDisplayLabel(key);
+      if (_host.get(key).title !== title) { _host.update(key, { title }); drawn = true; }
+    }
+    if (!drawn) _host.render();
+  }
 
-      // Model override indicator (non-clickable)
-      const cliTab = id.startsWith('cli-') ? window.cliModule?.tabs?.get(_cliTabIdOf(id)) : null;
-      if (cliTab) {
-        const hasOverride = cliTab.settings &&
-          cliTab.settings.modelMap && Object.values(cliTab.settings.modelMap).some(v => v);
-        const overrideIcon = document.createElement('span');
-        overrideIcon.className = 'cli-model-override-btn' + (hasOverride ? ' active' : '') + ' inspector-only';
-        overrideIcon.innerHTML = hasOverride
-          ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 2l12 10M1 7h12M1 12l12-10"/></svg>'
-          : '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 3h10m-2-2l2 2-2 2"/><path d="M1 7h10m-2-2l2 2-2 2"/><path d="M1 11h10m-2-2l2 2-2 2"/></svg>';
-        overrideIcon.title = hasOverride ? 'Model override active' : 'No model override';
-        btn.appendChild(overrideIcon);
-      }
-
-      const close = document.createElement('span');
-      close.className = 'view-tab-close';
-      close.textContent = '×';
-      close.title = 'Close this tab';
-      btn.appendChild(close);
-      inspectorTabStrip.appendChild(btn);
+  // The Inspector's parts of a tab button (the host draws the button, its
+  // label and the desk chip).
+  function _decorateTab(id, btn, label, onDesk) {
+    const card = _sessions.get(id);
+    btn.dataset.instanceId = id;
+    if (card?.status === 'inactive') btn.classList.add('instance-exited');
+    if (_views.get(id)?.loading) btn.classList.add('instance-loading');
+    if (id.startsWith('cli-')) {
+      label.classList.add('cli-tab-label');
+      // A second click on the shown tab goes to its CLI tab.
+      label.addEventListener('click', (e) => {
+        if (onDesk || activeInstanceTab !== id) return;
+        e.stopPropagation();
+        const tabId = _cliTabIdOf(id);
+        if (tabId) {
+          switchView('claude');
+          window.cliModule?.switchTab?.(tabId);
+        }
+      });
     }
 
-    updateStreamingState();
+    // Model override indicator (non-clickable)
+    const cliTab = id.startsWith('cli-') ? window.cliModule?.tabs?.get(_cliTabIdOf(id)) : null;
+    if (cliTab) {
+      const hasOverride = cliTab.settings &&
+        cliTab.settings.modelMap && Object.values(cliTab.settings.modelMap).some(v => v);
+      const overrideIcon = document.createElement('span');
+      overrideIcon.className = 'cli-model-override-btn' + (hasOverride ? ' active' : '') + ' inspector-only';
+      overrideIcon.innerHTML = hasOverride
+        ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 2l12 10M1 7h12M1 12l12-10"/></svg>'
+        : '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 3h10m-2-2l2 2-2 2"/><path d="M1 7h10m-2-2l2 2-2 2"/><path d="M1 11h10m-2-2l2 2-2 2"/></svg>';
+      overrideIcon.title = hasOverride ? 'Model override active' : 'No model override';
+      btn.appendChild(overrideIcon);
+    }
+
+    const close = document.createElement('span');
+    close.className = 'view-tab-close';
+    close.textContent = '×';
+    close.title = 'Close this tab';
+    close.addEventListener('click', (e) => { e.stopPropagation(); closeSessionTab(id); });
+    btn.appendChild(close);
   }
 
   function _showSessionsGrid(on) {
@@ -493,7 +519,7 @@
     };
     v.content = {
       key: instanceId,
-      get title() { return instanceDisplayLabel(instanceId); },
+      title: instanceDisplayLabel(instanceId),   // kept current by the strip (host.update)
       root,
       setShown: (visible) => _setShown(v, visible),
       destroy: () => _destroyView(v),
@@ -511,6 +537,7 @@
     initTimeline();
     v.el.focusBtn?.addEventListener('click', _here(toggleFocusMode));
     v.el.clearBtn?.addEventListener('click', _here(clearVisibleTurns));
+    v.root.addEventListener('pointerdown', () => { _touched = v; }, true);
     v.el.emptyState?.addEventListener('click', (e) => {
       const view = e.target.closest?.('.empty-state-link')?.dataset.view;
       if (view) document.querySelector(`.header-tab[data-view="${view}"]`)?.click();
@@ -623,6 +650,7 @@
     clearTimeout(v.dropTimer);
     v.dropTimer = null;
     _views.delete(v.instanceId);
+    if (_touched === v) _touched = null;
     v.root.remove();
     sendWs({ type: 'inspector:unsubscribe', instanceId: v.instanceId });
     _stripDrop(v.instanceId);
@@ -650,48 +678,48 @@
     _interner.drop(v.instanceId);
   }
 
-  // --- The strip: one view shown at a time in #view-dashboard ---
+  // --- The strip: the host shows one home tab at a time in #view-dashboard ---
 
-  // Open a session's tab (its view built on first open) and focus it.
-  function openSessionTab(instanceId) {
+  // Open a session's tab (its view built on first open) and show it; a tab
+  // on a desk is shown in its window.
+  function openSessionTab(instanceId, { show = true } = {}) {
     if (!instanceId || instanceId === SESSIONS_TAB) { switchInstanceTab(SESSIONS_TAB); return; }
-    if (!_openTabs.has(instanceId)) {
-      const content = createInstanceView(instanceId);
-      _openTabs.set(instanceId, _views.get(instanceId));
-      content.root.classList.add('hidden');
-      _stripHost?.appendChild(content.root);
-    }
-    switchInstanceTab(instanceId);
+    if (!_host.has(instanceId)) _host.add(createInstanceView(instanceId));
+    if (show) switchInstanceTab(instanceId);
+  }
+
+  // A desk placeholder's Reopen: the tab comes back (Desks mounts it in its
+  // window). A session the server no longer lists can't.
+  function _reopenTab(instanceId) {
+    if (!_host.has(instanceId) && !_sessions.has(instanceId)) return false;
+    openSessionTab(instanceId, { show: false });
+    return true;
   }
 
   // Close a session's tab: its view goes, with its traffic and its turns.
+  // A desk window holding it turns into a placeholder.
   function closeSessionTab(instanceId) {
     const v = _views.get(instanceId);
     if (v) v.content.destroy();
-    else _stripDrop(instanceId);
+    else if (_host.has(instanceId)) _host.remove(instanceId);
   }
 
-  // The strip forgets a tab whose view is gone; the next one takes over.
+  // A view was destroyed: the host lets its tab go; if it was the shown home
+  // tab, the next home tab takes over.
   function _stripDrop(instanceId) {
-    if (!_openTabs.has(instanceId)) return;
-    const order = [..._openTabs.keys()];
-    _openTabs.delete(instanceId);
-    if (activeInstanceTab === instanceId) {
-      const at = order.indexOf(instanceId);
-      const next = order[at + 1] ?? order[at - 1];
-      switchInstanceTab(next && _openTabs.has(next) ? next : SESSIONS_TAB);
-    } else {
-      renderInspectorTabStrip();
-    }
+    const wasActive = activeInstanceTab === instanceId;
+    const next = wasActive && _host.has(instanceId) ? _nextHomeTab(instanceId) : null;
+    if (_host.has(instanceId)) _host.remove(instanceId);   // destroy() again: a no-op now
+    if (wasActive) switchInstanceTab(next ?? SESSIONS_TAB);
+    else renderInspectorTabStrip();
   }
 
-  // Shown: the strip's active tab, while the Inspector itself is on screen.
-  function _syncStripShown() {
-    const page = _inspectorShown();
-    for (const [id, v] of _openTabs) {
-      const on = page && id === activeInstanceTab;
-      if (on !== v.shown || !on) _setShown(v, on);
-    }
+  // The home tab after this one in the strip, else the one before.
+  function _nextHomeTab(instanceId) {
+    const keys = _host.keys();
+    const at = keys.indexOf(instanceId);
+    const homes = keys.filter(k => k !== instanceId && !_host.isOnDesk(k));
+    return homes.find(k => keys.indexOf(k) > at) ?? homes.filter(k => keys.indexOf(k) < at).pop() ?? null;
   }
 
   /* Hold at most the cap of one session's turns: the oldest leave the page
@@ -746,17 +774,21 @@
   }
 
   function switchInstanceTab(instanceId) {
-    // Opening a session from elsewhere (a CLI or SDK panel) lands on its tab.
-    if (instanceId !== SESSIONS_TAB && !_openTabs.has(instanceId)) { openSessionTab(instanceId); return; }
+    if (instanceId !== SESSIONS_TAB) {
+      // Opening a session from elsewhere (a CLI or SDK panel) lands on its tab.
+      if (!_host.has(instanceId)) { openSessionTab(instanceId); return; }
+      // A tab on a desk: its window (the strip stays as it is).
+      if (_host.isOnDesk(instanceId) && window.tabHosts?.desks()) { _host.select(instanceId); return; }
+    }
     closeDetailModal();
     activeInstanceTab = instanceId;
     // The tab left behind keeps summaries only.
     _scheduleCompaction();
     _showSessionsGrid(instanceId === SESSIONS_TAB);
-    for (const [id, v] of _openTabs) v.root.classList.toggle('hidden', id !== instanceId);
-    _syncStripShown();
+    // Home tabs only: a tab on a desk is left alone.
+    _host.activate(instanceId === SESSIONS_TAB ? null : instanceId);
     renderInspectorTabStrip();
-    _in(_openTabs.get(instanceId) || null, updateStats);
+    _in(_views.get(instanceId) || null, updateStats);
     if (instanceId === SESSIONS_TAB) renderSessionsGrid();
   }
 
@@ -767,7 +799,7 @@
     for (const s of msg.sessions || []) _sessions.set(s.instanceId, s);
     _runs = msg.runs || {};
     // The strip is rebuilt only when an open tab's label or state moved.
-    const sig = JSON.stringify([...[..._openTabs.keys()].map(id => [id, _sessions.get(id)?.status === 'inactive', _sessions.get(id)?.label])]);
+    const sig = JSON.stringify([..._host.keys().map(id => [id, _sessions.get(id)?.status === 'inactive', _sessions.get(id)?.label])]);
     if (sig !== _stripSig) { _stripSig = sig; renderInspectorTabStrip(); } else updateStreamingState();
     if (activeInstanceTab === SESSIONS_TAB && !document.getElementById('view-dashboard')?.classList.contains('hidden')) {
       renderSessionsGrid();
@@ -834,19 +866,10 @@
     window.cliModule?.updateStreamingState?.(busyInstances);
   }
 
-  if (inspectorTabStrip) {
-    inspectorTabStrip.addEventListener('click', (e) => {
-      if (e.target.classList.contains('view-tab-close')) {
-        const id = e.target.closest('.view-tab')?.dataset.instanceId;
-        if (id && id !== SESSIONS_TAB) closeSessionTab(id);
-        return;
-      }
-      const tabBtn = e.target.closest('.view-tab');
-      if (tabBtn && tabBtn.dataset.instanceId != null) {
-        switchInstanceTab(tabBtn.dataset.instanceId);
-      }
-    });
-  }
+  // The Sessions button (the host handles its own tabs' clicks).
+  inspectorTabStrip?.addEventListener('click', (e) => {
+    if (e.target.closest('.inspector-sessions-tab')) switchInstanceTab(SESSIONS_TAB);
+  });
 
   // --- cURL export ---
   function buildCurlCommand(interaction) {
@@ -4557,12 +4580,15 @@
   }
 
   // --- Focus mode button + keyboard shortcuts ---
-  // The keys act on the strip's active view.
-  const _activeView = () => _openTabs.get(activeInstanceTab) || null;
+  // The keys act on the strip's shown tab in the Inspector, and on the view
+  // last clicked in Desks.
+  const _activeView = () => {
+    if (!_inspectorView || _visible(_inspectorView)) return _views.get(activeInstanceTab) || null;
+    return _touched?.onScreen ? _touched : null;
+  };
 
   document.addEventListener('keydown', (e) => {
-    const dashboardEl = document.getElementById('view-dashboard');
-    if (!dashboardEl || dashboardEl.classList.contains('hidden')) return;
+    if (_inspectorView && !_visible(_inspectorView) && !_visible(_desksView)) return;
     if (e.key === 'Escape' && _modalSel) {
       if (_overModal()) return;
       e.preventDefault();
@@ -4593,15 +4619,14 @@
   const _pendingSseRequests = new Set();
   const _pendingDetailRequests = new Set();
 
-  /* The Inspector page is on screen when its view is shown and the browser
-     tab is in front. It decides what the strip shows (_syncStripShown) and
+  /* The Inspector page is on screen when its view (or Desks, where its tabs
+     can be windows) is shown and the browser tab is in front. It decides
      whether the detail modal draws; each instance view has its own on-screen
      state (_onScreen). Hidden for a while, the modal's content is dropped
      (drawn again on return); a view off screen drops its own (_viewOff). */
-  const _inspectorView = document.getElementById('view-dashboard');
   function _inspectorShown() {
     if (document.hidden) return false;
-    return !_inspectorView || (_inspectorView.style.display !== 'none' && !_inspectorView.classList.contains('hidden'));
+    return !_inspectorView || _visible(_inspectorView) || _visible(_desksView);
   }
   let _renderOnShow = false;           // a modal render held back while hidden
   let _hiddenDropTimer = null;
@@ -4613,7 +4638,6 @@
     const shown = _inspectorShown();
     if (shown === _wasShown) return;
     _wasShown = shown;
-    _syncStripShown();
     if (!shown) {
       if (!_hiddenDropTimer) _hiddenDropTimer = setTimeout(_dropHiddenDetail, RET.LIMITS.HIDDEN_DROP_MS);
       return;
@@ -4635,9 +4659,9 @@
   }
 
   document.addEventListener('visibilitychange', _onInspectorVisibility);
-  if (_inspectorView) {
-    new MutationObserver(_onInspectorVisibility)
-      .observe(_inspectorView, { attributes: true, attributeFilter: ['style', 'class'] });
+  // Header view switches don't call setShown: the views follow them here.
+  for (const el of [_inspectorView, _desksView]) {
+    if (el) new MutationObserver(_onInspectorVisibility).observe(el, { attributes: true, attributeFilter: ['style', 'class'] });
   }
 
   /* Every turn's request carries the whole conversation so far, so holding

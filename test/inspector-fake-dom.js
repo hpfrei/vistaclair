@@ -106,6 +106,7 @@ function createDom() {
     replaceChild(node, old) { this.insertBefore(node, old); return this.removeChild(old); }
     append(...nodes) { for (const n of this._adopt(nodes)) this.insertBefore(n, null); }
     prepend(...nodes) { const first = this.firstChild; for (const n of this._adopt(nodes)) this.insertBefore(n, first); }
+    replaceChildren(...nodes) { while (this.firstChild) this.removeChild(this.firstChild); this.append(...nodes); }
     before(...nodes) { const p = this.parentNode; if (!p) return; for (const n of this._adopt(nodes)) p.insertBefore(n, this); }
     after(...nodes) {
       const p = this.parentNode; if (!p) return;
