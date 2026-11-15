@@ -607,7 +607,7 @@ main {
   border-top: 1px solid var(--paper-border);
 }
 
-aside#timeline {
+aside.insp-timeline {
   width: 280px;
   min-width: 140px;
   max-width: 60%;
@@ -618,7 +618,7 @@ aside#timeline {
   flex-direction: column;
 }
 
-#timeline-resizer {
+.insp-timeline-resizer {
   width: 4px;
   cursor: col-resize;
   background-image: linear-gradient(90deg, #cc3344, #c07020, #1a8a3a, #1088aa, #2255aa, #7744bb);
@@ -626,13 +626,13 @@ aside#timeline {
   flex-shrink: 0;
   transition: filter 0.2s, box-shadow 0.2s;
 }
-#timeline-resizer:hover,
-#timeline-resizer.dragging {
+.insp-timeline-resizer:hover,
+.insp-timeline-resizer.dragging {
   filter: brightness(1.3);
   box-shadow: 0 0 6px 1px currentColor;
 }
 
-#timeline-header {
+.insp-timeline-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -646,18 +646,18 @@ aside#timeline {
   flex-shrink: 0;
 }
 
-#timeline-header button {
+.inspector-body .insp-timeline-header button {
   font-size: 10px;
   padding: 2px 8px;
   color: var(--red);
   border-color: var(--red);
   background: transparent;
 }
-#timeline-header button:hover {
+.inspector-body .insp-timeline-header button:hover {
   background: color-mix(in srgb, var(--red) 15%, transparent);
 }
 
-#timeline-list {
+.insp-timeline-list {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -665,13 +665,13 @@ aside#timeline {
   flex: 1;
 }
 
-#timeline-footer {
+.insp-timeline-footer {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
-#timeline-footer-streaming {
+.insp-timeline-footer-streaming {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
@@ -681,10 +681,10 @@ aside#timeline {
   overflow-y: auto;
   transition: padding 0.2s ease;
 }
-#timeline-footer-streaming:not(:empty) {
+.insp-timeline-footer-streaming:not(:empty) {
   padding: 8px 12px;
 }
-#timeline-footer-stats {
+.insp-timeline-footer-stats {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -692,11 +692,11 @@ aside#timeline {
   font-size: 11px;
   color: var(--text-dim);
 }
-#timeline-total-time,
-#timeline-total-cost {
+.insp-timeline-total-time,
+.insp-timeline-total-cost {
   font-weight: 600;
 }
-#timeline-clear-btn {
+.inspector-body .insp-timeline-clear-btn {
   font-size: 10px;
   padding: 2px 8px;
   color: var(--red);
@@ -705,7 +705,7 @@ aside#timeline {
   background: transparent;
   cursor: pointer;
 }
-#timeline-clear-btn:hover {
+.inspector-body .insp-timeline-clear-btn:hover {
   background: color-mix(in srgb, var(--red) 15%, transparent);
 }
 .footer-streaming-badge {
@@ -1272,7 +1272,7 @@ aside#timeline {
 }
 .turn-link:hover { text-decoration: underline; }
 
-section#detail {
+section.insp-detail {
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -1283,8 +1283,8 @@ section#detail {
 }
 
 /* --- Focus mode: detail panel takes over full width --- */
-.inspector-body.focus-active aside#timeline,
-.inspector-body.focus-active #timeline-resizer {
+.inspector-body.focus-active aside.insp-timeline,
+.inspector-body.focus-active .insp-timeline-resizer {
   display: none;
 }
 .detail-focus-btn {
@@ -1310,11 +1310,11 @@ section#detail {
 .detail-focus-btn.focus-active svg {
   transform: rotate(45deg);
 }
-section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
+section.insp-detail:has(.insp-empty-state:not(.hidden)) .detail-focus-btn {
   display: none;
 }
 
-#empty-state {
+.insp-empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1322,7 +1322,7 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
   height: 100%;
   color: var(--text-dim);
 }
-#empty-state code {
+.insp-empty-state code {
   background: var(--bg-surface);
   padding: 4px 8px;
   border-radius: 4px;
@@ -1361,7 +1361,7 @@ section#detail:has(#empty-state:not(.hidden)) .detail-focus-btn {
 
 .hidden { display: none !important; }
 
-#detail-content {
+.insp-detail-content {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -6446,7 +6446,7 @@ details.model-section[open] > summary.model-section-head { border-bottom: 1px so
    PARALLEL TIMELINE (multi-column swimlane view)
    ============================================================ */
 /* "↓ live" in the timeline header while the reader has scrolled it up. */
-#timeline-header .tl-live-chip {
+.inspector-body .insp-timeline-header .tl-live-chip {
   margin-left: auto;
   padding: 1px 8px;
   border: 1px solid var(--accent);
@@ -6459,10 +6459,10 @@ details.model-section[open] > summary.model-section-head { border-bottom: 1px so
   letter-spacing: 0;
   cursor: pointer;
 }
-#timeline-header .tl-live-chip:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
-#timeline-header .tl-live-chip[hidden] { display: none; }
+.inspector-body .insp-timeline-header .tl-live-chip:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.inspector-body .insp-timeline-header .tl-live-chip[hidden] { display: none; }
 
-aside#timeline.parallel-mode {
+aside.insp-timeline.parallel-mode {
   max-width: none;
 }
 
@@ -6923,7 +6923,7 @@ aside#timeline.parallel-mode {
    VC DETAIL FRAME — request / response inspector
    ------------------------------------------------------------
    The old layout stacked a natural-height .request-panel above a
-   flex:1 .response-panel inside a scrolling #detail. Once the parent
+   flex:1 .response-panel inside a scrolling .insp-detail. Once the parent
    scrolled, flex:1 never resolved, so expanding the request pushed
    the response below the fold.
 
@@ -6951,7 +6951,7 @@ aside#timeline.parallel-mode {
   gap: 8px;
   flex-shrink: 0;
   padding: 6px 10px;
-  /* room for the absolutely-positioned #detail-focus-btn on the right */
+  /* room for the absolutely-positioned .detail-focus-btn on the right */
   padding-right: 42px;
   background: var(--vc-glass-2);
   border-bottom: 1px solid var(--vc-hair);
@@ -7019,7 +7019,7 @@ aside#timeline.parallel-mode {
 .vc-pane-request  { background: var(--request-panel-bg); }
 .vc-pane-response { background: var(--response-panel-bg); }
 
-/* --- resizer (mirrors #timeline-resizer, minus the gradient) --- */
+/* --- resizer (mirrors .insp-timeline-resizer, minus the gradient) --- */
 .vc-split-resizer {
   flex-shrink: 0;
   background: var(--vc-hair-strong);
@@ -7391,14 +7391,14 @@ aside#timeline.parallel-mode {
    Hairline separators instead of relying on hover alone, and a left
    accent bar on the selected entry rather than a flat fill.
    ============================================================ */
-aside#timeline {
+aside.insp-timeline {
   background: linear-gradient(180deg,
     color-mix(in srgb, var(--accent) 4%, var(--bg-surface)),
     var(--bg-surface) 40%);
   border-right: 1px solid var(--vc-hair);
 }
 
-#timeline-header {
+.insp-timeline-header {
   border-bottom: 1px solid var(--vc-hair-2);
   background: var(--vc-glass-2);
 }
@@ -7426,12 +7426,12 @@ aside#timeline {
   box-shadow: 0 0 8px var(--glow-accent);
 }
 
-#timeline-footer {
+.insp-timeline-footer {
   border-top: 1px solid var(--vc-hair);
   background: var(--vc-glass-2);
 }
-#timeline-total-time,
-#timeline-total-cost { font-variant-numeric: tabular-nums; }
+.insp-timeline-total-time,
+.insp-timeline-total-cost { font-variant-numeric: tabular-nums; }
 
 /* Status badges pick up the surface kit's tinted-pill treatment. */
 .entry-badge {
@@ -7465,7 +7465,7 @@ aside#timeline {
    Rather than rewrite ~300 component rules, this layer retargets
    them by *shape* onto the surface kit, exactly as the inspector
    frame does above. Gradient chrome (.view-nav, .header-gradient-bar,
-   #timeline-resizer) is deliberately untouched.
+   .insp-timeline-resizer) is deliberately untouched.
    ============================================================ */
 
 /* --- A. Elevated cards ---------------------------------------

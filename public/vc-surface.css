@@ -12,7 +12,7 @@
    different value.
 
    NOT touched here (the product's identity, kept on the gradient):
-     .header-gradient-bar, .view-nav, #timeline-resizer, nav-travel
+     .header-gradient-bar, .view-nav, .insp-timeline-resizer, nav-travel
    ============================================================ */
 
 :root {

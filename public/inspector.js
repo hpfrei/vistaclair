@@ -497,10 +497,10 @@
     const v = {
       instanceId, root,
       el: {
-        timeline: q('#timeline'), timelineHeader: q('#timeline-header'), timelineList: q('#timeline-list'),
-        footerStreaming: q('#timeline-footer-streaming'), totalTime: q('#timeline-total-time'),
-        totalCost: q('#timeline-total-cost'), clearBtn: q('#timeline-clear-btn'), resizer: q('#timeline-resizer'),
-        focusBtn: q('#detail-focus-btn'), emptyState: q('#empty-state'), detailContent: q('#detail-content'),
+        timeline: q('.insp-timeline'), timelineHeader: q('.insp-timeline-header'), timelineList: q('.insp-timeline-list'),
+        footerStreaming: q('.insp-timeline-footer-streaming'), totalTime: q('.insp-timeline-total-time'),
+        totalCost: q('.insp-timeline-total-cost'), clearBtn: q('.insp-timeline-clear-btn'), resizer: q('.insp-timeline-resizer'),
+        focusBtn: q('.detail-focus-btn'), emptyState: q('.insp-empty-state'), detailContent: q('.insp-detail-content'),
       },
       items: [],                        // the session's turns held here, oldest first
       loading: true, hasMore: false, loadingEarlier: false, extraCap: 0,
@@ -6230,7 +6230,7 @@
   }
 
   function updateUsageDisplay(usage, pricing) {
-    const bar = _detailHost.querySelector('#usage-bar');
+    const bar = _detailHost.querySelector('.usage-bar');
     if (bar) bar.innerHTML = renderUsage(usage, pricing);
   }
 
