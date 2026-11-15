@@ -110,29 +110,29 @@
     </div>
     <div class="inspector-sessions" id="inspectorSessions"></div>
     <div class="inspector-body hidden">
-      <aside id="timeline">
-        <div id="timeline-header">
+      <aside class="insp-timeline">
+        <div class="insp-timeline-header">
           <span>Timeline</span>
         </div>
-        <div id="timeline-list"></div>
-        <div id="timeline-footer">
-          <div id="timeline-footer-streaming"></div>
-          <div id="timeline-footer-stats">
-            <span id="timeline-total-time"></span>
-            <span id="timeline-total-cost"></span>
-            <button id="timeline-clear-btn">Clear</button>
+        <div class="insp-timeline-list"></div>
+        <div class="insp-timeline-footer">
+          <div class="insp-timeline-footer-streaming"></div>
+          <div class="insp-timeline-footer-stats">
+            <span class="insp-timeline-total-time"></span>
+            <span class="insp-timeline-total-cost"></span>
+            <button class="insp-timeline-clear-btn">Clear</button>
           </div>
         </div>
       </aside>
-      <div id="timeline-resizer"></div>
-      <section id="detail">
-        <button id="detail-focus-btn" class="detail-focus-btn" title="Toggle focus mode (F)">
+      <div class="insp-timeline-resizer"></div>
+      <section class="insp-detail">
+        <button class="detail-focus-btn" title="Toggle focus mode (F)">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="4 1 1 1 1 4"/><polyline points="12 1 15 1 15 4"/>
             <polyline points="4 15 1 15 1 12"/><polyline points="12 15 15 15 15 12"/>
           </svg>
         </button>
-        <div id="empty-state">
+        <div class="insp-empty-state">
           <p>No interaction selected.</p>
           <p class="empty-state-sub">Start capturing Claude Code API streams:</p>
           <ul class="empty-state-list">
@@ -140,7 +140,7 @@
             <li><b>Chat</b> &mdash; use the <span class="empty-state-link" data-view="claude">Chat</span> tab to talk to Claude directly through the proxy</li>
           </ul>
         </div>
-        <div id="detail-content" class="hidden"></div>
+        <div class="insp-detail-content hidden"></div>
       </section>
     </div>
   </main>

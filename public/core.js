@@ -1044,9 +1044,6 @@ function truncate(s, n) {
 }
 
 // --- DOM refs ---
-const timelineList = document.getElementById('timeline-list');
-const detailContent = document.getElementById('detail-content');
-const emptyState = document.getElementById('empty-state');
 const statusEl = document.getElementById('status');
 const statsEl = document.getElementById('footerStats');
 
@@ -1256,13 +1253,6 @@ async function doRestart() {
 
 document.getElementById('restartServerBtn')?.addEventListener('click', doRestart);
 
-// Wire up clickable view links in empty state
-document.querySelectorAll('#empty-state .empty-state-link').forEach(el => {
-  el.addEventListener('click', () => {
-    const view = el.dataset.view;
-    if (view) document.querySelector(`.header-tab[data-view="${view}"]`)?.click();
-  });
-});
 
 // --- Expose API for modules ---
 // --- AskUserQuestion: shared form rendering ---
@@ -1932,9 +1922,6 @@ window.dashboard = {
   closeFilePreview,
   fileCategory,
   formatBytes,
-  timelineList,
-  detailContent,
-  emptyState,
   statsEl,
   _pluginHandlers: [],
   registerModule: null,
@@ -2204,43 +2191,11 @@ document.addEventListener('keydown', e => {
 });
 
 // ============================================================
-// TIMELINE RESIZER
+// TIMELINE WIDTH (the page's preference, shared by every Inspector view)
 // ============================================================
-(function initResizer() {
-  const resizer = document.getElementById('timeline-resizer');
-  const timeline = document.getElementById('timeline');
-  if (!resizer || !timeline) return;
-
-  let startX, startW;
-  window.__timelineUserWidth = null;
-  window.__timelineDragging = false;
-
-  // Pointer events so the same handler serves mouse and touch.
-  resizer.addEventListener('pointerdown', (e) => {
-    e.preventDefault();
-    startX = e.clientX;
-    startW = timeline.offsetWidth;
-    window.__timelineDragging = true;
-    resizer.classList.add('dragging');
-    document.addEventListener('pointermove', onDrag);
-    document.addEventListener('pointerup', onUp);
-    document.addEventListener('pointercancel', onUp);
-  });
-
-  function onDrag(e) {
-    const w = Math.max(140, startW + (e.clientX - startX));
-    timeline.style.width = w + 'px';
-    window.__timelineUserWidth = w;
-  }
-
-  function onUp() {
-    window.__timelineDragging = false;
-    resizer.classList.remove('dragging');
-    document.removeEventListener('pointermove', onDrag);
-    document.removeEventListener('pointerup', onUp);
-    document.removeEventListener('pointercancel', onUp);
-  }
-})();
+// The drag handle itself is wired per view in inspector.js (_bindTimelineResizer).
+window.__timelineUserWidth = null;
+window.__timelineDragging = false;
 
 // --- Init ---
 // Show loading indicators on main tabs until data arrives

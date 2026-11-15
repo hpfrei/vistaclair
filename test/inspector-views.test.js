@@ -218,10 +218,10 @@ test('streaming, selection and the view\'s own buttons act on that view only', (
   assert.strictEqual(b.root.querySelectorAll('.selected').length, 0);
 
   // Focus mode and Clear are per view.
-  a.root.querySelector('#detail-focus-btn').click();
+  a.root.querySelector('.detail-focus-btn').click();
   assert.ok(a.root.classList.contains('focus-active'));
   assert.ok(!b.root.classList.contains('focus-active'));
-  b.root.querySelector('#timeline-clear-btn').click();
+  b.root.querySelector('.insp-timeline-clear-btn').click();
   dom.flushFrames();
   assert.deepStrictEqual(laneTurns(b.root), []);
   assert.deepStrictEqual(laneTurns(a.root), ['a1', 's1']);

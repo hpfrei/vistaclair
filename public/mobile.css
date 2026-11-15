@@ -13,7 +13,7 @@
 
 /* Resizers were mouse-only; now they use Pointer Events, so the browser
    must not claim the gesture for scrolling. Applies at every width. */
-#timeline-resizer,
+.insp-timeline-resizer,
 .dir-resizer,
 .dir-h-resizer,
 .vc-split-resizer {
@@ -75,8 +75,8 @@
   .turn-tip { display: none !important; }
 
   /* Resizers are fiddly at 4px; fatten the hit area without moving the seam. */
-  #timeline-resizer, .dir-resizer { position: relative; }
-  #timeline-resizer::before, .dir-resizer::before {
+  .insp-timeline-resizer, .dir-resizer { position: relative; }
+  .insp-timeline-resizer::before, .dir-resizer::before {
     content: '';
     position: absolute;
     inset: 0 -8px;
@@ -101,7 +101,7 @@
   .inspector-body,
   .header-tab.active,
   .header-gradient-bar,
-  #timeline-resizer {
+  .insp-timeline-resizer {
     background-attachment: scroll;
   }
 
@@ -367,13 +367,13 @@
   /* --- Inspector: the timeline alone ------------------------------
      No lanes on a phone; a tap on a timeline item opens the detail modal
      (inspector.js), full-screen. */
-  .inspector-body aside#timeline {
+  .inspector-body aside.insp-timeline {
     width: 100% !important;   /* beats the desktop drag width */
     max-width: none;
     min-width: 0;
   }
-  .inspector-body #timeline-resizer,
-  .inspector-body #detail,
+  .inspector-body .insp-timeline-resizer,
+  .inspector-body .insp-detail,
   .detail-focus-btn { display: none; }
   .turn-modal-panel {
     width: 100vw;

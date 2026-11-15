@@ -62,9 +62,6 @@ function loadInspector() {
     openFilePreview: () => {},
     openTextPreview: () => {},
     fileCategory: ext => ({ png: 'image', jpg: 'image', mp4: 'video', mp3: 'audio' })[ext] || 'text',
-    timelineList: document.getElementById('timeline-list'),
-    detailContent: document.getElementById('detail-content'),
-    emptyState: document.getElementById('empty-state'),
     statsEl: document.getElementById('footerStats'),
     registerView: () => {},
   };
