@@ -1,9 +1,9 @@
 (function() {
   'use strict';
-  const { state, escHtml, highlightJSON, renderJSON, jsonBlock, formatDuration, truncate,
+  const { escHtml, highlightJSON, renderJSON, jsonBlock, formatDuration, truncate,
           renderMarkdown, renderMarkdownDebounced, cancelRenderDebounce, sendWs,
           linkifyFilePaths, openFilePreview, openTextPreview, fileCategory,
-          timelineList, detailContent, emptyState, statsEl } = window.dashboard;
+          statsEl } = window.dashboard;
 
   // Absolute file paths anywhere in the detail pane (tool input JSON, tool
   // results, hook payloads) become links that open the file preview modal.
@@ -17,10 +17,108 @@
   const _phoneQuery = window.matchMedia('(max-width: 640px)');
   const _isPhone = () => _phoneQuery.matches;
 
+  // ============================================================
+  // INSTANCE VIEWS
+  // ============================================================
+  /* Each open session has a view: its own copy of the Inspector body
+     (timeline, live lanes, footers) built once when the tab opens, shown or
+     hidden, destroyed on close, and working wherever its root is placed
+     (a tab strip today, a Desks window later). It owns everything that
+     describes that session on this page: its turns (items), selection,
+     lanes, timeline layout, subagent numbering, timers.
+     The code below works on the view in _v. Every way in sets it with
+     _in(): a message for the session, setShown, the strip, a click inside the
+     view. _here(fn) keeps the current view for a listener or observer
+     registered while building; _vFrame/_vTimeout/_vInterval do so for frames
+     and timers, track them for destroy(), and skip the DOM work of a view
+     that is off screen (it is redrawn when shown again).
+     Shared by all views: the session list and grid, the detail modal (one
+     page overlay), the turn tooltip, the retention budget, detail prefs. */
+  const _views = new Map();             // instanceId -> view
+  let _v = null;                        // the view being worked on
+  let _touched = null;                  // the view last pressed (the keys act on it in Desks)
+  const _inspectorView = document.getElementById('view-dashboard');
+  const _desksView = document.getElementById('view-desks');
+
+  function _in(v, fn, ...args) {
+    const prev = _v;
+    _v = v;
+    try { return fn(...args); } finally { _v = prev; }
+  }
+  // A callback that runs for the view current now (nothing once destroyed).
+  function _here(fn) {
+    const v = _v;
+    return (...args) => (v?.destroyed ? undefined : _in(v, fn, ...args));
+  }
+  // On screen: shown by its host, inside a header view that is shown (the
+  // Inspector, or Desks for a desk window; header switches don't call
+  // setShown), and the browser tab in front.
+  const _onScreen = (v = _v) => !!v && v.shown && !v.destroyed && !document.hidden && _inShownView(v.root);
+  const _visible = (el) => !!el && el.style.display !== 'none' && !el.classList.contains('hidden');
+  // A root outside every header view (a test box, a detached root) counts as shown.
+  function _inShownView(el) {
+    const view = el.closest('[id^="view-"]');
+    return !view || _visible(view);
+  }
+
+  function _vFrame(fn) {
+    const v = _v;
+    const id = requestAnimationFrame((t) => {
+      v?.frames.delete(id);
+      if (!v) return fn(t);
+      if (v.destroyed) return;
+      if (!_onScreen(v)) { v.stale = true; return; }
+      _in(v, fn, t);
+    });
+    v?.frames.add(id);
+    return id;
+  }
+  function _vTimeout(fn, ms) {
+    const v = _v;
+    const id = setTimeout(() => {
+      v?.timeouts.delete(id);
+      if (!v) return fn();
+      if (v.destroyed) return;
+      if (!_onScreen(v)) { v.stale = true; return; }
+      _in(v, fn);
+    }, ms);
+    v?.timeouts.add(id);
+    return id;
+  }
+  function _vInterval(fn, ms) {
+    const v = _v;
+    const id = setInterval(() => {
+      if (!v) return fn();
+      if (v.destroyed || !_onScreen(v)) return;
+      _in(v, fn);
+    }, ms);
+    v?.intervals.add(id);
+    return id;
+  }
+  function _vClearInterval(id) {
+    if (id == null) return;
+    clearInterval(id);
+    _v?.intervals.delete(id);
+  }
+
+  // A turn held on this page, wherever its view is.
+  function _locate(id) {
+    for (const v of _views.values()) {
+      const idx = v.items.findIndex(i => i.id === id);
+      if (idx >= 0) return { v, idx, item: v.items[idx] };
+    }
+    return null;
+  }
+  const _itemById = id => _locate(id)?.item || null;
+  function* _allItems() {
+    for (const v of _views.values()) yield* v.items;
+  }
+
   // --- Subagent registry: track numbering and colors for parallel subagents ---
-  const _subagentRegistry = new Map();    // agentId -> { agentType, number, colorIndex }
-  const _subagentTypeCounts = new Map();  // agentType -> Map<agentId, number>
-  let _subagentColorCounter = 0;
+  // Per view (numbering is per session); code outside any view gets a scratch one.
+  const _newSubRegistry = () => ({ registry: new Map(), typeCounts: new Map(), colorCounter: 0 });
+  const _scratchSub = _newSubRegistry();
+  const _sub = () => _v?.sub || _scratchSub;
   const SUBAGENT_COLORS = [
     '#7dcfff', // cyan
     '#ff9e64', // orange
@@ -34,17 +132,17 @@
 
   function registerSubagent(subagent) {
     if (!subagent?.agentId) return null;
-    if (_subagentRegistry.has(subagent.agentId)) return _subagentRegistry.get(subagent.agentId);
+    if (_sub().registry.has(subagent.agentId)) return _sub().registry.get(subagent.agentId);
 
     const type = subagent.agentType || 'subagent';
-    if (!_subagentTypeCounts.has(type)) _subagentTypeCounts.set(type, new Map());
-    const typeMap = _subagentTypeCounts.get(type);
+    if (!_sub().typeCounts.has(type)) _sub().typeCounts.set(type, new Map());
+    const typeMap = _sub().typeCounts.get(type);
     const number = typeMap.size + 1;
     typeMap.set(subagent.agentId, number);
 
-    const colorIndex = _subagentColorCounter++ % SUBAGENT_COLORS.length;
+    const colorIndex = _sub().colorCounter++ % SUBAGENT_COLORS.length;
     const entry = { agentType: type, number, colorIndex };
-    _subagentRegistry.set(subagent.agentId, entry);
+    _sub().registry.set(subagent.agentId, entry);
 
     if (number === 2) refreshSubagentLabelsForType(type);
 
@@ -53,26 +151,26 @@
 
   function getSubagentLabel(subagent) {
     if (!subagent?.agentId) return subagent?.agentType || 'subagent';
-    const entry = _subagentRegistry.get(subagent.agentId);
+    const entry = _sub().registry.get(subagent.agentId);
     if (!entry) return subagent.agentType || 'subagent';
-    const typeMap = _subagentTypeCounts.get(entry.agentType);
+    const typeMap = _sub().typeCounts.get(entry.agentType);
     if (typeMap && typeMap.size > 1) return `${entry.agentType} ${entry.number}`;
     return entry.agentType;
   }
 
   function getSubagentColor(subagent) {
     if (!subagent?.agentId) return SUBAGENT_COLORS[0];
-    const entry = _subagentRegistry.get(subagent.agentId);
+    const entry = _sub().registry.get(subagent.agentId);
     if (!entry) return SUBAGENT_COLORS[0];
     return SUBAGENT_COLORS[entry.colorIndex];
   }
 
   function refreshSubagentLabelsForType(type) {
-    const typeMap = _subagentTypeCounts.get(type);
+    const typeMap = _sub().typeCounts.get(type);
     if (!typeMap) return;
     for (const [agentId, num] of typeMap) {
       const label = typeMap.size > 1 ? `${type} ${num}` : type;
-      document.querySelectorAll(`.turn-group[data-agent-id="${agentId}"]`).forEach(group => {
+      _v?.root.querySelectorAll(`.turn-group[data-agent-id="${agentId}"]`).forEach(group => {
         const badge = group.querySelector('.entry-subagent');
         if (badge) badge.textContent = label;
         group.querySelectorAll('.tag-agent').forEach(tag => { tag.textContent = label; });
@@ -81,9 +179,9 @@
   }
 
   function resetSubagentRegistry() {
-    _subagentRegistry.clear();
-    _subagentTypeCounts.clear();
-    _subagentColorCounter = 0;
+    _sub().registry.clear();
+    _sub().typeCounts.clear();
+    _sub().colorCounter = 0;
   }
 
   // --- Streaming text block merge state ---
@@ -93,7 +191,6 @@
   let _pendingMarkdownBodyEl = null;
 
   // --- Focus mode: detail panel takes over full width ---
-  let _focusMode = false;
 
   function flushPendingMarkdown() {
     if (_pendingMarkdownBodyEl) {
@@ -112,7 +209,12 @@
      feed, inspector:sessions); each open session has a closable tab of its
      own. Opening one subscribes this browser to the session: the server sends
      its snapshot, then its live events. Closing drops the subscription and
-     everything this page held for it. Nothing here survives a reload. */
+     everything this page held for it. Nothing here survives a reload.
+     Each open tab is an instance view (INSTANCE VIEWS above) on a TabHost
+     (public/tab-host.js, docs/desks.md): kind 'inspector', keyed by
+     instanceId. The host shows one home tab at a time in #view-dashboard and
+     hands tabs to Desks windows and back. "Sessions" is this module's own
+     fixed button, first in the strip, and never goes onto a desk. */
   const SESSIONS_TAB = 'sessions';
   const SESSION_GROUPS = [
     { kind: 'cli', title: 'CLI sessions' },
@@ -121,14 +223,27 @@
   ];
   const _sessions = new Map();          // instanceId → card from the summary feed
   let _runs = {};                       // runId → { status, orchestrator, workers } from the feed
-  const _openTabs = new Map();          // instanceId → { loading }, in opening order
-  let activeInstanceTab = SESSIONS_TAB;
+  let activeInstanceTab = SESSIONS_TAB;   // the strip's shown home tab
   const inspectorTabStrip = document.getElementById('inspectorTabStrip');
   const _sessionsGrid = document.getElementById('inspectorSessions');
-  const _inspectorBody = document.querySelector('#view-dashboard .inspector-body');
+  // The page's Inspector body is the template every view copies; the strip
+  // places its views' roots where it was.
+  const _bodyTemplate = document.querySelector('#view-dashboard .inspector-body');
+  const _stripHost = _bodyTemplate?.parentNode || null;
+  _bodyTemplate?.remove();
+  _bodyTemplate?.classList.remove('hidden');
+  const _host = window.createTabHost({
+    kind: 'inspector', label: 'Inspector', icon: '\u{1F50D}', homeView: 'dashboard',
+    stripEl: inspectorTabStrip, contentEl: _stripHost,
+    reopen: (key) => _reopenTab(key),
+    canMove: (key) => key !== SESSIONS_TAB,
+    decorate: (key, btn, label, { onDesk }) => _decorateTab(key, btn, label, onDesk),
+    // A click on a home tab, or the shown one left for a desk (next or null).
+    onSelect: (key) => switchInstanceTab(key ?? SESSIONS_TAB),
+    afterRender: () => updateStreamingState(),
+  });
   const _sessionTotals = new Map();     // CLI instanceId → whole-session totals from the server
   const _sessionTotalsAsked = new Set();
-  let _statsTab = null;                 // the tab the footer was last drawn for
 
   // The CLI tab that owns an instance, if it is still open.
   function _cliTabIdOf(instanceId) {
@@ -151,70 +266,72 @@
     return _sessions.get(instanceId)?.label || instanceId;
   }
 
+  // The Sessions button, then the host's tabs (their titles follow the labels).
   function renderInspectorTabStrip() {
-    if (!inspectorTabStrip) return;
-    inspectorTabStrip.innerHTML = '';
-    const home = document.createElement('button');
-    home.className = 'view-tab inspector-sessions-tab' + (activeInstanceTab === SESSIONS_TAB ? ' active' : '');
-    home.dataset.instanceId = SESSIONS_TAB;
-    home.textContent = 'Sessions';
-    inspectorTabStrip.appendChild(home);
-
-    for (const [id, tab] of _openTabs) {
-      const card = _sessions.get(id);
-      const btn = document.createElement('button');
-      btn.className = 'view-tab' + (activeInstanceTab === id ? ' active' : '');
-      if (card?.status === 'inactive') btn.classList.add('instance-exited');
-      if (tab.loading) btn.classList.add('instance-loading');
-      btn.dataset.instanceId = id;
-      const label = document.createElement('span');
-      label.textContent = instanceDisplayLabel(id);
-      if (id.startsWith('cli-')) {
-        label.className = 'cli-tab-label';
-        // A second click on the open tab goes to its CLI tab.
-        label.addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (activeInstanceTab !== id) {
-            switchInstanceTab(id);
-            return;
-          }
-          const tabId = _cliTabIdOf(id);
-          if (tabId) {
-            switchView('claude');
-            window.cliModule?.switchTab?.(tabId);
-          }
-        });
+    if (inspectorTabStrip) {
+      let home = inspectorTabStrip.querySelector(':scope > .inspector-sessions-tab');
+      if (!home) {
+        home = document.createElement('button');
+        home.className = 'view-tab inspector-sessions-tab';
+        home.dataset.instanceId = SESSIONS_TAB;
+        home.textContent = 'Sessions';
+        inspectorTabStrip.prepend(home);
       }
-      btn.appendChild(label);
+      home.classList.toggle('active', activeInstanceTab === SESSIONS_TAB);
+    }
+    let drawn = false;
+    for (const key of _host.keys()) {
+      const title = instanceDisplayLabel(key);
+      if (_host.get(key).title !== title) { _host.update(key, { title }); drawn = true; }
+    }
+    if (!drawn) _host.render();
+  }
 
-      // Model override indicator (non-clickable)
-      const cliTab = id.startsWith('cli-') ? window.cliModule?.tabs?.get(_cliTabIdOf(id)) : null;
-      if (cliTab) {
-        const hasOverride = cliTab.settings &&
-          cliTab.settings.modelMap && Object.values(cliTab.settings.modelMap).some(v => v);
-        const overrideIcon = document.createElement('span');
-        overrideIcon.className = 'cli-model-override-btn' + (hasOverride ? ' active' : '') + ' inspector-only';
-        overrideIcon.innerHTML = hasOverride
-          ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 2l12 10M1 7h12M1 12l12-10"/></svg>'
-          : '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 3h10m-2-2l2 2-2 2"/><path d="M1 7h10m-2-2l2 2-2 2"/><path d="M1 11h10m-2-2l2 2-2 2"/></svg>';
-        overrideIcon.title = hasOverride ? 'Model override active' : 'No model override';
-        btn.appendChild(overrideIcon);
-      }
-
-      const close = document.createElement('span');
-      close.className = 'view-tab-close';
-      close.textContent = '×';
-      close.title = 'Close this tab';
-      btn.appendChild(close);
-      inspectorTabStrip.appendChild(btn);
+  // The Inspector's parts of a tab button (the host draws the button, its
+  // label and the desk chip).
+  function _decorateTab(id, btn, label, onDesk) {
+    const card = _sessions.get(id);
+    btn.dataset.instanceId = id;
+    if (card?.status === 'inactive') btn.classList.add('instance-exited');
+    if (_views.get(id)?.loading) btn.classList.add('instance-loading');
+    if (id.startsWith('cli-')) {
+      label.classList.add('cli-tab-label');
+      // A second click on the shown tab goes to its CLI tab.
+      label.addEventListener('click', (e) => {
+        if (onDesk || activeInstanceTab !== id) return;
+        e.stopPropagation();
+        const tabId = _cliTabIdOf(id);
+        if (tabId) {
+          switchView('claude');
+          window.cliModule?.switchTab?.(tabId);
+        }
+      });
     }
 
-    updateStreamingState();
+    // Model override indicator (non-clickable)
+    const cliTab = id.startsWith('cli-') ? window.cliModule?.tabs?.get(_cliTabIdOf(id)) : null;
+    if (cliTab) {
+      const hasOverride = cliTab.settings &&
+        cliTab.settings.modelMap && Object.values(cliTab.settings.modelMap).some(v => v);
+      const overrideIcon = document.createElement('span');
+      overrideIcon.className = 'cli-model-override-btn' + (hasOverride ? ' active' : '') + ' inspector-only';
+      overrideIcon.innerHTML = hasOverride
+        ? '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 2l12 10M1 7h12M1 12l12-10"/></svg>'
+        : '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 3h10m-2-2l2 2-2 2"/><path d="M1 7h10m-2-2l2 2-2 2"/><path d="M1 11h10m-2-2l2 2-2 2"/></svg>';
+      overrideIcon.title = hasOverride ? 'Model override active' : 'No model override';
+      btn.appendChild(overrideIcon);
+    }
+
+    const close = document.createElement('span');
+    close.className = 'view-tab-close';
+    close.textContent = '×';
+    close.title = 'Close this tab';
+    close.addEventListener('click', (e) => { e.stopPropagation(); closeSessionTab(id); });
+    btn.appendChild(close);
   }
 
   function _showSessionsGrid(on) {
     if (_sessionsGrid) _sessionsGrid.classList.toggle('hidden', !on);
-    if (_inspectorBody) _inspectorBody.classList.toggle('hidden', on);
   }
 
   const _statusOf = (s) => (s.status === 'streaming' ? 'streaming' : s.status === 'running' ? 'running' : 'inactive');
@@ -248,7 +365,7 @@
     // The directory leads the subtitle unless the name already is it.
     const sub = [s.cwd && dir !== name ? SC.dirHtml(s.cwd) : '', _KIND_TAG[s.kind] || '',
       s.cwd && dir === name ? escHtml(s.cwd) : ''].filter(Boolean).join(' · ');
-    return `<button type="button" class="vc-card sc-card insp-card ${SC.accentOf(status)}${s.status === 'inactive' ? ' is-inactive' : ''}${_openTabs.has(s.instanceId) ? ' is-open' : ''}"`
+    return `<button type="button" class="vc-card sc-card insp-card ${SC.accentOf(status)}${s.status === 'inactive' ? ' is-inactive' : ''}${_views.has(s.instanceId) ? ' is-open' : ''}"`
       + ` data-instance-id="${escHtml(s.instanceId)}" title="Open this session's Inspector tab">`
       + SC.head({ icon: _KIND_ICON[s.kind] || _KIND_ICON.ext, name, sub, subTitle: s.cwd || null, status })
       + `<span class="sc-meta">${_metaHtml(s)}</span>`
@@ -294,7 +411,7 @@
         attrs: `data-instance-id="${escHtml(m.instanceId)}"`,
       };
     });
-    const open = members.some(m => _openTabs.has(m.instanceId));
+    const open = members.some(m => _views.has(m.instanceId));
     const workersHtml = `<span>${total} worker${total !== 1 ? 's' : ''}${running ? ` · <b>${running} running</b>` : ''}</span>`;
     return `<div class="vc-card sc-card insp-run-card ${SC.accentOf(status)}${!live ? ' is-inactive' : ''}${open ? ' is-open' : ''}">`
       + `<button type="button" class="insp-run-head" data-instance-id="${escHtml(head.instanceId)}" title="Open the orchestrator's Inspector tab">`
@@ -366,39 +483,184 @@
     });
   }
 
-  // Open a session's tab (subscribing on first open) and focus it.
-  function openSessionTab(instanceId) {
-    if (!instanceId || instanceId === SESSIONS_TAB) { switchInstanceTab(SESSIONS_TAB); return; }
-    if (!_openTabs.has(instanceId)) {
-      _openTabs.set(instanceId, { loading: true });
-      sendWs({ type: 'inspector:subscribe', instanceId });
-    }
-    switchInstanceTab(instanceId);
+  /* A session's view — what a tab host shows and moves:
+     { key, title, root, setShown(visible), destroy() }.
+     Creating it subscribes this page to the session (its snapshot, then its
+     live events); destroy() unsubscribes and forgets everything held for it.
+     One view per session: asking again returns the same one. */
+  function createInstanceView(instanceId) {
+    if (!instanceId || instanceId === SESSIONS_TAB) throw new Error('createInstanceView: a session instanceId is needed');
+    const existing = _views.get(instanceId);
+    if (existing) return existing.content;
+    const root = _bodyTemplate.cloneNode(true);
+    const q = sel => root.querySelector(sel);
+    const v = {
+      instanceId, root,
+      el: {
+        timeline: q('#timeline'), timelineHeader: q('#timeline-header'), timelineList: q('#timeline-list'),
+        footerStreaming: q('#timeline-footer-streaming'), totalTime: q('#timeline-total-time'),
+        totalCost: q('#timeline-total-cost'), clearBtn: q('#timeline-clear-btn'), resizer: q('#timeline-resizer'),
+        focusBtn: q('#detail-focus-btn'), emptyState: q('#empty-state'), detailContent: q('#detail-content'),
+      },
+      items: [],                        // the session's turns held here, oldest first
+      loading: true, hasMore: false, loadingEarlier: false, extraCap: 0,
+      shown: false, onScreen: false, stale: true, destroyed: false,
+      selection: null, focusMode: false,
+      lanes: null, lanesSyncQueued: 0, lanesTimer: null,
+      tl: {
+        follow: true, expectTop: 0, liveBtn: null, d3State: null, flowAnimations: new Map(),
+        inflightSet: new Set(), inflightTimers: new Map(), resizeObs: null, resizeRaf: null,
+        rebuildRaf: null, lastAgentId: null,
+      },
+      sub: _newSubRegistry(),
+      durationTimers: new Map(),
+      frames: new Set(), timeouts: new Set(), intervals: new Set(),
+      dropTimer: null,
+    };
+    v.content = {
+      key: instanceId,
+      title: instanceDisplayLabel(instanceId),   // kept current by the strip (host.update)
+      root,
+      setShown: (visible) => _setShown(v, visible),
+      destroy: () => _destroyView(v),
+    };
+    _views.set(instanceId, v);
+    _in(v, _buildView);
+    sendWs({ type: 'inspector:subscribe', instanceId });
+    return v.content;
   }
 
-  // Close a session's tab: stop its traffic and forget everything held for it.
-  function closeSessionTab(instanceId) {
-    if (!_openTabs.has(instanceId)) return;
-    const order = [..._openTabs.keys()];
-    _openTabs.delete(instanceId);
-    sendWs({ type: 'inspector:unsubscribe', instanceId });
-    _dropInstance(instanceId);
-    if (activeInstanceTab === instanceId) {
-      const at = order.indexOf(instanceId);
-      const next = order[at + 1] ?? order[at - 1];
-      switchInstanceTab(next && _openTabs.has(next) ? next : SESSIONS_TAB);
-    } else {
-      renderInspectorTabStrip();
-    }
-  }
-
-  function _dropInstance(instanceId) {
-    const dropped = new Set();
-    state.interactions = state.interactions.filter(i => {
-      if (i.instanceId !== instanceId) return true;
-      dropped.add(i.id);
-      return false;
+  // The view's own wiring, once: timeline follow and hover, the focus and
+  // Clear buttons, the timeline width handle, the empty state's links.
+  function _buildView() {
+    const v = _v;
+    initTimeline();
+    v.el.focusBtn?.addEventListener('click', _here(toggleFocusMode));
+    v.el.clearBtn?.addEventListener('click', _here(clearVisibleTurns));
+    v.root.addEventListener('pointerdown', () => { _touched = v; }, true);
+    v.el.emptyState?.addEventListener('click', (e) => {
+      const view = e.target.closest?.('.empty-state-link')?.dataset.view;
+      if (view) document.querySelector(`.header-tab[data-view="${view}"]`)?.click();
     });
+    _bindTimelineResizer();
+    if (window.__timelineUserWidth && v.el.timeline) v.el.timeline.style.width = window.__timelineUserWidth + 'px';
+    renderEmptyState();
+  }
+
+  // Drag the timeline's edge (pointer events: mouse and touch). The width
+  // chosen is the page's preference, used by every view.
+  function _bindTimelineResizer() {
+    const { resizer, timeline } = _v.el;
+    if (!resizer || !timeline) return;
+    let startX = 0, startW = 0;
+    const onDrag = (e) => {
+      const w = Math.max(140, startW + (e.clientX - startX));
+      timeline.style.width = w + 'px';
+      window.__timelineUserWidth = w;
+    };
+    const onUp = () => {
+      window.__timelineDragging = false;
+      resizer.classList.remove('dragging');
+      document.removeEventListener('pointermove', onDrag);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+    };
+    resizer.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      startX = e.clientX;
+      startW = timeline.offsetWidth;
+      window.__timelineDragging = true;
+      resizer.classList.add('dragging');
+      document.addEventListener('pointermove', onDrag);
+      document.addEventListener('pointerup', onUp);
+      document.addEventListener('pointercancel', onUp);
+    });
+  }
+
+  function _setShown(v, visible) {
+    if (v.destroyed) return;
+    v.shown = !!visible;
+    _applyScreen(v, true);
+  }
+
+  // A view went on or off screen. Told again that it is shown (a resize, a
+  // move), it refits.
+  function _applyScreen(v, refit = false) {
+    const on = _onScreen(v);
+    if (on === v.onScreen) {
+      if (on && refit) _in(v, queueTimelineParallelRebuild);
+      return;
+    }
+    v.onScreen = on;
+    _in(v, on ? _viewOn : _viewOff);
+  }
+
+  function _viewOn() {
+    const v = _v;
+    clearTimeout(v.dropTimer);
+    v.dropTimer = null;
+    // Off screen it only stored what arrived: draw it all now.
+    if (v.stale) _viewRender();
+    else queueTimelineParallelRebuild();
+  }
+
+  function _viewOff() {
+    const v = _v;
+    // Off screen a while: its lanes go and its turns keep summaries only.
+    if (!v.dropTimer) {
+      v.dropTimer = setTimeout(() => {
+        v.dropTimer = null;
+        if (!v.destroyed && !_onScreen(v)) _in(v, _dropHiddenView);
+      }, RET.LIMITS.HIDDEN_DROP_MS);
+    }
+    _scheduleCompaction();
+  }
+
+  function _dropHiddenView() {
+    _lanesTeardown();
+    _v.stale = true;
+    _compactView(_v, { hidden: true });
+  }
+
+  // Everything of the view drawn again from its turns.
+  function _viewRender() {
+    const v = _v;
+    if (!_onScreen()) { v.stale = true; return; }
+    v.stale = false;
+    _lanesTeardown();
+    renderTimelineActive();
+    _lanesShow();
+    updateStats();
+  }
+
+  function _destroyView(v) {
+    if (v.destroyed) return;
+    _in(v, () => {
+      _dropData();
+      clearAllFooterBadges();
+      v.tl.resizeObs?.disconnect();
+      v.tl.resizeObs = null;
+    });
+    v.destroyed = true;
+    v.shown = v.onScreen = false;
+    for (const id of v.frames) cancelAnimationFrame(id);
+    for (const id of v.timeouts) clearTimeout(id);
+    for (const id of v.intervals) clearInterval(id);
+    v.frames.clear(); v.timeouts.clear(); v.intervals.clear();
+    clearTimeout(v.dropTimer);
+    v.dropTimer = null;
+    _views.delete(v.instanceId);
+    if (_touched === v) _touched = null;
+    v.root.remove();
+    sendWs({ type: 'inspector:unsubscribe', instanceId: v.instanceId });
+    _stripDrop(v.instanceId);
+  }
+
+  // Forget the turns held for the view's session (closed, or a fresh snapshot).
+  function _dropData() {
+    const v = _v;
+    const dropped = new Set(v.items.map(i => i.id));
+    v.items = [];
     for (const id of dropped) {
       stopDurationTimer(id);
       _pendingSseRequests.delete(id);
@@ -408,26 +670,68 @@
     for (let k = _recentFull.length - 1; k >= 0; k--) {
       if (dropped.has(_recentFull[k])) _recentFull.splice(k, 1);
     }
-    if (_lanesView?.instanceId === instanceId) _lanesTeardown();
-    const sel = state.selection;
-    if (sel && dropped.has(_selId(sel))) state.selection = null;
+    _lanesTeardown();
+    v.selection = null;
     if (_modalSel && dropped.has(_selId(_modalSel))) closeDetailModal();
-    _sessionTotals.delete(instanceId);
-    _sessionTotalsAsked.delete(instanceId);
-    _interner.drop(instanceId);
+    _sessionTotals.delete(v.instanceId);
+    _sessionTotalsAsked.delete(v.instanceId);
+    _interner.drop(v.instanceId);
+  }
+
+  // --- The strip: the host shows one home tab at a time in #view-dashboard ---
+
+  // Open a session's tab (its view built on first open) and show it; a tab
+  // on a desk is shown in its window.
+  function openSessionTab(instanceId, { show = true } = {}) {
+    if (!instanceId || instanceId === SESSIONS_TAB) { switchInstanceTab(SESSIONS_TAB); return; }
+    if (!_host.has(instanceId)) _host.add(createInstanceView(instanceId));
+    if (show) switchInstanceTab(instanceId);
+  }
+
+  // A desk placeholder's Reopen: the tab comes back (Desks mounts it in its
+  // window). A session the server no longer lists can't.
+  function _reopenTab(instanceId) {
+    if (!_host.has(instanceId) && !_sessions.has(instanceId)) return false;
+    openSessionTab(instanceId, { show: false });
+    return true;
+  }
+
+  // Close a session's tab: its view goes, with its traffic and its turns.
+  // A desk window holding it turns into a placeholder.
+  function closeSessionTab(instanceId) {
+    const v = _views.get(instanceId);
+    if (v) v.content.destroy();
+    else if (_host.has(instanceId)) _host.remove(instanceId);
+  }
+
+  // A view was destroyed: the host lets its tab go; if it was the shown home
+  // tab, the next home tab takes over.
+  function _stripDrop(instanceId) {
+    const wasActive = activeInstanceTab === instanceId;
+    const next = wasActive && _host.has(instanceId) ? _nextHomeTab(instanceId) : null;
+    if (_host.has(instanceId)) _host.remove(instanceId);   // destroy() again: a no-op now
+    if (wasActive) switchInstanceTab(next ?? SESSIONS_TAB);
+    else renderInspectorTabStrip();
+  }
+
+  // The home tab after this one in the strip, else the one before.
+  function _nextHomeTab(instanceId) {
+    const keys = _host.keys();
+    const at = keys.indexOf(instanceId);
+    const homes = keys.filter(k => k !== instanceId && !_host.isOnDesk(k));
+    return homes.find(k => keys.indexOf(k) > at) ?? homes.filter(k => keys.indexOf(k) < at).pop() ?? null;
   }
 
   /* Hold at most the cap of one session's turns: the oldest leave the page
      and the tab offers "Load earlier". Turns the user paged back in raise
      that tab's cap, so the next live turn doesn't throw them out again. */
-  function _trimTimeline(instanceId) {
-    const tab = _openTabs.get(instanceId);
-    if (!tab) return false;
+  function _trimTimeline() {
+    const v = _v;
     const keep = _keptIds();
-    const drop = new Set(RET.timelineTrim(state.interactions, instanceId,
-      { cap: RET.LIMITS.TIMELINE_CAP + (tab.extraCap || 0), keep }));
+    const drop = new Set(RET.timelineTrim(v.items, v.instanceId,
+      { cap: RET.LIMITS.TIMELINE_CAP + (v.extraCap || 0), keep }));
     if (!drop.size) return false;
-    state.interactions = state.interactions.filter(i => !drop.has(i.id));
+    v.items = v.items.filter(i => !drop.has(i.id));
     for (const id of drop) {
       stopDurationTimer(id);
       _pendingSseRequests.delete(id);
@@ -437,54 +741,55 @@
     for (let k = _recentFull.length - 1; k >= 0; k--) {
       if (drop.has(_recentFull[k])) _recentFull.splice(k, 1);
     }
-    tab.hasMore = true;
+    v.hasMore = true;
     return true;
   }
 
-  function loadEarlier(instanceId = activeInstanceTab) {
-    const tab = _openTabs.get(instanceId);
-    if (!tab || !tab.hasMore || tab.loadingEarlier) return;
-    const oldest = state.interactions.find(i => i.instanceId === instanceId);
-    tab.loadingEarlier = true;
+  function loadEarlier() {
+    const v = _v;
+    if (!v || !v.hasMore || v.loadingEarlier) return;
+    const oldest = v.items[0];
+    v.loadingEarlier = true;
     _renderLoadEarlier();
-    sendWs({ type: 'inspector:getEarlier', instanceId, beforeId: oldest?.id || null,
+    sendWs({ type: 'inspector:getEarlier', instanceId: v.instanceId, beforeId: oldest?.id || null,
              before: oldest?.timestamp, limit: RET.LIMITS.EARLIER_PAGE });
   }
 
   // The "Load earlier" bar at the top of the timeline, while the server holds
   // older turns of this session than the page does.
   function _renderLoadEarlier() {
-    const tab = _openTabs.get(activeInstanceTab);
-    let bar = timelineList.querySelector(':scope > .tl-load-earlier');
-    if (!tab?.hasMore) { bar?.remove(); return; }
+    const v = _v;
+    if (!_onScreen()) { v.stale = true; return; }
+    let bar = v.el.timelineList.querySelector(':scope > .tl-load-earlier');
+    if (!v.hasMore) { bar?.remove(); return; }
     if (!bar) {
       bar = document.createElement('button');
       bar.className = 'tl-load-earlier';
       bar.style.cssText = 'display:block;width:100%;padding:4px 8px;font-size:11px;cursor:pointer;background:var(--surface, var(--bg));color:var(--text-dim);border:none;border-bottom:1px solid var(--border)';
-      bar.addEventListener('click', () => loadEarlier());
-      timelineList.prepend(bar);
+      bar.addEventListener('click', _here(() => loadEarlier()));
+      v.el.timelineList.prepend(bar);
     }
-    bar.disabled = !!tab.loadingEarlier;
-    bar.textContent = tab.loadingEarlier ? 'Loading earlier turns\u2026' : 'Load earlier turns';
+    bar.disabled = !!v.loadingEarlier;
+    bar.textContent = v.loadingEarlier ? 'Loading earlier turns…' : 'Load earlier turns';
   }
 
   function switchInstanceTab(instanceId) {
-    // Opening a session from elsewhere (a CLI or SDK panel) lands on its tab.
-    if (instanceId !== SESSIONS_TAB && !_openTabs.has(instanceId)) { openSessionTab(instanceId); return; }
-    // Another tab (or a fresh snapshot of this one) starts its lanes over.
-    _lanesTeardown();
+    if (instanceId !== SESSIONS_TAB) {
+      // Opening a session from elsewhere (a CLI or SDK panel) lands on its tab.
+      if (!_host.has(instanceId)) { openSessionTab(instanceId); return; }
+      // A tab on a desk: its window (the strip stays as it is).
+      if (_host.isOnDesk(instanceId) && window.tabHosts?.desks()) { _host.select(instanceId); return; }
+    }
     closeDetailModal();
     activeInstanceTab = instanceId;
-    _tlSetFollow(true);
     // The tab left behind keeps summaries only.
     _scheduleCompaction();
     _showSessionsGrid(instanceId === SESSIONS_TAB);
+    // Home tabs only: a tab on a desk is left alone.
+    _host.activate(instanceId === SESSIONS_TAB ? null : instanceId);
     renderInspectorTabStrip();
-    updateStats();
-    if (instanceId === SESSIONS_TAB) { renderSessionsGrid(); return; }
-    state.selection = null;
-    renderTimelineActive();
-    _lanesShow();
+    _in(_views.get(instanceId) || null, updateStats);
+    if (instanceId === SESSIONS_TAB) renderSessionsGrid();
   }
 
   // The summary feed: cards and every busy indicator.
@@ -494,7 +799,7 @@
     for (const s of msg.sessions || []) _sessions.set(s.instanceId, s);
     _runs = msg.runs || {};
     // The strip is rebuilt only when an open tab's label or state moved.
-    const sig = JSON.stringify([...[..._openTabs.keys()].map(id => [id, _sessions.get(id)?.status === 'inactive', _sessions.get(id)?.label])]);
+    const sig = JSON.stringify([..._host.keys().map(id => [id, _sessions.get(id)?.status === 'inactive', _sessions.get(id)?.label])]);
     if (sig !== _stripSig) { _stripSig = sig; renderInspectorTabStrip(); } else updateStreamingState();
     if (activeInstanceTab === SESSIONS_TAB && !document.getElementById('view-dashboard')?.classList.contains('hidden')) {
       renderSessionsGrid();
@@ -561,19 +866,10 @@
     window.cliModule?.updateStreamingState?.(busyInstances);
   }
 
-  if (inspectorTabStrip) {
-    inspectorTabStrip.addEventListener('click', (e) => {
-      if (e.target.classList.contains('view-tab-close')) {
-        const id = e.target.closest('.view-tab')?.dataset.instanceId;
-        if (id && id !== SESSIONS_TAB) closeSessionTab(id);
-        return;
-      }
-      const tabBtn = e.target.closest('.view-tab');
-      if (tabBtn && tabBtn.dataset.instanceId != null) {
-        switchInstanceTab(tabBtn.dataset.instanceId);
-      }
-    });
-  }
+  // The Sessions button (the host handles its own tabs' clicks).
+  inspectorTabStrip?.addEventListener('click', (e) => {
+    if (e.target.closest('.inspector-sessions-tab')) switchInstanceTab(SESSIONS_TAB);
+  });
 
   // --- cURL export ---
   function buildCurlCommand(interaction) {
@@ -634,7 +930,7 @@
     const btn = e.target.closest('.curl-btn');
     if (!btn) return;
     const id = btn.dataset.interactionId;
-    const interaction = state.interactions.find(i => i.id === id);
+    const interaction = _itemById(id);
     if (!interaction) return;
     // A summary has no conversation to put in the command: fetch it first.
     if (interaction._summary) {
@@ -735,7 +1031,7 @@
   // A summary's copy of a result is cut (_truncated); `owner` is the turn whose
   // detail holds it whole.
   function findToolResult(toolUseId, out) {
-    for (const interaction of state.interactions) {
+    for (const interaction of _allItems()) {
       const req = interaction.request;
       const msgs = req?.messages || (req?._toolResults && [{ role: 'user', content: req._toolResults }]);
       if (!msgs) continue;
@@ -784,16 +1080,18 @@
   }
 
   // --- SSE event handling ---
-  // Where each streaming interaction sits in state.interactions, checked on
+  // Where each streaming interaction sits in its view's items, checked on
   // use: one lookup per token must not scan the whole list.
+  // (Kept per id, against the items of the view being worked on.)
   const _sseIndex = new Map();
   function _findStreaming(id) {
+    const items = _v.items;
     const at = _sseIndex.get(id);
-    if (at !== undefined && state.interactions[at]?.id === id) return state.interactions[at];
-    const idx = state.interactions.findIndex(i => i.id === id);
+    if (at !== undefined && items[at]?.id === id) return items[at];
+    const idx = items.findIndex(i => i.id === id);
     if (idx < 0) { _sseIndex.delete(id); return null; }
     _sseIndex.set(id, idx);
-    return state.interactions[idx];
+    return items[idx];
   }
 
   function handleSSEEvent(interactionId, event) {
@@ -809,40 +1107,45 @@
     const _evtChars = JSON.stringify(event.data || '').length;
     interaction._respChars = (interaction._respChars || 0) + _evtChars;
 
+    // Off screen the view only stores the event; it is drawn when shown.
+    const draw = _onScreen();
+    if (!draw) _v.stale = true;
+
     if (event.eventType === 'message_start' && event.data?.message?.usage) {
       interaction.usage = { ...event.data.message.usage };
-      updateTurnTokens(interaction);
+      if (draw) updateTurnTokens(interaction);
     }
     if (event.eventType === 'message_delta' && event.data?.usage) {
       interaction.usage = { ...interaction.usage, ...event.data.usage };
-      updateTurnTokens(interaction);
+      if (draw) updateTurnTokens(interaction);
     }
     if (event.eventType === 'message_start') {
       interaction.status = 'streaming';
-      updateTurnBadge(interactionId, 'streaming');
+      if (draw) updateTurnBadge(interactionId, 'streaming');
     }
     if (event.eventType === 'message_stop') {
       interaction.status = 'complete';
-      updateTurnBadge(interactionId, 'complete');
+      if (draw) updateTurnBadge(interactionId, 'complete');
     }
 
-    if (event.eventType === 'content_block_start' && event.data?.content_block?.type === 'tool_use') {
+    if (draw && event.eventType === 'content_block_start' && event.data?.content_block?.type === 'tool_use') {
       const cb = event.data.content_block;
       const toolCalls = extractToolCalls(interaction);
       const toolIdx = toolCalls.length - 1;
       appendToolToTimeline(interactionId, toolIdx, cb.name, '');
     }
-    if (event.eventType === 'content_block_stop') {
+    if (draw && event.eventType === 'content_block_stop') {
+      const root = _v.root;
       const toolCalls = extractToolCalls(interaction);
       const match = toolCalls.find(c => c.blockIndex === event.data?.index);
       if (match) {
         const toolIdx = toolCalls.indexOf(match);
-        const summaryEl = document.querySelector(`[data-tool-summary="${interactionId}-${toolIdx}"]`);
+        const summaryEl = root.querySelector(`[data-tool-summary="${interactionId}-${toolIdx}"]`);
         if (summaryEl) summaryEl.textContent = toolSummary(match.name, match.input);
         if (match.name === 'Skill' && match.input?.skill) {
-          const nameEl = document.querySelector(`[data-tool-name="${interactionId}-${toolIdx}"]`);
+          const nameEl = root.querySelector(`[data-tool-name="${interactionId}-${toolIdx}"]`);
           if (nameEl) nameEl.textContent = `/${match.input.skill}`;
-          const toolEl = document.querySelector(`[data-tool-id="${interactionId}-${toolIdx}"]`);
+          const toolEl = root.querySelector(`[data-tool-id="${interactionId}-${toolIdx}"]`);
           if (toolEl && !toolEl.classList.contains('skill-call')) {
             toolEl.classList.add('skill-call');
             if (nameEl) {
@@ -859,13 +1162,11 @@
     // Route SSE to the lanes (every turn of the session) and to the detail
     // modal if it shows this turn — not while off screen: the event is
     // buffered above, and both replay the buffer when shown again.
+    if (draw && _v.lanes) _lanesOnSSE(interaction, event);
     const inModal = _modalSel?.type === 'turn' && _modalSel.id === interactionId;
-    if (!_inspectorShown()) {
-      if (inModal || _lanesView) _renderOnShow = true;
-      return;
-    }
-    if (_lanesView) _lanesOnSSE(interaction, event);
-    if (inModal && _detailView?.id === interactionId && _detailView.root?.isConnected) {
+    if (!inModal) return;
+    if (!_inspectorShown()) { _renderOnShow = true; return; }
+    if (_detailView?.id === interactionId && _detailView.root?.isConnected) {
       appendSSEToDetail(event, interaction);
     }
   }
@@ -876,9 +1177,9 @@
              pendingMd: () => _pendingMarkdownBodyEl, setPendingMd: v => { _pendingMarkdownBodyEl = v; } };
   }
 
+  // An element of the detail modal (or of another scope) by its id.
   function _scopeFind(scope, id) {
-    if (scope && scope !== document) return scope.querySelector(`#${CSS.escape(id)}`);
-    return document.getElementById(id);
+    return (scope || _detailHost).querySelector(`#${CSS.escape(id)}`);
   }
 
   // Sticky bottom: follow the stream only while the reader is already at the
@@ -897,7 +1198,7 @@
   // Keep the streaming response in view. Blocks now flow at natural height
   // inside the scrollable response panel, so we follow at the panel level.
   function _followResponse(scope) {
-    const root = scope && scope !== document ? scope : document;
+    const root = scope || _detailHost;
     // In the .vc-detail frame the pane body has overflow:hidden and each open
     // section scrolls itself, so follow the section holding #response-blocks.
     const blocks = _scopeFind(scope, 'response-blocks');
@@ -909,10 +1210,10 @@
 
   function appendSSEToDetail(event, interaction, scope) {
     const { eventType, data } = event;
-    scope = scope || document;
+    scope = scope || _detailHost;
     // Once a turn has streamed into the panel, #response-blocks and #raw-sse-pre
     // are ours — patchTurnDetail must not rebuild them from the buffer.
-    if (scope === document && _detailView?.id === interaction.id) _detailView.streamed = true;
+    if (scope === _detailHost && _detailView?.id === interaction.id) _detailView.streamed = true;
     const ss = _getStreamState();
     const blockMap = ss.blockMap;
     const thinkingTokens = ss.thinkingTokens;
@@ -923,7 +1224,7 @@
       const statusChip = _scopeFind(scope, 'resp-status-chip');
       if (statusChip) { statusChip.textContent = '200'; statusChip.className = 'status-ok'; }
       if (data?.message?.usage) {
-        if (scope === document) updateUsageDisplay(data.message.usage, interaction.pricing);
+        if (scope === _detailHost) updateUsageDisplay(data.message.usage, interaction.pricing);
       }
       blockMap.clear();
       thinkingTokens.clear();
@@ -1059,7 +1360,7 @@
     if (eventType === 'message_delta') {
       if (data?.usage) {
         interaction.usage = { ...interaction.usage, ...data.usage };
-        if (scope === document) updateUsageDisplay(interaction.usage, interaction.pricing);
+        if (scope === _detailHost) updateUsageDisplay(interaction.usage, interaction.pricing);
         updateTurnTokens(interaction);
       }
       if (interaction.timing) {
@@ -1125,7 +1426,7 @@
   // ============================================================
   /* One column per agent of the open session — the main thread leftmost,
      each subagent beside it \u2014 each a running feed of that agent's turns.
-     Lanes are kept in step with state.interactions by _lanesSync (batched to
+     Lanes are kept in step with the view's items by _lanesSync (batched to
      a frame): turn elements are created, moved and dropped, never rebuilt;
      streamed events go straight to their turn's element. Each lane follows
      its newest turn until the reader scrolls it up (or jumps to a turn from
@@ -1135,29 +1436,25 @@
      The decisions (grouping, pairing, windows) are in inspector-lanes.js. */
   const LANES = window.inspectorLanes;
   const LANE_MAIN = LANES.LANE_MAIN;
-  let _lanesView = null;     // { instanceId, root, lanes, turns, calls, results, links, byId, built }
-  let _lanesSyncQueued = 0;
-  let _lanesTimer = null;
   const _reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
 
   function _lanesActive() {
-    return activeInstanceTab !== SESSIONS_TAB && !_isPhone();
+    return !_isPhone();
   }
 
   function _lanesShow() {
-    if (activeInstanceTab === SESSIONS_TAB) return;
+    if (!_onScreen()) { _v.stale = true; return; }
     // Nothing to show yet: the empty state says so.
-    if (!state.interactions.some(isVisibleInTimeline)) {
-      detailContent.classList.add('hidden');
-      emptyState.classList.remove('hidden');
+    if (!_v.items.length) {
+      _v.el.detailContent.classList.add('hidden');
+      _v.el.emptyState.classList.remove('hidden');
       renderEmptyState();
       return;
     }
-    emptyState.classList.add('hidden');
+    _v.el.emptyState.classList.add('hidden');
     if (!_lanesActive()) return;
-    if (!_inspectorShown()) { _renderOnShow = true; return; }
-    if (_lanesView?.instanceId === activeInstanceTab && _lanesView.root.isConnected) {
-      detailContent.classList.remove('hidden');
+    if (_v.lanes && _v.lanes.root.parentNode === _v.el.detailContent) {
+      _v.el.detailContent.classList.remove('hidden');
       _lanesQueueSync();
       return;
     }
@@ -1166,27 +1463,29 @@
 
   // Into phone width the lanes go; out of it they come back.
   _phoneQuery.addEventListener?.('change', () => {
-    if (_isPhone()) _lanesTeardown();
-    else _lanesShow();
+    for (const v of _views.values()) _in(v, () => {
+      if (_isPhone()) _lanesTeardown();
+      else _lanesShow();
+    });
   });
 
   function _lanesBuild() {
     _lanesTeardown();
-    emptyState.classList.add('hidden');
-    detailContent.classList.remove('hidden');
-    detailContent.classList.add('lanes-active');
-    detailContent.innerHTML = '';
+    _v.el.emptyState.classList.add('hidden');
+    _v.el.detailContent.classList.remove('hidden');
+    _v.el.detailContent.classList.add('lanes-active');
+    _v.el.detailContent.innerHTML = '';
     const root = document.createElement('div');
     root.className = 'ln-strip';
-    detailContent.appendChild(root);
-    _lanesView = {
-      instanceId: activeInstanceTab, root, built: false,
+    _v.el.detailContent.appendChild(root);
+    _v.lanes = {
+      instanceId: _v.instanceId, root, built: false,
       lanes: new Map(),     // lane key -> lane
       turns: new Map(),     // interaction id -> turn view
       calls: new Map(),     // tool_use_id -> call view
       results: new Map(), links: new Map(), byId: new Map(), stopped: new Set(),
     };
-    root.addEventListener('click', _lanesOnClick);
+    root.addEventListener('click', _here(_lanesOnClick));
     root.addEventListener('mouseover', e => {
       const t = e.target.closest?.('.ln-call-thumb');
       if (t) _thumbPopShow(t);
@@ -1196,8 +1495,8 @@
     });
     root.addEventListener('scroll', _thumbPopHide, true);
     _lanesSync();
-    _lanesView.built = true;
-    for (const lane of _lanesView.lanes.values()) {
+    _v.lanes.built = true;
+    for (const lane of _v.lanes.lanes.values()) {
       // History opens folded, except the results of each lane's newest turn
       // that has any.
       const turns = [...lane.feed.querySelectorAll(':scope > .ln-turn')].reverse();
@@ -1210,31 +1509,34 @@
       lane.feed.scrollTop = lane.feed.scrollHeight;
       lane.expectTop = lane.feed.scrollTop;
     }
-    _lanesTimer = setInterval(_lanesStatus, 2000);
+    _v.lanesTimer = _vInterval(_lanesStatus, 2000);
   }
 
   function _lanesTeardown() {
-    if (!_lanesView) return;
-    clearInterval(_lanesTimer);
-    _lanesTimer = null;
-    for (const lane of _lanesView.lanes.values()) { cancelAnimationFrame(lane.raf); lane.io.disconnect(); }
-    _lanesView.root.remove();
-    _lanesView = null;
+    if (!_v.lanes) return;
+    _vClearInterval(_v.lanesTimer);
+    _v.lanesTimer = null;
+    cancelAnimationFrame(_v.lanesSyncQueued);
+    _v.lanesSyncQueued = 0;
+    for (const lane of _v.lanes.lanes.values()) { cancelAnimationFrame(lane.raf); lane.io.disconnect(); }
+    _v.lanes.root.remove();
+    _v.lanes = null;
     _thumbPop?.remove();
     _thumbPop = null;
-    detailContent.classList.remove('lanes-active');
+    _v.el.detailContent.classList.remove('lanes-active');
   }
 
   function _lanesQueueSync() {
-    if (!_lanesView || _lanesSyncQueued) return;
-    _lanesSyncQueued = requestAnimationFrame(() => { _lanesSyncQueued = 0; _lanesSync(); });
+    if (!_v.lanes || _v.lanesSyncQueued) return;
+    _v.lanesSyncQueued = _vFrame(() => { _v.lanesSyncQueued = 0; _lanesSync(); });
   }
 
   // Bring every lane in line with the session's turns.
   function _lanesSync() {
-    const v = _lanesView;
-    if (!v || !v.root.isConnected) return;
-    const mine = state.interactions.filter(i => i.instanceId === v.instanceId);
+    const v = _v.lanes;
+    if (!v) return;
+    if (!_onScreen()) { _v.stale = true; return; }
+    const mine = _v.items;
     v.byId = new Map(mine.map(i => [i.id, i]));
     v.results = LANES.toolResultIndex(mine);
     v.links = LANES.agentLinks(mine, extractToolCalls);
@@ -1315,7 +1617,7 @@
       subagent: null, doneAt: null, railOpened: false, wantOlder: false,
     };
     const feed = lane.feed;
-    feed.addEventListener('scroll', () => {
+    feed.addEventListener('scroll', _here(() => {
       // A scroll we did not make is the reader's: up pauses, back down resumes.
       const intent = LANES.scrollIntent({
         scrollTop: feed.scrollTop, expectTop: lane.expectTop, scrollHeight: feed.scrollHeight,
@@ -1325,22 +1627,22 @@
       else if (intent === 'pause') _lanePause(lane);
       if (Math.abs(feed.scrollTop - lane.expectTop) > 2) lane.expectTop = feed.scrollTop;
       if (feed.scrollTop < 40) _laneOlder(lane);
-    }, { passive: true });
+    }), { passive: true });
     feed.addEventListener('wheel', e => {
       if (e.deltaY < 0 && feed.scrollHeight > feed.clientHeight) _lanePause(lane);
     }, { passive: true });
     // An open result pushed off the top by newer content folds to its line —
     // only while following: a paused reader's page must not move under them.
-    lane.io = new IntersectionObserver(entries => {
+    lane.io = new IntersectionObserver(_here(entries => {
       if (!lane.follow) return;
       for (const e of entries) {
         if (!e.isIntersecting && e.rootBounds && e.boundingClientRect.bottom <= e.rootBounds.top + 1) {
           _resultFoldAbove(e.target._call);
         }
       }
-    }, { root: feed });
+    }), { root: feed });
     // A lane opening after the first frame slides in.
-    if (_lanesView?.built) {
+    if (_v.lanes?.built) {
       el.classList.add('is-entering');
       requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('is-entering')));
     }
@@ -1357,7 +1659,7 @@
 
   // Label, model, live dot, and the lane's output tokens and cost so far.
   function _laneHeader(lane) {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (lane.subagent?.agentId) registerSubagent(lane.subagent);
     lane.el.style.setProperty('--ln-color', _laneColor(lane));
     const label = _laneLabel(lane);
@@ -1381,7 +1683,7 @@
 
   // Render the lane's window of turns: add what is new, drop what left.
   function _laneRender(lane) {
-    const v = _lanesView;
+    const v = _v.lanes;
     const ids = lane.ids;
     const w = LANES.laneWindow(ids, lane.win);
     lane.win = { fromId: ids[w.from] ?? null, toId: w.to >= ids.length ? null : ids[w.to - 1] };
@@ -1409,7 +1711,7 @@
       if (after.nextElementSibling !== tv.el) after.after(tv.el);
       after = tv.el;
     }
-    const tab = _openTabs.get(v.instanceId);
+    const tab = _v;
     lane.older.hidden = !(w.from > 0 || tab?.hasMore);
     _setText(lane.older, tab?.loadingEarlier && lane.wantOlder ? 'Loading earlier turns\u2026' : '\u2191 earlier turns');
     if (anchor) _laneRestore(lane, anchor);
@@ -1434,7 +1736,7 @@
 
   // Scroll-up reached the top: show older turns, from the page or the server.
   function _laneOlder(lane) {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (!v) return;
     const ids = lane.ids;
     const from = lane.win.fromId ? ids.indexOf(lane.win.fromId) : 0;
@@ -1452,16 +1754,16 @@
       _laneRestore(lane, anchor);
       return;
     }
-    const tab = _openTabs.get(v.instanceId);
+    const tab = _v;
     if (!tab?.hasMore || tab.loadingEarlier) return;
     lane.wantOlder = true;
-    loadEarlier(v.instanceId);
+    loadEarlier();
     _setText(lane.older, 'Loading earlier turns\u2026');
   }
 
   // A page of history arrived: lanes that asked for it step back into it.
   function _lanesOnEarlier() {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (!v) return;
     _lanesSync();
     for (const lane of v.lanes.values()) {
@@ -1518,15 +1820,17 @@
 
   // Selecting text in a lane pauses it, like scrolling up.
   document.addEventListener('selectionchange', () => {
-    if (!_lanesView) return;
-    for (const lane of _lanesView.lanes.values()) {
-      if (lane.follow && _selectionInside(lane.feed)) _lanePause(lane);
+    for (const v of _views.values()) {
+      if (!v.lanes) continue;
+      for (const lane of v.lanes.lanes.values()) {
+        if (lane.follow && _selectionInside(lane.feed)) _lanePause(lane);
+      }
     }
   });
 
   // Done subagents dim, then fold to a rail.
   function _lanesStatus() {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (!v) return;
     const now = Date.now();
     for (const lane of v.lanes.values()) {
@@ -1598,7 +1902,7 @@
   }
 
   function _turnDrop(tv) {
-    const v = _lanesView;
+    const v = _v.lanes;
     tv.el.remove();
     tv.lane.views.delete(tv.id);
     if (v?.turns.get(tv.id) === tv) v.turns.delete(tv.id);
@@ -1615,7 +1919,7 @@
   function _turnCaption(tv, i) {
     if (!i) return;
     const parts = [];
-    const n = _lanesView?.numbers?.get(i.id);
+    const n = _v.lanes?.numbers?.get(i.id);
     if (n) parts.push(n);
     const at = i.timing?.startedAt || i.timestamp;
     if (at) parts.push(formatWallTime(at));
@@ -1723,7 +2027,7 @@
   }
 
   function _callFill(call, input) {
-    const v = _lanesView;
+    const v = _v.lanes;
     call.input = input || {};
     const line = LANES.toolLine(call.name, call.input);
     call.el.querySelector('.ln-call-ico').textContent = line.icon;
@@ -1779,7 +2083,7 @@
   // Attach the call's result once the next turn brought it — open, when it
   // arrives live — and colour an Agent call like the lane of the subagent it ran.
   function _callRefresh(call, live = false) {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (!v || !call.id) return;
     call.el.classList.toggle('is-pending', !call.server && !call.result);
     if (call.name === 'Agent' || call.name === 'Task') {
@@ -1939,7 +2243,7 @@
      above, its paths links. One the summary cut is fetched in full (the
      turn that carries it) and shown again when it lands, if still open. */
   let _resultModalWait = null;   // { id, call, overlay }
-  function _resultModal(call, block = _lanesView?.results.get(call.id)) {
+  function _resultModal(call, block = _v?.lanes?.results.get(call.id)) {
     if (!block) return;
     const r = LANES.resultLine(block);
     const line = LANES.toolLine(call.name, call.input);
@@ -1964,7 +2268,7 @@
     });
     _resultModalWait = null;
     if (!cut) return;
-    const id = LANES.resultHolder(state.interactions, call.id);
+    const id = LANES.resultHolder(_v.items, call.id);
     if (!id) return;
     _resultModalWait = { id, call, overlay };
     _pendingDetailRequests.add(id);
@@ -2123,7 +2427,7 @@
   // --- Live hooks from the message and SSE paths ---
 
   function _lanesOnSSE(interaction, event) {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (interaction.instanceId !== v.instanceId) return;
     const tv = v.turns.get(interaction.id);
     // A turn without its element yet gets it (with the events so far) on sync.
@@ -2139,7 +2443,7 @@
 
   // A turn's status moved (complete, error): finish its element.
   function _lanesOnUpdate(i) {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (i.instanceId !== v.instanceId) return;
     const tv = v.turns.get(i.id);
     if (tv && tv.live && !_isLiveInteraction(i)) {
@@ -2158,7 +2462,7 @@
   }
 
   function _lanesOnClick(e) {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (!v) return;
     const laneEl = e.target.closest('.ln-lane');
     const lane = laneEl && v.lanes.get(laneEl.dataset.lane);
@@ -2227,11 +2531,11 @@
 
   // The lane element a timeline item stands for: a turn, or one of its calls.
   function _laneTargetOf(sel) {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (!v || !sel) return null;
     const id = _selId(sel);
     if (sel.type === 'tool') {
-      const i = v.byId.get(id) || state.interactions.find(x => x.id === id);
+      const i = v.byId.get(id) || _v.items.find(x => x.id === id);
       const tc = i ? extractToolCalls(i)[sel.toolIndex] : null;
       const call = tc?.id ? v.calls.get(tc.id) : null;
       if (call?.el?.isConnected) return { el: call.el, lane: call.lane, id };
@@ -2257,7 +2561,7 @@
      "↓ live" chip goes back. False when the lanes do not hold the item
      (a hook, an MCP call, another endpoint). */
   function _laneReveal(sel) {
-    const v = _lanesView;
+    const v = _v.lanes;
     if (!v || !sel) return false;
     const id = _selId(sel);
     const i = v.byId.get(id);
@@ -2313,11 +2617,12 @@
 
   // --- Focus mode ---
 
+  // Per view: the detail panel takes the view's whole width.
   function enterFocusMode() {
-    _focusMode = true;
-    const body = document.querySelector('.inspector-body');
-    if (body) body.classList.add('focus-active');
-    const btn = document.getElementById('detail-focus-btn');
+    if (!_v) return;
+    _v.focusMode = true;
+    _v.root.classList.add('focus-active');
+    const btn = _v.el.focusBtn;
     if (btn) {
       btn.classList.add('focus-active');
       btn.title = 'Exit focus mode (Esc)';
@@ -2325,10 +2630,10 @@
   }
 
   function exitFocusMode() {
-    _focusMode = false;
-    const body = document.querySelector('.inspector-body');
-    if (body) body.classList.remove('focus-active');
-    const btn = document.getElementById('detail-focus-btn');
+    if (!_v) return;
+    _v.focusMode = false;
+    _v.root.classList.remove('focus-active');
+    const btn = _v.el.focusBtn;
     if (btn) {
       btn.classList.remove('focus-active');
       btn.title = 'Toggle focus mode (F)';
@@ -2336,43 +2641,52 @@
   }
 
   function toggleFocusMode() {
-    if (_focusMode) exitFocusMode();
+    if (!_v) return;
+    if (_v.focusMode) exitFocusMode();
     else enterFocusMode();
   }
 
   // --- Interaction update ---
   function updateInteraction(updated) {
-    const idx = state.interactions.findIndex(i => i.id === updated.id);
+    const items = _v.items;
+    const idx = items.findIndex(i => i.id === updated.id);
     if (idx >= 0) {
       // Keeps what the summary leaves out and this page already has: the
       // streamed events, the response gauge (a client-side running counter),
       // a subagent guess, a fetched conversation.
-      state.interactions[idx] = RET.mergeLiveUpdate(state.interactions[idx], _adoptIncoming(updated));
+      items[idx] = RET.mergeLiveUpdate(items[idx], _adoptIncoming(updated));
     }
 
-    updateTurnBadge(updated.id, updated.status || 'complete');
-    updateTurnMeta(updated);
-    updateTurnTokens(state.interactions[idx] || updated);
-    rebuildToolEntries(updated.id);
+    if (_onScreen()) {
+      updateTurnBadge(updated.id, updated.status || 'complete');
+      updateTurnMeta(updated);
+      updateTurnTokens(items[idx] || updated);
+      rebuildToolEntries(updated.id);
+      if (_v.lanes && idx >= 0) _lanesOnUpdate(items[idx]);
+    } else {
+      _v.stale = true;
+    }
     updateStats();
 
     if (_modalSel?.type === 'turn' && _modalSel.id === updated.id) {
-      refreshDetailIfShowing(state.interactions[idx] || updated);
+      refreshDetailIfShowing(items[idx] || updated);
     }
-
-    if (_lanesView && idx >= 0) _lanesOnUpdate(state.interactions[idx]);
   }
 
   function markInteractionError(id, error) {
-    const interaction = state.interactions.find(i => i.id === id);
+    const interaction = _v.items.find(i => i.id === id);
     if (interaction) {
       interaction.status = 'error';
       interaction.response = interaction.response || {};
       interaction.response.error = error;
     }
-    updateTurnBadge(id, 'error');
+    if (_onScreen()) {
+      updateTurnBadge(id, 'error');
+      if (_v.lanes && interaction) _lanesOnUpdate(interaction);
+    } else {
+      _v.stale = true;
+    }
     if (interaction) refreshDetailIfShowing(interaction);
-    if (_lanesView && interaction) _lanesOnUpdate(interaction);
   }
 
   // ============================================================
@@ -2406,57 +2720,54 @@
   function llmTurnNumber(interaction) {
     if (!isStandardLlm(interaction) || !hasAssistantMessage(interaction)) return null;
     let n = 0;
-    for (const i of state.interactions) {
-      if (i.instanceId !== interaction.instanceId) continue;
+    for (const i of _views.get(interaction.instanceId)?.items || []) {
       if (!i.isMcp && !i.isHook && isStandardLlm(i) && hasAssistantMessage(i)) n++;
       if (i === interaction) return n;
     }
     return n;
   }
 
-  let _lastRenderedAgentId = null;
 
   let _timelineMode = 'parallel';
 
   /* The timeline follows its newest entry until the reader scrolls it up;
      scrolling back down, or its "↓ live" chip in the header, resumes. */
-  let _tlFollow = true;
-  let _tlExpectTop = 0;
-  let _tlLiveBtn = null;
 
   function _tlSetFollow(on) {
-    _tlFollow = on;
-    if (_tlLiveBtn) _tlLiveBtn.hidden = on;
+    _v.tl.follow = on;
+    if (_v.tl.liveBtn) _v.tl.liveBtn.hidden = on;
   }
 
+  // The view's timeline, once: its "↓ live" chip, follow and hover.
   function initTimeline() {
-    const header = document.getElementById('timeline-header');
-    if (!header || header.querySelector('.tl-live-chip')) return;
-    _tlLiveBtn = document.createElement('button');
-    _tlLiveBtn.className = 'tl-live-chip';
-    _tlLiveBtn.title = 'Back to the newest turn and follow it';
-    _tlLiveBtn.textContent = '\u2193 live';
-    _tlLiveBtn.hidden = _tlFollow;
-    _tlLiveBtn.addEventListener('click', () => { _tlSetFollow(true); scrollTimelineToBottom(); });
-    header.appendChild(_tlLiveBtn);
-    const aside = document.getElementById('timeline');
-    if (aside) aside.classList.add('parallel-mode');
+    const v = _v;
+    const header = v.el.timelineHeader;
+    const list = v.el.timelineList;
+    if (!header || !list || header.querySelector('.tl-live-chip')) return;
+    v.tl.liveBtn = document.createElement('button');
+    v.tl.liveBtn.className = 'tl-live-chip';
+    v.tl.liveBtn.title = 'Back to the newest turn and follow it';
+    v.tl.liveBtn.textContent = '↓ live';
+    v.tl.liveBtn.hidden = v.tl.follow;
+    v.tl.liveBtn.addEventListener('click', _here(() => { _tlSetFollow(true); scrollTimelineToBottom(); }));
+    header.appendChild(v.tl.liveBtn);
+    v.el.timeline?.classList.add('parallel-mode');
 
-    timelineList.addEventListener('scroll', () => {
+    list.addEventListener('scroll', _here(() => {
       const intent = LANES.scrollIntent({
-        scrollTop: timelineList.scrollTop, expectTop: _tlExpectTop,
-        scrollHeight: timelineList.scrollHeight, clientHeight: timelineList.clientHeight,
+        scrollTop: list.scrollTop, expectTop: v.tl.expectTop,
+        scrollHeight: list.scrollHeight, clientHeight: list.clientHeight,
       }, FOLLOW_SLACK_PX);
       if (intent === 'resume') _tlSetFollow(true);
       else if (intent === 'pause') _tlSetFollow(false);
-      _tlExpectTop = timelineList.scrollTop;
-    }, { passive: true });
-    timelineList.addEventListener('wheel', e => {
-      if (e.deltaY < 0 && timelineList.scrollHeight > timelineList.clientHeight) _tlSetFollow(false);
-    }, { passive: true });
+      v.tl.expectTop = list.scrollTop;
+    }), { passive: true });
+    list.addEventListener('wheel', _here(e => {
+      if (e.deltaY < 0 && list.scrollHeight > list.clientHeight) _tlSetFollow(false);
+    }), { passive: true });
 
     // Hovering a timeline item lights up its turn (and call) in the lanes.
-    timelineList.addEventListener('mouseover', e => {
+    list.addEventListener('mouseover', _here(e => {
       const tool = e.target.closest?.('[data-tool-id]');
       if (tool) {
         const [interactionId, idx] = _splitToolId(tool.dataset.toolId);
@@ -2465,8 +2776,8 @@
       }
       const node = e.target.closest?.('.timeline-entry[data-id], .turn-group[data-turn-id]');
       _laneHover(node ? { type: 'turn', id: node.dataset.id || node.dataset.turnId } : null);
-    });
-    timelineList.addEventListener('mouseleave', () => _laneHover(null));
+    }));
+    list.addEventListener('mouseleave', _here(() => _laneHover(null)));
   }
 
   // "<interactionId>-<toolIndex>" — the id itself may hold dashes.
@@ -2481,10 +2792,6 @@
 
   // === D3 PARALLEL TIMELINE (multi-column swimlane with SVG connectors) ===
 
-  let _d3State = null; // persisted between incremental appends; reset on full re-render
-  let _flowAnimations = new Map(); // agentId -> animFrameId
-  let _inflightSet = new Set(); // interaction IDs currently shown as footer badges
-  let _inflightTimers = new Map(); // id -> intervalId for elapsed counter
 
   // --- Wide layout module (from wide-layout.js) ---
   const wl = window.wideLayout;
@@ -2556,10 +2863,10 @@
         <span class="entry-tokens" data-tokenlabel="${interaction.id}">${compactTokens(interaction.usage)}</span>
       `;
 
-      el.addEventListener('click', (e) => {
+      el.addEventListener('click', _here((e) => {
         e.stopPropagation();
         select({ type: 'turn', id: interaction.id }, { userClick: true });
-      });
+      }));
       group.appendChild(el);
       return group;
     }
@@ -2585,14 +2892,14 @@
 
     el.innerHTML = turnHeaderHtml(interaction, turnNum, isSubagentTurn);
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', _here((e) => {
       e.stopPropagation();
       select({ type: 'turn', id: interaction.id }, { userClick: true });
-    });
+    }));
 
-    group.addEventListener('click', () => {
+    group.addEventListener('click', _here(() => {
       select({ type: 'turn', id: interaction.id }, { userClick: true });
-    });
+    }));
 
     group.appendChild(el);
 
@@ -2625,10 +2932,10 @@
           ${agentTag}
           <span class="tool-entry-summary" title="${escHtml(hookInt.toolName || '')}">${escHtml(hookInt.toolName || '')}</span>
         `;
-        hookEl.addEventListener('click', (e) => {
+        hookEl.addEventListener('click', _here((e) => {
           e.stopPropagation();
           select({ type: 'turn', id: hookInt.id }, { userClick: true });
-        });
+        }));
         toolsContainer.appendChild(hookEl);
       }
     }
@@ -2664,10 +2971,10 @@
             <span class="entry-tokens" data-tokenlabel="${entry.id}">${compactTokens(entry.usage)}</span>
           `;
         }
-        el.addEventListener('click', (e) => {
+        el.addEventListener('click', _here((e) => {
           e.stopPropagation();
           select({ type: 'turn', id: entry.id }, { userClick: true });
-        });
+        }));
         return el;
       }
 
@@ -2682,7 +2989,7 @@
           <span class="hook-arrow clamped-chevron">▸</span>
           <span class="hook-entry-name">${summaryLabel}</span>
         `;
-        summaryEl.addEventListener('click', (e) => {
+        summaryEl.addEventListener('click', _here((e) => {
           e.stopPropagation();
           const wasCollapsed = clampGroup.classList.contains('collapsed');
           clampGroup.classList.toggle('collapsed');
@@ -2694,7 +3001,7 @@
             const h = parseFloat(groupEl.style.height) || 0;
             groupEl.style.height = (wasCollapsed ? h + delta : h - delta) + 'px';
           }
-        });
+        }));
         clampGroup.appendChild(summaryEl);
 
         for (const entry of clamped) clampGroup.appendChild(buildClampedEntryEl(entry));
@@ -2741,10 +3048,10 @@
       <span class="hook-tool-name" title="${escHtml(nameLabel)}">${escHtml(nameLabel)}</span>
     `;
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', _here((e) => {
       e.stopPropagation();
       select({ type: 'turn', id: interaction.id }, { userClick: true });
-    });
+    }));
 
     group.appendChild(el);
     return group;
@@ -2776,10 +3083,10 @@
       </div>
     `;
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', _here((e) => {
       e.stopPropagation();
       select({ type: 'turn', id: interaction.id }, { userClick: true });
-    });
+    }));
 
     group.appendChild(el);
     return group;
@@ -3032,29 +3339,29 @@
   // --- Streaming pulse for column backgrounds ---
 
   function startFlowAnimation(svg, agentId) {
-    if (_flowAnimations.has(agentId)) return;
+    if (_v.tl.flowAnimations.has(agentId)) return;
     const rect = svg.select(`.col-bg-rect[data-agent-id="${agentId}"]`);
     if (rect.empty()) return;
     rect.classed('col-bg-streaming', true);
-    _flowAnimations.set(agentId, true);
+    _v.tl.flowAnimations.set(agentId, true);
   }
 
   function stopFlowAnimation(agentId) {
-    if (!_flowAnimations.has(agentId)) return;
-    _flowAnimations.delete(agentId);
-    if (!_d3State?.svg) return;
-    _d3State.svg.select(`.col-bg-rect[data-agent-id="${agentId}"]`).classed('col-bg-streaming', false);
+    if (!_v.tl.flowAnimations.has(agentId)) return;
+    _v.tl.flowAnimations.delete(agentId);
+    if (!_v.tl.d3State?.svg) return;
+    _v.tl.d3State.svg.select(`.col-bg-rect[data-agent-id="${agentId}"]`).classed('col-bg-streaming', false);
   }
 
   function stopAllFlowAnimations() {
-    _flowAnimations.clear();
-    if (_d3State?.svg) _d3State.svg.selectAll('.col-bg-streaming').classed('col-bg-streaming', false);
+    _v.tl.flowAnimations.clear();
+    if (_v.tl.d3State?.svg) _v.tl.d3State.svg.selectAll('.col-bg-streaming').classed('col-bg-streaming', false);
   }
 
   // --- D3 Selection management ---
 
   function d3UpdateSelection(nodesLayer) {
-    const sel = state.selection;
+    const sel = _v.selection;
     if (!nodesLayer) return;
     const layer = typeof nodesLayer === 'string' ? document.querySelector(nodesLayer) : nodesLayer;
     if (!layer) return;
@@ -3076,8 +3383,13 @@
   // --- Main render ---
 
   function renderTimelineParallel() {
-    const savedScroll = _tlFollow ? null : timelineList.scrollTop;
-    timelineList.innerHTML = '';
+    if (!_onScreen()) { _v.stale = true; return; }
+    // A rebuild queued before this one is covered by it.
+    cancelAnimationFrame(_v.tl.rebuildRaf);
+    cancelAnimationFrame(_v.tl.resizeRaf);
+    _v.tl.rebuildRaf = _v.tl.resizeRaf = null;
+    const savedScroll = _v.tl.follow ? null : _v.el.timelineList.scrollTop;
+    _v.el.timelineList.innerHTML = '';
     _renderLoadEarlier();
     resetSubagentRegistry();
     stopAllFlowAnimations();
@@ -3085,7 +3397,7 @@
     // Rebuild footer badges filtered to the active instance tab
     rebuildFooterBadgesForTab();
 
-    const visible = state.interactions.filter(i => isVisibleInTimeline(i) && i.timestamp > 0 && !_inflightSet.has(i.id));
+    const visible = _v.items.filter(i => i.timestamp > 0 && !_v.tl.inflightSet.has(i.id));
     if (visible.length === 0) return;
 
     // Detect session boundaries (gaps > 5 min) for visual separators
@@ -3105,14 +3417,13 @@
     wl.buildFoldedHooksMap(filtered);
     wl.buildClampGroups(filtered, columnFor);
 
-    const aside = document.getElementById('timeline');
+    const aside = _v.el.timeline;
     if (aside) {
       const neededWidth = D3_CONST.RULER_WIDTH + totalColumns * colWidth + (totalColumns - 1) * D3_CONST.COLUMN_GAP + 24;
       aside.style.minWidth = '';
+      // A width the user dragged to holds for every view.
       const userW = window.__timelineUserWidth;
-      if (!userW) {
-        aside.style.width = neededWidth + 'px';
-      }
+      aside.style.width = (userW || neededWidth) + 'px';
     }
 
     const { layout, totalHeight, sessionStart, breaks, compressedY, cohorts } = wl.computeD3Layout(filtered, columnFor, totalColumns, parallelRegions, postHookClosedCol, depthAt, columnSegments);
@@ -3231,8 +3542,8 @@
     wrapper.appendChild(svgEl);
     wrapper.appendChild(nodesLayer);
     wrapper.appendChild(svgFgEl);
-    timelineList.appendChild(headers);
-    timelineList.appendChild(wrapper);
+    _v.el.timelineList.appendChild(headers);
+    _v.el.timelineList.appendChild(wrapper);
 
     // Render connectors: backgrounds in svg (behind nodes), curves in svgFg (above nodes)
     const connectors = wl.computeConnectorData(layout, columnFor, columnAgents, totalColumns, compressedY, sessionStart, postHookClosedCol, columnSegments, { subagentColors: SUBAGENT_COLORS, getSubagentColor, cohorts });
@@ -3269,11 +3580,11 @@
       }
     }
 
-    if (_tlFollow) scrollTimelineToBottom();
-    else if (savedScroll != null) { timelineList.scrollTop = savedScroll; _tlExpectTop = timelineList.scrollTop; }
+    if (_v.tl.follow) scrollTimelineToBottom();
+    else if (savedScroll != null) { _v.el.timelineList.scrollTop = savedScroll; _v.tl.expectTop = _v.el.timelineList.scrollTop; }
 
     // Save state for incremental appends
-    _d3State = {
+    _v.tl.d3State = {
       wrapper, svg, svgFg, nodesLayer, headers,
       columnFor, columnAgents, columnSegments, totalColumns,
       layout, totalHeight, sessionStart, breaks, compressedY, cohorts,
@@ -3289,48 +3600,45 @@
     _lanesQueueSync();
 
     // Set up resize observer
-    if (!_d3ResizeObserver) {
-      _d3ResizeObserver = new ResizeObserver(() => {
-        if (_timelineMode !== 'parallel' || !_d3State) return;
-        if (window.__timelineDragging || _focusMode) return;
-        _d3ResizeDebounce = _d3ResizeDebounce || requestAnimationFrame(() => {
-          _d3ResizeDebounce = null;
+    if (!_v.tl.resizeObs && _v.el.timeline) {
+      _v.tl.resizeObs = new ResizeObserver(_here(() => {
+        if (_timelineMode !== 'parallel' || !_v.tl.d3State) return;
+        if (window.__timelineDragging || _v.focusMode) return;
+        _v.tl.resizeRaf = _v.tl.resizeRaf || _vFrame(() => {
+          _v.tl.resizeRaf = null;
           renderTimelineParallel();
         });
-      });
+      }));
+      _v.tl.resizeObs.observe(_v.el.timeline);
     }
-    _d3ResizeObserver.observe(document.getElementById('timeline'));
   }
 
-  let _d3ResizeObserver = null;
-  let _d3ResizeDebounce = null;
 
   // --- Incremental append ---
 
   /* Subagent resolution enriches a turn and each of its related hooks in one
      burst (src/store.js applyResolution), and every one of them clears
-     timelineList wholesale. Coalesce a burst into a single rebuild. */
-  let _tlRebuildQueued = null;
+     _v.el.timelineList wholesale. Coalesce a burst into a single rebuild. */
 
   function queueTimelineParallelRebuild() {
-    if (_tlRebuildQueued) return;
-    _tlRebuildQueued = requestAnimationFrame(() => {
-      _tlRebuildQueued = null;
+    if (_v.tl.rebuildRaf) return;
+    _v.tl.rebuildRaf = _vFrame(() => {
+      _v.tl.rebuildRaf = null;
       renderTimelineParallel();
     });
   }
 
   function appendToParallelTimeline(interaction) {
-    if (!_d3State) {
+    if (!_v.tl.d3State) {
       renderTimelineParallel();
       return;
     }
-    const ds = _d3State;
+    const ds = _v.tl.d3State;
 
     // Determine column
     let agentId = null;
     if (interaction.isHook) {
-      agentId = interaction.subagent?.agentId || wl.resolveHookAgentId(interaction, state.interactions);
+      agentId = interaction.subagent?.agentId || wl.resolveHookAgentId(interaction, _v.items);
     } else {
       agentId = interaction.subagent?.agentId || null;
     }
@@ -3434,7 +3742,7 @@
     el.style.transform = `translate(${x}px, ${y - 8}px)`;
     ds.nodesLayer.appendChild(el);
 
-    requestAnimationFrame(() => {
+    _vFrame(() => {
       el.style.transition = 'opacity 0.25s cubic-bezier(0.33,1,0.68,1), transform 0.25s cubic-bezier(0.33,1,0.68,1)';
       el.style.opacity = '1';
       el.style.transform = `translate(${x}px, ${y}px)`;
@@ -3465,8 +3773,8 @@
   // --- D3 status update hook (called from updateTurnBadge) ---
 
   function d3UpdateNodeStatus(id, status) {
-    if (!_d3State) return;
-    const node = _d3State.nodesLayer.querySelector(`.turn-group[data-turn-id="${id}"]`);
+    if (!_v.tl.d3State) return;
+    const node = _v.tl.d3State.nodesLayer.querySelector(`.turn-group[data-turn-id="${id}"]`);
     if (!node) return;
 
     node.className = node.className
@@ -3478,7 +3786,7 @@
     const agentId = node.dataset.agentId;
     if (agentId) {
       if (status === 'streaming') {
-        startFlowAnimation(_d3State.svg, agentId);
+        startFlowAnimation(_v.tl.d3State.svg, agentId);
       } else {
         stopFlowAnimation(agentId);
       }
@@ -3512,14 +3820,13 @@
   }
 
   function rebuildFooterBadgesForTab() {
-    for (const iv of _inflightTimers.values()) clearInterval(iv);
-    _inflightSet.clear();
-    _inflightTimers.clear();
-    const container = document.getElementById('timeline-footer-streaming');
+    for (const iv of _v.tl.inflightTimers.values()) _vClearInterval(iv);
+    _v.tl.inflightSet.clear();
+    _v.tl.inflightTimers.clear();
+    const container = _v.el.footerStreaming;
     if (container) container.innerHTML = '';
 
-    for (const interaction of state.interactions) {
-      if (!isVisibleInTimeline(interaction)) continue;
+    for (const interaction of _v.items) {
       const iStatus = interaction.status || 'pending';
       const isLongLived = !interaction.isHook && !interaction.isMcp;
       if (isLongLived && (iStatus === 'pending' || iStatus === 'streaming')) {
@@ -3529,10 +3836,10 @@
   }
 
   function addFooterBadge(interaction) {
-    if (_inflightSet.has(interaction.id)) return;
-    _inflightSet.add(interaction.id);
+    if (_v.tl.inflightSet.has(interaction.id)) return;
+    _v.tl.inflightSet.add(interaction.id);
 
-    const container = document.getElementById('timeline-footer-streaming');
+    const container = _v.el.footerStreaming;
     if (!container) return;
 
     const badge = document.createElement('div');
@@ -3555,49 +3862,49 @@
       `<span class="badge-status badge-status-${status}">${status}</span>` +
       `<span class="badge-elapsed">0s</span>`;
 
-    badge.addEventListener('click', (e) => {
+    badge.addEventListener('click', _here((e) => {
       e.stopPropagation();
       select({ type: 'turn', id: interaction.id }, { userClick: true });
-    });
+    }));
 
     container.appendChild(badge);
     _updateFooterBadgeStats(badge, interaction);
     _updateFooterBusyIndicator();
 
     const startedAt = interaction.timing?.startedAt || Date.now();
-    const iv = setInterval(() => {
+    const iv = _vInterval(() => {
       const elapsedEl = badge.querySelector('.badge-elapsed');
       if (elapsedEl) elapsedEl.textContent = formatDuration(Date.now() - startedAt);
     }, 1000);
-    _inflightTimers.set(interaction.id, iv);
+    _v.tl.inflightTimers.set(interaction.id, iv);
   }
 
   function removeFooterBadge(id) {
-    if (!_inflightSet.has(id)) return;
-    _inflightSet.delete(id);
+    if (!_v.tl.inflightSet.has(id)) return;
+    _v.tl.inflightSet.delete(id);
 
-    const iv = _inflightTimers.get(id);
-    if (iv != null) { clearInterval(iv); _inflightTimers.delete(id); }
+    const iv = _v.tl.inflightTimers.get(id);
+    if (iv != null) { _vClearInterval(iv); _v.tl.inflightTimers.delete(id); }
 
-    const container = document.getElementById('timeline-footer-streaming');
+    const container = _v.el.footerStreaming;
     const badge = container?.querySelector(`[data-interaction-id="${id}"]`);
     if (badge) {
       badge.classList.add('animate-out');
-      setTimeout(() => badge.remove(), 300);
+      _vTimeout(() => badge.remove(), 300);
     }
 
     _updateFooterBusyIndicator();
 
     if (_timelineMode === 'parallel') {
-      setTimeout(() => renderTimelineParallel(), 320);
+      _vTimeout(() => renderTimelineParallel(), 320);
     }
   }
 
   function _updateFooterBusyIndicator() {
-    const container = document.getElementById('timeline-footer-streaming');
+    const container = _v.el.footerStreaming;
     if (!container) return;
     let indicator = container.querySelector('.footer-busy-indicator');
-    if (_inflightSet.size > 0) {
+    if (_v.tl.inflightSet.size > 0) {
       if (!indicator) {
         indicator = document.createElement('div');
         indicator.className = 'footer-busy-indicator';
@@ -3613,10 +3920,10 @@
   }
 
   function clearAllFooterBadges() {
-    for (const iv of _inflightTimers.values()) clearInterval(iv);
-    _inflightSet.clear();
-    _inflightTimers.clear();
-    const container = document.getElementById('timeline-footer-streaming');
+    for (const iv of _v.tl.inflightTimers.values()) _vClearInterval(iv);
+    _v.tl.inflightSet.clear();
+    _v.tl.inflightTimers.clear();
+    const container = _v.el.footerStreaming;
     if (container) container.innerHTML = '';
   }
 
@@ -3649,12 +3956,12 @@
         <span class="entry-tokens" data-tokenlabel="${interaction.id}">${compactTokens(interaction.usage)}</span>
       `;
 
-      el.addEventListener('click', (e) => {
+      el.addEventListener('click', _here((e) => {
         e.stopPropagation();
         select({ type: 'turn', id: interaction.id }, { userClick: true });
-      });
+      }));
       group.appendChild(el);
-      timelineList.appendChild(group);
+      _v.el.timelineList.appendChild(group);
       return;
     }
 
@@ -3671,13 +3978,13 @@
       group.dataset.agentId = interaction.subagent.agentId;
       const color = getSubagentColor(interaction.subagent);
       group.style.setProperty('--subagent-color', color);
-      if (currentAgentId !== _lastRenderedAgentId) {
+      if (currentAgentId !== _v.tl.lastAgentId) {
         group.style.borderTop = `2px solid ${color}`;
       }
-    } else if (_lastRenderedAgentId !== null && currentAgentId === null) {
+    } else if (_v.tl.lastAgentId !== null && currentAgentId === null) {
       group.style.borderTop = '2px solid var(--border)';
     }
-    _lastRenderedAgentId = currentAgentId;
+    _v.tl.lastAgentId = currentAgentId;
 
     const el = document.createElement('div');
     el.className = 'timeline-entry turn-entry';
@@ -3685,10 +3992,10 @@
 
     el.innerHTML = turnHeaderHtml(interaction, turnNum, isSubagentTurn);
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', _here((e) => {
       e.stopPropagation();
       select({ type: 'turn', id: interaction.id }, { userClick: true });
-    });
+    }));
 
     group.appendChild(el);
 
@@ -3703,7 +4010,7 @@
       toolsContainer.appendChild(toolEl);
     });
 
-    timelineList.appendChild(group);
+    _v.el.timelineList.appendChild(group);
 
     if (interaction.status === 'pending' || interaction.status === 'streaming') {
       startDurationTimer(interaction);
@@ -3736,19 +4043,19 @@
       </div>
     `;
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', _here((e) => {
       e.stopPropagation();
       select({ type: 'turn', id: interaction.id }, { userClick: true });
-    });
+    }));
 
     group.appendChild(el);
-    timelineList.appendChild(group);
+    _v.el.timelineList.appendChild(group);
   }
 
   function findHookSubagent(hookInteraction) {
     if (!hookInteraction.toolUseId) return null;
-    for (let i = state.interactions.length - 1; i >= 0; i--) {
-      const turn = state.interactions[i];
+    for (let i = _v.items.length - 1; i >= 0; i--) {
+      const turn = _v.items[i];
       if (turn.isHook || turn.isMcp) continue;
       if (turn.instanceId !== hookInteraction.instanceId) continue;
       const tools = extractToolCalls(turn);
@@ -3782,10 +4089,10 @@
         ${agentTag}
         <span class="tool-entry-summary" title="${escHtml(toolName)}">${escHtml(toolName)}</span>
       `;
-      el.addEventListener('click', (e) => {
+      el.addEventListener('click', _here((e) => {
         e.stopPropagation();
         select({ type: 'turn', id: interaction.id }, { userClick: true });
-      });
+      }));
       parentContainer.appendChild(el);
       return;
     }
@@ -3809,22 +4116,22 @@
       <span class="hook-tool-name">${escHtml(hookNameLabel)}</span>
     `;
 
-    el.addEventListener('click', (e) => {
+    el.addEventListener('click', _here((e) => {
       e.stopPropagation();
       select({ type: 'turn', id: interaction.id }, { userClick: true });
-    });
+    }));
 
     group.appendChild(el);
-    timelineList.appendChild(group);
+    _v.el.timelineList.appendChild(group);
   }
 
   function findParentToolContainer(hookInteraction) {
     // If the hook has a toolUseId, find the turn that owns that tool call
     if (hookInteraction.toolUseId) {
-      const groups = timelineList.querySelectorAll('.turn-group:not(.hook-call-group):not(.mcp-call-group)');
+      const groups = _v.el.timelineList.querySelectorAll('.turn-group:not(.hook-call-group):not(.mcp-call-group)');
       for (let i = groups.length - 1; i >= 0; i--) {
         const turnId = groups[i].dataset.turnId;
-        const turn = state.interactions.find(t => t.id === turnId);
+        const turn = _v.items.find(t => t.id === turnId);
         if (!turn) continue;
         const tools = extractToolCalls(turn);
         if (tools.some(tc => tc.id === hookInteraction.toolUseId)) {
@@ -3833,10 +4140,10 @@
       }
     }
     // Fallback: most recent LLM turn for the same instance
-    const groups = timelineList.querySelectorAll('.turn-group:not(.hook-call-group):not(.mcp-call-group)');
+    const groups = _v.el.timelineList.querySelectorAll('.turn-group:not(.hook-call-group):not(.mcp-call-group)');
     for (let i = groups.length - 1; i >= 0; i--) {
       const turnId = groups[i].dataset.turnId;
-      const turn = state.interactions.find(t => t.id === turnId);
+      const turn = _v.items.find(t => t.id === turnId);
       if (turn && turn.instanceId === hookInteraction.instanceId) {
         return groups[i].querySelector('.tool-entries');
       }
@@ -3845,13 +4152,13 @@
   }
 
   function appendToolToTimeline(interactionId, toolIdx, name, summary) {
-    const container = document.querySelector(`[data-tools-for="${interactionId}"]`);
+    const container = _v.root.querySelector(`[data-tools-for="${interactionId}"]`);
     if (!container) return;
     if (container.querySelector(`[data-tool-id="${interactionId}-${toolIdx}"]`)) return;
-    const interaction = state.interactions.find(i => i.id === interactionId);
+    const interaction = _v.items.find(i => i.id === interactionId);
     const toolEl = createToolEntryEl(interactionId, toolIdx, name, summary, null, interaction?.subagent);
     container.appendChild(toolEl);
-    if (_tlFollow) scrollTimelineToBottom();
+    if (_v.tl.follow) scrollTimelineToBottom();
   }
 
   function createToolEntryEl(interactionId, toolIdx, name, summary, input, subagent) {
@@ -3871,10 +4178,10 @@
       ${agentTag}
       <span class="tool-entry-summary" title="${escHtml(summary)}" data-tool-summary="${interactionId}-${toolIdx}">${escHtml(summary)}</span>
     `;
-    toolEl.addEventListener('click', (e) => {
+    toolEl.addEventListener('click', _here((e) => {
       e.stopPropagation();
       select({ type: 'tool', interactionId, toolIndex: toolIdx }, { userClick: true });
-    });
+    }));
     return toolEl;
   }
 
@@ -3964,8 +4271,9 @@
   function showTurnTip(group) {
     const id = group.dataset.turnId;
     if (!id || _turnTipFor === id) return;
-    const interaction = state.interactions.find(i => i.id === id);
-    if (!interaction) return;
+    const loc = _locate(id);
+    if (!loc) return;
+    const interaction = loc.item;
 
     if (!_turnTipEl) {
       _turnTipEl = document.createElement('div');
@@ -3973,7 +4281,7 @@
       document.body.appendChild(_turnTipEl);
     }
     _turnTipFor = id;
-    _turnTipEl.innerHTML = turnTipHtml(interaction, group.querySelector('.entry-num')?.textContent);
+    _turnTipEl.innerHTML = _in(loc.v, turnTipHtml, interaction, group.querySelector('.entry-num')?.textContent);
 
     const r = group.getBoundingClientRect();
     const tr = _turnTipEl.getBoundingClientRect();
@@ -4005,11 +4313,11 @@
   window.addEventListener('scroll', hideTurnTip, true);
 
   function rebuildToolEntries(interactionId) {
-    const container = document.querySelector(`[data-tools-for="${interactionId}"]`);
+    const container = _v.root.querySelector(`[data-tools-for="${interactionId}"]`);
     if (!container) return;
     const hookEls = [...container.querySelectorAll('.hook-tool-entry')];
     container.innerHTML = '';
-    const interaction = state.interactions.find(i => i.id === interactionId);
+    const interaction = _v.items.find(i => i.id === interactionId);
     if (!interaction) return;
     const toolCalls = extractToolCalls(interaction);
     toolCalls.forEach((tc, tIdx) => {
@@ -4019,32 +4327,31 @@
     for (const h of hookEls) container.appendChild(h);
   }
 
-  const _durationTimers = new Map();
   function startDurationTimer(interaction) {
-    if (_durationTimers.has(interaction.id)) return;
+    if (_v.durationTimers.has(interaction.id)) return;
     const startedAt = interaction.timing?.startedAt || Date.now();
-    const iv = setInterval(() => {
-      const el = document.querySelector(`[data-duration="${interaction.id}"]`);
+    const iv = _vInterval(() => {
+      const el = _v.root.querySelector(`[data-duration="${interaction.id}"]`);
       if (el) el.innerHTML = durationText(Date.now() - startedAt);
     }, 1000);
-    _durationTimers.set(interaction.id, iv);
+    _v.durationTimers.set(interaction.id, iv);
   }
   function stopDurationTimer(id) {
-    const iv = _durationTimers.get(id);
-    if (iv != null) { clearInterval(iv); _durationTimers.delete(id); }
+    const iv = _v.durationTimers.get(id);
+    if (iv != null) { _vClearInterval(iv); _v.durationTimers.delete(id); }
   }
 
   function updateTurnBadge(id, status) {
-    const badge = document.querySelector(`[data-badge="${id}"]`);
+    const badge = _v.root.querySelector(`[data-badge="${id}"]`);
     if (badge) {
       badge.className = `entry-badge ${badgeClass(status)}`;
       badge.textContent = status;
     }
     if (status === 'streaming' || status === 'pending') {
-      const interaction = state.interactions.find(i => i.id === id);
+      const interaction = _v.items.find(i => i.id === id);
       if (interaction) startDurationTimer(interaction);
       // Update footer badge streaming state and status text
-      const footerBadge = document.querySelector(`.footer-streaming-badge[data-interaction-id="${id}"]`);
+      const footerBadge = _v.root.querySelector(`.footer-streaming-badge[data-interaction-id="${id}"]`);
       if (footerBadge) {
         footerBadge.classList.toggle('is-pending', status === 'pending');
         footerBadge.classList.toggle('is-streaming', status === 'streaming');
@@ -4062,7 +4369,7 @@
   }
 
   function updateTurnSubagentBadge(interaction) {
-    const entry = document.querySelector(`.turn-entry[data-id="${interaction.id}"]`);
+    const entry = _v.root.querySelector(`.turn-entry[data-id="${interaction.id}"]`);
     if (!entry) return;
     const header = entry.querySelector('.entry-header');
     if (!header) return;
@@ -4105,11 +4412,11 @@
   }
 
   function updateTurnMeta(interaction) {
-    const durationEl = document.querySelector(`[data-duration="${interaction.id}"]`);
+    const durationEl = _v.root.querySelector(`[data-duration="${interaction.id}"]`);
     if (durationEl && interaction.timing?.duration) {
       durationEl.innerHTML = durationText(interaction.timing.duration);
     }
-    const modelEl = document.querySelector(`[data-model="${interaction.id}"]`);
+    const modelEl = _v.root.querySelector(`[data-model="${interaction.id}"]`);
     if (modelEl) {
       const modelSpan = modelEl.querySelector('.entry-model-label');
       if (modelSpan) {
@@ -4121,9 +4428,9 @@
   }
 
   function updateTurnTokens(interaction) {
-    const tokenEl = document.querySelector(`[data-tokenlabel="${interaction.id}"]`);
+    const tokenEl = _v.root.querySelector(`[data-tokenlabel="${interaction.id}"]`);
     if (tokenEl) tokenEl.innerHTML = compactTokens(interaction.usage);
-    const costEl = document.querySelector(`[data-costgauge="${interaction.id}"]`);
+    const costEl = _v.root.querySelector(`[data-costgauge="${interaction.id}"]`);
     if (costEl) {
       const cost = computeCost(interaction.usage, interaction.pricing);
       costEl.innerHTML = costText(cost);
@@ -4133,9 +4440,9 @@
 
   function updateUserTurnTotals() {
     // Remove existing totals
-    timelineList.querySelectorAll('.user-turn-total').forEach(el => el.remove());
+    _v.el.timelineList.querySelectorAll('.user-turn-total').forEach(el => el.remove());
 
-    const children = [...timelineList.children];
+    const children = [..._v.el.timelineList.children];
     let sectionCost = 0;
     let lastGroupInSection = null;
 
@@ -4151,7 +4458,7 @@
       }
 
       const turnId = el.dataset.turnId;
-      const interaction = state.interactions.find(it => it.id === turnId);
+      const interaction = _v.items.find(it => it.id === turnId);
       if (interaction) {
         const cost = computeCost(interaction.usage, interaction.pricing);
         if (cost != null) sectionCost += cost;
@@ -4180,8 +4487,8 @@
   }
 
   function scrollTimelineToBottom() {
-    timelineList.scrollTop = timelineList.scrollHeight;
-    _tlExpectTop = timelineList.scrollTop;
+    _v.el.timelineList.scrollTop = _v.el.timelineList.scrollHeight;
+    _v.tl.expectTop = _v.el.timelineList.scrollTop;
   }
 
   // ============================================================
@@ -4197,7 +4504,7 @@
   // What retention must not trim: the timeline's selection and the modal's.
   function _keptIds() {
     const keep = new Set();
-    if (state.selection) keep.add(_selId(state.selection));
+    if (_v?.selection) keep.add(_selId(_v.selection));
     if (_modalSel) keep.add(_selId(_modalSel));
     return keep;
   }
@@ -4254,30 +4561,34 @@
      lane (or opens the modal for what has no lane presence); on a phone it
      opens the modal, full-screen. */
   function select(sel, { userClick = false } = {}) {
-    state.selection = sel;
+    _v.selection = sel;
     _markTimelineSelection(sel);
     if (!userClick) return;
-    if (!_inspectorShown()) return;
+    if (!_onScreen()) return;
     if (_isPhone() || !_laneReveal(sel)) openDetailModal(sel);
   }
 
   function _markTimelineSelection(sel) {
-    document.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
-    if (_d3State) d3UpdateSelection(_d3State.nodesLayer);
+    const root = _v.root;
+    root.querySelectorAll('.timeline-entry.selected').forEach(el => el.classList.remove('selected'));
+    if (_v.tl.d3State) d3UpdateSelection(_v.tl.d3State.nodesLayer);
     if (!sel) return;
     const el = sel.type === 'turn'
-      ? document.querySelector(`.turn-entry[data-id="${CSS.escape(sel.id)}"]`)
-      : document.querySelector(`[data-tool-id="${CSS.escape(sel.interactionId + '-' + sel.toolIndex)}"]`);
+      ? root.querySelector(`.turn-entry[data-id="${CSS.escape(sel.id)}"]`)
+      : root.querySelector(`[data-tool-id="${CSS.escape(sel.interactionId + '-' + sel.toolIndex)}"]`);
     el?.classList.add('selected');
   }
 
   // --- Focus mode button + keyboard shortcuts ---
-  const _focusBtn = document.getElementById('detail-focus-btn');
-  if (_focusBtn) _focusBtn.addEventListener('click', toggleFocusMode);
+  // The keys act on the strip's shown tab in the Inspector, and on the view
+  // last clicked in Desks.
+  const _activeView = () => {
+    if (!_inspectorView || _visible(_inspectorView)) return _views.get(activeInstanceTab) || null;
+    return _touched?.onScreen ? _touched : null;
+  };
 
   document.addEventListener('keydown', (e) => {
-    const dashboardEl = document.getElementById('view-dashboard');
-    if (!dashboardEl || dashboardEl.classList.contains('hidden')) return;
+    if (_inspectorView && !_visible(_inspectorView) && !_visible(_desksView)) return;
     if (e.key === 'Escape' && _modalSel) {
       if (_overModal()) return;
       e.preventDefault();
@@ -4287,9 +4598,9 @@
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
 
     if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      if (_modalSel) return;
+      if (_modalSel || !_activeView()) return;
       e.preventDefault();
-      toggleFocusMode();
+      _in(_activeView(), toggleFocusMode);
       return;
     }
     if (e.key === 'l' && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -4298,9 +4609,9 @@
       toggleDetailLayout();
       return;
     }
-    if (e.key === 'Escape' && _focusMode) {
+    if (e.key === 'Escape' && _activeView()?.focusMode) {
       e.preventDefault();
-      exitFocusMode();
+      _in(_activeView(), exitFocusMode);
       return;
     }
   });
@@ -4308,20 +4619,22 @@
   const _pendingSseRequests = new Set();
   const _pendingDetailRequests = new Set();
 
-  /* The inspector is on screen when its view is shown and the browser tab is
-     in front. Hidden, nothing renders; hidden for a while, the lanes, the
-     detail modal's content and every full-detail turn are dropped, summaries
-     kept (an open modal is drawn again on return). */
-  const _inspectorView = document.getElementById('view-dashboard');
+  /* The Inspector page is on screen when its view (or Desks, where its tabs
+     can be windows) is shown and the browser tab is in front. It decides
+     whether the detail modal draws; each instance view has its own on-screen
+     state (_onScreen). Hidden for a while, the modal's content is dropped
+     (drawn again on return); a view off screen drops its own (_viewOff). */
   function _inspectorShown() {
     if (document.hidden) return false;
-    return !_inspectorView || (_inspectorView.style.display !== 'none' && !_inspectorView.classList.contains('hidden'));
+    return !_inspectorView || _visible(_inspectorView) || _visible(_desksView);
   }
-  let _renderOnShow = false;           // a render held back while hidden
+  let _renderOnShow = false;           // a modal render held back while hidden
   let _hiddenDropTimer = null;
   let _wasShown = _inspectorShown();
 
   function _onInspectorVisibility() {
+    // The browser tab going to the back or the front moves every view.
+    for (const v of _views.values()) _applyScreen(v);
     const shown = _inspectorShown();
     if (shown === _wasShown) return;
     _wasShown = shown;
@@ -4333,28 +4646,22 @@
     _hiddenDropTimer = null;
     if (!_renderOnShow) return;
     _renderOnShow = false;
-    // Lanes missed what streamed meanwhile: build them again.
-    _lanesTeardown();
-    _lanesShow();
     if (_modalSel) { _detailView = null; _modalRender(); }
   }
 
   function _dropHiddenDetail() {
     _hiddenDropTimer = null;
     if (_inspectorShown()) return;
-    const hadLanes = !!_lanesView;
-    _lanesTeardown();
     _detailView = null;
     _deferredRender = null;
     _detailHost.innerHTML = '';
-    _compactInteractions({ hidden: true });
-    if (_modalSel || hadLanes) _renderOnShow = true;
+    if (_modalSel) _renderOnShow = true;
   }
 
   document.addEventListener('visibilitychange', _onInspectorVisibility);
-  if (_inspectorView) {
-    new MutationObserver(_onInspectorVisibility)
-      .observe(_inspectorView, { attributes: true, attributeFilter: ['style', 'class'] });
+  // Header view switches don't call setShown: the views follow them here.
+  for (const el of [_inspectorView, _desksView]) {
+    if (el) new MutationObserver(_onInspectorVisibility).observe(el, { attributes: true, attributeFilter: ['style', 'class'] });
   }
 
   /* Every turn's request carries the whole conversation so far, so holding
@@ -4380,19 +4687,30 @@
     _compactTimer = setTimeout(() => { _compactTimer = null; _compactInteractions(); }, 1000);
   }
 
-  function _compactInteractions({ hidden = false } = {}) {
+  // The budget is shared by every view; a view not shown keeps summaries only.
+  function _compactInteractions() {
     _recentFull.splice(0, Math.max(0, _recentFull.length - RET.LIMITS.FULL_DETAIL_BUDGET));
-    const keep = _keptIds();
-    const plan = RET.compactionPlan(state.interactions, {
-      recentFull: _recentFull, keep, activeInstance: activeInstanceTab, hidden, now: Date.now(),
+    for (const v of _views.values()) _compactView(v);
+  }
+
+  function _compactView(v, { hidden = false } = {}) {
+    const keep = _in(v, _keptIds);
+    const plan = RET.compactionPlan(v.items, {
+      recentFull: _recentFull, keep, activeInstance: v.shown ? v.instanceId : null, hidden, now: Date.now(),
     });
-    if (!plan.length) return;
-    const byId = new Map(state.interactions.map(i => [i.id, i]));
-    for (const { id, dropStream } of plan) {
-      const i = byId.get(id);
-      if (i) _compactInteraction(i, { dropStream });
+    if (plan.length) {
+      const byId = new Map(v.items.map(i => [i.id, i]));
+      for (const { id, dropStream } of plan) {
+        const i = byId.get(id);
+        if (i) _compactInteraction(i, { dropStream });
+      }
     }
-    if (hidden) _recentFull.length = 0;
+    if (hidden) {
+      const mine = new Set(v.items.map(i => i.id));
+      for (let k = _recentFull.length - 1; k >= 0; k--) {
+        if (mine.has(_recentFull[k])) _recentFull.splice(k, 1);
+      }
+    }
   }
 
   // Serialized size of a value, for the size gauges: measured once per object
@@ -4590,8 +4908,9 @@
     const sel = _modalSel;
     if (!sel) return;
     if (!_inspectorShown()) { _renderOnShow = true; return; }
-    const interaction = state.interactions.find(i => i.id === _selId(sel));
-    if (!interaction) return;
+    const loc = _locate(_selId(sel));
+    if (!loc) return;
+    const interaction = loc.item;
 
     if (interaction._summary && (sel.type === 'tool' || _needsDetailOnSelect(interaction))) {
       _requestDetail(interaction.id);
@@ -4601,7 +4920,8 @@
       _pendingSseRequests.add(interaction.id);
       sendWs({ type: 'interaction:getSseEvents', id: interaction.id });
     }
-    _renderDetail(sel, interaction);
+    // Drawn as its session's view numbers and names its agents.
+    _in(loc.v, _renderDetail, sel, interaction);
   }
 
   // Fetch a turn's full detail; retry once after 3s if still pending
@@ -4612,7 +4932,7 @@
       sendWs({ type: 'interaction:getDetail', id });
     }
     setTimeout(() => {
-      const cur = state.interactions.find(i => i.id === id);
+      const cur = _itemById(id);
       if (cur?._summary && !_pendingDetailRequests.has(id)) {
         _pendingDetailRequests.add(id);
         sendWs({ type: 'interaction:getDetail', id });
@@ -5097,7 +5417,7 @@
   function _fillLazySection(root, sec) {
     if (sec.dataset.lazyBody !== 'pending') return;
     const interaction = _detailView?.kind === 'llm'
-      ? state.interactions.find(i => i.id === _detailView.id) : null;
+      ? _itemById(_detailView.id) : null;
     if (!interaction) return;
     const key = sec.dataset.sec;
     const descs = key.startsWith('req:') ? _requestSections(interaction) : _responseSections(interaction);
@@ -5795,7 +6115,7 @@
     const detail = row.querySelector('.vc-sheet-detail');
     if (!sheetEl?.dataset.sheetSrc || !detail) return;
     const id = sheetEl.dataset.sheetSrc;
-    const interaction = state.interactions.find(i => i.id === id);
+    const interaction = _itemById(id);
     const item = interaction?.request?.[sheetEl.dataset.sheetKind]?.[Number(row.dataset.row)];
     if (item === undefined) {
       detail.innerHTML = '<div class="json-block" style="opacity:0.5">Loading...</div>';
@@ -5816,7 +6136,7 @@
     if (!more) return;
     const sheetEl = more.closest('.vc-sheet');
     const id = sheetEl?.dataset.sheetSrc;
-    const msgs = state.interactions.find(i => i.id === id)?.request?.messages;
+    const msgs = _itemById(id)?.request?.messages;
     if (msgs) sheetEl.outerHTML = renderMessages(msgs, id, { all: true });
   });
 
@@ -5910,7 +6230,7 @@
   }
 
   function updateUsageDisplay(usage, pricing) {
-    const bar = document.getElementById('usage-bar');
+    const bar = _detailHost.querySelector('#usage-bar');
     if (bar) bar.innerHTML = renderUsage(usage, pricing);
   }
 
@@ -5928,8 +6248,7 @@
      just the ones held here \u2014 the server keeps only its newest few hundred
      in memory, and a long-running tab has far more on disk. The server adds
      them up (src/session-totals.js) and pushes updates as turns land. */
-  function _activeSessionTotals() {
-    const id = activeInstanceTab;
+  function _sessionTotalsOf(id) {
     if (typeof id !== 'string' || !id.startsWith('cli-')) return null;
     // Not connected yet: the `init` that follows connecting clears the set.
     if (!_sessionTotalsAsked.has(id)) {
@@ -5970,17 +6289,22 @@
     return { turns, apiCalls, hookEvents };
   }
 
+  /* The figures of the view in _v (none: the Sessions tab): the page footer
+     shows the strip's active tab, the view's timeline footer its own. */
   function updateStats() {
-    const source = state.interactions.filter(isVisibleInTimeline);
+    const v = _v;
+    const page = (v ? v.instanceId : SESSIONS_TAB) === activeInstanceTab;
+    const own = !!v && _onScreen(v);
+    if (v && !own) v.stale = true;
+    if (!page && !own) return;
+    const source = v ? v.items : [];
     let inputTokens = 0, outputTokens = 0, cacheRead = 0, cacheCreate = 0, toolCallCount = 0, totalCost = 0;
     let hasCost = false;
-    _statsTab = activeInstanceTab;
-    const sess = _activeSessionTotals();
+    const sess = v ? _sessionTotalsOf(v.instanceId) : null;
     // Without the server's figures, the turns held here add up to the
     // session's only when they are all of them (no older page, not loading);
     // else the footer waits rather than show a capped sum.
-    const tab = _openTabs.get(activeInstanceTab);
-    const waiting = !sess && !!tab && (tab.loading || tab.hasMore);
+    const waiting = !sess && !!v && (v.loading || v.hasMore);
     const counts = sess || (waiting ? { turns: 0, apiCalls: 0, hookEvents: 0 } : _countTurns(source));
     if (sess) {
       ({ toolCalls: toolCallCount, inputTokens, outputTokens, cacheRead, cacheCreate, hasCost } = sess);
@@ -6005,56 +6329,59 @@
       : sess ? 'Whole session, every turn on disk'
       : waiting ? 'Waiting for the whole session\'s totals' : '';
 
-    // Footer stats section. A session that never reported a prompt (no
-    // hooks reached the server) can only be counted in model calls.
-    const byCalls = counts.turns === 0 && counts.apiCalls > 0;
-    const n = byCalls ? counts.apiCalls : counts.turns;
-    const unit = byCalls ? 'API call' : 'turn';
-    statsEl.textContent = waiting ? '\u2026 turns'
-      : `${approx}${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''} \u00b7 ${toolCallCount.toLocaleString()} tool call${toolCallCount !== 1 ? 's' : ''}`;
-    statsEl.title = waiting ? scanNote : [
-      scanNote,
-      `${counts.turns.toLocaleString()} prompt${counts.turns !== 1 ? 's' : ''} sent`,
-      `${counts.apiCalls.toLocaleString()} API call${counts.apiCalls !== 1 ? 's' : ''}`,
-      `${counts.hookEvents.toLocaleString()} hook event${counts.hookEvents !== 1 ? 's' : ''}`,
-    ].filter(Boolean).join('\n');
+    if (page) {
+      // Footer stats section. A session that never reported a prompt (no
+      // hooks reached the server) can only be counted in model calls.
+      const byCalls = counts.turns === 0 && counts.apiCalls > 0;
+      const n = byCalls ? counts.apiCalls : counts.turns;
+      const unit = byCalls ? 'API call' : 'turn';
+      statsEl.textContent = waiting ? '\u2026 turns'
+        : `${approx}${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''} \u00b7 ${toolCallCount.toLocaleString()} tool call${toolCallCount !== 1 ? 's' : ''}`;
+      statsEl.title = waiting ? scanNote : [
+        scanNote,
+        `${counts.turns.toLocaleString()} prompt${counts.turns !== 1 ? 's' : ''} sent`,
+        `${counts.apiCalls.toLocaleString()} API call${counts.apiCalls !== 1 ? 's' : ''}`,
+        `${counts.hookEvents.toLocaleString()} hook event${counts.hookEvents !== 1 ? 's' : ''}`,
+      ].filter(Boolean).join('\n');
 
-    // Footer tokens section — arrows for in/out
-    const tokensEl = document.getElementById('footerTokens');
-    if (tokensEl) {
-      if (inputTokens || outputTokens) {
-        tokensEl.innerHTML =
-          `<span class="ft-in"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M4 1L7 5H1Z" fill="currentColor"/></svg> ${escHtml(inputTokens.toLocaleString())}</span>` +
-          `<span class="ft-out"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M4 7L1 3H7Z" fill="currentColor"/></svg> ${escHtml(outputTokens.toLocaleString())}</span>`;
-      } else {
-        tokensEl.innerHTML = '<span class="footer-placeholder">tokens</span>';
+      // Footer tokens section — arrows for in/out
+      const tokensEl = document.getElementById('footerTokens');
+      if (tokensEl) {
+        if (inputTokens || outputTokens) {
+          tokensEl.innerHTML =
+            `<span class="ft-in"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M4 1L7 5H1Z" fill="currentColor"/></svg> ${escHtml(inputTokens.toLocaleString())}</span>` +
+            `<span class="ft-out"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M4 7L1 3H7Z" fill="currentColor"/></svg> ${escHtml(outputTokens.toLocaleString())}</span>`;
+        } else {
+          tokensEl.innerHTML = '<span class="footer-placeholder">tokens</span>';
+        }
       }
-    }
 
-    // Footer cache section — cache icon with create/read
-    const cacheEl = document.getElementById('footerCache');
-    if (cacheEl) {
-      if (cacheRead || cacheCreate) {
-        const icon = '<svg class="ft-cache-icon" width="10" height="10" viewBox="0 0 10 10"><ellipse cx="5" cy="2.5" rx="4" ry="1.8" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 2.5v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V2.5" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 4.7v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V4.7" fill="none" stroke="currentColor" stroke-width="0.9"/></svg>';
-        let parts = '';
-        if (cacheCreate) parts += `<span class="ft-cache-w">${icon} ${escHtml(cacheCreate.toLocaleString())} w</span>`;
-        if (cacheRead) parts += `<span class="ft-cache-r">${icon} ${escHtml(cacheRead.toLocaleString())} r</span>`;
-        cacheEl.innerHTML = parts;
-      } else {
-        cacheEl.innerHTML = '<span class="footer-placeholder">cache</span>';
+      // Footer cache section — cache icon with create/read
+      const cacheEl = document.getElementById('footerCache');
+      if (cacheEl) {
+        if (cacheRead || cacheCreate) {
+          const icon = '<svg class="ft-cache-icon" width="10" height="10" viewBox="0 0 10 10"><ellipse cx="5" cy="2.5" rx="4" ry="1.8" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 2.5v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V2.5" fill="none" stroke="currentColor" stroke-width="0.9"/><path d="M1 4.7v2.2c0 1 1.8 1.8 4 1.8s4-.8 4-1.8V4.7" fill="none" stroke="currentColor" stroke-width="0.9"/></svg>';
+          let parts = '';
+          if (cacheCreate) parts += `<span class="ft-cache-w">${icon} ${escHtml(cacheCreate.toLocaleString())} w</span>`;
+          if (cacheRead) parts += `<span class="ft-cache-r">${icon} ${escHtml(cacheRead.toLocaleString())} r</span>`;
+          cacheEl.innerHTML = parts;
+        } else {
+          cacheEl.innerHTML = '<span class="footer-placeholder">cache</span>';
+        }
       }
-    }
 
-    // Footer cost section with gauge
-    const costEl = document.getElementById('footerCost');
-    if (costEl) {
-      costEl.innerHTML = hasCost ? costGauge(totalCost) : '<span class="footer-placeholder">price</span>';
-      costEl.title = scanNote;
+      // Footer cost section with gauge
+      const costEl = document.getElementById('footerCost');
+      if (costEl) {
+        costEl.innerHTML = hasCost ? costGauge(totalCost) : '<span class="footer-placeholder">price</span>';
+        costEl.title = scanNote;
+      }
     }
 
     // Timeline footer — total busy time and cost of visible turns
-    const tlTimeEl = document.getElementById('timeline-total-time');
-    const tlCostEl = document.getElementById('timeline-total-cost');
+    if (!own) return;
+    const tlTimeEl = v.el.totalTime;
+    const tlCostEl = v.el.totalCost;
     let visibleCost = 0, visibleTime = 0;
     let hasVisibleCost = false, hasVisibleTime = false;
     if (sess) {
@@ -6063,7 +6390,6 @@
       visibleTime = sess.duration; hasVisibleTime = sess.duration > 0;
     } else if (!waiting) {
       for (const i of source) {
-        if (!isVisibleInTimeline(i)) continue;
         const c = computeCost(i.usage, i.pricing);
         if (c != null) { visibleCost += c; hasVisibleCost = true; }
         if (i.timing?.duration) { visibleTime += i.timing.duration; hasVisibleTime = true; }
@@ -6082,31 +6408,33 @@
     }
   }
 
-  function isVisibleInTimeline(interaction) {
-    return interaction.instanceId === activeInstanceTab;
-  }
-
   function renderEmptyState() {
-    if (!emptyState) return;
-    if (state.interactions.some(isVisibleInTimeline)) return;
-    emptyState.innerHTML = _openTabs.get(activeInstanceTab)?.loading
+    if (!_v.el.emptyState) return;
+    if (_v.items.length) return;
+    _v.el.emptyState.innerHTML = _v.loading
       ? '<p>Loading session\u2026</p>'
       : '<p>No interactions in this session yet.</p>';
   }
 
   // --- Message handler ---
+  /* Messages for one session go to its view (none open here: dropped, left
+     over from a view closed a moment ago). Each view stores what arrives and
+     draws it only while on screen. */
+  const _viewOf = instanceId => (instanceId ? _views.get(instanceId) : null) || null;
+  // A message naming a turn only: its session if given, else the view holding it.
+  const _viewOfTurn = (instanceId, id) => _viewOf(instanceId) || _locate(id)?.v || null;
+
   function handleMessage(msg) {
     switch (msg.type) {
       case 'init': {
         // A new connection may be a restarted server; ask again.
         _sessionTotals.clear();
         _sessionTotalsAsked.clear();
-        // A reconnect keeps the open tabs: subscribe again for a fresh snapshot.
-        for (const [id, tab] of _openTabs) {
-          tab.loading = true;
-          sendWs({ type: 'inspector:subscribe', instanceId: id });
+        // A reconnect keeps the open views: subscribe again for a fresh snapshot.
+        for (const v of _views.values()) {
+          v.loading = true;
+          sendWs({ type: 'inspector:subscribe', instanceId: v.instanceId });
         }
-        initTimeline();
         _applySessions(msg);
         switchInstanceTab(activeInstanceTab);
         break;
@@ -6127,107 +6455,80 @@
         break;
 
       case 'inspector:snapshot': {
-        const id = msg.instanceId;
-        const tab = _openTabs.get(id);
-        if (!tab) break;            // closed before it arrived
+        const v = _viewOf(msg.instanceId);
+        if (!v) break;              // closed before it arrived
         // The server subscribed this page before building the snapshot, so it
         // holds every turn up to now and every live event follows it; it
         // replaces whatever an earlier subscription left here.
-        _dropInstance(id);
-        state.interactions.push(...(msg.interactions || []).map(_adoptIncoming));
-        state.interactions.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-        tab.loading = false;
-        tab.hasMore = !!msg.hasMore;
-        tab.loadingEarlier = false;
-        tab.extraCap = 0;
-        if (activeInstanceTab === id) switchInstanceTab(id);
-        else renderInspectorTabStrip();
+        _in(v, () => {
+          _dropData();
+          v.items = (msg.interactions || []).map(_adoptIncoming);
+          v.items.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+          v.loading = false;
+          v.hasMore = !!msg.hasMore;
+          v.loadingEarlier = false;
+          v.extraCap = 0;
+          _tlSetFollow(true);
+          v.stale = true;
+          _viewRender();
+          if (v.stale) updateStats();     // off screen: the page footer still counts it
+        });
+        renderInspectorTabStrip();
         break;
       }
 
-      case 'interaction:start':
-        // Only sessions open here are sent; anything else is left over from a
-        // tab closed a moment ago.
-        if (!_openTabs.has(msg.interaction.instanceId)) break;
-        if (state.interactions.some(i => i.id === msg.interaction.id)) {
-          updateInteraction(msg.interaction);
-          break;
-        }
-        // Insert in timestamp order — hooks and subagent turns arrive via
-        // independent paths and may reach the client out of logical order.
-        const _ts = msg.interaction.timestamp || 0;
-        let _lo = 0, _hi = state.interactions.length;
-        while (_lo < _hi) {
-          const mid = (_lo + _hi) >>> 1;
-          if ((state.interactions[mid].timestamp || 0) <= _ts) _lo = mid + 1;
-          else _hi = mid;
-        }
-        state.interactions.splice(_lo, 0, _adoptIncoming(msg.interaction));
-        if (!msg.interaction._summary) _touchFull(msg.interaction.id);
-        const matchesFilter = msg.interaction.instanceId === activeInstanceTab;
-        if (matchesFilter) {
-          if (_timelineMode === 'parallel') {
-            const iStatus = msg.interaction.status || 'pending';
-            const isLongLived = !msg.interaction.isHook && !msg.interaction.isMcp;
-            if (isLongLived && (iStatus === 'pending' || iStatus === 'streaming')) {
-              addFooterBadge(msg.interaction);
-            } else {
-              appendToParallelTimeline(msg.interaction);
-            }
-          } else {
-            appendTurnToTimeline(msg.interaction);
-          }
-          // Past the per-session cap the oldest turns leave the page (and the
-          // timeline is rebuilt without them); "Load earlier" brings them back.
-          if (_trimTimeline(msg.interaction.instanceId)) renderTimelineActive();
-          // The timeline follows the newest unless the reader scrolled it up;
-          // the lanes take the turn (hooks name the agent an Agent call ran,
-          // and when it stopped).
-          if (_tlFollow) scrollTimelineToBottom();
-          _lanesShow();
-        }
-        else _trimTimeline(msg.interaction.instanceId);
-        updateStats();
+      case 'interaction:start': {
+        const v = _viewOf(msg.interaction.instanceId);
+        if (v) _in(v, _onStart, msg.interaction);
         break;
+      }
 
-      case 'interaction:update':
-        if (!_openTabs.has(msg.interaction.instanceId)) break;
-        updateInteraction(msg.interaction);
+      case 'interaction:update': {
+        const v = _viewOf(msg.interaction.instanceId);
+        if (!v) break;
+        _in(v, updateInteraction, msg.interaction);
         // Re-render the modal if it shows this interaction.
         if (_modalSel?.type === 'turn' && _modalSel.id === msg.interaction.id) _modalRender();
         break;
+      }
 
-      case 'sse_event':
-        handleSSEEvent(msg.interactionId, msg.event);
+      case 'sse_event': {
+        const v = _viewOfTurn(msg.instanceId, msg.interactionId);
+        if (v) _in(v, handleSSEEvent, msg.interactionId, msg.event);
         break;
+      }
 
-      case 'interaction:complete':
-        if (!_openTabs.has(msg.interaction.instanceId)) break;
+      case 'interaction:complete': {
+        const v = _viewOf(msg.interaction.instanceId);
+        if (!v) break;
         _sseIndex.delete(msg.interaction.id);
-        updateInteraction(msg.interaction);
+        _in(v, updateInteraction, msg.interaction);
         _scheduleCompaction();
         break;
+      }
 
-      case 'interaction:error':
-        markInteractionError(msg.interactionId, msg.error);
+      case 'interaction:error': {
+        const v = _viewOfTurn(msg.instanceId, msg.interactionId);
+        if (v) _in(v, markInteractionError, msg.interactionId, msg.error);
         break;
+      }
 
       case 'interaction:detail': {
         _pendingDetailRequests.delete(msg.id);
-        const dIdx = state.interactions.findIndex(i => i.id === msg.id);
-        if (dIdx >= 0 && msg.interaction) {
-          state.interactions[dIdx] = RET.mergeDetail(state.interactions[dIdx], msg.interaction);
+        const loc = _locate(msg.id);
+        if (loc && msg.interaction) {
+          const merged = loc.v.items[loc.idx] = RET.mergeDetail(loc.item, msg.interaction);
           _touchFull(msg.id);
-          _resultModalDetail(state.interactions[dIdx]);
+          _in(loc.v, _resultModalDetail, merged);
           if (_curlPending === msg.id) {
             _curlPending = null;
-            showCurlModal(buildCurlCommand(state.interactions[dIdx]));
+            showCurlModal(buildCurlCommand(merged));
           }
           // A tool's result lives in the turn after the one that called it.
           _modalRefresh(msg.id);
-        } else if (dIdx >= 0 && !msg.interaction) {
+        } else if (loc && !msg.interaction) {
           // Server couldn't find full data — clear _summary so we stop retrying
-          delete state.interactions[dIdx]._summary;
+          delete loc.item._summary;
           for (const el of _detailHost.querySelectorAll(`[data-lazy-detail="${msg.id}"]`)) {
             const loader = el.querySelector('.json-block');
             if (loader) loader.textContent = '(data not available)';
@@ -6237,33 +6538,17 @@
       }
 
       case 'inspector:earlier': {
-        const tab = _openTabs.get(msg.instanceId);
-        if (!tab) break;
-        tab.loadingEarlier = false;
-        tab.hasMore = !!msg.hasMore;
-        const have = new Set(state.interactions.map(i => i.id));
-        const older = (msg.interactions || []).filter(i => !have.has(i.id)).map(_adoptIncoming);
-        tab.extraCap = (tab.extraCap || 0) + older.length;
-        state.interactions.unshift(...older);
-        state.interactions.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-        if (activeInstanceTab === msg.instanceId) {
-          // The reader asked for what is above: show it, not the live end.
-          _tlSetFollow(false);
-          renderTimelineActive();
-          timelineList.scrollTop = 0;
-          _tlExpectTop = 0;
-          updateStats();
-          _lanesOnEarlier();
-        }
+        const v = _viewOf(msg.instanceId);
+        if (v) _in(v, _onEarlier, msg);
         break;
       }
 
       case 'interaction:sseEvents': {
         _pendingSseRequests.delete(msg.id);
-        const sseIdx = state.interactions.findIndex(i => i.id === msg.id);
-        if (sseIdx >= 0) {
-          if (!state.interactions[sseIdx].response) state.interactions[sseIdx].response = {};
-          state.interactions[sseIdx].response.sseEvents = msg.sseEvents || [];
+        const item = _itemById(msg.id);
+        if (item) {
+          if (!item.response) item.response = {};
+          item.response.sseEvents = msg.sseEvents || [];
           if (_modalSel && _selId(_modalSel) === msg.id) _modalRender();
         }
         break;
@@ -6273,54 +6558,130 @@
         if (!msg.instanceId) break;
         if (msg.totals) _sessionTotals.set(msg.instanceId, msg.totals);
         else _sessionTotals.delete(msg.instanceId);
-        if (activeInstanceTab === msg.instanceId) updateStats();
+        const v = _viewOf(msg.instanceId);
+        if (v) _in(v, updateStats);
         break;
       }
 
       case 'interaction:enriched': {
-        const interaction = state.interactions.find(i => i.id === msg.interactionId);
-        if (interaction && msg.promptImages) {
-          interaction.promptImages = msg.promptImages;
-          if (_modalSel?.type === 'turn' && _modalSel.id === msg.interactionId) _modalRender();
-        } else if (interaction) {
-          // Confirms or corrects the guess the turn started with; null puts it
-          // back on the main thread.
-          interaction.subagent = msg.subagent || undefined;
-          delete interaction._subagentInferred;
-          delete interaction.subagentProvisional;
-          if (_timelineMode === 'parallel') {
-            queueTimelineParallelRebuild();
-          } else {
-            updateTurnSubagentBadge(interaction);
-          }
-          _lanesQueueSync();
-          if (_modalSel?.type === 'turn' && _modalSel.id === msg.interactionId) _modalRender();
-        }
+        const v = _viewOfTurn(msg.instanceId, msg.interactionId);
+        if (v) _in(v, _onEnriched, msg);
         break;
       }
     }
   }
 
-  // Timeline Clear and the footer reset drop the focused session's finished
-  // turns from this page only; the session itself stays (Sessions tab Clear
-  // removes sessions).
-  function clearVisibleTurns() {
-    const toRemove = new Set();
-    for (const i of state.interactions) {
-      if (isVisibleInTimeline(i) && i.status !== 'streaming' && i.status !== 'pending') {
-        toRemove.add(i.id);
-      }
+  function _onStart(interaction) {
+    const v = _v;
+    if (v.items.some(i => i.id === interaction.id)) {
+      updateInteraction(interaction);
+      return;
     }
-    if (toRemove.size === 0) return;
-    state.interactions = state.interactions.filter(i => !toRemove.has(i.id));
-    if (state.selection && toRemove.has(_selId(state.selection))) state.selection = null;
-    if (_modalSel && toRemove.has(_selId(_modalSel))) closeDetailModal();
-    renderTimelineActive();
+    // Insert in timestamp order — hooks and subagent turns arrive via
+    // independent paths and may reach the client out of logical order.
+    const items = v.items;
+    const ts = interaction.timestamp || 0;
+    let lo = 0, hi = items.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if ((items[mid].timestamp || 0) <= ts) lo = mid + 1;
+      else hi = mid;
+    }
+    items.splice(lo, 0, _adoptIncoming(interaction));
+    if (!interaction._summary) _touchFull(interaction.id);
+    if (!_onScreen()) {
+      // Stored only; drawn when the view is shown.
+      _trimTimeline();
+      v.stale = true;
+      updateStats();
+      return;
+    }
+    if (_timelineMode === 'parallel') {
+      const iStatus = interaction.status || 'pending';
+      const isLongLived = !interaction.isHook && !interaction.isMcp;
+      if (isLongLived && (iStatus === 'pending' || iStatus === 'streaming')) {
+        addFooterBadge(interaction);
+      } else {
+        appendToParallelTimeline(interaction);
+      }
+    } else {
+      appendTurnToTimeline(interaction);
+    }
+    // Past the per-session cap the oldest turns leave the page (and the
+    // timeline is rebuilt without them); "Load earlier" brings them back.
+    if (_trimTimeline()) renderTimelineActive();
+    // The timeline follows the newest unless the reader scrolled it up;
+    // the lanes take the turn (hooks name the agent an Agent call ran,
+    // and when it stopped).
+    if (v.tl.follow) scrollTimelineToBottom();
     _lanesShow();
     updateStats();
   }
-  document.getElementById('footerReset')?.addEventListener('click', clearVisibleTurns);
-  document.getElementById('timeline-clear-btn')?.addEventListener('click', clearVisibleTurns);
 
-  window.inspectorModule = { handleMessage, instanceDisplayLabel, renderInspectorTabStrip, switchInstanceTab, openSession: openSessionTab, toggleFocusMode, isFocusMode: () => _focusMode };
+  // A page of older turns the view asked for.
+  function _onEarlier(msg) {
+    const v = _v;
+    v.loadingEarlier = false;
+    v.hasMore = !!msg.hasMore;
+    const have = new Set(v.items.map(i => i.id));
+    const older = (msg.interactions || []).filter(i => !have.has(i.id)).map(_adoptIncoming);
+    v.extraCap = (v.extraCap || 0) + older.length;
+    v.items.unshift(...older);
+    v.items.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    // The reader asked for what is above: show it, not the live end.
+    _tlSetFollow(false);
+    if (!_onScreen()) { v.stale = true; updateStats(); return; }
+    renderTimelineActive();
+    v.el.timelineList.scrollTop = 0;
+    v.tl.expectTop = 0;
+    updateStats();
+    _lanesOnEarlier();
+  }
+
+  function _onEnriched(msg) {
+    const interaction = _v.items.find(i => i.id === msg.interactionId);
+    if (!interaction) return;
+    if (msg.promptImages) {
+      interaction.promptImages = msg.promptImages;
+    } else {
+      // Confirms or corrects the guess the turn started with; null puts it
+      // back on the main thread.
+      interaction.subagent = msg.subagent || undefined;
+      delete interaction._subagentInferred;
+      delete interaction.subagentProvisional;
+      if (!_onScreen()) _v.stale = true;
+      else if (_timelineMode === 'parallel') queueTimelineParallelRebuild();
+      else updateTurnSubagentBadge(interaction);
+      _lanesQueueSync();
+    }
+    if (_modalSel?.type === 'turn' && _modalSel.id === msg.interactionId) _modalRender();
+  }
+
+  // Timeline Clear and the footer reset drop the view's finished turns from
+  // this page only; the session itself stays (Sessions tab Clear removes
+  // sessions).
+  function clearVisibleTurns() {
+    const v = _v;
+    if (!v) return;
+    const toRemove = new Set();
+    for (const i of v.items) {
+      if (i.status !== 'streaming' && i.status !== 'pending') toRemove.add(i.id);
+    }
+    if (toRemove.size === 0) return;
+    v.items = v.items.filter(i => !toRemove.has(i.id));
+    if (v.selection && toRemove.has(_selId(v.selection))) v.selection = null;
+    if (_modalSel && toRemove.has(_selId(_modalSel))) closeDetailModal();
+    _viewRender();
+  }
+  // The page footer's reset acts on the strip's active tab.
+  document.getElementById('footerReset')?.addEventListener('click', () => _in(_activeView(), clearVisibleTurns));
+
+  window.inspectorModule = {
+    handleMessage, instanceDisplayLabel, renderInspectorTabStrip, switchInstanceTab,
+    openSession: openSessionTab,
+    // A session's view for a tab host: { key, title, root, setShown, destroy }.
+    createInstanceView,
+    toggleFocusMode: () => _in(_activeView(), toggleFocusMode),
+    isFocusMode: () => !!_activeView()?.focusMode,
+  };
 })();
