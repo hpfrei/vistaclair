@@ -45,6 +45,26 @@
     return DATA_IMAGE_TAGS.has(tag) && /^data:image\//i.test(url);
   }
 
+  // A local file path written as a media src (`![](/home/me/shot.png)`, an
+  // <img src="/tmp/a.png">) is not a URL of this dashboard: the browser would
+  // ask the tunnel host for that path and get a 404. The dashboard serves
+  // disk files only through /api/raw-file (video: /api/video-stream), so such
+  // a src becomes that URL. http(s):, data:, protocol-relative and the
+  // dashboard's own routes (/api/, /outputs/, /vendor/, /landing_page/ and the
+  // single-segment static files like /favicon.svg) stay as they are.
+  const OWN_ROUTES = new Set(['api', 'outputs', 'vendor', 'landing_page']);
+  const MEDIA_SRC_TAGS = new Set(['img', 'video', 'audio', 'source']);
+  function localMediaUrl(raw, tag) {
+    let p = decodeAttr(raw).trim();
+    if (!p.startsWith('/') || p.startsWith('//') || /[\u0000-\u001f\\]/.test(p)) return null;
+    const segs = p.split('/');
+    if (segs.length < 3 || OWN_ROUTES.has(segs[1])) return null;
+    p = p.split(/[?#]/)[0];
+    try { p = decodeURIComponent(p); } catch {}
+    const base = tag === 'video' ? '/api/video-stream' : '/api/raw-file';
+    return base + '?path=' + encodeURIComponent(p);
+  }
+
   // HTML with active elements gone, every kept tag rebuilt without on*
   // handlers, FORBID_ATTR or unsafe URLs, SVG animations of links dropped,
   // and any other `<` or `>` escaped as text.
@@ -74,7 +94,8 @@
         if (URL_ATTRS.has(attr) && !safeUrl(val || '', name)) continue;
         // <animate attributeName="href" values="javascript:…"> rewrites a link.
         if (ANIMATE.has(name) && attr === 'attributename' && /^(?:xlink:)?href$|^src$|^on/i.test(decodeAttr(val || '').trim())) drop = true;
-        attrs += val == null ? ` ${a[1]}` : ` ${a[1]}="${escAttr(decodeAttr(val))}"`;
+        const local = val != null && (attr === 'src' && MEDIA_SRC_TAGS.has(name) || attr === 'poster' && name === 'video') ? localMediaUrl(val, attr === 'poster' ? 'img' : name) : null;
+        attrs += val == null ? ` ${a[1]}` : ` ${a[1]}="${local ? escAttr(local) : escAttr(decodeAttr(val))}"`;
       }
       if (!drop) out += `<${tag}${attrs}${m[4] ? ' /' : ''}>`;
     }
@@ -104,7 +125,7 @@
     return url;
   }
 
-  const api = { cleanHtml, sanitizeHtml, userImageUrl, PURIFY_BLOCK, FORBID_TAGS, FORBID_ATTR };
+  const api = { cleanHtml, sanitizeHtml, userImageUrl, localMediaUrl, PURIFY_BLOCK, FORBID_TAGS, FORBID_ATTR };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.renderSafe = api;
 })(typeof window !== 'undefined' ? window : globalThis);
