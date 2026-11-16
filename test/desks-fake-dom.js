@@ -103,7 +103,7 @@ function makeDom() {
 
 // Runs public/<files> in one vm context with a fake window/document.
 // Returns the window.
-function loadPublic(files, { doc, window: extra = {}, timers = true } = {}) {
+function loadPublic(files, { doc, window: extra = {}, timers = true, globals = {} } = {}) {
   const window = {
     innerWidth: 1600, innerHeight: 900,
     addEventListener() {}, removeEventListener() {},
@@ -115,6 +115,7 @@ function loadPublic(files, { doc, window: extra = {}, timers = true } = {}) {
     setTimeout: timers ? setTimeout : () => 0, clearTimeout,
     requestAnimationFrame: (fn) => setTimeout(fn, 0),
     ResizeObserver: class { observe() {} disconnect() {} unobserve() {} },
+    ...globals,
   };
   ctx.globalThis = ctx;
   window.document = doc;
