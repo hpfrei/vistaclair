@@ -32,6 +32,10 @@
 .oi-lk-count { color: var(--text-dim); font-size: 11px; }
 .oi-lock ul { list-style: none; margin: 2px 0 0; padding: 0 0 0 12px; color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
 .oi-lk-waiter { font-style: italic; }
+/* The popover's × (top right, stays in view while the list scrolls). */
+.oi-close { float: right; position: sticky; top: 0; margin: -4px -6px 0 8px; width: 24px; height: 24px; padding: 0; line-height: 1; font-size: 18px; border: 0; border-radius: 6px; background: transparent; color: var(--text-dim); cursor: pointer; }
+.oi-close:hover, .oi-close:focus-visible { background: var(--bg-hover, color-mix(in srgb, var(--text) 12%, transparent)); color: var(--text-bright, var(--text)); }
+.oi-panel:focus { outline: none; }
 /* The SDK run panel's popover under the toolbar. */
 .sdk-turn { position: absolute; z-index: 30; right: 8px; top: 34px; width: min(560px, calc(100% - 16px)); max-height: 70%; overflow: auto; box-shadow: 0 6px 24px rgba(0,0,0,.35); background: var(--bg); }
 .sdk-tb-turn.on { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 55%, var(--border)); }

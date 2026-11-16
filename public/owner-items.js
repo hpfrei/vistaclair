@@ -174,9 +174,34 @@
 
   // A panel element. `runId`: one run's items; none: every run's. `onCount(n)`
   // hears the number of open items after each fetch.
-  function view({ runId = null, emptyText = '', onCount = null } = {}) {
+  // `popover: { anchor }`: the panel is a popover that opens from the `anchor`
+  // button (hidden at first): open() / close() / toggle(), a × in the corner,
+  // Escape or a mousedown outside closes it, it fetches only while open.
+  function view({ runId = null, emptyText = '', onCount = null, popover = null } = {}) {
     const el = document.createElement('div');
     el.className = 'oi-panel';
+    const btn = popover?.anchor || null;
+    // In a popover the checklist is drawn into its own body, so the × stays.
+    let body = el;
+    let closeBtn = null;
+    if (popover) {
+      el.classList.add('hidden');
+      el.setAttribute('role', 'dialog');
+      el.setAttribute('aria-label', 'Your turn');
+      el.setAttribute('tabindex', '-1');
+      closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'oi-close';
+      closeBtn.setAttribute('aria-label', 'Close');
+      closeBtn.title = 'Close (Esc)';
+      closeBtn.textContent = '×';
+      body = document.createElement('div');
+      body.className = 'oi-body';
+      el.appendChild(closeBtn);
+      el.appendChild(body);
+      btn?.setAttribute('aria-expanded', 'false');
+    }
+    let isOpen = false;
     let runs = [];
     let locks = null;
     let html = null;
@@ -190,7 +215,7 @@
 
     function render() {
       const next = panelHtml(runs, locks, { emptyText, selected });
-      if (!emptyText) el.classList.toggle('hidden', !next);   // with an empty text the owner of the element shows and hides it
+      if (!emptyText && !popover) el.classList.toggle('hidden', !next);   // with an empty text the owner of the element shows and hides it
       if (next === html) return;
       // Do not rebuild under someone typing an answer.
       const active = el.contains(document.activeElement) ? document.activeElement : null;
@@ -200,7 +225,7 @@
       const focus = active?.dataset?.selId != null ? `[data-sel-run="${CSS.escape(active.dataset.selRun)}"][data-sel-id="${CSS.escape(active.dataset.selId)}"]`
         : active?.matches?.('[data-sel-all]') ? '[data-sel-all]' : active?.matches?.('[data-del-sel]') ? '[data-del-sel]' : null;
       html = next;
-      el.innerHTML = next;
+      body.innerHTML = next;
       for (const i of el.querySelectorAll('[data-answer-for]')) if (typed.has(i.dataset.answerFor)) i.value = typed.get(i.dataset.answerFor);
       for (const i of el.querySelectorAll('[data-sel-all][data-some]')) i.indeterminate = true;
       if (focus) el.querySelector(focus)?.focus?.();
@@ -214,7 +239,7 @@
     }
 
     async function refresh() {
-      if (busy) return;
+      if (busy || (popover && !isOpen)) return;   // a closed popover does not fetch
       busy = true;
       try {
         const [items, lk] = await Promise.all([
@@ -334,14 +359,64 @@
       el.querySelector(`button[data-act="answer"][data-id="${CSS.escape(e.target.dataset.answerFor)}"]`)?.click();
     });
 
+    function stop() { clearInterval(timer); timer = null; }
     function tick() {
-      if (!el.isConnected) { clearInterval(timer); timer = null; return; }
+      if (!el.isConnected || (popover && (!isOpen || el.classList.contains('hidden')))) { stop(); return; }
       if (!document.hidden) refresh();
     }
     // `start`: call it when the panel is put on screen. It fetches, then again at
-    // a modest interval for as long as the element stays in the page.
+    // a modest interval for as long as the element stays in the page (a
+    // popover: as long as it is open).
     const start = () => { if (!timer) { timer = setInterval(tick, REFRESH_MS); } refresh(); };
-    const api = { el, refresh, start };
+
+    // ---- the popover: open, and close by Escape, ×, or a mousedown outside ----
+    // Escape (not while composing) first clears a selection, then closes, from
+    // anywhere on the page; an answer field's Escape closes, its text stays (the
+    // element is only hidden).
+    const onDocDown = (e) => {
+      if (!el.isConnected) { close(); return; }
+      const t = e.target;
+      if (el.contains(t) || btn?.contains?.(t)) return;   // the anchor has its own toggle
+      close();
+    };
+    const onDocKey = (e) => {
+      if (e.key !== 'Escape' || e.isComposing) return;
+      if (!el.isConnected) { close(); return; }
+      e.stopPropagation();
+      if (selected.size && !e.target?.matches?.('[data-answer-for]')) {
+        e.preventDefault();
+        selected = new Set();
+        anchor = null;
+        render();
+        return;
+      }
+      close({ focus: true });
+    };
+    function open() {
+      if (!popover || isOpen) return;
+      isOpen = true;
+      el.classList.remove('hidden');
+      btn?.setAttribute('aria-expanded', 'true');
+      document.addEventListener('mousedown', onDocDown, true);
+      document.addEventListener('keydown', onDocKey, true);
+      start();
+      el.focus?.();
+    }
+    // `focus`: the focus goes back to the anchor (Escape, ×); after an outside
+    // click it stays where the user clicked.
+    function close({ focus = false } = {}) {
+      if (!popover || !isOpen) return;
+      isOpen = false;
+      el.classList.add('hidden');
+      btn?.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('mousedown', onDocDown, true);
+      document.removeEventListener('keydown', onDocKey, true);
+      stop();
+      if (focus) btn?.focus?.();
+    }
+    const toggle = () => { if (isOpen) close({ focus: true }); else open(); };
+    closeBtn?.addEventListener('click', () => close({ focus: true }));
+    const api = { el, refresh, start, stop, open, close, toggle, isOpen: () => isOpen };
     views.add(api);
     return api;
   }

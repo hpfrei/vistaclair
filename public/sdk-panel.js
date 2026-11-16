@@ -2948,22 +2948,22 @@
       this.turnBtn.classList.toggle('on', n > 0);
       this.turnBtn.textContent = n ? `Your turn · ${n}` : 'Your turn';
       this.turnBtn.title = n ? `${n} thing${n === 1 ? '' : 's'} only you can do or decide` : 'Nothing waits for you. Shows the checklist and the locks held on this machine';
-      if (this.turnEl && n !== this._turnN) this.turnView?.refresh();
+      if (this.turnEl && n !== this._turnN) this.turnView?.refresh();   // (a closed popover does not fetch)
+      if (hide) this.turnView?.close();
       this._turnN = n;
     }
 
     toggleTurn() {
       if (!window.ownerItems) return;
       if (!this.turnEl) {
-        this.turnView = window.ownerItems.view({ runId: this.runId, emptyText: 'Nothing waits for you in this run.' });
+        // The view is a popover: it opens and closes itself (×, Esc, a click
+        // outside), keeps aria-expanded on the button and stops fetching when closed.
+        this.turnView = window.ownerItems.view({ runId: this.runId, emptyText: 'Nothing waits for you in this run.', popover: { anchor: this.turnBtn } });
         this.turnEl = this.turnView.el;
-        this.turnEl.classList.add('sdk-turn', 'hidden');
+        this.turnEl.classList.add('sdk-turn');
         this.panelEl.appendChild(this.turnEl);
       }
-      const open = this.turnEl.classList.contains('hidden');
-      this.turnEl.classList.toggle('hidden', !open);
-      this.turnBtn.setAttribute('aria-expanded', String(open));
-      if (open) this.turnView.start();
+      this.turnView.toggle();
     }
 
     renderFresh() {
@@ -3049,6 +3049,7 @@
       clearInterval(this._poll);
       clearInterval(this._tick);
       this._poll = this._tick = null;
+      if (!this.active) this.turnView?.close();
       if (this.active) {
         this._poll = setInterval(() => this.pollTodos(), POLL_MS);
         this._tick = setInterval(() => this.tick(), TICK_MS);
@@ -3069,6 +3070,7 @@
       if (_pick?.panel === this) closePicker();
       if (_menu && (_menu.owner === this || this.allAreas().includes(_menu.owner))) closeMenu();
       if (_models?.panel === this) closeModels();
+      this.turnView?.close();
       for (const a of this.allAreas()) a.destroy();
       this.workers.clear();
       this.main = null;
