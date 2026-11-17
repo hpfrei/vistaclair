@@ -14,7 +14,6 @@ const PROJECT_ROOT = PACKAGE_ROOT;
 
 const DEFAULT_SETTINGS = {
   modelMap: { fable: null, opus: null, sonnet: null, haiku: null },
-  showThinking: false,
 };
 
 const SCROLLBACK_LIMIT = 128 * 1024;

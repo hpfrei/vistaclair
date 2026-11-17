@@ -140,21 +140,17 @@ async function* resumeWebStream(firstChunk, reader) {
   }
 }
 
-// Tab-level "show thinking". Claude Code sends every request with its own
+// Thinking is always shown. Claude Code sends every request with its own
 // display (`{ type: 'adaptive', display: 'updates' }`: an empty thinking block
 // and now and then a short progress note), and its subagents keep that
-// display even when the session switched its own. So the tab's choice is
-// made here, per request: on, a tab asks for summarized reasoning; off, an
-// Agent SDK session (whose panel is the only view) asks for none ('omitted'),
-// while a terminal tab keeps Claude Code's default (its screen shows those
-// notes). Only a thinking config that takes `display` gets it (adaptive,
-// enabled; never disabled or between_tools), and none is ever added.
-function applyShowThinking(body, cliSettings) {
+// display, so a tab's requests are set here, per request, to ask for
+// summarized reasoning. Only a thinking config that takes `display` gets it
+// (adaptive, enabled; never disabled or between_tools), and none is ever added.
+function applyThinkingDisplay(body, cliSettings) {
   const t = body && body.thinking;
   if (!cliSettings || !t || typeof t !== 'object') return;
   if (t.type !== 'adaptive' && t.type !== 'enabled') return;
-  if (cliSettings.showThinking) t.display = 'summarized';
-  else if (cliSettings.engine === 'sdk') t.display = 'omitted';
+  t.display = 'summarized';
 }
 
 // Resolve a CLI tab's per-session model override (modelMap, family-substring
@@ -435,7 +431,7 @@ function createProxyRouter(store, broadcaster, targetUrl) {
     const { tabModelDef } = resolveTabModel(body, cliSettings);
 
     // --- Tab-level "show thinking" ---
-    applyShowThinking(body, cliSettings);
+    applyThinkingDisplay(body, cliSettings);
 
     const instCtx = getInstanceContext(req.instanceId);
     const interaction = {
@@ -1008,5 +1004,5 @@ createProxyRouter._showSensitiveHeaders = false;
 
 module.exports = createProxyRouter;
 module.exports.pendingQuestions = pendingQuestions;
-module.exports.applyShowThinking = applyShowThinking;
+module.exports.applyThinkingDisplay = applyThinkingDisplay;
 module.exports.clearPendingQuestionsForTab = clearPendingQuestionsForTab;

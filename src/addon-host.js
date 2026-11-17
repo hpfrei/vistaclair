@@ -115,14 +115,14 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
       // unregister() (cli:exit, then cli:tabs without it). adapter = { sessId,
       // kind: 'sdk', hidden?, title, settings, running, busy, state (read
       // live), submit(text, { images }), interrupt(), setModel(m),
-      // setShowThinking(on), setAuth(auth, { continueTurn }), historyPage({
+      // setAuth(auth, { continueTurn }), historyPage({
       // limit, before }) → an sdk:history page, kill(), close() (the tab's ×;
       // the add-on unregisters), orchestration?() → the run members GET
       // /api/orchestration/run answers for its settings.orchestration.runId }.
       // settings is untrusted: at most 16 KB as JSON, and only engine (always
       // 'sdk'), auth ('apikey' | 'subscription'), sessionDir (for sdk:todo;
       // kept only when it resolves, symlinks included, strictly inside
-      // DATA_HOME), externalHost, model, showThinking (boolean), name,
+      // DATA_HOME), externalHost, model, name,
       // modelMap ({ fable, opus, sonnet, haiku }) and orchestration ({ runId,
       // role, workerId, orchestrator, name }) survive, type-checked and capped.
       // orchestration() is consulted only for a runId none of core's own

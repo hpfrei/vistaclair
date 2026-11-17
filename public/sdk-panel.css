@@ -350,21 +350,6 @@
 }
 .sdk-model:hover:not(:disabled) { border-color: color-mix(in srgb, var(--purple) 50%, var(--border)); background: var(--bg-hover); }
 .sdk-model:disabled { color: var(--text-dim); cursor: default; }
-/* The thinking toggle: dim when off, lit when the summaries are shown. */
-.sdk-think {
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 10px;
-  line-height: 15px;
-  padding: 0 7px;
-  border-radius: 999px;
-  cursor: pointer;
-}
-.sdk-think:hover:not(:disabled) { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 55%, var(--border)); }
-.sdk-think.on { color: var(--purple); border-color: color-mix(in srgb, var(--purple) 55%, var(--border)); background: color-mix(in srgb, var(--purple) 14%, var(--bg)); }
-.sdk-think:disabled { opacity: .45; cursor: default; }
 /* ■ on a busy box: stop its current turn. */
 .sdk-stop {
   border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border));
@@ -435,9 +420,6 @@
   .sdk-cap-right { gap: 4px; }
   .sdk-cap { padding: 0 4px; }
   .sdk-model { padding: 0 2px; }
-  .sdk-think { padding: 0 5px; }
-  .sdk-think-l { display: none; }
-  .sdk-think::before { content: '\1F4AD'; font-size: 9px; }
 }
 .sdk-insp {
   padding: 0 8px;

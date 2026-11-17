@@ -1,7 +1,7 @@
 // WebSocket handler for the in-browser CLI terminal: tab lifecycle, input,
 // file upload, resize, settings, scrollback, and saved-session management.
 // Registered on the dashboard broadcaster under the 'cli:' prefix, and 'sdk:'
-// for the Agent SDK panel (src/sdk-session.js): send, interrupt, setModel, setThinking,
+// for the Agent SDK panel (src/sdk-session.js): send, interrupt, setModel,
 // history, todo. An external session's tab (src/external-session.js) takes the
 // same messages through its add-on's adapter: same replies, the adapter's
 // errors in the reply's own error shape.
@@ -420,22 +420,6 @@ function handleMessage(ws, msg, bc) {
           console.error(`[sdk:setModel] run record: ${e.message}`);
         }
       })();
-      break;
-    }
-    case 'sdk:setThinking': {
-      // The box's Thinking toggle: persisted by the session (settings), shown
-      // back as its status; a refusal as an error notice.
-      const session = sdkSession(mgr, msg.sessId);
-      if (session?.external) {
-        settle(session.call('setShowThinking', msg.on === true), null, (e) => sendNotice(sendLater, msg.sessId, `Thinking not switched: ${e.message}`));
-        break;
-      }
-      try {
-        if (!session) throw new Error('that Agent SDK session is not running');
-        session.setShowThinking(msg.on === true);
-      } catch (e) {
-        sendNotice(send, msg.sessId, `Thinking not switched: ${e.message}`);
-      }
       break;
     }
     case 'sdk:history': {

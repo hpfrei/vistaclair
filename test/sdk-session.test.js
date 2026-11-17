@@ -80,7 +80,7 @@ function fakeSdk() {
         return: async () => { out.end(); return { value: undefined, done: true }; },
         interrupt: async () => { call.interrupts++; return sdk.interruptReceipt; },
         setModel: async (m) => { call.models.push(m); },
-        setMaxThinkingTokens: async (tokens, display) => { call.thinking.push([tokens, display]); if (sdk.thinkingFails) throw new Error('refused'); },
+        setMaxThinkingTokens: async (tokens, display) => { call.thinking.push([tokens, display]); },
         getContextUsage: async (o) => { call.contextAsks.push(o); return sdk.contextUsage || null; },
         close: () => { call.closed = true; out.end(); },
       };
@@ -391,11 +391,11 @@ const statuses = (events) => events().filter(e => e.ev.platform?.kind === 'statu
 test('setModel: live on a running query, settings only when not running; refused when exited or invalid', async () => {
   const { s, calls, events } = makeSession({ model: 'sonnet', modelMap: { fable: null, opus: 'gpt-x', sonnet: null, haiku: null } });
   s.spawn(tmp('proj-'), 80, 24, {});
-  assert.deepStrictEqual(statuses(events)[0], { kind: 'status', state: 'idle', costUsd: 0, model: 'sonnet', actualModel: null, mappedTo: null, showThinking: false, credential: 'api-key' });
+  assert.deepStrictEqual(statuses(events)[0], { kind: 'status', state: 'idle', costUsd: 0, model: 'sonnet', actualModel: null, mappedTo: null, credential: 'api-key' });
   assert.deepStrictEqual(await s.setModel('claude-opus-4-5[1m]'), { ok: true, model: 'claude-opus-4-5[1m]' });
   assert.deepStrictEqual(calls[0].models, ['claude-opus-4-5[1m]']);
   assert.strictEqual(s.settings.model, 'claude-opus-4-5[1m]');
-  assert.deepStrictEqual(statuses(events).at(-1), { kind: 'status', state: 'idle', costUsd: 0, model: 'claude-opus-4-5[1m]', actualModel: null, mappedTo: 'gpt-x', showThinking: false, credential: 'api-key' });
+  assert.deepStrictEqual(statuses(events).at(-1), { kind: 'status', state: 'idle', costUsd: 0, model: 'claude-opus-4-5[1m]', actualModel: null, mappedTo: 'gpt-x', credential: 'api-key' });
   await assert.rejects(s.setModel('bad model'), /invalid model/);
   await assert.rejects(s.setModel(''), /invalid model/);
   await assert.rejects(s.setModel(undefined), /invalid model/);
@@ -415,50 +415,16 @@ test('setModel: live on a running query, settings only when not running; refused
   b.s.kill();
 });
 
-test('showThinking: --thinking-display summarized (off: omitted) at spawn, switched live on a running query', async () => {
-  const { s, calls, events } = makeSession();
-  s.spawn(tmp('proj-'), 80, 24, {});
-  assert.deepStrictEqual(calls[0].options.extraArgs, { 'replay-user-messages': null, 'thinking-display': 'omitted' }, 'off: no thinking text, not Claude Code\'s "updates" notes');
-  s.updateSettings({ showThinking: true });
-  await tick();
-  assert.deepStrictEqual(calls[0].thinking, [[undefined, 'summarized']], 'the budget is left as it is');
-  s.updateSettings({ showThinking: true });
-  await tick();
-  assert.strictEqual(calls[0].thinking.length, 1, 'unchanged: nothing to switch');
-  s.updateSettings({ showThinking: false });
-  await tick();
-  assert.deepStrictEqual(calls[0].thinking[1], [undefined, 'omitted']);
-
-  // The panel's toggle: persisted, and told back in the status.
-  let saved = 0;
-  s.onSettingsChange = () => saved++;
-  assert.deepStrictEqual(s.setShowThinking(true), { ok: true, showThinking: true });
-  assert.strictEqual(saved, 1);
-  assert.strictEqual(statuses(events).at(-1).showThinking, true);
-
-  // A respawn keeps it.
-  s.spawn(tmp('proj-'), 80, 24, {});
-  assert.deepStrictEqual(calls[1].options.extraArgs, { 'replay-user-messages': null, 'thinking-display': 'summarized' });
-  s.kill();
-});
-
-test('showThinking: a refused live switch is logged, never thrown', async () => {
-  const { s, sdk, calls } = makeSession({ showThinking: true });
-  s.spawn(tmp('proj-'), 80, 24, {});
-  assert.strictEqual(calls[0].options.extraArgs['thinking-display'], 'summarized');
-  sdk.thinkingFails = true;
-  const err = console.error;
-  const logged = [];
-  console.error = (m) => logged.push(String(m));
-  try {
-    assert.doesNotThrow(() => s.updateSettings({ showThinking: false }));
+test('thinking: --thinking-display summarized at spawn, whatever the settings (an old showThinking is ignored)', async () => {
+  for (const settings of [{}, { showThinking: false }, { showThinking: true }]) {
+    const { s, calls } = makeSession(settings);
+    s.spawn(tmp('proj-'), 80, 24, {});
+    assert.deepStrictEqual(calls[0].options.extraArgs, { 'replay-user-messages': null, 'thinking-display': 'summarized' });
+    s.updateSettings({ showThinking: !settings.showThinking });
     await tick();
-  } finally { console.error = err; }
-  assert.deepStrictEqual(calls[0].thinking, [[undefined, 'omitted']]);
-  assert.match(logged.join('\n'), /thinking display not switched: refused/);
-  assert.strictEqual(s.running, true, 'the session lives on');
-  assert.strictEqual(s.settings.showThinking, false);
-  s.kill();
+    assert.deepStrictEqual(calls[0].thinking, [], 'nothing is switched on a running query');
+    s.kill();
+  }
 });
 
 test('a new model map on a running session: its status names the new target at once', async () => {
@@ -467,7 +433,7 @@ test('a new model map on a running session: its status names the new target at o
   assert.strictEqual(statuses(events).length, 0, 'not running: nothing to tell');
   s.spawn(tmp('proj-'), 80, 24, {});
   const before = statuses(events).length;
-  s.updateSettings({ showThinking: true });
+  s.updateSettings({ sessionDir: tmp('folder-') });
   assert.strictEqual(statuses(events).length, before, 'another setting says nothing');
   s.updateSettings({ modelMap: { fable: null, opus: 'gpt-y', sonnet: null, haiku: null } });
   assert.strictEqual(statuses(events).at(-1).mappedTo, 'gpt-y');

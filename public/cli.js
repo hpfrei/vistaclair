@@ -1415,9 +1415,6 @@
         modelSel.appendChild(o);
       }
     }
-
-    const showThinking = settingsModal.querySelector('[data-setting="showThinking"]');
-    if (showThinking) showThinking.checked = !!settings.showThinking;
   }
 
   function saveSettings() {
@@ -1429,12 +1426,10 @@
       const sel = settingsModal.querySelector(`[data-map="${family}"]`);
       modelMap[family] = sel?.value || null;
     });
-    const showThinking = settingsModal.querySelector('[data-setting="showThinking"]');
     const modelSel = settingsModal.querySelector('[data-setting="model"]');
     const settings = {
       modelMap,
       model: modelSel?.value || null,
-      showThinking: !!showThinking?.checked,
     };
     if (tab) tab.settings = { ...tab.settings, ...settings };
     sendWs({ type: 'cli:settings', tabId, settings });

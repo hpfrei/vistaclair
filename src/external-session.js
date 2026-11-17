@@ -6,7 +6,7 @@
 //
 //   adapter        { sessId, kind: 'sdk', hidden?, title, settings, running,
 //                  busy, state (read live, getters allowed), submit(text,
-//                  { images }), interrupt(), setModel(m), setShowThinking(on),
+//                  { images }), interrupt(), setModel(m),
 //                  setAuth(auth, { continueTurn }), historyPage({ limit,
 //                  before }), kill(), close(), orchestration?() }
 //   facade         ExternalSession: the session surface the manager's lookups
@@ -39,7 +39,7 @@ const CALL_TIMEOUT_MS = 30 * 1000;
 const MODEL_FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'];
 const TAB_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const SESS_ID_RE = /^[0-9a-f-]{36}$/i;
-const METHODS = ['submit', 'interrupt', 'setModel', 'setShowThinking', 'setAuth', 'historyPage', 'kill', 'close'];
+const METHODS = ['submit', 'interrupt', 'setModel', 'setAuth', 'historyPage', 'kill', 'close'];
 
 function cap(v, n) {
   return v == null ? '' : String(v).slice(0, n);
@@ -56,7 +56,6 @@ const SETTINGS = {
   sessionDir: (v) => (typeof v === 'string' && v.length <= MAX_PATH ? insideDataHome(v) : undefined),
   externalHost: str(MAX_HOST),
   model: str(MAX_TITLE),
-  showThinking: (v) => (typeof v === 'boolean' ? v : undefined),
   name: str(MAX_ID),
   modelMap: (v) => (v && typeof v === 'object' && !Array.isArray(v)
     ? Object.fromEntries(MODEL_FAMILIES.map(f => [f, str(MAX_TITLE)(v[f]) || null]))
