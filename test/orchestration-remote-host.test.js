@@ -118,7 +118,7 @@ function addTab(mgr, tabId, { runId, name, host = 'hetzner-1', running = true })
     submitted: [], interrupts: 0,
     submit(text, opts) { this.submitted.push({ text, opts }); },
     interrupt() { this.interrupts++; },
-    setModel() {}, setShowThinking() {}, setAuth() {}, historyPage() { return { events: [] }; }, kill() {}, close() {},
+    setModel() {}, setAuth() {}, historyPage() { return { events: [] }; }, kill() {}, close() {},
   };
   const ext = new ExternalSession(tabId, adapter);
   mgr.external.set(tabId, ext);

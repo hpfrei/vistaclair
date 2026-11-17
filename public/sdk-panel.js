@@ -3,14 +3,13 @@
 // worker sits in a row below it (workers are hidden sessions with no tab of
 // their own), and an SVG behind the boxes joins them. A plain SDK tab has a
 // single box. Each box shows one view at a time — Live or Notes — under a
-// caption on its top border: name, model (click to switch), a thinking
-// toggle (summarized thinking text, settings.showThinking), state (with a ■
+// caption on its top border: name, model (click to switch), state (with a ■
 // that stops the session's current turn while it works), cost; at
 // its right end the main agent's context use, then the Inspector button. Live
 // is split: the TODO table on top, below it the agent's text and the
 // `description` of its tool calls, its thinking (open while it streams, then
-// one collapsed line with a preview; a block with no text, as when the toggle
-// is off, is not shown), and the same of its subagents, chipped by
+// one collapsed line with a preview; a block with no text, as when the model
+// sent none, is not shown), and the same of its subagents, chipped by
 // type and launch order ("Explore 2"), the user's turns and, at each stop of
 // the main agent, a rule with its time; notices and messages are
 // only in the Inspector. A turn the agent has not taken in yet waits as a
@@ -417,7 +416,6 @@
       this.model = null;             // chosen (settings.model)
       this.actualModel = null;       // what the API answered with
       this.mappedTo = null;          // the tab's modelMap target, when it rewrites
-      this.showThinking = false;     // settings.showThinking, from the status
       this.initModel = null;         // system/init, before any status names one
       this.todo = null;
       this.context = null;           // { tokens, window, compactAt, windowEstimated } from the status
@@ -443,7 +441,6 @@
           <div class="sdk-cap">
             <span class="sdk-area-name"></span>
             <button type="button" class="sdk-model" title="Change this session's model"></button>
-            <button type="button" class="sdk-think" aria-pressed="false"><span class="sdk-think-l">thinking</span></button>
             <span class="sdk-chip sdk-area-state"></span>
             <span class="sdk-chip sdk-area-bill hidden"></span>
             <button type="button" class="sdk-stop hidden" title="Stop what this session is doing now. It stays open and waits for your next message.">■</button>
@@ -494,7 +491,6 @@
       const q = (s) => root.querySelector(s);
       this.nameEl = q('.sdk-area-name');
       this.modelBtn = q('.sdk-model');
-      this.thinkBtn = q('.sdk-think');
       this.stateEl = q('.sdk-area-state');
       this.billEl = q('.sdk-area-bill');
       this.stopBtn = q('.sdk-stop');
@@ -533,7 +529,6 @@
 
       for (const [v, b] of Object.entries(this.segBtns)) b.addEventListener('click', () => this.setView(v));
       this.modelBtn.addEventListener('click', (e) => { e.stopPropagation(); openModelMenu(this, this.modelBtn); });
-      this.thinkBtn.addEventListener('click', () => this.toggleThinking());
       this.stopBtn.addEventListener('click', () => this.stop());
       this.freshBtn.addEventListener('click', () => this.panel.refresh());
       this.autoBtn.addEventListener('click', () => this.panel.toggleAutoRefresh());
@@ -736,12 +731,6 @@
       ].filter(Boolean).join('\n');
       this.modelBtn.disabled = ended;
       if (_max?.area === this) _max.composer.disabled = ended;
-      this.thinkBtn.classList.toggle('on', this.showThinking);
-      this.thinkBtn.setAttribute('aria-pressed', String(this.showThinking));
-      this.thinkBtn.disabled = ended;
-      this.thinkBtn.title = this.showThinking
-        ? 'Thinking shown: the model\'s thinking summaries appear in Live, from its next request. Click to hide them.'
-        : 'Thinking hidden. Click to show the model\'s thinking summaries in Live, from its next request (billed the same either way).';
       const arch = this.todo?.archived?.length || 0;   // ARCHIVE.md rows count as done
       const t = this.todo?.rows || [];
       const done = t.filter(x => isDone(x.status)).length + arch;
@@ -1167,7 +1156,7 @@
         seen: new Set(), pending: new Map(), pendingEl: el('div'),
         act: Activity.createActivity(), gotStatus: true, initModel: null, _quietInit: true, _replaying: true,
       });
-      for (const k of ['setState', 'setCost', 'renderHeader', 'renderContext', 'renderNow', 'markUnread', 'requestTodo', 'applyStatus', 'modelRefused', 'thinkingRefused', 'trim']) sh[k] = () => {};
+      for (const k of ['setState', 'setCost', 'renderHeader', 'renderContext', 'renderNow', 'markUnread', 'requestTodo', 'applyStatus', 'modelRefused', 'trim']) sh[k] = () => {};
       return sh;
     }
 
@@ -1205,7 +1194,6 @@
       if (p?.kind === 'status') return this.applyStatus(p);
       if (p?.kind === 'files') return this.requestTodo();
       if (p?.kind === 'notice' && /^Model not changed/.test(p.text || '')) return this.modelRefused();
-      if (p?.kind === 'notice' && /^Thinking not switched/.test(p.text || '')) return this.thinkingRefused();
       const m = ev?.sdk;
       if (!m || m.parent_tool_use_id) return;
       if (m.type === 'system' && m.subtype === 'compact_boundary') { this.compactions++; this.renderContext(); }
@@ -1223,29 +1211,12 @@
       if (p.kind === 'message') return this.applyPeerMessage(p, live);
       if (p.kind === 'notice') {
         if (/^Model not changed/.test(p.text || '')) this.modelRefused();
-        if (/^Thinking not switched/.test(p.text || '')) this.thinkingRefused();
         if (live) this.panel.flashDelivery(this, p.text);
         return this.notice(p.text, p.level === 'warning' ? 'warn' : p.level);
       }
       if (p.kind === 'files') { if (live) this.requestTodo(); return; }
       if (p.kind === 'usage-limit') return this.limitNotice(p);
       if (p.kind === 'status') this.applyStatus(p);
-    }
-
-    // Shown at once; a refused switch puts it back (thinkingRefused).
-    toggleThinking() {
-      if (this.ended()) return;
-      if (this._thinkingBefore === undefined) this._thinkingBefore = this.showThinking;
-      this.showThinking = !this.showThinking;
-      this.renderHeader();
-      sendWs({ type: 'sdk:setThinking', sessId: this.sessId, on: this.showThinking });
-    }
-
-    thinkingRefused() {
-      if (this._thinkingBefore === undefined) return;
-      this.showThinking = this._thinkingBefore;
-      this._thinkingBefore = undefined;
-      this.renderHeader();
     }
 
     // A refused switch: the label goes back to the model still in use.
@@ -1263,7 +1234,6 @@
       if (p.model !== undefined) { this.model = p.model || null; this._modelBefore = undefined; }
       if (p.actualModel !== undefined) this.actualModel = p.actualModel || null;
       if (p.mappedTo !== undefined) this.mappedTo = p.mappedTo || null;
-      if (p.showThinking !== undefined) { this.showThinking = !!p.showThinking; this._thinkingBefore = undefined; }
       if (p.context && typeof p.context === 'object') this.context = p.context;
       // Billing (absent from older transcripts' statuses).
       if (p.credential !== undefined) {
@@ -2219,7 +2189,6 @@
       if (this.main && info.state) this.main.setState(info.state);
       if (this.main && typeof info.costUsd === 'number') this.main.setCost(info.costUsd);
       if (this.main && !this.main.model && this.info.settings?.model) { this.main.model = this.info.settings.model; this.main.renderHeader(); }
-      if (this.main && !this.main.gotStatus && this.info.settings) { this.main.showThinking = !!this.info.settings.showThinking; this.main.renderHeader(); }
       if (this.main && role === 'single' && this.info.title) {
         this.main.label = this.info.title;
         this.main.renderHeader();

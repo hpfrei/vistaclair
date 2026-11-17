@@ -50,7 +50,7 @@ function fakeAdapter(over = {}, sessId = SESS) {
     sessId, kind: 'sdk', title: 'remote job',
     settings: { engine: 'sdk', auth: 'apikey', model: 'claude-opus-5-5', sessionDir, externalHost: 'slave-1', orchestration: { runId: 'r9', role: 'orchestrator' } },
     running: true, busy: false, state: 'idle',
-    submit: rec('submit'), interrupt: rec('interrupt'), setModel: rec('setModel'), setShowThinking: rec('setShowThinking'),
+    submit: rec('submit'), interrupt: rec('interrupt'), setModel: rec('setModel'),
     setAuth: (auth, opts) => { calls.push(['setAuth', auth, opts]); return { auth, applied: 'pending' }; },
     historyPage: (opts) => { calls.push(['historyPage', opts]); return { events: [{ sessId, ts: 1, ev: { sdk: { type: 'assistant' } } }], hasMore: true, before: 42, totals: { costUsd: 0.5, compactions: 0 } }; },
     kill: rec('kill'), close: rec('close'),
@@ -177,7 +177,6 @@ test('the tab\'s messages reach the adapter through the cli-handler', async () =
   browser.send({ type: 'sdk:send', sessId: SESS, text: 'hello', images: [{ name: 'a.png' }] });
   browser.send({ type: 'sdk:interrupt', sessId: SESS });
   browser.send({ type: 'sdk:setModel', sessId: SESS, model: 'claude-sonnet-5-5' });
-  browser.send({ type: 'sdk:setThinking', sessId: SESS, on: true });
   browser.send({ type: 'sdk:history', sessId: SESS, limit: 50, before: 100 });
   browser.send({ type: 'cli:sessionAuth', tabId: 'remote-a', auth: 'subscription', continue: true, reqId: 'q1' });
   browser.send({ type: 'cli:interrupt', tabId: 'remote-a', reqId: 'q2' });
@@ -189,7 +188,6 @@ test('the tab\'s messages reach the adapter through the cli-handler', async () =
     ['submit', 'hello', { images: [{ name: 'a.png' }] }],
     ['interrupt'],
     ['setModel', 'claude-sonnet-5-5'],
-    ['setShowThinking', true],
     ['historyPage', { limit: 50, before: 100 }],
     ['setAuth', 'subscription', { continueTurn: true }],
     ['interrupt'],
@@ -256,7 +254,7 @@ test('a throwing or rejecting adapter answers its requester only and crashes not
   const boom = () => { throw new Error('boom'); };
   const reject = () => Promise.reject(new Error('nope'));
   const bad = fakeAdapter({
-    submit: boom, interrupt: reject, setModel: reject, setShowThinking: boom,
+    submit: boom, interrupt: reject, setModel: reject,
     setAuth: reject, historyPage: boom, kill: boom, close: reject,
   });
   // A getter that throws, too: the tab still lists, with its defaults.
@@ -275,7 +273,6 @@ test('a throwing or rejecting adapter answers its requester only and crashes not
   a.send({ type: 'sdk:send', sessId: SESS, text: 'x' });
   a.send({ type: 'sdk:interrupt', sessId: SESS });
   a.send({ type: 'sdk:setModel', sessId: SESS, model: 'm' });
-  a.send({ type: 'sdk:setThinking', sessId: SESS, on: true });
   a.send({ type: 'sdk:history', sessId: SESS });
   a.send({ type: 'cli:sessionAuth', tabId: 'remote-bad', auth: 'apikey', reqId: 'r1' });
   a.send({ type: 'cli:interrupt', tabId: 'remote-bad', reqId: 'r2' });
@@ -289,7 +286,6 @@ test('a throwing or rejecting adapter answers its requester only and crashes not
     [SESS, 'error', 'Model not changed: nope'],
     [SESS, 'error', 'Not interrupted: nope'],
     [SESS, 'error', 'Not sent: boom'],
-    [SESS, 'error', 'Thinking not switched: boom'],
   ]);
   assert.strictEqual(a.sent.find(m => m.type === 'sdk:history').error, 'boom');
   const results = a.sent.filter(m => m.type === 'cli:actionResult').map(m => [m.action, m.tabId, m.error]).sort();

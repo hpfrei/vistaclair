@@ -112,7 +112,7 @@ async function sdkRun() {
   const adapter = {
     sessId: crypto.randomUUID(), kind: 'sdk', title: 'remote', running: true, busy: false, state: 'idle',
     settings: { engine: 'sdk', name: 'remote-member', orchestration: { runId: stamp.runId, role: 'worker', workerId: 'wx' } },
-    submit() {}, interrupt() {}, setShowThinking() {}, historyPage() {}, kill() {}, close() {},
+    submit() {}, interrupt() {}, historyPage() {}, kill() {}, close() {},
     async setAuth(auth, opts) { calls.push(['setAuth', auth, opts]); return { auth, applied: 'pending' }; },
     async setModel(model) { calls.push(['setModel', model]); return { ok: true, model }; },
   };

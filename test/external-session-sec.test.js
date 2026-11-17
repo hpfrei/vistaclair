@@ -52,7 +52,7 @@ function fakeAdapter(over = {}, sessId = SESS) {
     sessId, kind: 'sdk', title: 'remote job',
     settings: { engine: 'sdk', auth: 'apikey', sessionDir, externalHost: 'slave-1' },
     running: true, busy: false, state: 'idle',
-    submit: rec('submit'), interrupt: rec('interrupt'), setModel: rec('setModel'), setShowThinking: rec('setShowThinking'),
+    submit: rec('submit'), interrupt: rec('interrupt'), setModel: rec('setModel'),
     setAuth: rec('setAuth'), historyPage: () => ({ events: [], hasMore: false, before: null, totals: null }),
     kill: rec('kill'), close: rec('close'),
     ...over,
@@ -225,14 +225,14 @@ test('4: settings keep only known fields, type-checked and capped; oversized set
   };
   mgr.registerExternal('remote-a', fakeAdapter({ settings }).adapter);
   const s = mgr.list()[0].settings;
-  assert.deepStrictEqual(Object.keys(s).sort(), ['auth', 'engine', 'externalHost', 'model', 'modelMap', 'name', 'orchestration', 'showThinking']);
+  assert.deepStrictEqual(Object.keys(s).sort(), ['auth', 'engine', 'externalHost', 'model', 'modelMap', 'name', 'orchestration']);
   assert.strictEqual(s.engine, 'sdk');
   assert.deepStrictEqual([s.model.length, s.externalHost.length, s.name.length], [200, 100, 100]);
   assert.deepStrictEqual(s.modelMap, { fable: null, opus: 'claude-opus-5-5', sonnet: null, haiku: null });
   assert.deepStrictEqual(s.orchestration, { runId: 'r1', role: 'worker', workerId: 'w1' });
 
   // Wrong types are dropped, not coerced.
-  const typed = new ExternalSession('t', { ...fakeAdapter().adapter, settings: { auth: 'bogus', showThinking: 'yes', model: 5, externalHost: { toString: () => 'h' }, orchestration: { role: 'god' } } });
+  const typed = new ExternalSession('t', { ...fakeAdapter().adapter, settings: { auth: 'bogus', model: 5, externalHost: { toString: () => 'h' }, orchestration: { role: 'god' } } });
   assert.deepStrictEqual(typed.getSettings(), { engine: 'sdk' });
   // Over MAX_SETTINGS: nothing of it but the engine.
   const big = new ExternalSession('t', { ...fakeAdapter().adapter, settings: { auth: 'apikey', pad: 'x'.repeat(MAX_SETTINGS) } });

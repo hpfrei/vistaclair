@@ -34,7 +34,7 @@
 //                  after a reload or restart. Each page carries `totals`
 //                  ({ costUsd, compactions }) over the whole file.
 //   status         `{ platform: { kind: 'status', state, costUsd, baseUsd?,
-//                  model, actualModel, mappedTo, showThinking, context? } }`: the chosen model (setModel
+//                  model, actualModel, mappedTo, context? } }`: the chosen model (setModel
 //                  switches it live), the model the last main-agent reply came
 //                  from (cleared by a switch), and the tab's modelMap target for its family. The
 //                  cost is the session folder's running total: every earlier
@@ -49,13 +49,11 @@
 //                  no API call), which also names the auto-compact threshold.
 //                  Until a turn's end (a first turn, a model switch) the
 //                  window is the model catalogue's, windowEstimated true.
-//   thinking       settings.showThinking asks Claude Code for summarized
-//                  thinking (--thinking-display summarized: it builds each
-//                  model's own thinking config); off, for none (omitted, not
-//                  its default "updates" notes). setShowThinking switches it
-//                  live (setMaxThinkingTokens). Its subagents keep Claude
-//                  Code's default either way: the proxy sets the display of
-//                  every request of the session (applyShowThinking).
+//   thinking       always summarized (--thinking-display summarized: Claude
+//                  Code builds each model's own thinking config). Its
+//                  subagents keep Claude Code's default: the proxy sets the
+//                  display of every request of the session
+//                  (applyThinkingDisplay).
 //   files          `{ platform: { kind: 'files', todo, notes } }` when a
 //                  main-agent tool call that wrote the folder's TODO.md /
 //                  NOTES.md has returned: the panel re-reads them (sdk:todo).
@@ -696,7 +694,7 @@ class SdkSession {
       stderr: (d) => { this._stderr = (this._stderr + d).slice(-STDERR_TAIL); },
       // Echo each input message (isReplay, same uuid) as the CLI takes it
       // into a turn: the panel's "waiting" chip becomes the user's bubble.
-      extraArgs: { 'replay-user-messages': null, 'thinking-display': s.showThinking ? 'summarized' : 'omitted' },
+      extraArgs: { 'replay-user-messages': null, 'thinking-display': 'summarized' },
     };
     if (s.settingsFile) options.settings = s.settingsFile;
     // The CLI twin's --disable-slash-commands (src/utils.js): no skills, Skill tool or slash commands.
@@ -1004,7 +1002,7 @@ class SdkSession {
     const context = this.context.tokens != null ? { ...this.context } : undefined;
     const base = this._costBase > 0 ? { baseUsd: this._costBase } : {};
     const billing = { credential: this._credential, ...(this._authPending ? { authPending: this._authPending } : {}), ...(this._limit ? { limited: true } : {}) };
-    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, ...base, model, actualModel: this.actualModel, mappedTo, showThinking: !!this.settings.showThinking, ...(context ? { context } : {}), ...billing } });
+    this.emitEvent({ platform: { kind: 'status', state: this.state, costUsd: this.costUsd, ...base, model, actualModel: this.actualModel, mappedTo, ...(context ? { context } : {}), ...billing } });
   }
 
   // The end of a turn: the SDK's own count (its summary answers from the
@@ -1044,17 +1042,6 @@ class SdkSession {
     this.onSettingsChange?.(this);
     this._emitStatus();
     return { ok: true, model };
-  }
-
-  // Show or hide the model's thinking text (the SDK panel's toggle): kept in
-  // the settings, so a respawn or resume keeps it; a running query switches
-  // from its next request (updateSettings).
-  setShowThinking(on) {
-    if (this.status === 'exited' || this.state === 'exited') throw new Error('this session has exited');
-    this.updateSettings({ showThinking: !!on });
-    this.onSettingsChange?.(this);
-    this._emitStatus();
-    return { ok: true, showThinking: !!on };
   }
 
   // Switch the billing (settings.auth: 'apikey' | 'subscription'), see the
@@ -1337,18 +1324,7 @@ class SdkSession {
   }
 
   updateSettings(newSettings) {
-    const thinking = !!this.settings.showThinking;
     this.settings = { ...this.settings, ...newSettings };
-    // The display for the rest of a running query (no tokens: its budget
-    // stays as it is, where null would reset it; off is 'omitted', since
-    // null would bring back Claude Code's default "updates" notes). A
-    // refusal is only logged.
-    const q = this._query;
-    if (q && !!this.settings.showThinking !== thinking && typeof q.setMaxThinkingTokens === 'function') {
-      const on = !!this.settings.showThinking;
-      Promise.resolve().then(() => q.setMaxThinkingTokens(undefined, on ? 'summarized' : 'omitted'))
-        .catch((e) => console.error(`[sdk-session] thinking display not switched: ${e?.message || e}`));
-    }
     // A new model map rewrites the next request already (the proxy reads the
     // settings per request); the caption's "→ target" follows now.
     if (newSettings && 'modelMap' in newSettings && this.running) this._emitStatus();
