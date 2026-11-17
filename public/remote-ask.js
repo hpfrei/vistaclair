@@ -23,6 +23,17 @@
     return host ? `Remote · ${host}` : null;
   }
 
+  // The panel-header chip of a remote session: a <span class=cls> reading
+  // "⇄ <host>" with the tooltip "Remote worker on <host>" (text nodes and a
+  // title attribute only), or null for a local session (no host).
+  function hostChipEl(doc, host, cls) {
+    const h = capText(host, HOST_MAX);
+    if (!h) return null;
+    const el = remoteLabelEl(doc, `\u21C4 ${h}`, cls);
+    el.title = `Remote worker on ${h}`;
+    return el;
+  }
+
   // "Remote · <host> · <sessionTitle>" for an ask:question carrying `host`
   // ("· <sessionTitle>" only when remote.sessionTitle is set), or null for a
   // local ask.
@@ -55,7 +66,7 @@
     return out;
   }
 
-  const api = { capText, hostBadgeLabel, remoteAskLabel, remoteLabelEl, askAnswerMsg, HOST_MAX, TITLE_MAX };
+  const api = { capText, hostBadgeLabel, remoteAskLabel, remoteLabelEl, hostChipEl, askAnswerMsg, HOST_MAX, TITLE_MAX };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.remoteAsk = api;
 })(typeof window !== 'undefined' ? window : globalThis);
