@@ -326,7 +326,18 @@
   overflow: hidden;
 }
 .sdk-area-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 7ch; }
-.sdk-cap > :not(.sdk-area-name):not(.sdk-model) { flex-shrink: 0; }
+.sdk-cap > :not(.sdk-area-name):not(.sdk-model):not(.sdk-area-host) { flex-shrink: 0; }
+/* A remote session's host, beside its name; a long host name is cut with an ellipsis. */
+.sdk-area-host {
+  flex: 0 1 auto;
+  min-width: 4ch;
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid color-mix(in srgb, var(--cyan) 55%, var(--border));
+  background: color-mix(in srgb, var(--cyan) 12%, var(--bg-surface));
+  color: var(--cyan);
+}
 /* The chips (state, report) and the cost keep their whole text; when the
    caption is short of room the model name gives way (full name in its tooltip). */
 .sdk-cap > .sdk-model { flex: 0 1 auto; min-width: 6ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

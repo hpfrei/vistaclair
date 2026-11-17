@@ -411,6 +411,7 @@
       this.lastActivityAt = null;    // ms: a worker's last sign of work (describeRun)
       this.idleSince = null;         // ms: when this box last saw it go idle
       this.landing = null;           // describeRun's `landing` (a worktree worker)
+      this.host = null;              // the machine a remote session runs on (null: this one)
       this.closed = false;           // closed by its orchestrator (run membership)
       this.closedAt = null;          // ms
       this.model = null;             // chosen (settings.model)
@@ -440,6 +441,7 @@
         <div class="sdk-top">
           <div class="sdk-cap">
             <span class="sdk-area-name"></span>
+            <span class="sdk-chip sdk-area-host hidden"></span>
             <button type="button" class="sdk-model" title="Change this session's model"></button>
             <span class="sdk-chip sdk-area-state"></span>
             <span class="sdk-chip sdk-area-bill hidden"></span>
@@ -490,6 +492,7 @@
         </div>`;
       const q = (s) => root.querySelector(s);
       this.nameEl = q('.sdk-area-name');
+      this.hostEl = q('.sdk-area-host');
       this.modelBtn = q('.sdk-model');
       this.stateEl = q('.sdk-area-state');
       this.billEl = q('.sdk-area-bill');
@@ -694,6 +697,11 @@
     renderHeader() {
       this.nameEl.textContent = this.label;
       this.nameEl.title = this.name;
+      // A remote session's host as a chip (untrusted text: set as text only).
+      const chip = window.remoteAsk?.hostChipEl(document, this.host, 'sdk-chip sdk-area-host');
+      this.hostEl.classList.toggle('hidden', !chip);
+      this.hostEl.textContent = chip ? chip.textContent : '';
+      this.hostEl.title = chip ? chip.title : '';
       const s = this.state || 'idle';
       const ended = this.ended();
       this.stateEl.textContent = this.closed ? 'closed' : STATE_TEXT[s] || s;
@@ -2188,6 +2196,10 @@
       }
       if (this.main && info.state) this.main.setState(info.state);
       if (this.main && typeof info.costUsd === 'number') this.main.setCost(info.costUsd);
+      if (this.main && role !== 'orchestrator' && (this.main.host || null) !== (this.info.settings?.externalHost || null)) {
+        this.main.host = this.info.settings?.externalHost || null;
+        this.main.renderHeader();
+      }
       if (this.main && !this.main.model && this.info.settings?.model) { this.main.model = this.info.settings.model; this.main.renderHeader(); }
       if (this.main && role === 'single' && this.info.title) {
         this.main.label = this.info.title;
@@ -2238,6 +2250,7 @@
         if (!w) return;
         this.main.lastReport = w.lastReport || null;
         this.main.landing = w.landing || null;
+        this.main.host = w.host || this.main.host;
         this.main.renderHeader();
       } catch {}
     }
@@ -2247,6 +2260,8 @@
       if (this.main) {
         this.main.addAliases([run.orchestrator]);
         this.main.name = run.orchestrator || this.main.name;
+        // An orchestrator mirrored from another machine shows that host.
+        this.main.host = run.mirror?.host || this.info?.settings?.externalHost || null;
         // Every cost is a session folder's running total (every session
         // that ran in it): replace, never add. Only the toolbar adds,
         // across folders.
@@ -2277,6 +2292,7 @@
         a.lastReport = w.lastReport || null;
         a.lastActivityAt = Date.parse(w.lastActivityAt || '') || null;
         a.landing = w.landing || null;
+        a.host = w.host || null;
         a.closed = !!w.closed || w.state === 'closed';
         a.closedAt = Date.parse(w.closedAt) || null;
         if (!a.model && w.model) a.model = w.model;
