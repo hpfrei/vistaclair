@@ -65,3 +65,55 @@ test('formatElapsed and pickRecorderMime', () => {
   assert.strictEqual(A.pickRecorderMime(() => true), 'audio/webm;codecs=opus');
   assert.strictEqual(A.pickRecorderMime(() => false), '');
 });
+
+// ── the picker button and a drop share one path ──────────────────────────
+
+test('uploadFiles: classifies, uploads, collects paths and per-file errors', async () => {
+  const uploaded = [];
+  const upload = async (f) => {
+    if (f.name === 'bad.bin') throw new Error('disk full');
+    uploaded.push(f.name);
+    return { path: `/s/uploads/${f.name}` };
+  };
+  const started = [];
+  const r = await A.uploadFiles([
+    { name: 'a.pdf', type: 'application/pdf', size: 100 },
+    { name: 'big.zip', type: 'application/zip', size: 30 * MB },
+    { name: 'bad.bin', type: '', size: 5 },
+    { name: 'p.png', type: 'image/png', size: 9 * MB },   // the terminal bar sends images as paths too: 25 MB limit
+  ], { upload, onStart: f => started.push(f.name) });
+  assert.deepStrictEqual(r.paths, ['/s/uploads/a.pdf', '/s/uploads/p.png']);
+  assert.strictEqual(r.errors.length, 2);
+  assert.match(r.errors[0], /big.zip" is too large/);
+  assert.match(r.errors[1], /bad.bin" was not uploaded: disk full/);
+  assert.deepStrictEqual(started, ['a.pdf', 'bad.bin', 'p.png']);
+});
+
+// The wiring of the two input lines, read from the source (no DOM here): the
+// picker's change event and the drop event must reach the same function, and
+// the picker must not filter by type.
+const fs = require('fs');
+const path = require('path');
+const src = (f) => fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8');
+
+test('vc-composer: the picker accepts any file and feeds addFiles like a drop', () => {
+  const s = src('vc-composer.js');
+  assert.match(s, /<input type="file" multiple hidden>/);
+  assert.doesNotMatch(s, /type="file"[^>]*accept=/);
+  assert.match(s, /class="vc-composer-attach" title="Attach files or images/);
+  // picker change → addFiles; drop → addFiles; both classify through VcAttach.classifyFile
+  assert.match(s, /this\._file\.addEventListener\('change', \(\) => \{[^}]*this\.addFiles\(files\)/s);
+  assert.match(s, /on\('drop'[\s\S]*?this\.addFiles\(\[\.\.\.\(e\.dataTransfer\.files/);
+  assert.match(s, /addFiles\(files\) \{[\s\S]*?A\.classifyFile\(/);
+});
+
+test('terminal bar: a 📎 button with an any-type picker and the drop both call dropFiles → uploadFiles', () => {
+  const s = src('cli.js');
+  assert.match(s, /class="mobile-cli-attach"/);
+  assert.match(s, /<input type="file" class="mobile-cli-file" multiple hidden>/);
+  assert.doesNotMatch(s, /mobile-cli-file"[^>]*accept=/);
+  assert.match(s, /picker\.addEventListener\('change'[\s\S]*?dropFiles\(activeTabId, files\)/);
+  assert.match(s, /bar\.addEventListener\('drop'[\s\S]*?dropFiles\(activeTabId,/);
+  assert.match(s, /_mobileBar\.dropFiles\(tabId, files\)/);
+  assert.match(s, /async function dropFiles[\s\S]*?VcAttach\.uploadFiles\(/);
+});
