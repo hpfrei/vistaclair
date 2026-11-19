@@ -73,7 +73,23 @@
     return want.find(m => { try { return isSupported(m); } catch { return false; } }) || '';
   }
 
-  const api = { IMAGE_MAX, IMAGES_TOTAL_MAX, FILE_MAX, IMAGE_TYPES, fmtSize, classifyFile, withAttached, quotePath, insertAtCursor, formatElapsed, pickRecorderMime };
+  // Files from a drop or from the picker button → { paths, errors }: each one
+  // classified (a refusal is an error line), then uploaded with `upload(file)`
+  // (→ {path}; a throw is an error line). One function for both gestures so
+  // they cannot drift. `onStart(file)` lets the caller show progress.
+  async function uploadFiles(files, { upload, onStart } = {}) {
+    const paths = [], errors = [];
+    for (const file of files) {
+      const verdict = classifyFile(file, { imageMax: FILE_MAX });
+      if (verdict.kind === 'reject') { errors.push(verdict.reason); continue; }
+      if (onStart) onStart(file);
+      try { paths.push((await upload(file)).path); }
+      catch (e) { errors.push(`"${file.name || 'file'}" was not uploaded: ${e.message}`); }
+    }
+    return { paths, errors };
+  }
+
+  const api = { IMAGE_MAX, IMAGES_TOTAL_MAX, FILE_MAX, IMAGE_TYPES, fmtSize, classifyFile, uploadFiles, withAttached, quotePath, insertAtCursor, formatElapsed, pickRecorderMime };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.VcAttach = api;
 })(typeof window !== 'undefined' ? window : globalThis);

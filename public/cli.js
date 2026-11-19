@@ -226,8 +226,10 @@
       <div class="mobile-cli-note hidden"></div>
       <div class="mobile-cli-compose">
         <textarea rows="1" placeholder="Type a message… (drop files here for their path)" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+        <button type="button" class="mobile-cli-attach" aria-label="Attach files" title="Attach files (or drop them): their paths are added to the message">📎</button>
         <button type="button" class="mobile-cli-mic" aria-label="Voice input">🎤</button>
         <button type="button" class="mobile-cli-send" aria-label="Send">➤</button>
+        <input type="file" class="mobile-cli-file" multiple hidden>
       </div>`;
     view.appendChild(bar);
 
@@ -282,25 +284,29 @@
     // Files dropped on the terminal or on this bar: uploaded to the tab's
     // uploads folder, their paths (quoted as a terminal drop writes them)
     // inserted into the textarea at the cursor for the owner to send.
+    // The one path for a drop and for the 📎 picker.
     async function dropFiles(tabId, files) {
       say('');
-      const paths = [];
-      for (const file of files) {
-        const verdict = window.VcAttach.classifyFile(file, { imageMax: window.VcAttach.FILE_MAX });
-        if (verdict.kind === 'reject') { say(verdict.reason, true); continue; }
-        say(`Uploading ${file.name}…`);
-        try { paths.push((await window.VcInput.upload(file, { tab: tabId })).path); }
-        catch (e) { say(`"${file.name}" was not uploaded: ${e.message}`, true); }
-      }
+      const { paths, errors } = await window.VcAttach.uploadFiles(files, {
+        upload: (file) => window.VcInput.upload(file, { tab: tabId }),
+        onStart: (file) => say(`Uploading ${file.name}…`),
+      });
+      say(errors.join(' · '), errors.length > 0);
       if (!paths.length) return;
       const at = input.selectionStart ?? input.value.length;
       const out = window.VcAttach.insertAtCursor(input.value, at, input.selectionEnd ?? at, paths.map(window.VcAttach.quotePath).join(' '));
       input.value = out.value;
       input.setSelectionRange(out.caret, out.caret);
       input.dispatchEvent(new Event('input'));
-      say('');
       input.focus();
     }
+    const picker = bar.querySelector('.mobile-cli-file');
+    bar.querySelector('.mobile-cli-attach').addEventListener('click', () => picker.click());
+    picker.addEventListener('change', () => {
+      const files = [...picker.files];
+      picker.value = '';
+      if (files.length && activeTabId) dropFiles(activeTabId, files);
+    });
     const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
     bar.addEventListener('dragover', e => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
     bar.addEventListener('drop', e => {
