@@ -187,6 +187,8 @@ function streamFile(req, res, file, mime) {
 
 function createApiRouter({ broadcaster, store, proxyPort, dashboardPort, authToken, cliSessionManager }) {
   const router = express.Router();
+  // Files and recordings from the input lines: raw bodies, before the JSON parser.
+  router.use(require('./session-uploads').createUploadRouter({ mgr: cliSessionManager, platform: () => require('./addons').platformTools() }));
   router.use(express.json());
 
   // ── GET /api/locks — holders and waiters of the machine-wide resource locks ──

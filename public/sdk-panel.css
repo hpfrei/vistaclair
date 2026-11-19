@@ -1130,7 +1130,7 @@
   line-height: 1.4;
 }
 .vc-composer textarea:focus { outline: none; border-color: var(--accent); }
-.vc-composer-attach, .vc-composer-send {
+.vc-composer-attach, .vc-composer-mic, .vc-composer-send {
   flex-shrink: 0;
   height: 34px;
   min-width: 34px;
@@ -1141,6 +1141,13 @@
   font-size: 16px;
   cursor: pointer;
 }
+.vc-composer-mic.recording { background: var(--red); border-color: var(--red); color: #fff; font-size: 12px; padding: 0 8px; animation: vc-mic-pulse 1.2s ease-in-out infinite; }
+.vc-composer-mic.mic-unavailable { opacity: .4; }
+.vc-composer-mic.mic-cancel { font-size: 13px; }
+@keyframes vc-mic-pulse { 50% { opacity: .65; } }
+.vc-composer-file { display: inline-flex; align-items: center; padding: 4px 18px 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); font-size: 12px; max-width: 240px; }
+.vc-composer-file.uploading { opacity: .6; }
+.vc-composer-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vc-composer-send { background: var(--accent); border-color: var(--accent); color: #fff; font-size: 14px; }
 .vc-composer button:disabled { opacity: .45; cursor: default; }
 .vc-composer-note { font-size: 11px; color: var(--text-dim); }
