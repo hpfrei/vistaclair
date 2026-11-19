@@ -674,7 +674,12 @@ test('only a done, failed, blocked or paused report (or a message to the orchest
   reportTool('started', 'on it, waiting for the schema from w2');
   const nudge = blockOf(stop());
   assert.match(nudge, /report to the orchestrator/);
-  assert.match(nudge, /done, failed, blocked \(name whom you wait for and what\) or paused/);
+  assert.match(nudge, /status exactly "done"/);
+  assert.match(nudge, /"update", "started" and progress reports are not final/);
+  // A non-final last report is not accepted: it is nudged again (also on the
+  // hook's own re-fire), at most 3 nudges in all, then an idle event.
+  assert.match(blockOf(stop({ stop_hook_active: true })), /Your last report had status "started", which is NOT a final report/);
+  assert.ok(blockOf(stop({ stop_hook_active: true })));
   assert.deepStrictEqual(stop({ stop_hook_active: true }), {});
   assert.strictEqual(idles().length, 1);
   assert.strictEqual(idles()[0].text, `${w.worker} went idle; last report: started (on it, waiting for the schema from w2). Its last message: waiting for w2`);
@@ -683,6 +688,8 @@ test('only a done, failed, blocked or paused report (or a message to the orchest
   // A second Stop without stop_hook_active in the same turn: already nudged, an idle event.
   hook(orch, ws, { hook_event_name: 'UserPromptSubmit' });
   reportTool('started', 'again');
+  assert.ok(blockOf(stop()));
+  assert.ok(blockOf(stop()));
   assert.ok(blockOf(stop()));
   assert.deepStrictEqual(stop(), {});
   assert.strictEqual(idles().length, 2);
@@ -1046,7 +1053,9 @@ test('close guards: a worker closes when complete or forced, an orchestrator not
   const refused = orch.closeCheck(w1.tabId);
   assert.strictEqual(refused.ok, false);
   assert.strictEqual(refused.canForce, true);
-  assert.deepStrictEqual(orch.closeCheck(orchSession.tabId).ok, false);
+  s1.busy = true;
+  assert.deepStrictEqual(orch.closeCheck(orchSession.tabId).ok, false, 'a busy worker holds the orchestrator');
+  s1.busy = false;
   orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
   assert.strictEqual(orch.closeCheck(w1.tabId).ok, true, 'done and idle');
   orch.report(s1.instanceId, { status: 'blocked', summary: 'hm' });
@@ -1055,6 +1064,59 @@ test('close guards: a worker closes when complete or forced, an orchestrator not
   s1.running = false;
   assert.strictEqual(orch.closeCheck(orchSession.tabId).ok, true);
   assert.deepStrictEqual(orch.closeCheck('tab-unknown'), { ok: true });
+});
+
+test('close_worker: an idle worker closes whatever its last report (update, started, none); a busy one is refused', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const w2 = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'y' });
+  const s1 = mgr.sessions.get(w1.tabId);
+  const s2 = mgr.sessions.get(w2.tabId);
+  const close = (worker) => orch.closeWorker(orchSession.instanceId, { worker });
+  orch.report(s1.instanceId, { status: 'update', summary: 'Status: done' });
+  s1.busy = true;
+  assert.throws(() => close('w1'), /is busy/, 'busy: still refused');
+  assert.ok(!run().workers[0].closed);
+  s1.busy = false;
+  const r = close('w1');
+  assert.strictEqual(r.closed, true);
+  assert.strictEqual(r.lastReport, 'update');
+  assert.match(r.note, /last report was update, not done or failed/);
+  assert.ok(run().workers[0].closed);
+  // No report at all.
+  assert.strictEqual(close('w2').closed, true);
+  assert.ok(s2 && run().workers[1].closed);
+});
+
+test('the report reply and the Stop nudge say that update is not a final report', async (t) => {
+  const { orch, orchSession, mgr } = await openOrchestrator(t, { isolation: 'none' });
+  const w = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const ws = mgr.sessions.get(w.tabId);
+  assert.match(orch.report(ws.instanceId, { status: 'update', summary: 'Status: done' }).warning, /NOT a final report.*status exactly "done"/);
+  assert.strictEqual(orch.report(ws.instanceId, { status: 'done', summary: 'ok' }).warning, undefined);
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'orchestrator-mcp.js'), 'utf8');
+  assert.match(src, /status exactly \\"done\\"/);
+  assert.match(src, /there is no \\"update\\" status/);
+});
+
+test('close and remove of the orchestrator tab: idle workers are closed with it, a busy one refuses', async (t) => {
+  const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none' });
+  const w1 = orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'x' });
+  const w2 = orch.launchWorker(orchSession.instanceId, { title: 'b', task: 'y' });
+  const s1 = mgr.sessions.get(w1.tabId);
+  const s2 = mgr.sessions.get(w2.tabId);
+  orch.report(s1.instanceId, { status: 'update', summary: 'Status: done' });
+  s1.busy = false;
+  s2.busy = true;
+  const refused = orch.closeCheck(orchSession.tabId);
+  assert.strictEqual(refused.ok, false);
+  assert.strictEqual(refused.canForce, false);
+  assert.match(refused.reason, new RegExp(`still working \\(${w2.worker}`));
+  assert.ok(!refused.reason.includes(w1.worker), 'the idle one is not named');
+  assert.ok(!run().workers[0].closed, 'nothing closed while refused');
+  s2.busy = false;
+  assert.deepStrictEqual(orch.closeCheck(orchSession.tabId), { ok: true });
+  assert.ok(run().workers.every(w => w.closed), 'idle workers closed with the tab, resumable');
 });
 
 test('close guards: a finished, idle worker with an empty TODO no longer holds the orchestrator', async (t) => {
@@ -1067,9 +1129,9 @@ test('close guards: a finished, idle worker with an empty TODO no longer holds t
 
   todo('done', 'dropped');
   orch.report(s1.instanceId, { status: 'started', summary: 'on it' });
-  assert.strictEqual(closable().ok, false, 'started');
-  orch.report(s1.instanceId, { status: 'update', summary: 'half way' });
-  assert.strictEqual(closable().ok, false, 'update');
+  s1.busy = true;
+  assert.strictEqual(closable().ok, false, 'started and busy');
+  s1.busy = false;
 
   orch.report(s1.instanceId, { status: 'done', summary: 'ok' });
   assert.strictEqual(closable().ok, true, 'done, idle, TODO all done');
@@ -1080,27 +1142,20 @@ test('close guards: a finished, idle worker with an empty TODO no longer holds t
   assert.match(busy.reason, /\(.*\)/);
   s1.busy = false;
 
+  // Open TODO rows no longer hold it once the worker is idle: it is closed with the tab.
   todo('done', 'doing');
-  assert.strictEqual(closable().ok, false, 'a row still doing');
-  todo('done', 'todo');
-  assert.strictEqual(closable().ok, false, 'a row still open');
-  todo('done', 'done');
-  assert.strictEqual(closable().ok, true);
+  assert.strictEqual(closable().ok, true, 'idle with a row still doing');
 
-  fs.unlinkSync(path.join(w1.folder, 'TODO.md'));
-  assert.strictEqual(closable().ok, true, 'no TODO rows');
 });
 
-test('close_worker: refuses a busy or unfinished worker, closes a done idle one and frees its slot', async (t) => {
+test('close_worker: refuses a busy worker, closes a done idle one and frees its slot', async (t) => {
   const { orch, orchSession, mgr, run } = await openOrchestrator(t, { isolation: 'none', engine: 'sdk' });
   const ws = [1, 2, 3, 4, 5].map(i => orch.launchWorker(orchSession.instanceId, { title: `t${i}`, task: `brief ${i}` }));
   const s1 = mgr.sessions.get(ws[0].tabId);
   s1.context = { tokens: 50000, window: 200000, compactAt: 160000, windowEstimated: false };
   const close = (worker) => orch.closeWorker(orchSession.instanceId, { worker });
 
-  assert.throws(() => close('w1'), /has not finished \(last report: none\)/);
   orch.report(s1.instanceId, { status: 'started', summary: 'on it' });
-  assert.throws(() => close('w1'), /last report: started/);
   orch.report(s1.instanceId, { status: 'done', summary: 'parser done' });
   s1.busy = true;
   assert.throws(() => close('w1'), /is busy/);
@@ -1638,7 +1693,6 @@ test('stop_worker: orchestrator only, refuses an idle worker, interrupts a busy 
     orch.report(ws.instanceId, { status: 'started', summary: 'on it' });
     ws.busy = false;
     assert.throws(() => stopW('w1'), /is idle: nothing to stop/);
-    assert.throws(() => orch.closeWorker(orchSession.instanceId, { worker: 'w1' }), /last report: started/);
 
     ws.busy = true;
     hook(orch, orchSession, { hook_event_name: 'UserPromptSubmit' });   // takes the 'started' report
@@ -1679,7 +1733,6 @@ test('stop_worker: new instructions or a report clear the stop', async (t) => {
   ws.busy = false;
   orch.sendMessage(orchSession.instanceId, { to: 'w1', message: 'do Y instead' });
   assert.strictEqual(run().workers[0].turnStopped, undefined);
-  assert.throws(() => orch.closeWorker(orchSession.instanceId, { worker: 'w1' }), /has not finished/);
   ws.busy = true;
   orch.stopWorker(orchSession.instanceId, { worker: 'w1' });
   orch.report(ws.instanceId, { status: 'started', summary: 'again' });

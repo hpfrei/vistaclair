@@ -489,7 +489,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   const modelCatalog = models || (() => require('./capabilities').listModelsWithAvailability(dataHome));
   const HOOK_SCRIPT = path.join(coreRoot, 'lib', 'orchestration-hook.js');
   const runDirs = new Map();       // runId -> runDir (rebuilt from stamps on miss)
-  const volatile = new Map();      // session name -> { agents, reported, nudged, stopping }
+  const volatile = new Map();      // session name -> { agents, reported, nudged, nudges, stopping }
   const pushTimers = new Map();    // runId -> timeout
   const pendingAsks = new Map();   // dedupe key -> Promise
   const relayTimers = new Map();   // worker name -> pause fallback timeout
@@ -765,7 +765,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   function vol(name) {
     let v = volatile.get(name);
-    if (!v) { v = { agents: 0, reported: false, nudged: false }; volatile.set(name, v); }
+    if (!v) { v = { agents: 0, reported: false, nudged: false, nudges: 0 }; volatile.set(name, v); }
     return v;
   }
 
@@ -4057,7 +4057,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     // The last paused worker back unpauses the run: queued launches may start.
     if (!fresh.paused) pumpQueue(fresh.runDir);
     const v = vol(w.name);
-    v.agents = 0; v.reported = false; v.nudged = false; v.stopping = false;
+    v.agents = 0; v.reported = false; v.nudged = false; v.nudges = 0; v.stopping = false;
     return { worker: w.name, tabId, mode: mode === 'fresh' || lost ? 'fresh' : 'continue', ...(lost ? { fellBack: true, note: 'its conversation could not be restored, so it was started fresh from its brief and notes' } : {}) };
   }
 
@@ -4087,16 +4087,21 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const live = workerSession(run, w.id);
     if (!live?.session.running) throw new Error(`${w.name} is not running${w.closed ? ' (already closed)' : w.paused ? ' (paused)' : ''}`);
     if (live.session.busy) throw new Error(`${w.name} is busy: close it once it has reported and gone idle, or stop it first with stop_worker`);
+    // Idle is the only hard guard: closing is reversible (resume_worker), so a
+    // worker whose last report is update/started/none closes too, with a note.
     const status = w.lastReport?.status;
-    if (!['done', 'failed'].includes(status) && !w.turnStopped) {
-      throw new Error(`${w.name} has not finished (last report: ${status || 'none'}): only a worker whose last report is done or failed, or one stopped with stop_worker, can be closed`);
-    }
+    const unreported = !['done', 'failed'].includes(status);
+    const wasStopped = !!w.turnStopped;
     const { now, td } = closeLive(run, w, live);
     const p = folderSummary(w.sessionDir);
     const open = p ? p.total - p.done : 0;
+    const notes = [
+      ...(unreported && !wasStopped ? [`its last report was ${status || 'none'}, not done or failed`] : []),
+      ...(open > 0 ? [`${open} open TODO row(s)`] : []),
+    ];
     const out = {
       worker: w.name, closed: true, closedAt: now, lastReport: status,
-      ...(open > 0 ? { note: `closed with ${open} open TODO row(s): its last report was ${status}` } : {}),
+      ...(notes.length ? { note: `closed with ${notes.join(' and ')}${open > 0 && !(unreported && !wasStopped) ? `: its last report was ${status}` : ''}` } : {}),
       ...(td ? { worktree: td.removed ? 'removed' : `kept: ${td.kept}${td.files?.length ? ` (${td.files.join(', ')})` : ''}` } : {}),
       resume: 'it stays in list_workers; resume_worker (continue or fresh) brings it back',
     };
@@ -4114,10 +4119,6 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!waiting && !remoteHoldsSlot(run, w)) throw new Error(`${w.name} is not running (${st})`);
     if (live?.session.running) {
       if (live.session.busy) throw new Error(`${w.name} is busy: close it once it has reported and gone idle, or stop it first with stop_worker`);
-      const status = w.lastReport?.status;
-      if (!['done', 'failed'].includes(status) && !w.turnStopped) {
-        throw new Error(`${w.name} has not finished (last report: ${status || 'none'}): only a worker whose last report is done or failed, or one stopped with stop_worker, can be closed`);
-      }
     }
     const killed = closeRemote(run, w);
     saveRun(run);
@@ -4328,8 +4329,16 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       return { ok: false, canForce: true, reason: `${w.name} has not finished its work. A worker is paused through its orchestrator, and closes once it reports done or failed. Force-closing abandons it.` };
     }
     const running = runningWorkers(run).filter(w => !workerFinished(run, w));
-    if (running.length) {
-      return { ok: false, canForce: false, reason: `Workers of this run are still running (${running.map(w => w.name).join(', ')}). Pause the run, or wait for them to finish.` };
+    const busy = running.filter(w => workerSession(run, w.id)?.session.busy);
+    const idle = running.filter(w => !busy.includes(w));
+    const lastOf = (w) => w.lastReport?.status || 'none';
+    // Owner decision: only a busy worker holds the orchestrator tab. Idle ones
+    // (whatever their last report) are closed with it, resumable like close_worker.
+    if (busy.length) {
+      return { ok: false, canForce: false, reason: `Workers of this run are still working (${busy.map(w => `${w.name}, last report: ${lastOf(w)}`).join('; ')}). Pause the run, or wait for them to finish.` };
+    }
+    for (const w of idle) {
+      try { closeLive(run, w, workerSession(run, w.id)); } catch (e) { console.error(`[orchestration] closing idle ${w.name}:`, e.message); }
     }
     return { ok: true };
   }
@@ -4355,7 +4364,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     else saveRun(run);   // the landing job reads lastReport from run.json
     pumpQueue(run.runDir);   // a queued launch may wait on this worker
     if (run.mirror) relayMirror(run, { address: w.name, kind: 'report', status: w.lastReport.status, summary: mirrorSummary(w, owner) });
-    return { ok: true, ...(note ? { landing: note } : {}), ...(owner ? { ownerItems: { added: owner.added, updated: owner.updated, ignored: owner.ignored } } : {}) };
+    const notFinal = !WAKE_STATUSES.has(w.lastReport.status) ? { warning: `status "${w.lastReport.status}" is NOT a final report: if the task is finished, report again with status exactly "done" (or failed / blocked / paused)` } : {};
+    return { ok: true, ...notFinal, ...(note ? { landing: note } : {}), ...(owner ? { ownerItems: { added: owner.added, updated: owner.updated, ignored: owner.ignored } } : {}) };
   }
 
   // --- The owner's checklist (run.ownerItems) ---
@@ -4992,7 +5002,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     switch (ev) {
       case 'SessionStart': {
         const src = input.source;
-        if (src === 'startup' || src === 'resume' || src === 'clear') { v.agents = 0; v.reported = false; v.nudged = false; v.stopping = false; }
+        if (src === 'startup' || src === 'resume' || src === 'clear') { v.agents = 0; v.reported = false; v.nudged = false; v.nudges = 0; v.stopping = false; }
         if (isOrch) {
           run.busy = false;
           if (src === 'compact') {
@@ -5036,7 +5046,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       case 'UserPromptSubmit': {
         if (!isOrch) {
-          v.reported = false; v.nudged = false; v.stopping = false;
+          v.reported = false; v.nudged = false; v.nudges = 0; v.stopping = false;
           const w = run.workers.find(x => x.id === stamp.workerId);
           const typed = w && ownerPrompt(w, input.prompt);
           if (typed) addFollowUp(run, w.id, typed, 'owner');
@@ -5129,9 +5139,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         // Still working in the background (subagents, background shells): not idle.
         if (Array.isArray(input.background_tasks) && input.background_tasks.length) return {};
         if (v.reported) return {};
-        if (!v.nudged && !input.stop_hook_active) {
+        // A non-final last report (update / started) does not count as reported:
+        // it is nudged again, but never more than 3 times in a turn.
+        const lastRep = run.workers.find(x => x.id === stamp.workerId)?.lastReport;
+        const nudges = v.nudges || 0;
+        if ((!v.nudged && !input.stop_hook_active) || (v.nudged && lastRep && !WAKE_STATUSES.has(lastRep.status) && nudges < 3)) {
           v.nudged = true;
-          return { stdout: JSON.stringify({ decision: 'block', reason: `Before ending this turn, report to the orchestrator \`${run.orchestrator}\` with the \`report\` tool (status, summary, filesChanged, verified, open). The status must be done, failed, blocked (name whom you wait for and what) or paused. Do not report "started" or progress; a message to another worker does not end a turn.` }) };
+          v.nudges = nudges + 1;
+          const wrong = lastRep && !WAKE_STATUSES.has(lastRep.status) ? ` Your last report had status "${lastRep.status}", which is NOT a final report and does not end the turn.` : '';
+          return { stdout: JSON.stringify({ decision: 'block', reason: `Before ending this turn, report to the orchestrator \`${run.orchestrator}\` with the \`report\` tool (status, summary, filesChanged, verified, open).${wrong} A finished task is reported with status exactly "done" (even if your summary says so); otherwise "failed", "blocked" (name whom you wait for and what) or "paused". "update", "started" and progress reports are not final and do not end a turn; a message to another worker does not end a turn either.` }) };
         }
         const last = run.workers.find(x => x.id === stamp.workerId)?.lastReport;
         const head = last ? `${name} went idle; last report: ${last.status} (${clip(last.summary, 200)}).` : `${name} went idle without reporting.`;
