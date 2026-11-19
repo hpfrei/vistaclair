@@ -1,14 +1,18 @@
-// <vc-composer>: the message box of an Agent SDK panel. A textarea plus image
+// <vc-composer>: the message box of an Agent SDK panel. A textarea plus
 // attachments from three gestures (Ctrl-V paste, drag/drop, the file picker),
-// all through one addFiles() so the size guards and the base64 conversion
-// cannot drift between them. It knows nothing about sessions: it emits
+// all through one addFiles() so the size guards cannot drift between them.
+// An image becomes a base64 block; any other file is uploaded to the session's
+// uploads/ folder (needs the tab-id or sess-id attribute) and the sent text
+// gets an "Attached: /abs/path" line for it. The mic records, transcribes
+// (platform audio tool) and puts the text in the textarea; it never sends. It knows nothing about sessions: it emits
 //   send       {text, images:[{mediaType, base64, name}]}  (Enter, Ctrl+Enter, ➤)
 //   interrupt  (Esc)
 // and the panel decides where they go. A send does not clear the draft: the
 // panel calls clear() once the message has really gone out.
 (function () {
-  const FILE_MAX = 8 * 1024 * 1024;
-  const TOTAL_MAX = 18 * 1024 * 1024;
+  const A = window.VcAttach;
+  const FILE_MAX = A.IMAGE_MAX;
+  const TOTAL_MAX = A.IMAGES_TOTAL_MAX;
 
   const fmtSize = (n) => n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(n % (1024 * 1024) ? 1 : 0)} MB`
     : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`;
@@ -26,6 +30,7 @@
     constructor() {
       super();
       this._atts = [];        // {name, mediaType, base64, size, url}
+      this._files = [];       // uploaded non-images: {name, size, path}
       this._reading = new Set();
       this._detachers = [];
     }
@@ -44,12 +49,13 @@
       this.innerHTML = `
         <div class="vc-composer-chips"></div>
         <div class="vc-composer-row">
-          <button type="button" class="vc-composer-attach" title="Attach images (or paste / drop them)">+</button>
+          <button type="button" class="vc-composer-attach" title="Attach files or images (or paste / drop them)">+</button>
           <textarea rows="1" spellcheck="true"></textarea>
+          <button type="button" class="vc-composer-mic">🎤</button>
           <button type="button" class="vc-composer-send" title="Send (Enter)">➤</button>
         </div>
         <div class="vc-composer-note hidden"></div>
-        <input type="file" accept="image/*" multiple hidden>`;
+        <input type="file" multiple hidden>`;
       this._chips = this.querySelector('.vc-composer-chips');
       this._input = this.querySelector('textarea');
       this._note = this.querySelector('.vc-composer-note');
@@ -65,6 +71,7 @@
         this.addFiles(files);
       });
       this.querySelector('.vc-composer-send').addEventListener('click', () => this.send());
+      this._mic = window.VcInput?.mountMic(this.querySelector('.vc-composer-mic'), { input: this._input, say: (t, bad) => this._say(t, bad) });
       this._input.addEventListener('keydown', (e) => {
         if (e.isComposing) return;
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.send(); }
@@ -83,6 +90,7 @@
     }
 
     disconnectedCallback() {
+      this._mic?.destroy();
       for (const a of this._atts) URL.revokeObjectURL(a.url);
     }
 
@@ -93,7 +101,7 @@
     set disabled(v) {
       this.toggleAttribute('disabled', !!v);
       if (this._input) this._input.disabled = !!v;
-      this.querySelectorAll('button').forEach(b => { b.disabled = !!v; });
+      this.querySelectorAll('button').forEach(b => { b.disabled = !!v || b.classList.contains('mic-unavailable'); });
     }
 
     focus() { this._input?.focus(); }
@@ -133,11 +141,12 @@
     addFiles(files) {
       this._say('');
       for (const file of files) {
-        if (!file.type.startsWith('image/')) { this._say(`"${file.name || 'that file'}" is not an image; only images can be attached`, true); continue; }
-        if (file.size > FILE_MAX) { this._say(`"${file.name || 'that image'}" is too large (max ${fmtSize(FILE_MAX)})`, true); continue; }
+        const name = nameFor(file);
+        const verdict = A.classifyFile({ name, size: file.size, type: file.type });
+        if (verdict.kind === 'reject') { this._say(verdict.reason, true); continue; }
+        if (verdict.kind === 'file') { this._upload(file, name); continue; }
         const total = this._atts.reduce((s, a) => s + a.size, 0) + this._pendingBytes();
         if (total + file.size > TOTAL_MAX) { this._say(`Attachments exceed ${fmtSize(TOTAL_MAX)} total`, true); break; }
-        const name = nameFor(file);
         const job = new Promise((resolve) => {
           const reader = new FileReader();
           reader.onload = () => {
@@ -155,13 +164,31 @@
       }
     }
 
+    // A non-image file goes to the server; its chip appears (marked "…") at
+    // once and send() waits for it like it waits for an image being read.
+    _upload(file, name) {
+      const where = { tab: this.getAttribute('tab-id'), sess: this.getAttribute('sess-id') };
+      if (!where.tab && !where.sess) { this._say(`"${name}" cannot be attached here (no session to save it in)`, true); return; }
+      const chip = { name, size: file.size, path: null };
+      this._files.push(chip);
+      this._renderChips();
+      const job = window.VcInput.upload(file, where).then((r) => { chip.path = r.path; }, (e) => {
+        this._files = this._files.filter(c => c !== chip);
+        this._say(`"${name}" was not attached: ${e.message}`, true);
+      }).then(() => this._renderChips());
+      job.size = 0;
+      this._reading.add(job);
+      job.then(() => this._reading.delete(job));
+    }
+
     _pendingBytes() { let n = 0; for (const j of this._reading) n += j.size || 0; return n; }
 
     async send() {
       if (this.disabled) return;
       // An image still being read would otherwise be dropped from this send.
       if (this._reading.size) await Promise.all([...this._reading]);
-      const text = this._input.value.replace(/\s+$/, '');
+      const typed = this._input.value.replace(/\s+$/, '');
+      const text = A.withAttached(typed, this._files.map(f => f.path));
       if (!text.trim() && !this._atts.length) return;
       const images = this._atts.map(({ mediaType, base64, name }) => ({ mediaType, base64, name }));
       this.dispatchEvent(new CustomEvent('send', { bubbles: true, detail: { text, images } }));
@@ -170,6 +197,7 @@
     clear() {
       for (const a of this._atts) URL.revokeObjectURL(a.url);
       this._atts = [];
+      this._files = [];
       this._input.value = '';
       this._grow();
       this._renderChips();
@@ -189,6 +217,22 @@
 
     _renderChips() {
       this._chips.querySelectorAll('.vc-composer-att').forEach(el => el.remove());
+      this._files.forEach((f) => {
+        const chip = document.createElement('span');
+        chip.className = 'vc-composer-att vc-composer-file' + (f.path ? '' : ' uploading');
+        chip.title = f.path ? `${f.path} · ${fmtSize(f.size)}` : `Uploading ${f.name}…`;
+        const lbl = document.createElement('span');
+        lbl.className = 'vc-composer-file-name';
+        lbl.textContent = `📎 ${f.name}${f.path ? '' : ' …'}`;
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'vc-composer-att-x vc-composer-file-x';
+        rm.textContent = '×';
+        rm.title = 'Remove';
+        rm.addEventListener('click', () => { this._files = this._files.filter(c => c !== f); this._renderChips(); });
+        chip.append(lbl, rm);
+        this._chips.appendChild(chip);
+      });
       this._atts.forEach((a, i) => {
         const chip = document.createElement('span');
         chip.className = 'vc-composer-att';

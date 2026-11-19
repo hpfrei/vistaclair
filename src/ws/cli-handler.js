@@ -151,18 +151,12 @@ function handleMessage(ws, msg, bc) {
     case 'cli:uploadFile':
       if (msg.tabId && msg.data) {
         try {
-          const session = mgr.get(msg.tabId);
-          const subfolder = session?.sessId || msg.tabId;
-          const uploadsDir = path.join(DATA_HOME, 'interactions', subfolder, 'uploads');
-          ensureDir(uploadsDir);
-
           const match = (msg.data || '').match(/^data:([^;]*);base64,(.+)$/);
           if (!match) throw new Error('Invalid data URL');
-          const buffer = Buffer.from(match[2], 'base64');
-          let safeName = (msg.filename || 'file').replace(/[/\\]/g, '_').replace(/[^a-zA-Z0-9._-]/g, '_');
-          if (safeName.length > 200) safeName = safeName.slice(0, 200);
-          const filePath = path.join(uploadsDir, safeName);
-          fs.writeFileSync(filePath, buffer);
+          const session = mgr.get(msg.tabId);
+          const dir = path.join(DATA_HOME, 'interactions', session?.sessId || msg.tabId);
+          const saved = require('../session-uploads').saveUpload(dir, msg.filename, Buffer.from(match[2], 'base64'));
+          const safeName = saved.name, filePath = saved.path;
 
           const ext = path.extname(safeName).toLowerCase();
           const isImage = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(ext);

@@ -146,7 +146,7 @@
       if (overlay) return;
       overlay = document.createElement('div');
       overlay.className = 'cli-drop-overlay';
-      overlay.textContent = 'Drop files here to upload';
+      overlay.textContent = 'Drop files here to add their path to the message';
       wrap.appendChild(overlay);
     }
 
@@ -185,6 +185,7 @@
           }
         }
       }
+      if (_mobileBar && window.VcInput) { _mobileBar.dropFiles(tabId, files); return; }
       for (const file of files) {
         const dataUrl = await _fileToDataURL(file);
         sendWs({ type: 'cli:uploadFile', tabId, data: dataUrl, filename: file.name });
@@ -222,8 +223,10 @@
         <button type="button" data-font="-1">A−</button>
         <button type="button" data-font="1">A+</button>
       </div>
+      <div class="mobile-cli-note hidden"></div>
       <div class="mobile-cli-compose">
-        <textarea rows="1" placeholder="Type a message…" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+        <textarea rows="1" placeholder="Type a message… (drop files here for their path)" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+        <button type="button" class="mobile-cli-mic" aria-label="Voice input">🎤</button>
         <button type="button" class="mobile-cli-send" aria-label="Send">➤</button>
       </div>`;
     view.appendChild(bar);
@@ -231,6 +234,12 @@
     const pill = bar.querySelector('.mobile-cli-pill');
     const input = bar.querySelector('textarea');
     const sendBtn = bar.querySelector('.mobile-cli-send');
+    const note = bar.querySelector('.mobile-cli-note');
+    const say = (text, bad) => {
+      note.textContent = text || '';
+      note.classList.toggle('hidden', !text);
+      note.classList.toggle('bad', !!bad);
+    };
     const active = () => tabs.get(activeTabId);
     const atBottom = t => t.buffer.active.viewportY >= t.buffer.active.baseY;
 
@@ -268,6 +277,37 @@
       }
     });
     sendBtn.addEventListener('click', submit);
+    // Voice: the transcript lands in the textarea for editing, never sent.
+    window.VcInput?.mountMic(bar.querySelector('.mobile-cli-mic'), { input, say, idle: '🎤' });
+    // Files dropped on the terminal or on this bar: uploaded to the tab's
+    // uploads folder, their paths (quoted as a terminal drop writes them)
+    // inserted into the textarea at the cursor for the owner to send.
+    async function dropFiles(tabId, files) {
+      say('');
+      const paths = [];
+      for (const file of files) {
+        const verdict = window.VcAttach.classifyFile(file, { imageMax: window.VcAttach.FILE_MAX });
+        if (verdict.kind === 'reject') { say(verdict.reason, true); continue; }
+        say(`Uploading ${file.name}…`);
+        try { paths.push((await window.VcInput.upload(file, { tab: tabId })).path); }
+        catch (e) { say(`"${file.name}" was not uploaded: ${e.message}`, true); }
+      }
+      if (!paths.length) return;
+      const at = input.selectionStart ?? input.value.length;
+      const out = window.VcAttach.insertAtCursor(input.value, at, input.selectionEnd ?? at, paths.map(window.VcAttach.quotePath).join(' '));
+      input.value = out.value;
+      input.setSelectionRange(out.caret, out.caret);
+      input.dispatchEvent(new Event('input'));
+      say('');
+      input.focus();
+    }
+    const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+    bar.addEventListener('dragover', e => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+    bar.addEventListener('drop', e => {
+      if (!hasFiles(e) || !activeTabId) return;
+      e.preventDefault();
+      dropFiles(activeTabId, [...(e.dataTransfer.files || [])]);
+    });
     input.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
     });
@@ -301,7 +341,7 @@
         tab.terminal.onScroll(() => { if (atBottom(tab.terminal)) pill.classList.add('hidden'); });
       }
     }
-    return { onOutput, onTabChange, fontSize: () => (window.dashboard.isPhone?.() ? fontSize : 14) };
+    return { onOutput, onTabChange, dropFiles, fontSize: () => (window.dashboard.isPhone?.() ? fontSize : 14) };
   })();
 
   function createTab(tabId, kind = 'cli', init) {

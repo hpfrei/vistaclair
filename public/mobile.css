@@ -86,6 +86,33 @@
 /* ============================================================
    LAYOUT — phone width
    ============================================================ */
+/* The terminal tabs' message bar on wide screens: just the message line (mic,
+   file drops, ➤); the key row and the "new output" pill are phone chrome. An
+   SDK tab has its own composer and the Sessions list no terminal. */
+@media (min-width: 641px) {
+  #view-claude:not(.cli-sessions-active):not(.sdk-tab-active) .mobile-cli-bar {
+    display: flex; flex-direction: column; flex-shrink: 0;
+    background: var(--bg-surface); border-top: 1px solid var(--border);
+  }
+  .mobile-cli-keys, .mobile-cli-pill { display: none; }
+  .mobile-cli-compose { display: flex; align-items: flex-end; gap: 6px; padding: 6px 8px; }
+  .mobile-cli-compose textarea {
+    flex: 1; min-height: 32px; max-height: 120px; padding: 6px 10px; resize: none;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+    color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.3;
+  }
+  .mobile-cli-compose textarea:focus { outline: none; border-color: var(--accent); }
+  .mobile-cli-mic, .mobile-cli-send { flex-shrink: 0; height: 32px; min-width: 34px; border-radius: 8px; font-size: 14px; }
+  .mobile-cli-mic { border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  .mobile-cli-send { border: none; background: var(--accent); color: #fff; }
+}
+/* Mic and note: every width. */
+.mobile-cli-note { padding: 4px 10px 0; font-size: 11px; color: var(--text-dim); }
+.mobile-cli-note.bad { color: var(--red); }
+.mobile-cli-mic.mic-unavailable { opacity: .4; }
+.mobile-cli-mic.recording { background: var(--red); border-color: var(--red); color: #fff; font-size: 12px; animation: vc-mic-pulse 1.2s ease-in-out infinite; }
+@keyframes vc-mic-pulse { 50% { opacity: .65; } }
+
 @media (max-width: 640px) {
   /* --- App shell -------------------------------------------- */
   html, body {
@@ -521,6 +548,8 @@
     color: #fff;
     font-size: 16px;
   }
+  .mobile-cli-mic { flex-shrink: 0; width: 40px; height: 38px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--text); font-size: 16px; }
+  .mobile-cli-mic.recording { width: auto; padding: 0 10px; font-size: 13px; }
   .mobile-cli-send:active { filter: brightness(.85); }
   /* Keyboard up: the key row is what matters, hide chrome that isn't. */
   body.keyboard-open .mobile-tabbar { display: none; }

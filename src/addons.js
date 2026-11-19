@@ -222,8 +222,21 @@ function collectPinnedSessions() {
   return pinned;
 }
 
+// The platform's artifact store and tool calls, as an add-on offers them
+// (descriptor.platformTools, optional): { putArtifact(buffer, {mime, name}) →
+// Promise<{uri}>, call(tool, args) → Promise<MCP result> }. The first add-on
+// that has both wins; null when none does (core alone, or an older Pro).
+function platformTools() {
+  for (const a of addons) {
+    const t = a.platformTools;
+    if (t && typeof t.putArtifact === 'function' && typeof t.call === 'function') return t;
+  }
+  return null;
+}
+
 module.exports = {
   CONTRACT_VERSION,
+  platformTools,
   registerAddon,
   removeAddon,
   getClientModules,

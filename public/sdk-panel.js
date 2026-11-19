@@ -1732,6 +1732,7 @@
   function maxComposer(area, dialog) {
     const composer = document.createElement('vc-composer');
     composer.setAttribute('placeholder', `Message ${area.label}…`);
+    if (area.sessId) composer.setAttribute('sess-id', area.sessId);
     composer.addEventListener('send', (e) => {
       e.stopPropagation();
       if (area.ended()) return;
@@ -2134,6 +2135,7 @@
       this.billBtns = Object.fromEntries([...this.billEl.querySelectorAll('button')].map(b => [b.dataset.auth, b]));
       this.actionsEl = q('.sdk-tb-actions');
       this.composer = q('vc-composer');
+      this.composer.setAttribute('tab-id', tabId);
 
       this.pauseBtn.addEventListener('click', () => this.pause());
       // A−/A+ (phone only: sdk-panel.css hides the group elsewhere). Re-follow
