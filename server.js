@@ -17,7 +17,6 @@ const SdkSession = require('./src/sdk-session');
 const caps = require('./src/capabilities');
 const claudeAuth = require('./src/claude-auth');
 const mcp = require('./src/mcp');
-const { createLicensing } = require('./src/licensing');
 const addons = require('./src/addons');
 const { createAddonCtx } = require('./src/addon-host');
 const { createOrchestration } = require('./src/orchestration');
@@ -27,16 +26,7 @@ const { createCliIsolation } = require('./src/cli-isolation');
 const { createAuth } = require('./src/auth');
 const csp = require('./src/csp');
 const { killStalePortListeners } = require('./src/port-cleanup');
-let proModule = null;   // the loaded ./vistaclair-pro module (for licensing/update)
-let proAddon = null;    // its registered descriptor (null until init succeeds)
-let proLicenseValid = false;
-const isDev = process.argv.includes('dev');
-if (isDev && !process.env.DEV_LICENCING_SERVER) {
-  console.error('Error: DEV_LICENCING_SERVER is not set. Create a .env file with DEV_LICENCING_SERVER=http://localhost:8888');
-  process.exit(1);
-}
-const licensing = createLicensing({ dataHome: DATA_HOME, isDev });
-const { proDir, validateLicense, fetchProductInfo, checkProUpdates, npmInstall } = licensing;
+let platformModule = null; // ./platform, loaded unconditionally below
 const ruleHandler = require('./src/proxy-rule-handler');
 const createApiRouter = require('./src/api');
 
@@ -79,33 +69,13 @@ try {
   console.error(`Error: ${e.message}`);
   process.exit(1);
 }
-fetchProductInfo();
-setInterval(fetchProductInfo, 60 * 60 * 1000);
-
-if (fs.existsSync(proDir)) {
-  const result = await validateLicense();
-  proLicenseValid = result.valid;
-  if (proLicenseValid) {
-    try { proModule = require('./vistaclair-pro'); } catch (e) {
-      // Self-heal installs that were cloned before deps were installed (older
-      // installer) or whose install was interrupted — otherwise the GUI loops
-      // on needsRestart forever (installed && licensed && !loaded).
-      if (e.code === 'MODULE_NOT_FOUND') {
-        console.error('  Pro: missing dependencies, installing...');
-        try {
-          npmInstall(proDir);
-          proModule = require('./vistaclair-pro');
-          console.log('  Pro: dependencies installed');
-        } catch (e2) {
-          console.error('  Pro: dependency install failed:', e2.message);
-        }
-      } else {
-        console.error('  Pro: failed to load:', e.message);
-      }
-    }
-  } else {
-    console.log(`  Pro: license invalid (${result.reason}) — running in free mode`);
-  }
+// The platform (apps, Horst, federation, ...) is part of this repo and always
+// loads. A load error is fatal: the supervisor shows it, there is no reduced mode.
+try {
+  platformModule = require('./platform');
+} catch (e) {
+  console.error('  Platform: failed to load:', e && e.stack || e);
+  process.exit(1);
 }
 
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || '3456');
@@ -330,25 +300,11 @@ ensureDir(OUTPUTS_DIR);
 // User content: sandboxed unless passive (see userContentHeaders in src/api.js).
 dashboardApp.use('/outputs', express.static(OUTPUTS_DIR, { setHeaders: createApiRouter.userContentSetHeaders }));
 
-// Pro update check (background)
-if (fs.existsSync(proDir) && proLicenseValid) {
-  checkProUpdates();
-  setInterval(checkProUpdates, 60 * 60 * 1000);
-}
-
-// Mount the /api/pro/* licensing routes. The lifecycle adapter bridges to the
-// Pro module-load state that this file owns as the composition root.
-dashboardApp.use('/api', licensing.createLicenseRouter({
-  getPro: () => proModule,
-  isProLoaded: () => !!proAddon,
-  getProLicenseValid: () => proLicenseValid,
-  getProClientModules: () => (proAddon ? addons.getClientModules() : null),
-  scheduleRestart: () => scheduleRestart(),
-  revalidate: async () => {
-    const result = await validateLicense();
-    proLicenseValid = result.valid;
-  },
-}));
+// The add-on client modules (the platform's Apps/Horst tabs, fleet panel),
+// fetched by public/addons-loader.js. Owner-authed: mounted after gateMiddleware.
+dashboardApp.get('/api/addons/client-modules', (req, res) => {
+  res.json(addons.getClientModules());
+});
 
 const dashboardServer = http.createServer(dashboardApp);
 // Node cuts any request whose body is not fully received in 5 minutes; a
@@ -451,15 +407,13 @@ const addonCtx = createAddonCtx({
     login: login.api,
   },
 });
-if (proModule) {
-  try {
-    const descriptor = proModule.init(addonCtx);
-    proAddon = addons.registerAddon(descriptor);
-    if (proAddon) console.log('  Pro: loaded');
-    else console.error('  Pro: descriptor rejected (contract mismatch)');
-  } catch (e) {
-    console.error('  Pro: init failed:', e.message);
-  }
+try {
+  const descriptor = platformModule.init(addonCtx);
+  if (!addons.registerAddon(descriptor)) throw new Error('descriptor rejected (contract mismatch)');
+  console.log('  Platform: loaded');
+} catch (e) {
+  console.error('  Platform: init failed:', e && e.stack || e);
+  process.exit(1);
 }
 // Mount add-on routers AFTER the auth middleware (declared above) so add-on
 // routes are auth-gated by construction, except their declared authExemptPaths.
@@ -631,20 +585,6 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
     // Auto-open dashboard in the default browser (skip with NO_OPEN=1 or server mode)
     if (autoOpen) openDashboard({ port: DASHBOARD_PORT, login, execFile: require('child_process').execFile });
 
-    // Re-validate license every 4 hours
-    setInterval(async () => {
-      if (!proAddon) return;
-      const result = await validateLicense();
-      if (!result.valid && result.reason !== 'offline-grace') {
-        console.log(`  Pro: license no longer valid (${result.reason}) — disabling`);
-        try { proAddon.shutdown?.(); } catch {}
-        addons.removeAddon(proAddon.id);
-        proAddon = null;
-        proModule = null;
-        proLicenseValid = false;
-        broadcaster.broadcast({ type: 'pro:disabled', reason: result.reason });
-      }
-    }, 4 * 60 * 60 * 1000);
   });
 });
 

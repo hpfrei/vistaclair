@@ -1,0 +1,7 @@
+{
+  "name": "com.vistaclair.build",
+  "version": "1.0.0",
+  "displayName": "Vistaclair build",
+  "description": "Shipped by the vistaclair unity platform extra. Android signing from the environment at build time: UNITY_ANDROID_KEYSTORE_PATH / _PASS / _ALIAS / _ALIAS_PASS (the app fills them from its secrets), else the extra's shared debug keystore. No key material in the project.",
+  "unity": "6000.0"
+}

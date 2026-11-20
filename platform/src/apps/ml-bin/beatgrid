@@ -1,0 +1,66 @@
+#!/opt/vistaclair-ml/venv/bin/python
+"""beatgrid — detect tempo, beats, and onsets in an audio file (librosa).
+
+Usage:
+  beatgrid --in /path/track.wav [--tightness 100]
+
+Output (stdout JSON):
+  {"ok":true,"bpm":121.4,"beats":[0.49,0.99,...],"downbeats":[0.49,2.47,...],
+   "onsets":[...],"duration":30.0,"rms_peaks":[...]}
+
+beats/onsets are second offsets. downbeats are estimated every 4 beats from the
+strongest phase. rms_peaks are the loudest moments (for cut-on-impact edits).
+"""
+import argparse, json, sys
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--in", dest="inp", required=True)
+    p.add_argument("--tightness", type=float, default=100.0)
+    a = p.parse_args()
+
+    import numpy as np
+    import librosa
+
+    y, sr = librosa.load(a.inp, sr=None, mono=True)
+    duration = len(y) / sr
+    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, tightness=a.tightness)
+    beats = librosa.frames_to_time(beat_frames, sr=sr)
+    onsets = librosa.onset.onset_detect(y=y, sr=sr, units="time")
+
+    # Downbeat estimate: pick the 4-beat phase with the highest mean onset strength
+    env = librosa.onset.onset_strength(y=y, sr=sr)
+    strengths = env[beat_frames] if len(beat_frames) else np.array([])
+    best_phase = 0
+    if len(strengths) >= 4:
+        best_phase = int(np.argmax([strengths[i::4].mean() for i in range(4)]))
+    downbeats = beats[best_phase::4].tolist() if len(beats) else []
+
+    # RMS peaks: local maxima of loudness, top 8
+    rms = librosa.feature.rms(y=y)[0]
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr)
+    order = np.argsort(rms)[::-1]
+    peaks, taken = [], []
+    for i in order:
+        t = float(times[i])
+        if all(abs(t - u) > 1.0 for u in taken):
+            peaks.append(round(t, 3)); taken.append(t)
+        if len(peaks) >= 8:
+            break
+
+    print(json.dumps({
+        "ok": True,
+        "bpm": round(float(np.atleast_1d(tempo)[0]), 2),
+        "beats": [round(float(t), 3) for t in beats],
+        "downbeats": [round(float(t), 3) for t in downbeats],
+        "onsets": [round(float(t), 3) for t in onsets],
+        "rms_peaks": sorted(peaks),
+        "duration": round(duration, 3),
+    }))
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        sys.exit(1)

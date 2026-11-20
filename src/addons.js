@@ -3,12 +3,11 @@
 // Core stays add-on-agnostic for every additive transport: HTTP routes, client
 // assets, WebSocket upgrades, and auth-exempt paths all flow through here as a
 // versioned descriptor returned by each add-on's init(core). The only thing the
-// composition root (server.js) still knows by name is which add-on to *install
-// and license* — that part is inherently product-specific.
+// composition root (server.js) knows by name is the add-on it loads: ./platform.
 //
 // Descriptor shape (contractVersion CONTRACT_VERSION):
 //   {
-//     contractVersion, id, productSlug,
+//     contractVersion, id,
 //     router,                 // express.Router mounted after auth
 //     clientModules: [{ styles, scripts }],
 //     cspReady: true,         // optional; the client modules run under the
@@ -28,8 +27,8 @@
 //     toolPacks: [pack, ...],  // optional; MCP servers / tool restrictions /
 //                              // prompt text for sessions (src/tool-packs.js).
 //                              // Registered with the add-on, dropped by removeAddon.
-//     shutdown(), update(),    // optional lifecycle hooks
-//     _module,                 // raw module handle (licensing/lifecycle)
+//     shutdown(),              // optional lifecycle hook
+//     _module,                 // raw module handle
 //   }
 //
 // Additive fields (toolPacks here, registerToolPack on the ctx) do not change

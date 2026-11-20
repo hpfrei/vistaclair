@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Vistaclair</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="vista.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div id="title">📥 Approvals</div>
+    <div id="status-pill" class="pill">connecting…</div>
+  </header>
+
+  <main id="main" aria-live="polite">
+    <section id="queue" class="pane"></section>
+    <section id="detail" class="pane" hidden></section>
+  </main>
+
+  <nav id="tabs">
+    <button data-tab="approvals" class="active">📥<span>Approvals</span></button>
+    <button data-tab="briefing">📰<span>Briefing</span></button>
+    <button data-tab="mail">✉<span>Mail</span></button>
+    <button data-tab="calendar">📅<span>Calendar</span></button>
+    <button data-tab="files">📁<span>Files</span></button>
+  </nav>
+</div>
+<!-- The same card renderer the dashboard uses, so a proposal looks identical
+     on both surfaces and neither knows anything kind-specific. -->
+<script src="/pro/proposal-cards.js"></script>
+<script src="/pro/tg-common/miniapp.js"></script>
+<script src="vista.js"></script>
+</body>
+</html>

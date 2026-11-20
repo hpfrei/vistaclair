@@ -1,9 +1,8 @@
 // Remote workers, the master half (src/orchestration.js registerHostProvider):
 // launch_cli({ host }) with a fake host provider, the member's tab as a real
 // ExternalSession in a fake session manager. Nothing here spawns `claude`.
-// The last test drives Pro's own provider (peer-remote-host.js) when a Pro
-// checkout is present (VISTACLAIR_PRO_DIR, else <core>/vistaclair-pro);
-// skipped otherwise.
+// The last test drives the platform's provider (peer-remote-host.js,
+// <core>/platform/src/apps).
 //
 //   node --test test/orchestration-remote-host.test.js
 
@@ -405,11 +404,11 @@ test('a member tab found by its stamp: the run\'s, the member\'s, from its host 
   assert.strictEqual(member(ctx, h, a.worker).tabId, 'rs-real');
 });
 
-// Pro's own provider against this core (read-only use of a Pro checkout).
-const PRO = process.env.VISTACLAIR_PRO_DIR || path.join(CORE, 'vistaclair-pro');
+// Pro's own provider against this core (<core>/platform).
+const PRO = path.join(CORE, 'platform');
 const PRO_HOST = path.join(PRO, 'src', 'apps', 'peer-remote-host.js');
 
-test('Pro\'s peer-remote-host registers with core: hosts reach the card, a launch files a card, an approval binds the tab, a slave report reaches the orchestrator', { skip: !fs.existsSync(PRO_HOST) && 'no Pro checkout' }, async () => {
+test('Pro\'s peer-remote-host registers with core: hosts reach the card, a launch files a card, an approval binds the tab, a slave report reaches the orchestrator', async () => {
   const ctx = setup();
   const peers = [{ name: 'hetzner-1', connected: true, claude: { loggedIn: true, remoteSessions: { enabled: true } } }];
   const proposals = new Map();

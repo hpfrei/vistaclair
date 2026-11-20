@@ -1,6 +1,6 @@
 # Defensive Code Audit — retries, recovery wrappers, race guards
 
-Date: 2026-06-12. Scope: vistaclair core + vistaclair-pro (node_modules excluded).
+Date: 2026-06-12. Scope: vc, including `platform/` (node_modules excluded).
 
 Verdict legend: **keep** (guards a real external failure mode), **dedupe** (correct but duplicated),
 **fix** (root-cause fix removes the need), **log** (keep the swallow but make it visible).
@@ -23,13 +23,9 @@ Verdict legend: **keep** (guards a real external failure mode), **dedupe** (corr
 | `src/capabilities.js:377` | Secrets migration `writeSecrets` failure swallowed | log — correctness risk |
 | `src/capabilities.js` (many) | Optional-file reads return defaults on error | keep |
 | `src/utils.js:415` | `hasClaudeSubscription` swallows credential read errors | keep (boolean probe) |
-| `src/licensing.js:109` | Signing-key refresh failure swallowed | log |
-| `src/licensing.js:132-143` | Offline-grace fallback on license validation failure | keep — by design |
-| `src/licensing.js:320` | `git pull --ff-only` failure swallowed in /pro/update | log |
 | `src/store.js` (many) | Observability store degrades silently | keep — by design, must never crash proxy |
 | `src/cli-sessions.js:22-35` | Six `try{unlink}catch{}` cleanup blocks | dedupe → `tryRm` |
 | `lib/mcp-bridge.js:53-56,87-96` | Optional ws reporting + non-JSON stdio lines | keep |
-| `server.js:61-75` | Pro module self-heal via npm install on MODULE_NOT_FOUND | keep — install model |
 | `server.js:204-230` | Hook-report endpoint swallows all | keep — fire-and-forget by design |
 | `src/proxy-rule-handler.js:269,333,336,427` | Temp-file precleans + meta parse fallbacks | dedupe unlinks → `tryRm` |
 
@@ -47,7 +43,7 @@ Verdict legend: **keep** (guards a real external failure mode), **dedupe** (corr
 | `src/port-cleanup.js` | `killStalePortListeners` at startup (local mode) | keep — `node server.js` runs unsupervised; listeners only (never clients such as ngrok), never self/parent/ngrok |
 | `server.js:253-263` | `/api/ask` close-event cleanup | keep — prevents Promise/Map leak |
 
-## vistaclair-pro
+## platform/ (paths relative to `platform/`)
 
 ### Retries
 | Where | What | Verdict |

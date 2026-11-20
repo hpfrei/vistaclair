@@ -3,8 +3,8 @@
 //
 // Second layer behind the renderers' sanitizers (public/render-safe.js,
 // ask-safe.js): markup that slips through still cannot run script, because
-// script-src allows only files served by this origin, plus the checkout's
-// lemon.js (below). Every library is vendored (public/vendor/), and no page
+// script-src allows only files served by this origin. Every library is
+// vendored (public/vendor/), and no page
 // has an inline <script> or on*= handler (test/csp.test.js keeps it so).
 //
 // Not applied under /apps/: the add-on sets its own headers there. An add-on
@@ -22,19 +22,13 @@ const REPORT_ONLY_HEADER = 'Content-Security-Policy-Report-Only';
 
 const GOOGLE_FONTS_CSS = 'https://fonts.googleapis.com';
 const GOOGLE_FONTS_FILES = 'https://fonts.gstatic.com';
-// The Pro checkout overlay: lemon.js, loaded by pro-header.js only on the
-// teaser, and the checkout it frames. A trusted third party: the only script
-// origins besides 'self', as it is served live and cannot be pinned or
-// vendored. app.lemonsqueezy.com/js/lemon.js redirects to assets.lemonsqueezy.com.
-const LEMON_SCRIPT = ['https://app.lemonsqueezy.com', 'https://assets.lemonsqueezy.com'];
-const LEMON_FRAMES = 'https://*.lemonsqueezy.com';
 
 // [directive, sources]. Each allowance beyond 'self' says why.
 const DIRECTIVES = [
   // Anything not named below (media, manifest, ...) stays same-origin.
   ['default-src', ["'self'"]],
-  // No inline script, no eval; the one third-party origin is lemon.js.
-  ['script-src', ["'self'", ...LEMON_SCRIPT]],
+  // No inline script, no eval, no third-party script origin.
+  ['script-src', ["'self'"]],
   // Inline style attributes are everywhere in the UI and in rendered html
   // fences; Monaco, MathJax and xterm inject <style> elements. Style cannot
   // run script. The Google Fonts stylesheet is the kit's face (index.html).
@@ -55,8 +49,8 @@ const DIRECTIVES = [
   // importScripts its vendored workerMain.js. Only script already running
   // here can make a blob worker, and a worker has no DOM.
   ['worker-src', ["'self'", 'blob:']],
-  // Apps are framed same-origin (/apps/<name>/); the LemonSqueezy checkout.
-  ['frame-src', ["'self'", LEMON_FRAMES]],
+  // Apps are framed same-origin (/apps/<name>/).
+  ['frame-src', ["'self'"]],
   ['frame-ancestors', ["'self'"]],
   ['object-src', ["'none'"]],
   ['base-uri', ["'self'"]],

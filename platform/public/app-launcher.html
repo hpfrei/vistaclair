@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Vistaclair</title>
+<!-- Theme vars + .app-overlay-* styles for the overlay host loaded below.
+     Linked BEFORE the inline style so the launcher's own :root values win. -->
+<link rel="stylesheet" href="/pro/app-theme.css">
+<link rel="stylesheet" href="/pro/apps.css">
+<style>
+  :root { --bar-h: 34px; --bg: #0c0e12; --fg: #e6e8ec; --muted: #8a909a; --accent: #6aa9ff; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; overflow: hidden; }
+  #bar { height: var(--bar-h); display: flex; align-items: center; gap: 10px;
+    padding: 0 12px; background: #11141a; border-bottom: 1px solid #1d2230; user-select: none; }
+  #bar a.brand { display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
+    color: var(--muted); font-size: 12px; letter-spacing: .02em; }
+  #bar a.brand:hover { color: var(--fg); }
+  #bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); opacity: .85; }
+  #bar .title { color: var(--fg); font-weight: 600; }
+  #bar .spacer { flex: 1; }
+  #bar .mode { font-size: 11px; color: var(--muted); }
+  #wrap { position: absolute; top: var(--bar-h); left: 0; right: 0; bottom: 0; }
+  iframe { width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+  #err { position: absolute; inset: var(--bar-h) 0 0 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px; color: var(--muted); padding: 24px; text-align: center; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <a class="brand" href="https://hpfreilabs.com/vistaclair/" target="_blank" rel="noopener">
+      <span class="dot"></span><span>Vistaclair</span>
+    </a>
+    <span class="title" id="appTitle"></span>
+    <span class="spacer"></span>
+    <span class="mode" id="mode"></span>
+  </div>
+  <div id="wrap"><iframe id="appFrame" allow="clipboard-write; clipboard-read; microphone"></iframe></div>
+  <div id="err">
+    <div>Couldn't load this app.</div>
+    <div id="errDetail" style="font-size:12px"></div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+  var params = new URLSearchParams(location.search);
+  var app = (params.get('app') || '').replace(/[^a-z0-9-]/g, '');
+  var titleEl = document.getElementById('appTitle');
+  var modeEl = document.getElementById('mode');
+  var frame = document.getElementById('appFrame');
+
+  if (!app) {
+    document.getElementById('err').style.display = 'flex';
+    document.getElementById('errDetail').textContent = 'No ?app= specified.';
+    return;
+  }
+  document.title = app + ' · Vistaclair';
+  titleEl.textContent = app;
+  frame.setAttribute('data-app-iframe', app);
+  frame.src = '/apps/' + app + '/';
+
+  // --- Minimal dashboard shim the Bridge relay (app-bridge-client.js) expects.
+  // Provides sendWs over an owner-authenticated WS + the plugin handler registry.
+  var pluginHandlers = [];
+  var state = { ws: null };
+  window.dashboard = {
+    state: state,
+    sendWs: function (msg) { if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(msg)); },
+    escHtml: function (str) {
+      if (typeof str !== 'string') str = String(str);
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    },
+    registerModule: function (prefix, handler) { pluginHandlers.push({ prefix: prefix, handler: handler }); },
+    _pluginHandlers: pluginHandlers,
+    showToast: function (t) {
+      // Best-effort; forward into the app iframe so it can surface its own toast.
+      try { frame.contentWindow.postMessage({ type: 'bridge:event', event: 'toast', data: t }, location.origin); } catch (e) {}
+    },
+  };
+
+  function dispatch(msg) {
+    var best = null;
+    for (var i = 0; i < pluginHandlers.length; i++) {
+      var e = pluginHandlers[i];
+      if (msg.type && msg.type.indexOf(e.prefix) === 0 && (!best || e.prefix.length > best.prefix.length)) best = e;
+    }
+    if (best) best.handler(msg);
+  }
+
+  // --- Try to open the owner WebSocket. Success => Bridge parity (owner cookie
+  // present). Failure (public visitor, no cookie => 1006) => REST-only mode.
+  function connect() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var ws;
+    try { ws = new WebSocket(proto + '//' + location.host); }
+    catch (e) { return restOnly(); }
+    state.ws = ws;
+    var opened = false;
+    ws.onopen = function () {
+      opened = true;
+      modeEl.textContent = 'connected';
+      loadBridgeRelay();
+    };
+    ws.onmessage = function (evt) { try { dispatch(JSON.parse(evt.data)); } catch (e) {} };
+    ws.onclose = function (evt) {
+      if (!opened) { restOnly(); return; }   // never authenticated => public
+      modeEl.textContent = '';
+      state.ws = null;
+      setTimeout(connect, 2000);             // owner reconnect
+    };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
+  }
+
+  var relayLoaded = false;
+  function loadBridgeRelay() {
+    if (relayLoaded) return;
+    relayLoaded = true;
+    var s = document.createElement('script');
+    s.src = '/pro/app-bridge-client.js';
+    document.body.appendChild(s);
+  }
+
+  function restOnly() {
+    state.ws = null;
+    modeEl.textContent = '';   // public: no chrome, no "mode" hint
+  }
+
+  connect();
+
+  // Overlay host for Bridge.confirm()/Bridge.modal(): app-runtime.js posts
+  // app:overlay to the parent and awaits app:overlay:result. Pure postMessage
+  // UI (no server), so load it in owner AND public mode — without it the
+  // app's promise hangs forever.
+  var overlays = document.createElement('script');
+  overlays.src = '/pro/app-overlays.js';
+  document.body.appendChild(overlays);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,243 @@
+/* Vista Mini App. Deliberately does NOT import /pro/app-theme.css: a Mini App
+   is themed by Telegram, which hands the client its palette in --tg-theme-*.
+   The card class names below are exactly what proposal-cards.js emits, so the
+   same descriptor renders here and on the Horst page without either knowing. */
+* { box-sizing: border-box; margin: 0; }
+
+:root {
+  --bg: var(--tg-theme-bg-color, #17212b);
+  --fg: var(--tg-theme-text-color, #f5f5f5);
+  --hint: var(--tg-theme-hint-color, #708499);
+  --accent: var(--tg-theme-button-color, #5288c1);
+  --accent-fg: var(--tg-theme-button-text-color, #fff);
+  --card: var(--tg-theme-secondary-bg-color, #232e3c);
+  --danger: #d05353;
+  --warn: #e6a23c;
+}
+
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+/* The dvh pair matters: Telegram's webview reports a stale 100vh while its
+   header animates, which otherwise leaves the last card under the fold. */
+#app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+
+#topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: var(--card); flex: 0 0 auto;
+}
+#title { font-weight: 600; }
+.pill {
+  font-size: 12px; padding: 3px 10px; border-radius: 999px;
+  background: var(--hint); color: var(--bg); white-space: nowrap; margin-left: 8px;
+}
+.pill.error { background: var(--danger); color: #fff; }
+.pill.ready { background: #4c9a5a; color: #fff; }
+
+#main { flex: 1 1 auto; overflow-y: auto; }
+.pane { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+/* .pane sets display:flex, which outranks the UA's [hidden] rule — without
+   this the two panes render stacked on top of each other. */
+[hidden] { display: none !important; }
+.empty { color: var(--hint); text-align: center; padding: 40px 20px; }
+
+#tabs { flex: 0 0 auto; display: flex; background: var(--card); border-top: 1px solid rgba(255,255,255,.07); }
+#tabs button {
+  flex: 1; background: none; border: 0; color: var(--hint); padding: 8px 4px;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 18px;
+}
+#tabs button span { font-size: 11px; }
+#tabs button.active { color: var(--accent); }
+
+/* --- group headers + bulk ------------------------------------------------- */
+
+.group-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; color: var(--hint); font-size: 13px; font-weight: 600;
+  padding-top: 4px;
+}
+.bulk { display: flex; gap: 6px; flex-wrap: wrap; }
+.bulk button {
+  background: transparent; color: var(--hint); border: 1px solid var(--hint);
+  border-radius: 999px; padding: 4px 10px; font-size: 12px;
+}
+.bulk button.danger { color: var(--danger); border-color: var(--danger); }
+
+/* --- a proposal ----------------------------------------------------------- */
+
+.prop { background: var(--card); border-radius: 10px; padding: 12px; }
+.prop.tappable:active { opacity: .7; }
+.prop-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.prop-kind { font-size: 12px; color: var(--hint); overflow-wrap: anywhere; }
+.prop-age { font-size: 12px; color: var(--hint); white-space: nowrap; }
+.prop.stale .prop-age { color: var(--warn); }
+
+/* Warnings sit ABOVE the card: "you already did this" has to be readable
+   before the buttons are. */
+.prop-prior { font-size: 13px; margin-bottom: 8px; padding: 6px 8px; border-radius: 6px; background: rgba(230,162,60,.15); }
+.prop-note { font-size: 13px; color: var(--hint); margin-bottom: 6px; }
+.prop-source { font-size: 12px; color: var(--hint); margin-bottom: 6px; overflow-wrap: anywhere; }
+.prop-detail { font-size: 13px; color: var(--hint); margin-bottom: 6px; }
+
+.prop-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.prop-actions button {
+  flex: 1 1 40%; padding: 10px; border: 0; border-radius: 8px; font-size: 15px;
+  font-weight: 600; color: var(--accent-fg); background: var(--accent);
+}
+.prop-actions button.ghost { background: transparent; color: var(--hint); border: 1px solid var(--hint); font-weight: 400; }
+.prop-actions button.deny { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+.prop-actions button[disabled] { opacity: .5; }
+
+/* --- the draft → approved diff (originalPayload) -------------------------- */
+
+.prop-diff { margin-top: 10px; font-size: 13px; background: rgba(255,255,255,.05); border-radius: 8px; padding: 8px; }
+.prop-diff > b { display: block; margin-bottom: 6px; font-size: 12px; color: var(--warn); }
+.pd-row { display: grid; grid-template-columns: 1fr; gap: 2px; padding: 4px 0; border-top: 1px solid rgba(255,255,255,.06); }
+.pd-key { color: var(--hint); font-size: 12px; }
+.pd-before { color: var(--hint); text-decoration: line-through; overflow-wrap: anywhere; }
+.pd-after { overflow-wrap: anywhere; }
+
+/* --- the source mail pane ------------------------------------------------- */
+
+.po-source { margin-top: 12px; }
+.po-source-head { font-size: 12px; color: var(--hint); margin-bottom: 6px; }
+.tl-note { font-size: 13px; color: var(--hint); }
+
+/* --- the payload editor --------------------------------------------------- */
+
+.prop-editor { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.me-label { font-size: 12px; color: var(--hint); display: block; margin-bottom: 2px; }
+.sig-check {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--hint); cursor: pointer; white-space: nowrap;
+}
+.sig-check input { accent-color: var(--accent); }
+.me-input, .me-body {
+  width: 100%; background: rgba(0,0,0,.25); color: var(--fg);
+  border: 1px solid rgba(255,255,255,.12); border-radius: 6px; padding: 8px; font: inherit;
+}
+.me-body { min-height: 140px; resize: vertical; }
+.me-note { font-size: 12px; color: var(--hint); }
+
+/* --- mail (read-only) ----------------------------------------------------- */
+
+.mrow { background: var(--card); border-radius: 10px; padding: 10px 12px; }
+.mrow.unread { box-shadow: inset 3px 0 0 var(--accent); }
+.mrow-top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--hint); }
+.mrow-from { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mrow-date { flex: 0 0 auto; }
+.mrow-subj { font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+.mrow.unread .mrow-subj { color: var(--fg); }
+.mrow-snip { font-size: 13px; color: var(--hint); margin-top: 2px; overflow-wrap: anywhere; }
+
+/* --- calendar (read-only) ------------------------------------------------- */
+
+.daynav { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; }
+.daynav button {
+  background: transparent; color: var(--fg); border: 1px solid var(--hint);
+  border-radius: 8px; padding: 4px 14px; font-size: 16px;
+}
+.erow { display: flex; gap: 10px; background: var(--card); border-radius: 10px; padding: 10px 12px; }
+.erow-time { flex: 0 0 auto; font-size: 12px; color: var(--hint); min-width: 92px; }
+.erow-body { min-width: 0; }
+.erow-title { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.erow-loc { display: block; font-size: 12px; color: var(--hint); overflow-wrap: anywhere; }
+
+/* --- the card descriptor (class names from proposal-cards.js) ------------- */
+
+.mail-card { background: rgba(0,0,0,.18); border-radius: 8px; padding: 10px; }
+.mail-card.warn { box-shadow: inset 3px 0 0 var(--warn); }
+.mail-card.danger { box-shadow: inset 3px 0 0 var(--danger); }
+.mail-head { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+.mail-avatar { font-size: 18px; line-height: 1.2; }
+.mail-meta { min-width: 0; }
+.mail-subject { font-weight: 600; overflow-wrap: anywhere; }
+.mail-ref { font-size: 12px; color: var(--hint); margin-top: 2px; }
+.mail-ref.warn { color: var(--warn); }
+
+.mail-row { display: flex; gap: 8px; font-size: 14px; padding: 2px 0; }
+.mail-label { color: var(--hint); flex: 0 0 auto; min-width: 64px; }
+.mail-val { overflow-wrap: anywhere; }
+
+.card-block { margin-top: 8px; }
+.card-block .mail-label { display: block; margin-bottom: 4px; }
+.mail-body {
+  font-size: 14px; max-height: 320px; overflow-y: auto;
+  background: rgba(0,0,0,.2); border-radius: 6px; padding: 8px; overflow-wrap: anywhere;
+}
+.mail-body.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap; }
+.mail-quote { color: var(--hint); }
+.mail-sep { color: var(--hint); }
+
+/* The briefing is the whole pane, not a block inside a card, so it takes the
+   mail body's treatment without the 320px scroll box that would trap it. */
+.brief-body {
+  font-size: 14px; line-height: 1.5; background: rgba(0,0,0,.2);
+  border-radius: 6px; padding: 10px; overflow-wrap: anywhere;
+}
+
+.att-chip {
+  display: inline-block; font-size: 12px; padding: 2px 8px; margin: 2px 4px 2px 0;
+  border-radius: 999px; background: rgba(255,255,255,.1);
+}
+
+/* --- files ---------------------------------------------------------------- */
+
+.fchips { display: flex; gap: 6px; flex-wrap: wrap; }
+.fchip {
+  background: transparent; color: var(--hint); border: 1px solid var(--hint);
+  border-radius: 999px; padding: 4px 10px; font-size: 12px;
+}
+.fchip.active { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.fchip.dim { opacity: .4; }
+
+.frow { display: flex; gap: 10px; align-items: center; background: var(--card); border-radius: 10px; padding: 8px 12px 8px 8px; }
+.frow:active { opacity: .7; }
+.frow.missing { opacity: .6; }
+.frow-thumb {
+  flex: 0 0 auto; width: 48px; height: 48px; border-radius: 6px; overflow: hidden;
+  background: rgba(0,0,0,.2); display: flex; align-items: center; justify-content: center;
+}
+.frow-thumb.icon { font-size: 24px; }
+.frow-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.frow-body { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; }
+.frow-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frow-name { font-size: 12px; color: var(--hint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frow-meta { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--hint); }
+.frow-src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frow-when { flex: 0 0 auto; }
+.frow-gone { font-size: 12px; color: var(--warn); }
+
+.link-back { background: none; border: 0; color: var(--accent); font: inherit; padding: 0 6px 0 0; }
+.file-body { margin: 8px 0; display: flex; flex-direction: column; gap: 8px; }
+.file-full { display: block; width: 100%; height: auto; border-radius: 8px; background: rgba(0,0,0,.2); }
+.file-media { display: block; width: 100%; border-radius: 8px; }
+.prop-actions .file-btn {
+  flex: 1 1 40%; padding: 10px; border-radius: 8px; font-size: 15px; font-weight: 600;
+  color: var(--accent-fg); background: var(--accent); text-align: center; text-decoration: none;
+}
+.sib-chip {
+  display: inline-block; font-size: 12px; padding: 4px 10px; margin: 2px 4px 2px 0;
+  border: 0; border-radius: 999px; background: rgba(255,255,255,.1); color: var(--fg);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sib-chip.active { background: var(--accent); color: var(--accent-fg); }
+
+/* --- in-page confirm sheet (when Telegram's showConfirm is unavailable) ---- */
+
+.confirm-backdrop {
+  position: fixed; inset: 0; z-index: 50; padding: 16px;
+  background: rgba(0, 0, 0, .45);
+  display: flex; align-items: center; justify-content: center;
+}
+.confirm-sheet {
+  width: min(400px, 100%); max-height: 80vh; overflow-y: auto;
+  background: var(--card); color: var(--fg); border-radius: 12px; padding: 16px;
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, .6);
+}
+.confirm-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.confirm-sheet .prop-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

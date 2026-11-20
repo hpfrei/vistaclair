@@ -150,12 +150,9 @@
     -webkit-text-fill-color: var(--text);
   }
   .header-actions { padding-bottom: 0; gap: 6px; }
-  /* Restart lives in the "More" sheet; Pro chrome (subscription,
-     update, spend pill) is out of scope on phones. */
+  /* Restart lives in the "More" sheet; the spend pill is out of scope
+     on phones. */
   .header-actions .restart-server-btn,
-  .header-actions .pro-header-btn,
-  .header-actions .pro-check-btn,
-  .header-actions .pro-update-btn,
   .header-actions .spend-pill {
     display: none !important;
   }

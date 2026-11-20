@@ -58,9 +58,6 @@
     <div id="toastContainer" class="toast-container"></div>
     <div class="header-actions">
       <button id="toastBellBtn" class="toast-bell-btn" title="Notifications">&#128276;<span id="toastBadge" class="toast-badge hidden">0</span></button>
-      <button id="proCheckBtn" class="pro-check-btn" style="display:none" title="Check now whether a new pro version is available">&#8635; Check</button>
-      <button id="proUpdateBtn" class="pro-update-btn" style="display:none" title="Update pro to latest version">&#8593; Update</button>
-      <button id="proHeaderBtn" class="pro-header-btn" title="VistaClair Pro">PRO</button>
       <button class="restart-server-btn" id="restartServerBtn" title="Restart vistaclair server">&#8635; Restart</button>
       <button id="claudeAuthPill" class="claude-auth-pill hidden" type="button" title="Claude sign-in"></button>
       <span id="status" class="status disconnected">disconnected</span>
@@ -785,112 +782,6 @@ jq -r '.tool_input.command' |
   </div>
 
 
-  <!-- Pro Teaser Modal -->
-  <div id="proModal" class="pro-modal-backdrop" style="display:none">
-    <div class="pro-modal">
-      <button class="pro-modal-close" id="proModalClose">&times;</button>
-      <div class="pro-teaser">
-        <div class="pro-teaser-icon">
-          <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-        </div>
-        <h2 class="pro-teaser-title">VistaClair Pro</h2>
-        <p class="pro-teaser-desc">Build and run AI-powered apps inside VistaClair. Each app gets a full GUI, shell access, file I/O, and Claude CLI integration.</p>
-        <div class="pro-teaser-features">
-          <div class="pro-feature-card">
-            <strong>AI Pentester</strong>
-            <span>Automated security scanning with AI-powered threat analysis</span>
-          </div>
-          <div class="pro-feature-card">
-            <strong>Custom App Builder</strong>
-            <span>Describe what you want, AI builds the app for you</span>
-          </div>
-          <div class="pro-feature-card">
-            <strong>Shell + Browser Bridge</strong>
-            <span>Apps can run CLI tools, capture screenshots, spawn processes</span>
-          </div>
-        </div>
-        <div class="pro-teaser-activate">
-          <div id="proVariantButtons" class="pro-variant-buttons"></div>
-          <div id="proClaimMsg" class="pro-activate-msg"></div>
-          <div class="pro-key-activate">
-            <div class="pro-key-divider"><span>or activate with a license key</span></div>
-            <div class="pro-key-row">
-              <input type="text" id="proKeyInput" class="pro-key-input" placeholder="HPFR-XXXX-XXXX-XXXX" spellcheck="false" autocomplete="off">
-              <button class="pro-key-btn" id="proKeyBtn">Activate</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div id="subInfoModal" class="pro-modal-backdrop" style="display:none">
-    <div class="pro-modal" style="max-width:440px">
-      <button class="pro-modal-close" id="subInfoClose">&times;</button>
-      <div class="sub-info">
-        <h2 class="sub-info-title">Your Subscription</h2>
-        <div class="sub-info-rows">
-          <div class="sub-info-row">
-            <span class="sub-info-label">Status</span>
-            <span class="sub-info-value sub-info-active" id="subInfoStatus">Active</span>
-          </div>
-          <div class="sub-info-row" id="subInfoProductRow">
-            <span class="sub-info-label">Product</span>
-            <span class="sub-info-value" id="subInfoProduct"></span>
-          </div>
-          <div class="sub-info-row" id="subInfoExpiryRow">
-            <span class="sub-info-label">Renews</span>
-            <span class="sub-info-value" id="subInfoExpiry"></span>
-          </div>
-          <div class="sub-info-row" id="subInfoEmailRow">
-            <span class="sub-info-label">Account</span>
-            <span class="sub-info-value" id="subInfoEmail"></span>
-          </div>
-        </div>
-        <div class="sub-info-actions">
-          <a id="subInfoPortalLink" class="sub-info-portal-btn" href="#" target="_blank" style="display:none">Open billing portal</a>
-          <p id="subInfoFallback" class="sub-info-fallback" style="display:none">
-            The billing portal is not available for this license. To manage your subscription, visit
-            <a href="https://app.lemonsqueezy.com/my-orders" target="_blank" rel="noopener">LemonSqueezy My Orders</a>
-            or contact <a href="mailto:support@hpfreilabs.com">support@hpfreilabs.com</a>.
-          </p>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div id="proUpdateModal" class="pro-modal-backdrop" style="display:none">
-    <div class="pro-modal" style="max-width:480px">
-      <button class="pro-modal-close" id="proUpdateClose">&times;</button>
-      <div class="sub-info">
-        <h2 class="sub-info-title">Pro Update</h2>
-        <div class="sub-info-rows">
-          <div class="sub-info-row">
-            <span class="sub-info-label">Installed</span>
-            <span class="sub-info-value" id="updLocalVer"></span>
-          </div>
-          <div class="sub-info-row">
-            <span class="sub-info-label">Latest</span>
-            <span class="sub-info-value" id="updRemoteVer"></span>
-          </div>
-          <div class="sub-info-row">
-            <span class="sub-info-label">Status</span>
-            <span class="sub-info-value" id="updStatusLine"></span>
-          </div>
-        </div>
-        <div id="updWarnings" class="upd-warnings"></div>
-        <label class="upd-lock-row">
-          <input type="checkbox" id="updAllowChk">
-          <span>Allow updating vc-pro on this machine</span>
-        </label>
-        <div class="sub-info-actions">
-          <button class="sub-info-portal-btn" id="updApplyBtn">Update now</button>
-        </div>
-        <div id="updMsg" class="pro-activate-msg"></div>
-      </div>
-    </div>
-  </div>
-
   <div class="footer-gradient-bar">
     <div class="footer-sep" style="left:200px"></div>
     <div class="footer-sep" style="left:400px"></div>
@@ -1037,7 +928,6 @@ jq -r '.tool_input.command' |
   <script src="directories.js"></script>
   <script src="mobile.js"></script>
   <script src="desks.js"></script>
-  <script src="checkout-msg.js"></script>
-  <script src="pro-header.js"></script>
+  <script src="addons-loader.js"></script>
 </body>
 </html>

@@ -9,6 +9,10 @@ docs/api/
 vistaclair-pro/
 vistaclair-apps/
 
+# platform: capability-check scratch dirs, logs
+platform/src/apps/.caps-test-*/
+*.log
+
 # MCP config — contains auth tokens, auto-generated per machine
 .mcp.json
 .mcp.json.bak
