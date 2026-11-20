@@ -85,7 +85,10 @@ a random secret per spawn (`app-manager.getCronSecret`, env
 `VISTACLAIR_CRON_SECRET`; a standalone runner publishes its own as `cronSecret`
 in `.standalone.json`). `app-runner.js` resolves a request carrying
 `x-vistaclair-cron-sig` as owner of that one app, then strips all
-`x-vistaclair-*` headers. `proxyToApp` strips them from every proxied request.
+`x-vistaclair-*` headers. `proxyToApp` strips them from every proxied request. Core's global JSON/urlencoded
+parsers drain the body first; `proxyToApp` then replays `req.rawBody` with a
+matching `Content-Length` (same as the `/s/` byte-proxy) rather than piping the
+spent stream.
 A CLI tab calling `/apps/<name>/api/...` with the internal header resolves as
 owner in-process (my-blog's save flow); an own-process app gets no owner
 credential from the proxy (it never did: cookies and `authorization` are

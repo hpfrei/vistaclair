@@ -185,7 +185,7 @@ test('a throwing handler reaches onSubscriberError with the app and the envelope
   const r = await bus.publish('x', {}, { app: 'a', source: 'app' });
   assert.equal(r.outcome, '→ agenda');
   assert.equal(r.delivered, 2);
-  await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 100 && rec.errors.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual(rec.errors.map((e) => `${e.app}:${e.err.message}`).sort(), ['bad:boom', 'good:later']);
   assert.equal(rec.errors[0].env.kind, 'a:x');
 });

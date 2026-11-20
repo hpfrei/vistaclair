@@ -30,6 +30,16 @@ function proxyToApp(req, res, port, targetPath) {
   // app that must tell platform cron apart uses its own per-app cron signature
   // (platform-cron.js), which cron sends to the app directly, not through here.
   internalHeaders.stripMap(fwd);
+  // Core's host-level json/urlencoded parsers may already have drained the
+  // stream; their verify hook keeps the exact bytes on req.rawBody. Replay
+  // those with a matching Content-Length instead of piping a dead stream.
+  const consumed = req._body === true || req.readableEnded;
+  let raw = null;
+  if (consumed) {
+    raw = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.alloc(0);
+    delete fwd['transfer-encoding'];
+    fwd['content-length'] = String(raw.length);
+  }
   const opts = {
     hostname: 'localhost',
     port,
@@ -44,7 +54,7 @@ function proxyToApp(req, res, port, targetPath) {
   proxyReq.on('error', () => {
     if (!res.headersSent) res.status(502).end();
   });
-  req.pipe(proxyReq, { end: true });
+  if (consumed) proxyReq.end(raw); else req.pipe(proxyReq, { end: true });
 }
 
 // The /apps/<name> dispatcher: in-process router or own-process proxy. Exported
