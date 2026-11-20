@@ -874,6 +874,13 @@
     return { peers: fleet.length, reporting, rows };
   }
 
+  // Read-only sites line of a remote row: `main ● running :8080 · 2 crashes`.
+  function remoteSitesLine(r, cls) {
+    if (!r.sites || !r.sites.length) return '';
+    const parts = r.sites.map((x) => `${escHtml(x.site)} <span class="vc-site-dot ${SITE_DOT[x.state] || 'dim'}"></span>${escHtml(x.state)}${x.port ? ' :' + escHtml(String(x.port)) : ''}${x.crashCount ? ` <span class="warn">${escHtml(String(x.crashCount))} crash${x.crashCount === 1 ? '' : 'es'}</span>` : ''}${x.fence === 'unfenced' ? ' <span class="warn">unfenced</span>' : ''}`);
+    return `<div class="${cls}">sites: ${parts.join(' &middot; ')}</div>`;
+  }
+
   function remoteChipClick(name) {
     hideRemoteTip();
     window.publishModule?.showPublish(name);
@@ -904,7 +911,7 @@
       const job = r.job && r.job.status !== 'done' ? `<div class="vc-remote-tip-sub">${escHtml(r.job.name)}: <span class="${r.job.status === 'failed' ? 'warn' : ''}">${escHtml(r.job.status)}</span>${r.job.error ? ' — ' + escHtml(String(r.job.error).slice(0, 120)) : ''}</div>` : '';
       lines.push(`<div class="vc-remote-tip-row">
         <div class="vc-remote-tip-head"><span class="vc-remote-tip-dot${r.connected ? ' live' : ''}"></span><b>${escHtml(r.peer)}</b><span class="vc-remote-tip-dim">${escHtml(seen)}</span></div>
-        <div class="vc-remote-tip-sub"><code>${escHtml(String(r.commit || '').slice(0, 8) || '—')}</code> · ${rev} · ${health}</div>${job}
+        <div class="vc-remote-tip-sub"><code>${escHtml(String(r.commit || '').slice(0, 8) || '—')}</code> · ${rev} · ${health}</div>${remoteSitesLine(r, 'vc-remote-tip-sub')}${job}
       </div>`);
     }
     const others = fleet.filter((f) => !info.rows.some((r) => r.peer === f.name));
@@ -1054,7 +1061,14 @@
   async function stopAppConfirm(name) {
     const who = stopDependents(name);
     if (who.length && !(await showConfirm(`Stop "${name}"? ${who.join(' and ')} depend on it — their calls fail until it runs again.`, { confirmLabel: 'Stop', danger: true }))) return;
-    toggleApp(name, false);
+    toggleApp(name, false, { stopSites: await askStopSites(name) });
+  }
+
+  // An app with sites keeps them running when it stops; ask whether to stop them too.
+  async function askStopSites(name) {
+    const app = apps.list.find((a) => a.name === name);
+    if (!app || !app.sites || typeof app.sites !== 'object' || !Object.keys(app.sites).length) return false;
+    return showConfirm('Also stop its sites?', { confirmLabel: 'Stop sites too', cancelLabel: 'Keep sites running' });
   }
 
   const APPS_COLS = 11;
@@ -1872,9 +1886,9 @@
     });
 
     // Stop lives here and on the app card — closing the tab never stops an app.
-    panel.querySelector('.app-workspace-power')?.addEventListener('click', () => {
+    panel.querySelector('.app-workspace-power')?.addEventListener('click', async () => {
       const a = apps.list.find(x => x.name === name);
-      if (a?.running) sendWs({ type: 'app:stop', name });
+      if (a?.running) { const stopSites = await askStopSites(name); sendWs(stopSites ? { type: 'app:stop', name, stopSites: true } : { type: 'app:stop', name }); }
       else startFromPanel(name);
     });
     setPanelPower(name, !!app?.running, panel);
@@ -2700,11 +2714,11 @@
     refreshGrid();
   }
 
-  function toggleApp(name, start) {
+  function toggleApp(name, start, opts) {
     const row = document.querySelector(`#view-apps tr.apps-row[data-app="${CSS.escape(name)}"]`);
     const btn = row?.querySelector('.apps-act-toggle');
     if (btn) { btn.disabled = true; btn.textContent = start ? 'Starting...' : 'Stopping...'; }
-    sendWs({ type: start ? 'app:start' : 'app:stop', name });
+    sendWs(!start && opts?.stopSites ? { type: 'app:stop', name, stopSites: true } : { type: start ? 'app:start' : 'app:stop', name });
   }
 
   // With `{ mount, onExit }` the confirmation renders inside `mount` (the
@@ -5416,6 +5430,11 @@
       case 'app:domainCheck':
         if (apps._onDomainCheck) { apps._onDomainCheck(msg); }
         break;
+      case 'app:site:result':
+      case 'app:site':
+      case 'app:site:log':
+        if (apps._onSiteMsg) { apps._onSiteMsg(msg); }
+        break;
       case 'app:configSaved':
         if (apps._onConfigSaved) { apps._onConfigSaved(msg.appName); }
         break;
@@ -6864,6 +6883,7 @@
     { key: 'appmd', label: 'APP.md', icon: 'md', sub: true },
     { key: 'logs', label: 'Logs', sub: true },
     { key: 'config', label: 'Config' },
+    { key: 'sites', label: 'Sites', when: (app) => !!app.sites && typeof app.sites === 'object' && Object.keys(app.sites).length > 0 },
     { key: 'spend', label: 'Spend &amp; permissions' },
     { key: 'git', label: 'Git' },
     { key: 'remote', label: 'Remote' },
@@ -6987,7 +7007,7 @@
     q('banner').innerHTML = banner.join('');
     q('banner').style.display = banner.length ? '' : 'none';
 
-    q('rail').innerHTML = SETTINGS_RAIL.map((r) => {
+    q('rail').innerHTML = SETTINGS_RAIL.filter((r) => !r.when || r.when(app)).map((r) => {
       const icon = S_ICONS[r.icon || r.key];
       return `<button data-sact="tab:${r.key}" class="${[r.sub ? 'sub' : '', r.cls || '', s.tab === r.key ? 'on' : ''].filter(Boolean).join(' ')}"><span class="ico">${icon}</span>${r.label}${settingsRailState(app, r.key)}</button>`;
     }).join('');
@@ -6997,6 +7017,8 @@
     const s = settings;
     if (!s) return;
     if (!SETTINGS_TABS.has(tab)) tab = 'overview';
+    const rail = SETTINGS_RAIL.find((r) => r.key === tab);
+    if (rail?.when && !rail.when(apps.list.find((a) => a.name === s.name) || {})) tab = 'overview';
     try { s.detach?.(); } catch {}
     s.detach = null; s.refresh = null; s.tab = tab;
     try { sessionStorage.setItem(SETTINGS_TAB_KEY, tab); } catch {}
@@ -7142,6 +7164,249 @@
     return { detach: mountAppConfig(name, pane, settings.foot) };
   }
 
+  // Sites: the app's own web servers (docs/sites.md). One section per declared
+  // site, built once; status, log tail, crashes and snapshots then follow the
+  // app:site / app:site:log broadcasts — no polling. Replies carry our reqId.
+  const SITE_DOT = { running: 'ok', starting: 'warn', stopping: 'warn', backoff: 'warn', crashed: 'bad', error: 'bad', stopped: 'dim' };
+  const SITE_LOG_MAX = 200;
+
+  function siteFmtUp(ms) {
+    const s = Math.floor((ms || 0) / 1000);
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+    return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+  }
+
+  function siteFmtClock(t) {
+    try { return new Date(t).toLocaleTimeString(); } catch { return ''; }
+  }
+
+  // One compact status line (state dot, port, uptime, req/s, memory, crashes, fence).
+  function siteStatusLine(st) {
+    const bits = [`<b>${escHtml(st.state)}</b>`];
+    if (st.port) bits.push(`:${st.port}`);
+    if (st.state === 'running') {
+      bits.push(`up ${siteFmtUp(st.uptimeMs)}`, `${st.reqPerSec || 0} req/s`);
+      if (st.mem != null) bits.push(escHtml(formatBytes(st.mem)));
+    }
+    if (st.state === 'backoff' && st.nextRetryAt) bits.push(`retry in ${Math.max(0, Math.round((st.nextRetryAt - Date.now()) / 1000))}s`);
+    if (st.crashCount) bits.push(`<span class="warn">${st.crashCount} crash${st.crashCount === 1 ? '' : 'es'}</span>`);
+    bits.push(st.fence === 'fenced' ? '<span class="ok">fenced</span>' : '<span class="warn">unfenced</span>');
+    return `<span class="vc-site-dot ${SITE_DOT[st.state] || 'dim'}"></span>${bits.join(' &middot; ')}`;
+  }
+
+  function paneSites(name, pane) {
+    pane.innerHTML = paneHead('Sites', 'The app&rsquo;s own web servers. Each runs on its own port as a child of the dashboard and stops with it.')
+      + '<div class="vc-sites" data-sx-root><div class="vc-hint">Loading&hellip;</div></div>';
+    const root = pane.querySelector('[data-sx-root]');
+    const views = new Map();   // site -> { el, st, q }
+    let meta = { fenceMinNode: null, node: '' };
+    let gone = false;
+    let seq = 0;
+    const pending = new Map();
+    const req = (type, extra = {}) => new Promise((resolve) => {
+      const reqId = 'sx' + (++seq);
+      pending.set(reqId, resolve);
+      sendWs({ type, name, reqId, ...extra });
+    });
+
+    const setStatus = (v, st) => {
+      if (!st) return;
+      v.st = st;
+      v.q('status').innerHTML = siteStatusLine(st);
+      const err = v.q('err');
+      err.textContent = st.lastError ? `Last error: ${st.lastError}` : '';
+      err.style.display = st.lastError ? '' : 'none';
+      const fence = v.q('fence');
+      fence.textContent = st.fence === 'unfenced' && meta.fenceMinNode ? `Node ≥ ${meta.fenceMinNode} fences the site (this host runs ${meta.node || 'an older Node'}).` : '';
+      fence.style.display = fence.textContent ? '' : 'none';
+      const live = st.state === 'running' || st.state === 'starting' || st.state === 'backoff' || st.state === 'crashed';
+      v.q('start').disabled = st.state === 'running' || st.state === 'starting' || st.state === 'stopping';
+      v.q('stop').disabled = !live && st.state !== 'error';
+      v.q('restart').disabled = st.state === 'stopping';
+    };
+
+    const setForm = (v, st) => {
+      const f = (k) => v.el.querySelector(`[data-sx-f="${k}"]`);
+      f('port').value = st.port != null ? st.port : '';
+      f('bind').value = st.bind || '127.0.0.1';
+      f('autostart').checked = st.autostart !== false;
+      f('keep').value = st.keep != null ? st.keep : 5;
+      f('domain').value = st.domain || '';
+    };
+
+    const addLines = (v, lines) => {
+      const box = v.q('log');
+      const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+      for (const l of lines || []) {
+        const line = document.createElement('div');
+        line.className = 'vc-site-ll' + (l.level === 'err' || l.level === 'error' ? ' err' : '');
+        line.textContent = `${siteFmtClock(l.t)}  ${l.text}`;
+        box.appendChild(line);
+      }
+      while (box.childElementCount > SITE_LOG_MAX) box.firstElementChild.remove();
+      if (stick) box.scrollTop = box.scrollHeight;
+    };
+
+    const drawCrashes = (v, crashes) => {
+      const el = v.q('crashes');
+      if (!crashes.length) { el.innerHTML = '<div class="vc-hint">No crashes recorded.</div>'; return; }
+      el.innerHTML = crashes.map((c) => `<div class="vc-site-li"><span>${escHtml(new Date(c.at).toLocaleString())}</span><span>${escHtml(c.signal ? `signal ${c.signal}` : `exit ${c.code}`)}${c.uptimeMs != null ? ` after ${escHtml(siteFmtUp(c.uptimeMs))}` : ''}</span>${c.error ? `<code>${escHtml(String(c.error).slice(0, 200))}</code>` : ''}</div>`).join('');
+    };
+
+    const drawSnaps = (v, snaps) => {
+      const el = v.q('snaps');
+      if (!snaps.length) { el.innerHTML = '<div class="vc-hint">No snapshots yet. The app publishes one with <code>ctx.sites.publish</code>.</div>'; return; }
+      el.innerHTML = snaps.map((s) => `<div class="vc-site-li"><span>${escHtml(new Date(s.at).toLocaleString())}${s.active ? ' <b class="ok">active</b>' : ''}</span><span>${s.files} files &middot; ${escHtml(formatBytes(s.bytes))}${s.note ? ' &middot; ' + escHtml(s.note) : ''}</span>${s.active ? '' : `<button class="vc-btn" data-sx-act="rollback" data-sx-id="${escHtml(s.id)}">Rollback</button>`}</div>`).join('');
+    };
+
+    const drawNginx = (v, text) => {
+      v.q('nginx').textContent = text || '';
+      v.q('copy').innerHTML = `<button class="vc-btn" type="button" ${vcAct.attrs('click', 'vcAct.copyText', [text || '', { $: 'this' }])}>Copy</button>`;
+    };
+
+    const loadDetail = async (v) => {
+      const msg = await req('app:site:detail', { site: v.st.site });
+      if (gone || msg.error || !msg.result) return;
+      const d = msg.result;
+      setStatus(v, d.status);
+      drawCrashes(v, d.crashes || []);
+      drawSnaps(v, d.snapshots || []);
+      drawNginx(v, d.nginx);
+      v.q('log').textContent = '';
+      addLines(v, d.logs || []);
+      v.q('log').scrollTop = v.q('log').scrollHeight;
+    };
+
+    const build = (st) => {
+      const el = document.createElement('section');
+      el.className = 'vc-site';
+      el.dataset.site = st.site;
+      const s = escHtml(st.site);
+      el.innerHTML = `
+        <div class="vc-shead"><div><h4>${s}</h4></div>
+          <div class="vc-acts-row"><button class="vc-btn" data-sx-act="start">&#9654; Start</button><button class="vc-btn" data-sx-act="stop">&#9632; Stop</button><button class="vc-btn" data-sx-act="restart">&#8635; Restart</button></div></div>
+        <div class="vc-panel">
+          <div class="vc-row col">
+            <div class="vc-site-status" data-sx="status"></div>
+            <div class="vc-hint warn" data-sx="err" style="display:none"></div>
+            <div class="vc-hint" data-sx="fence" style="display:none"></div>
+          </div>
+          <div class="vc-row col">
+            <div class="vc-site-form">
+              <div class="vc-field"><label>port</label><input type="number" min="1024" max="65535" class="vc-inp" data-sx-f="port"></div>
+              <div class="vc-field"><label>bind</label><select class="vc-inp" data-sx-f="bind"><option value="127.0.0.1">127.0.0.1</option><option value="0.0.0.0">0.0.0.0</option></select></div>
+              <div class="vc-field"><label>keep snapshots</label><input type="number" min="1" max="50" class="vc-inp" data-sx-f="keep"></div>
+              <div class="vc-field"><label>autostart</label><label class="vc-site-check"><input type="checkbox" data-sx-f="autostart"> with the dashboard</label></div>
+              <div class="vc-field vc-site-wide"><label>domain</label><input type="text" class="vc-inp" data-sx-f="domain" placeholder="optional, e.g. www.example.com" autocomplete="off" spellcheck="false"></div>
+            </div>
+            <div><button class="vc-btn signal" data-sx-act="save">Save</button> <span class="vc-hint" data-sx="msg"></span></div>
+          </div>
+          <div class="vc-row col">
+            <span class="vc-lbl">domain &amp; nginx</span>
+            <div class="vc-hint">Optional &mdash; only for a host with a reverse proxy (nginx). The site already serves on its port and at <code>/s/${escHtml(name)}/${s}/</code> on this dashboard.</div>
+            <pre class="vc-code" data-sx="nginx"></pre>
+            <div><span data-sx="copy"></span> <button class="vc-btn" data-sx-act="check">Check</button></div>
+            <div class="vc-hint" data-sx="checkout"></div>
+          </div>
+          <div class="vc-row col"><span class="vc-lbl">log</span><div class="vc-site-log" data-sx="log"></div></div>
+          <div class="vc-row col"><span class="vc-lbl">crashes</span><div data-sx="crashes"></div></div>
+          <div class="vc-row col"><span class="vc-lbl">snapshots</span><div data-sx="snaps"></div></div>
+        </div>`;
+      const q = (k) => (['start', 'stop', 'restart'].includes(k) ? el.querySelector(`[data-sx-act="${k}"]`) : el.querySelector(`[data-sx="${k}"]`));
+      return { el, st, q };
+    };
+
+    const act = async (v, btn) => {
+      const a = btn.dataset.sxAct;
+      const site = v.st.site;
+      const msgEl = v.q('msg');
+      if (a === 'start' || a === 'stop' || a === 'restart') {
+        btn.disabled = true;
+        const m = await req('app:site:' + a, { site });
+        if (gone) return;
+        if (m.error) { msgEl.textContent = m.error; btn.disabled = false; return; }
+        setStatus(v, m.result);
+      } else if (a === 'save') {
+        const f = (k) => v.el.querySelector(`[data-sx-f="${k}"]`);
+        const next = { port: Number(f('port').value), bind: f('bind').value, autostart: f('autostart').checked, keep: Number(f('keep').value), domain: f('domain').value.trim() };
+        const patch = {};
+        for (const k of Object.keys(next)) {
+          const cur = k === 'domain' ? (v.st.domain || '') : v.st[k];
+          if (next[k] !== cur) patch[k] = next[k];
+        }
+        if (!Object.keys(patch).length) { msgEl.textContent = 'No changes.'; return; }
+        btn.disabled = true;
+        msgEl.textContent = 'Saving…';
+        const m = await req('app:site:settings', { site, patch });
+        if (gone) return;
+        btn.disabled = false;
+        if (m.error) { msgEl.textContent = m.error; return; }
+        msgEl.textContent = 'Saved.';
+        setStatus(v, m.result);
+        setForm(v, m.result);
+        loadDetail(v);
+      } else if (a === 'rollback') {
+        btn.disabled = true;
+        const m = await req('app:site:rollback', { site, id: btn.dataset.sxId });
+        if (gone) return;
+        if (m.error) { msgEl.textContent = m.error; btn.disabled = false; return; }
+        loadDetail(v);
+      } else if (a === 'check') {
+        const out = v.q('checkout');
+        btn.disabled = true;
+        out.textContent = 'Checking…';
+        const m = await req('app:site:checkDomain', { site, domain: v.el.querySelector('[data-sx-f="domain"]').value.trim() });
+        if (gone) return;
+        btn.disabled = false;
+        const r = m.result;
+        if (m.error || !r) { out.innerHTML = `<span class="warn">&#9888; ${escHtml(m.error || 'Check failed.')}</span>`; return; }
+        out.innerHTML = `<span class="${r.ok ? 'ok' : 'warn'}">${r.ok ? '&#10003;' : '&#9888;'} ${escHtml(r.text)}</span>`;
+      }
+    };
+
+    root.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-sx-act]');
+      const sec = btn && btn.closest('.vc-site');
+      const v = sec && views.get(sec.dataset.site);
+      if (v) act(v, btn);
+    });
+
+    apps._onSiteMsg = (msg) => {
+      if (gone || msg.appName !== name) return;
+      if (msg.type === 'app:site:result') {
+        const done = pending.get(msg.reqId);
+        if (done) { pending.delete(msg.reqId); done(msg); }
+        return;
+      }
+      const v = views.get(msg.site);
+      if (!v) return;
+      if (msg.type === 'app:site:log') { addLines(v, msg.lines); return; }
+      if (msg.type !== 'app:site') return;
+      setStatus(v, msg.status);
+      if (msg.event === 'site:crashed' || msg.event === 'site:published') loadDetail(v);
+    };
+
+    req('app:sites:list').then((msg) => {
+      if (gone) return;
+      if (msg.error || !msg.result) { root.innerHTML = `<div class="vc-callout bad">${escHtml(msg.error || 'Could not read the sites.')}</div>`; return; }
+      meta = { fenceMinNode: msg.result.fenceMinNode, node: msg.result.node };
+      root.textContent = '';
+      for (const st of msg.result.sites || []) {
+        const v = build(st);
+        views.set(st.site, v);
+        root.appendChild(v.el);
+        setForm(v, st);
+        setStatus(v, st);
+        loadDetail(v);
+      }
+      if (!views.size) root.innerHTML = '<div class="vc-hint">This app declares no sites.</div>';
+    });
+
+    return { detach: () => { gone = true; pending.clear(); if (apps._onSiteMsg) apps._onSiteMsg = null; } };
+  }
+
   function paneSpend(name, pane) {
     pane.innerHTML = paneHead('Spend &amp; permissions', 'What this app may cost you and which platform capabilities it keeps. Policies are yours, stored on this host outside the app folder.')
       + '<div class="vc-spend-host"></div>';
@@ -7222,7 +7487,7 @@
           : r.health === 'unknown' ? 'health unknown' : `<span class="warn">${escHtml(r.health)}</span>`;
         const job = r.job && r.job.status !== 'done' ? `<span>${escHtml(r.job.name)}: <span class="${r.job.status === 'failed' ? 'warn' : ''}">${escHtml(r.job.status)}</span>${r.job.error ? ' — ' + escHtml(String(r.job.error).slice(0, 160)) : ''}</span>` : '';
         return `<div class="vc-row"><i class="apps-slave ${slaveDotState(r)}"></i><div class="t"><b>${escHtml(r.peer)}</b>
-          <span>${escHtml(seen)} &middot; <code>${escHtml(String(r.commit || '').slice(0, 8) || '—')}</code> &middot; ${rev} &middot; ${health}</span>${job}</div>
+          <span>${escHtml(seen)} &middot; <code>${escHtml(String(r.commit || '').slice(0, 8) || '—')}</code> &middot; ${rev} &middot; ${health}</span>${remoteSitesLine(r, 'vc-remote-sites')}${job}</div>
           <button class="vc-btn" data-rm="history" data-peer="${escHtml(r.peer)}" title="Versions this slave keeps — roll back without a new publish">History &amp; rollback</button></div>`;
       });
       stateEl.innerHTML = `<div class="vc-panel vc-remote">${rows.join('')}</div>`;
@@ -7263,7 +7528,7 @@
 
   const SETTINGS_PANES = {
     overview: paneOverview, tools: paneTools, appmd: paneAppMd, logs: paneLogs,
-    config: paneConfig, spend: paneSpend, git: paneGit, remote: paneRemote, danger: paneDanger,
+    config: paneConfig, sites: paneSites, spend: paneSpend, git: paneGit, remote: paneRemote, danger: paneDanger,
   };
 
   // Former per-app modals: their entry points open the matching tab.

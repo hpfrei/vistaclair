@@ -1099,6 +1099,18 @@ Memory and CPU render as side-by-side figures (hero value + area chart + hover c
 - **`manual` mode**: suppresses auto-subscribe for contexts with no app Bridge, or when you already have the data. Feed it via the properties above.
 - **Events**: `sysmon-sample` `{sample}` re-emitted on each tick, so the host page can react (e.g. warn on swap) without its own subscription.
 <!-- /API:DETAIL -->
+<!-- API:DETAIL key=ui-site-status -->
+### `<vc-site-status>` — one site's live state
+
+A compact card for one of your own sites (`manifest.sites`): state dot and label, port, uptime, requests/s, memory, crash count, fenced/unfenced and the last error. It reads `sites.status` on connect and then follows `site:status`, `site:crashed` and `site:published` for its site; it does not poll. Advertise `sites` in the manifest when you use it.
+
+```html
+<vc-site-status site="main"></vc-site-status>
+<vc-site-status site="main" compact></vc-site-status>   <!-- one line -->
+```
+- **Attributes**: `site` (required; the manifest key), `compact` (one line, no error text).
+- **Properties**: `status` (get/set the status object; setting it renders it).
+<!-- /API:DETAIL -->
 <!-- /API:SECTION -->
 
 ## Platform Bus, Governance & Horst Surfaces (Architecture D)
