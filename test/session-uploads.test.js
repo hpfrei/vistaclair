@@ -153,8 +153,8 @@ test('addons.platformTools: the first add-on offering putArtifact and call', () 
   const addons = require('../src/addons');
   assert.strictEqual(addons.platformTools(), null);
   const tools = { putArtifact: async () => ({}), call: async () => ({}) };
-  addons.registerAddon({ contractVersion: addons.CONTRACT_VERSION, id: 'x', platformTools: { putArtifact() {} } });
+  addons.registerAddon({ id: 'x', platformTools: { putArtifact() {} } });
   assert.strictEqual(addons.platformTools(), null);
-  addons.registerAddon({ contractVersion: addons.CONTRACT_VERSION, id: 'y', platformTools: tools });
+  addons.registerAddon({ id: 'y', platformTools: tools });
   assert.strictEqual(addons.platformTools(), tools);
 });

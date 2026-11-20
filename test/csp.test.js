@@ -52,15 +52,15 @@ async function withApp(opts, fn) {
   try { await fn(server); } finally { server.close(); }
 }
 
-test('policy: script-src self (+ documented lemon.js), and the required directives', () => {
+test('policy: script-src self only, and the required directives', () => {
   const policy = csp.buildPolicy();
   const dir = Object.fromEntries(policy.split('; ').map(d => { const [k, ...v] = d.split(' '); return [k, v]; }));
-  // 'self' plus the documented checkout script only.
-  assert.deepStrictEqual(dir['script-src'], ["'self'", 'https://app.lemonsqueezy.com', 'https://assets.lemonsqueezy.com']);
+  // 'self' only: no third-party script origin.
+  assert.deepStrictEqual(dir['script-src'], ["'self'"]);
   assert.deepStrictEqual(dir['object-src'], ["'none'"]);
   assert.deepStrictEqual(dir['base-uri'], ["'self'"]);
   assert.deepStrictEqual(dir['frame-ancestors'], ["'self'"]);
-  assert.deepStrictEqual(dir['frame-src'], ["'self'", 'https://*.lemonsqueezy.com']);
+  assert.deepStrictEqual(dir['frame-src'], ["'self'"]);
   for (const s of ["'self'", 'ws:', 'wss:']) assert.ok(dir['connect-src'].includes(s), `connect-src ${s}`);
   assert.ok(!/unsafe-eval/.test(policy), 'no unsafe-eval');
   assert.ok(!dir['script-src'].includes("'unsafe-inline'"), 'no inline script');
@@ -100,7 +100,7 @@ test('VISTACLAIR_CSP=off sends no header; report-only sends the report-only head
 
 test('an add-on that is not cspReady downgrades the policy to report-only', async () => {
   const addons = require('../src/addons');
-  const base = { contractVersion: addons.CONTRACT_VERSION, clientModules: [{ scripts: ['/x/a.js'] }] };
+  const base = { clientModules: [{ scripts: ['/x/a.js'] }] };
   addons.registerAddon({ ...base, id: 'csp-test-ready', cspReady: true });
   assert.deepStrictEqual(addons.cspBlockers(), []);
   addons.registerAddon({ ...base, id: 'csp-test-legacy' });
@@ -182,31 +182,4 @@ test('no inline on*= handler in generated HTML in public/*.js', () => {
     assert.deepStrictEqual(hits, [], `${f}: inline handler in generated HTML`);
     assert.ok(!/\beval\s*\(|new\s+Function\s*\(|set(Timeout|Interval)\s*\(\s*["'`]/.test(src), `${f}: string eval`);
   }
-});
-
-// The checkout overlay's Checkout.Success message (public/checkout-msg.js):
-// claimed only from a checkout origin, in the expected shape, with a sane id.
-test('checkout message: origin allow-list, shape and order id checks', () => {
-  const { checkoutOrigins, checkoutOrderId } = require('../public/checkout-msg.js');
-  const origins = checkoutOrigins(['https://shop.lemonsqueezy.com/checkout/buy/abc', 'http://plain.example/x', 'not a url']);
-  assert.deepStrictEqual([...origins].sort(), ['https://app.lemonsqueezy.com', 'https://shop.lemonsqueezy.com']);
-  const msg = (origin, data) => ({ origin, data });
-  const ok = { event: 'Checkout.Success', data: { order: { id: 12345 } } };
-  assert.strictEqual(checkoutOrderId(msg('https://shop.lemonsqueezy.com', ok), origins), '12345');
-  assert.strictEqual(checkoutOrderId(msg('https://app.lemonsqueezy.com', { event: 'Checkout.Success', data: { order: { data: { id: 'ord_9-x' } } } }), origins), 'ord_9-x');
-  // Wrong origin: another frame, an opener, the dashboard itself, a look-alike.
-  for (const o of ['https://evil.example', 'http://127.0.0.1:3457', 'https://shop.lemonsqueezy.com.evil.example', 'null', '']) {
-    assert.strictEqual(checkoutOrderId(msg(o, ok), origins), null, o);
-  }
-  // Wrong shape or a bad id.
-  for (const data of [null, 'Checkout.Success', { event: 'Checkout.Closed', data: { order: { id: 1 } } },
-    { event: 'Checkout.Success' }, { event: 'Checkout.Success', data: { order: null } },
-    { event: 'Checkout.Success', data: { order: { id: '1/../../admin' } } },
-    { event: 'Checkout.Success', data: { order: { id: 'x'.repeat(65) } } },
-    { event: 'Checkout.Success', data: { order: { id: -3 } } },
-    { event: 'Checkout.Success', data: { order: { id: 1.5 } } },
-    { event: 'Checkout.Success', data: { order: { id: { toString() { return '1'; } } } } }]) {
-    assert.strictEqual(checkoutOrderId(msg('https://shop.lemonsqueezy.com', data), origins), null, JSON.stringify(data));
-  }
-  assert.strictEqual(checkoutOrderId(msg('https://shop.lemonsqueezy.com', ok), null), null, 'no origins yet');
 });

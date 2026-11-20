@@ -2,9 +2,8 @@
 // openMirrorRun): a run whose orchestrator is an address on another machine,
 // its members ordinary SDK workers whose reports and messages to the
 // orchestrator go to the add-on's deliver(). A fake session manager stands in
-// for the sessions. The last test drives Pro's own peer-remote-slave.js when a
-// Pro checkout is present (VISTACLAIR_PRO_DIR, else <core>/vistaclair-pro);
-// skipped otherwise.
+// for the sessions. The last test drives the platform's peer-remote-slave.js
+// (<core>/platform/src/apps).
 //
 //   node --test test/orchestration-mirror.test.js
 
@@ -225,11 +224,11 @@ test('re-open by key after a restart: the same run and members; deliver goes to 
   assert.notStrictEqual(fresh.runId, run.runId);
 });
 
-// Pro's own slave half against this core (read-only use of a Pro checkout).
-const PRO = process.env.VISTACLAIR_PRO_DIR || path.join(CORE, 'vistaclair-pro');
+// Pro's own slave half against this core (<core>/platform).
+const PRO = path.join(CORE, 'platform');
 const PRO_SLAVE = path.join(PRO, 'src', 'apps', 'peer-remote-slave.js');
 
-test('Pro\'s peer-remote-slave: member.launch reaches launchWorker, a report comes back as rs:msg, member.submit reaches the worker', { skip: !fs.existsSync(PRO_SLAVE) && 'no Pro checkout' }, async () => {
+test('Pro\'s peer-remote-slave: member.launch reaches launchWorker, a report comes back as rs:msg, member.submit reaches the worker', async () => {
   const appsDir = tmpDir('vistaclair-mirror-apps-');
   fs.mkdirSync(path.join(appsDir, 'my-app'));
   fs.writeFileSync(path.join(appsDir, 'my-app', 'manifest.json'), '{}');

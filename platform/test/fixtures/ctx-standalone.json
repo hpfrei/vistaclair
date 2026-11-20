@@ -1,0 +1,282 @@
+{
+  "profile": "standalone",
+  "revoked": [],
+  "hasAuth": false,
+  "members": {
+    "aiPrompt": {
+      "kind": "function"
+    },
+    "aiUsage": {
+      "kind": "function"
+    },
+    "appDir": {
+      "kind": "string"
+    },
+    "appName": {
+      "kind": "string"
+    },
+    "basePath": {
+      "kind": "string"
+    },
+    "broadcaster": {
+      "kind": "object",
+      "keys": {
+        "broadcast": "function"
+      }
+    },
+    "browser": {
+      "kind": "object",
+      "keys": {
+        "screenshot": "function"
+      }
+    },
+    "capabilities": {
+      "kind": "object",
+      "keys": {
+        "has": "function",
+        "list": "function"
+      }
+    },
+    "dataDir": {
+      "kind": "string"
+    },
+    "dbName": {
+      "kind": "getter"
+    },
+    "dbQuery": {
+      "kind": "function"
+    },
+    "detect": {
+      "kind": "function"
+    },
+    "embed": {
+      "kind": "function"
+    },
+    "embeddingInfo": {
+      "kind": "getter"
+    },
+    "ensureSchema": {
+      "kind": "function"
+    },
+    "events": {
+      "kind": "object",
+      "keys": {
+        "declare": "function",
+        "emit": "function",
+        "history": "function"
+      }
+    },
+    "files": {
+      "kind": "object",
+      "keys": {
+        "saveBase64": "function",
+        "serve": "function"
+      }
+    },
+    "geocode": {
+      "kind": "function"
+    },
+    "getDb": {
+      "kind": "function"
+    },
+    "identity": {
+      "kind": "object",
+      "keys": {
+        "hashPassword": "function",
+        "issueLinkCode": "function",
+        "issueSession": "function",
+        "randomToken": "function",
+        "redeemLinkCode": "function",
+        "require": "function",
+        "resolve": "function",
+        "validateInitData": "function",
+        "verifyPassword": "function",
+        "verifySession": "function"
+      }
+    },
+    "image": {
+      "kind": "function"
+    },
+    "isStandalone": {
+      "kind": "boolean"
+    },
+    "jobs": {
+      "kind": "object",
+      "keys": {
+        "cancel": "function",
+        "get": "function",
+        "list": "function",
+        "prune": "function",
+        "remove": "function",
+        "start": "function"
+      }
+    },
+    "license": {
+      "kind": "object",
+      "keys": {
+        "entitlement": "function",
+        "products": "function",
+        "refresh": "function",
+        "release": "function",
+        "validate": "function"
+      }
+    },
+    "mediaModels": {
+      "kind": "function"
+    },
+    "memory": {
+      "kind": "object",
+      "keys": {
+        "bySource": "function",
+        "entities": "function",
+        "forget": "function",
+        "history": "function",
+        "recall": "function",
+        "remember": "function",
+        "rememberBatch": "function"
+      }
+    },
+    "music": {
+      "kind": "object",
+      "keys": {
+        "analyze": "function",
+        "generate": "function",
+        "status": "function"
+      }
+    },
+    "notify": {
+      "kind": "function"
+    },
+    "placePhoto": {
+      "kind": "function"
+    },
+    "places": {
+      "kind": "function"
+    },
+    "provisionDb": {
+      "kind": "function"
+    },
+    "route": {
+      "kind": "function"
+    },
+    "routeMatrix": {
+      "kind": "function"
+    },
+    "settings": {
+      "kind": "object",
+      "keys": {
+        "all": "function",
+        "get": "function",
+        "set": "function"
+      }
+    },
+    "sfx": {
+      "kind": "function"
+    },
+    "spendStatus": {
+      "kind": "function"
+    },
+    "sse": {
+      "kind": "object",
+      "keys": {
+        "emit": "function",
+        "handler": "function"
+      }
+    },
+    "streetview": {
+      "kind": "function"
+    },
+    "sysmon": {
+      "kind": "object",
+      "keys": {
+        "arm": "function",
+        "get": "function",
+        "processes": "function"
+      }
+    },
+    "telegram": {
+      "kind": "object",
+      "keys": {
+        "botToken": "function",
+        "call": "function",
+        "configured": "function",
+        "downloadFile": "function",
+        "entryUrl": "function",
+        "isAllowed": "function",
+        "onUpdate": "function",
+        "send": "function",
+        "sendAudio": "function",
+        "sendDocument": "function",
+        "sendPhoto": "function",
+        "status": "function",
+        "webAppUrl": "function"
+      }
+    },
+    "tiles3d": {
+      "kind": "function"
+    },
+    "todos": {
+      "kind": "object",
+      "keys": {
+        "complete": "function",
+        "counts": "function",
+        "create": "function",
+        "delete": "function",
+        "get": "function",
+        "list": "function",
+        "on": "function",
+        "reopen": "function",
+        "similar": "function",
+        "snooze": "function",
+        "subscribe": "function",
+        "update": "function"
+      }
+    },
+    "transcribe": {
+      "kind": "function"
+    },
+    "translate": {
+      "kind": "function"
+    },
+    "tts": {
+      "kind": "function"
+    },
+    "ttsRender": {
+      "kind": "function"
+    },
+    "vectorLiteral": {
+      "kind": "function"
+    },
+    "voiceSample": {
+      "kind": "function"
+    },
+    "webSearch": {
+      "kind": "function"
+    },
+    "whatsapp": {
+      "kind": "object",
+      "keys": {
+        "accessToken": "function",
+        "botToken": "function",
+        "call": "function",
+        "configured": "function",
+        "entryUrl": "function",
+        "isAllowed": "function",
+        "markRead": "function",
+        "media": "object",
+        "onUpdate": "function",
+        "react": "function",
+        "requestLocation": "function",
+        "send": "function",
+        "sendButtons": "function",
+        "sendCta": "function",
+        "sendList": "function",
+        "sendLocation": "function",
+        "sendMedia": "function",
+        "sendPhoto": "function",
+        "status": "function",
+        "webAppUrl": "function"
+      }
+    }
+  }
+}

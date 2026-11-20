@@ -1,0 +1,4 @@
+printer Disabled_One disabled since Thu 19 Nov 2026 07:16:02 PM CET -
+	reason unknown
+printer Busy_One now printing Busy_One-7.  enabled since Thu 19 Nov 2026 07:20:00 PM CET
+system default destination: Busy_One

@@ -1,0 +1,333 @@
+/* VistaClair Platform Theme — apps inherit these variables */
+:root {
+  --bg: #1a1b26;
+  --bg-surface: #24283b;
+  --bg-hover: #2f3348;
+  --bg-selected: #3b4261;
+  --bg-deep: #0a0e17;
+  --border: #414868;
+  --text: #c0caf5;
+  --text-dim: #565f89;
+  --text-bright: #e0e6ff;
+  --accent: #7aa2f7;
+  --green: #9ece6a;
+  --blue: #7aa2f7;
+  --red: #f7768e;
+  --orange: #ff9e64;
+  --purple: #bb9af7;
+  --cyan: #7dcfff;
+  --yellow: #e0af68;
+  --magenta: #ff7eb6;
+  --radius: 6px;
+  --font: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+
+  /* Nightglow: glow colors are tokens so a bright theme can mute them all
+     at once (set them transparent) instead of fighting each effect */
+  --glow-cyan: rgba(125, 207, 255, .45);
+  --glow-accent: rgba(122, 162, 247, .40);
+  --glow-purple: rgba(187, 154, 247, .38);
+  --glow-green: rgba(158, 206, 106, .30);
+  --glow-red: rgba(247, 118, 142, .30);
+}
+
+* { margin: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font);
+  /* Nightglow aurora ground: faint cyan/purple/green washes over --bg */
+  background:
+    radial-gradient(ellipse 70% 50% at 12% -6%, rgba(125, 207, 255, .08), transparent 60%),
+    radial-gradient(ellipse 65% 45% at 88% 0%, rgba(187, 154, 247, .09), transparent 60%),
+    radial-gradient(ellipse 55% 40% at 50% 108%, rgba(158, 206, 106, .05), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* Common components */
+.btn {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn:hover { background: var(--bg-hover); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+
+.btn-primary {
+  background: linear-gradient(115deg, #3d59a1, var(--purple) 135%);
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 2px 12px var(--glow-accent);
+  animation: vc-breathe 3s ease-in-out infinite;
+}
+.btn-primary:hover { filter: brightness(1.15); }
+.btn-primary:disabled { animation: none; box-shadow: none; }
+@keyframes vc-breathe { 50% { box-shadow: 0 2px 20px var(--glow-purple); } }
+
+/* the one irreversible go-button on a screen: Deploy, Go live, Restart */
+.btn-launch {
+  padding: 10px 26px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: #0d1a24;
+  border: none;
+  border-radius: 9px;
+  background: linear-gradient(115deg, var(--cyan), #a6dcff);
+  box-shadow: 0 0 20px var(--glow-cyan);
+  animation: vc-breathe-launch 2.6s ease-in-out infinite;
+  cursor: pointer;
+}
+.btn-launch:hover { box-shadow: 0 0 34px var(--glow-cyan); }
+.btn-launch:disabled { opacity: 0.5; cursor: not-allowed; animation: none; box-shadow: none; }
+@keyframes vc-breathe-launch { 50% { box-shadow: 0 0 32px var(--glow-cyan); } }
+
+.btn-danger {
+  border-color: var(--border);
+}
+.btn-danger:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.form-input {
+  padding: 6px 10px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+}
+.form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.form-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.modal {
+  position: relative;
+  background: var(--bg-surface);
+  border: 1px solid color-mix(in srgb, var(--cyan) 40%, var(--border));
+  border-radius: 10px;
+  padding: 20px 24px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 34px var(--glow-cyan);
+}
+/* HUD corner brackets — high-stakes surfaces only */
+.modal::before, .modal::after {
+  content: '';
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--cyan);
+  pointer-events: none;
+}
+.modal::before { top: 0; left: 0; border-right: none; border-bottom: none; border-top-left-radius: 10px; }
+.modal::after { bottom: 0; right: 0; border-left: none; border-top: none; border-bottom-right-radius: 10px; }
+.modal-title {
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 14px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.status-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); animation: vc-pulse 1.6s ease-in-out infinite; }
+.status-dot.error { background: var(--red); box-shadow: 0 0 6px var(--red); }
+@keyframes vc-pulse { 50% { opacity: 0.5; } }
+.status-dot.idle { background: var(--text-dim); opacity: 0.4; }
+
+table.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+table.data-table th {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 2px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+table.data-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+table.data-table tr:hover td {
+  background: var(--bg-hover);
+}
+
+/* --- Nightglow tab kit (inherited by all apps using .tab / .tab-bar) --- */
+.tab-bar {
+  border-bottom-color: rgba(125, 207, 255, 0.12);
+}
+/* only target .tab inside a .tab-bar so we don't fight unrelated .tab classes */
+.tab-bar > .tab {
+  transition: color 0.15s, border-color 0.15s, background 0.15s, text-shadow 0.15s;
+}
+.tab-bar > .tab:hover {
+  color: var(--text);
+  background: rgba(125, 207, 255, 0.05);
+}
+.tab-bar > .tab.active {
+  color: var(--cyan);
+  border-bottom-color: var(--cyan);
+  text-shadow: 0 0 10px var(--glow-cyan);
+}
+
+/* --- Loading / progress components --- */
+@keyframes vc-spin { to { transform: rotate(360deg); } }
+/* Nightglow reactor spinner: two counter-rotating glowing rings at different
+   periods around a soft core — same single-element markup as before */
+.spinner {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--glow-accent) 0%, transparent 55%);
+}
+.spinner::before, .spinner::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  border: 2.5px solid transparent;
+}
+.spinner::before {
+  inset: 0;
+  border-top-color: var(--cyan);
+  border-right-color: var(--cyan);
+  animation: vc-spin 1.4s linear infinite;
+  filter: drop-shadow(0 0 6px var(--glow-cyan));
+}
+.spinner::after {
+  inset: 22%;
+  border-bottom-color: var(--purple);
+  border-left-color: var(--purple);
+  animation: vc-spin 1.8s linear infinite reverse;
+  filter: drop-shadow(0 0 5px var(--glow-purple));
+}
+.spinner-sm {
+  width: 16px;
+  height: 16px;
+}
+.spinner-sm::before, .spinner-sm::after { border-width: 2px; }
+.spinner-sm::after { display: none; }
+.spinner-lg { width: 64px; height: 64px; }
+.spinner-lg::before, .spinner-lg::after { border-width: 3px; }
+
+@keyframes vc-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-hover) 50%, var(--bg-surface) 75%);
+  background-size: 200% 100%;
+  animation: vc-shimmer 1.4s ease infinite;
+  min-height: 1em;
+}
+
+.progress-bar {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  width: 0;
+  transition: width 0.3s ease;
+}
+.progress-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.empty-state {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* gradient hairline separator */
+.rule-glow {
+  border: 0;
+  height: 1px;
+  width: 100%;
+  background: linear-gradient(90deg, transparent, var(--glow-cyan) 30%, var(--glow-purple) 70%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner::before, .spinner::after, .btn-primary, .btn-launch,
+  .status-dot.ok, .skeleton { animation: none; }
+}

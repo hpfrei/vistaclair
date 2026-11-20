@@ -1,7 +1,7 @@
 /* ============================================================
    VC SURFACE KIT
    Shared token + primitive layer. This is the CANONICAL home of the
-   --vc-* tokens: vistaclair-pro consumes them and adds only its own
+   --vc-* tokens: the platform consumes them and adds only its own
    (--vc-display, --vc-signal, --vcp-*) — pro depends on this file,
    never the other way around.
 

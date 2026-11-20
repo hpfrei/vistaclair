@@ -1,4 +1,4 @@
-// Mid-session spend cut for vistaclair-pro ai.prompt sessions.
+// Mid-session spend cut for platform ai.prompt sessions.
 //
 // Pro's spend gate admits a session up front (ai.prompt → spendGate.authorize)
 // and settles every request's cost from this proxy's interaction:complete

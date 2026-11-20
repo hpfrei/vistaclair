@@ -1,0 +1,2 @@
+printer EPSON_ET_8500_Series is idle.  enabled since Thu Nov 19 19:16:02 2026
+no system default destination

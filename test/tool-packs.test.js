@@ -252,7 +252,7 @@ test('add-ons: descriptor toolPacks register with the add-on and go with removeA
   clearPacks();
   const build = () => ({});
   const { logged } = quietly(() => addons.registerAddon({
-    contractVersion: addons.CONTRACT_VERSION, id: 'pro-test',
+    id: 'pro-test',
     toolPacks: [{ id: 'pro-a', roles: ['plain'], build }, { id: 'broken' }],
   }));
   assert.deepStrictEqual(toolPacks.listToolPacks().map(p => p.id), ['pro-a']);
@@ -387,7 +387,6 @@ test('the add-on ctx: toolPackFeatures and sendToSession in the dashboard profil
   const headless = createAddonCtx({ dataHome: HOME });
   assert.strictEqual(headless.toolPackFeatures, undefined);
   assert.strictEqual(headless.sendToSession, undefined);
-  assert.strictEqual(ctx.contractVersion, 2);
 });
 
 test('the add-on ctx: orchestration in the dashboard profile only, frozen, delegating to core', () => {

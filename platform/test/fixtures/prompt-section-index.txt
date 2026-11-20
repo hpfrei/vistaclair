@@ -1,0 +1,53 @@
+All available at runtime. **(inlined)** = section is in this prompt; **(used here)** = this
+app's code already calls it. For a section not inlined, read `.vistaclair/api/<key>.md`
+BEFORE using it — app-lint checks (`unread-capability`). Advertise what you use in
+`manifest.json` → `capabilities` (`npm run infer:capabilities -- <appDir> --write`).
+
+- `fs` — `fs.read/write/list/exists` — app-directory-scoped file access
+- `exec` — `exec`, `spawn`, `spawn.kill` — shell commands and long-running processes
+- `cron` — per-app `cron.schedule/cancel/list` — persistent recurring jobs
+- `jobs` — `ctx.jobs.start/get/list/cancel`, `job:update` events — reload-resilient work
+- `ai` — `ai.prompt`/`ai.models`/`ai.usage`, `pickModel`, `askAI`, `parseAIResponse`
+- `cli` — `cli.edit`, `cli.workspace` — Claude Code in the app or workspaces
+- `db` — `db.query`, `db.status`, `ctx.dbQuery` — per-app MariaDB
+- `state` — `state.get/set` — small iframe-only preferences; not readable from routes.js
+- `settings` — `settings.get/all` — user configuration (`persist-key`)
+- `secrets` — `secrets.get/set` — encrypted at rest
+- `files` — `ctx.files.saveBase64/serve` — uploads and range-served downloads
+- `http` — `http.fetch` — server-side fetch, private addresses blocked
+- `notify` — `toast.show` / `showToast` — dashboard-level toasts with history
+- `dialogs` — `showConfirm`, `showModal` (host overlays) and `<vc-dialog>` (in-iframe)
+- `tasks` — `tasks.list/kill` — inspect and stop spawned processes
+- `events` — `Bridge.on/subscribe`, `ctx.broadcaster`; bus `ctx.events`/`Bridge.bus`
+- `ui` — `<vc-input-bar>`, `<vc-chat-log>`, `<vc-progress>`, `<vc-dialog>` and more
+- `tools` — register AI-callable tools; `expose: self|platform|apps`
+- `artifacts` — `vc-artifact://` file refs for tool results
+- `identity` — `ctx.identity` — one user across dashboard session and Telegram mini-app
+- `capabilities` — `ctx.capabilities.has/list` — feature-detect this platform
+- `audio` — `ai.transcribe/tts/image/sfx/translate/detect` — speech, sfx, images, i18n
+- `music` — `ai.music.generate/analyze/status` — local MusicGen (optional extra)
+- `maps` — `ai.route/geocode/places/streetview/tiles3d` — Google maps, tiles
+- `web-search` — `ai.webSearch` — live web/news/video search via Brave Search
+- `embeddings` — `embed` — local 384-dim vectors
+- `memory` — `memory.remember/rememberBatch/recall` — shared knowledge store
+- `google` — `auth.google.getToken/accounts` — non-mail Google APIs
+- `email` — `accounts.email.*`, `email.list/get/send/…` — always-synced master mail store
+- `calendar` — `calendar.events/get/create/update/delete` — synced Google Calendar
+- `todos` — `todos.list/create/complete/…` — platform-owned user todos/reminders
+- `browser` — `browser.screenshot` — headless page render
+- `telegram` — `telegram.status/send/…` + Web App (mini-app)
+- `whatsapp` — `whatsapp.status/send/sendButtons/sendList/…`
+- `apps` — `ctx.apps.access(app)` — another app's bot/number/URL front doors; never tokens
+- `licensing` — `manifest.auth.license` + `ctx.license.*` — paid/freemium apps, seats, tiers
+- `platform-cron` — `platform.cron.schedule/list` — cross-app persistent jobs
+- `sysmon` — `sysmon.get/subscribe/processes` — host RAM/CPU/disk/load; `<vc-sysmon>`
+- `print` — `print.status/pdf` — print a PDF on the owner's printer
+- `governance` — `governance.propose/list/decide/registerKind` — the one owner-approval plane
+- `spend` — `spend.status` / `ctx.spendStatus()` — the policy in force
+- `fleet` — `ctx.fleet` — slaves, specs; data publish; remote call / job
+- `config` — Named configurations — platform-side, no app API
+
+Not capabilities, same dir: `api/routes-ctx.md` (routes.js setup, loader ctx, OAuth
+redirect, own-process), `api/toolchains.md` (Android, Blender, Rust, Godot, Unity), `migration.md`
+(code the platform replaces — read it first), `platform-request.md` / `app-request.md`
+(asking for a surface), `scaffolds.md`, `appmd-format.md`, `api-reference.md` (all; large).

@@ -1,4 +1,4 @@
-// Per-session tool gate for vistaclair-pro ai.prompt sessions.
+// Per-session tool gate for platform ai.prompt sessions.
 //
 // Those sessions run headless with --dangerously-skip-permissions, so CLI-level
 // --allowedTools is advisory only. This rule makes the caller's allowedTools an

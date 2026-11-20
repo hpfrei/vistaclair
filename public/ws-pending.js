@@ -1,5 +1,5 @@
 // Holds WebSocket messages that no handler consumed yet, so an add-on whose
-// client module registers late (after the licence check) still gets what the
+// client module registers late (public/addons-loader.js) still gets what the
 // server sent on connect. Pure: the clock is passed in, nothing touches the DOM.
 (function (root) {
   const MAX = 1000;

@@ -52,7 +52,7 @@ async function startApp(t) {
   fs.writeFileSync(path.join(pub, 'pro', 'tg-session', 'page.txt'), 'EXEMPT-PAGE');
 
   const descriptor = {
-    contractVersion: addons.CONTRACT_VERSION, id: 'sec-gate-test',
+    id: 'sec-gate-test',
     authExemptPaths: ['/pro/tg-session'],
     authExemptPatterns: [/^\/apps\/demo\/$/],
   };
@@ -186,7 +186,7 @@ test('upgrade: an exempt add-on path (peer channel) is not Origin-checked; it au
   const s = await startApp(t);
   const seen = [];
   const d = {
-    contractVersion: addons.CONTRACT_VERSION, id: 'sec-gate-peer', authExemptUpgradePaths: ['/api/peer/channel'],
+    id: 'sec-gate-peer', authExemptUpgradePaths: ['/api/peer/channel'],
     handleUpgrade(req, socket) {
       seen.push(req.headers.origin);
       socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
@@ -310,7 +310,7 @@ test('upgrade: any error in the handler destroys the socket instead of leaving i
 
 test('exempt paths: a normal exempt path passes, dot segments never do (unit)', (t) => {
   assert.ok(addons.registerAddon({
-    contractVersion: addons.CONTRACT_VERSION, id: 'sec-gate-exempt',
+    id: 'sec-gate-exempt',
     authExemptPaths: ['/pro/tg-session', '/pro/auth/google/callback'],
     authExemptPatterns: [/^\/apps\/demo\/.*$/],
   }));

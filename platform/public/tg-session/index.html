@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Vistaclair Session</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="tg-session.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <button id="back-btn" class="icon" hidden aria-label="All runs">‹</button>
+    <button id="title-btn" class="title-btn" type="button">
+      <span class="title-row"><span id="title">Vistaclair Session</span><span id="title-caret" hidden>▾</span></span>
+      <span id="status-pill" class="pill">connecting…</span>
+    </button>
+    <div id="run-actions" hidden>
+      <button id="pause-btn" class="small ghost" type="button">⏸ Pause</button>
+      <button id="esc-btn" class="small ghost" type="button" aria-label="Interrupt">Esc</button>
+      <button id="more-btn" class="icon" type="button" aria-label="More">⋯</button>
+    </div>
+  </header>
+
+  <div id="banner" hidden></div>
+
+  <!-- The run picker: the remote sessions' questions no run holds, then one
+       card per orchestrator run. -->
+  <main id="picker" class="view" hidden>
+    <div id="remote-list" hidden></div>
+    <div id="picker-runs"></div>
+  </main>
+
+  <!-- The run view (also hosts the legacy single-session UI). -->
+  <section id="run" class="view" hidden>
+    <details id="workers" hidden>
+      <summary id="workers-summary"></summary>
+      <div id="workers-list"></div>
+    </details>
+    <main id="conversation" aria-live="polite"></main>
+    <button id="new-pill" type="button" hidden>new messages ↓</button>
+    <section id="question-area" hidden></section>
+    <div id="send-note" hidden></div>
+    <footer id="inputbar">
+      <textarea id="msg-input" rows="1" placeholder="Message the orchestrator…" disabled></textarea>
+      <button id="send-btn" type="button" disabled>Send</button>
+    </footer>
+  </section>
+
+  <div id="sheet" hidden><div id="sheet-body"></div></div>
+  <div id="overlay" hidden><div id="overlay-box"><div id="overlay-msg"></div><div id="overlay-actions"></div></div></div>
+</div>
+<script src="/pro/marked.min.js"></script>
+<script src="/pro/purify.min.js"></script>
+<script src="/pro/tg-common/miniapp.js"></script>
+<script src="tg-session.js"></script>
+</body>
+</html>

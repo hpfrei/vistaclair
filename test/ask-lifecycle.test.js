@@ -34,6 +34,13 @@ function tmpDir() {
 // server. `end`: how the call ends (cancel: Claude Code's notifications/cancelled
 // on an interrupt or its MCP tool timeout; stdin: the client process gone).
 async function bridgeCall(end) {
+  // The integrated MCP server needs its own dependencies (installed by the root
+  // `postinstall`, else at first boot). Without them the bridge dies at once and
+  // the fake dashboard would wait forever: fail here, with the fix.
+  const sdk = path.join(CORE, 'mcp-servers', 'integrated', 'node_modules', '@modelcontextprotocol', 'sdk');
+  if (!fs.existsSync(sdk)) {
+    throw new Error('mcp-servers/integrated dependencies are missing (@modelcontextprotocol/sdk, zod): run `npm install` in mcp-servers/integrated (the root `npm install` does it in its postinstall)');
+  }
   let closed = null;
   let arrived = null;
   const asked = new Promise(r => { arrived = r; });
@@ -55,7 +62,7 @@ async function bridgeCall(end) {
     send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } } });
     send({ jsonrpc: '2.0', method: 'notifications/initialized' });
     send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'vista-AskUserQuestion', arguments: { questions: [{ id: 'q', question: 'Ship?' }] } } });
-    const body = await asked;
+    const body = await Promise.race([asked, new Promise((_, rej) => child.on('exit', (code) => rej(new Error(`the MCP bridge exited (code ${code}) before the ask arrived`))))]);
     assert.strictEqual(body.instanceId, 'cli-x');
     assert.strictEqual(closed, null, 'the ask waits');
     if (end === 'cancel') send({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 2, reason: 'interrupted' } });

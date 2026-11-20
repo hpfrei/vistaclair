@@ -1,0 +1,60 @@
+/* VistaSurface landing kit theme. Override the --vs-* custom properties on
+ * :root (or any ancestor of the mount) to brand a landing page; the VistaAuth
+ * card inside inherits color and font from here. */
+:root {
+  --vs-max-width: 420px;
+  --vs-accent: #6aa9ff;
+  --vs-accent-text: #06121f;
+  --vs-text: inherit;
+  --vs-muted: rgba(128, 128, 128, 0.9);
+  --vs-card-bg: rgba(128, 128, 128, 0.08);
+  --vs-card-border: rgba(128, 128, 128, 0.2);
+  --vs-radius: 12px;
+}
+
+.vs-landing {
+  max-width: var(--vs-max-width);
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+  color: var(--vs-text);
+  font: 15px/1.5 system-ui, sans-serif;
+}
+
+.vs-hero { text-align: center; margin-bottom: 20px; }
+.vs-title { margin: 0 0 8px; font-size: 26px; line-height: 1.2; }
+.vs-desc { margin: 0; color: var(--vs-muted); font-size: 14px; }
+
+.vs-btn {
+  display: inline-block;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--vs-accent);
+  color: var(--vs-accent-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  text-align: center;
+  cursor: pointer;
+}
+
+.vs-tg-cta { text-align: center; margin-bottom: 18px; }
+.vs-tg-btn { width: 100%; box-sizing: border-box; }
+.vs-hint { margin: 8px 0 0; color: var(--vs-muted); font-size: 13px; }
+
+.vs-license { margin-top: 28px; }
+.vs-license-title { margin: 0 0 12px; font-size: 18px; text-align: center; }
+.vs-tiers { display: flex; flex-direction: column; gap: 12px; }
+.vs-tier {
+  background: var(--vs-card-bg);
+  border: 1px solid var(--vs-card-border);
+  border-radius: var(--vs-radius);
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.vs-tier-name { font-weight: 600; flex: 1; }
+.vs-tier-meta { color: var(--vs-muted); font-size: 13px; }
+
+.vs-loading, .vs-err { text-align: center; padding: 40px 0; color: var(--vs-muted); }

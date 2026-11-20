@@ -15,12 +15,11 @@
 // timelines.
 //
 // Every field here is contract (Pro spreads the whole object). Add fields
-// additively; removing or reshaping one is a CONTRACT_VERSION bump. The table
-// in vistaclair-pro/CLAUDE.md ("The core ⇄ Pro seam") mirrors this file.
+// additively; removing or reshaping one means updating the platform with it. The table
+// in docs/seam.md ("The core ⇄ Pro seam") mirrors this file.
 
 const path = require('path');
 const crypto = require('crypto');
-const { CONTRACT_VERSION } = require('./addons');
 
 function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
   // The runner boots outside the dashboard and needs core's .env (AUTH_TOKEN,
@@ -37,7 +36,6 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
   const home = dataHome || utils.DATA_HOME;
 
   const shared = {
-    contractVersion: CONTRACT_VERSION,
     headless: !dashboard,
     coreDir: utils.PACKAGE_ROOT,
     dataHome: home,
@@ -300,4 +298,4 @@ function createAddonCtx({ dataHome, loadEnv = false, dashboard = null } = {}) {
   });
 }
 
-module.exports = { createAddonCtx, CONTRACT_VERSION };
+module.exports = { createAddonCtx };

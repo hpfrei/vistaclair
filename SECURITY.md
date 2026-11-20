@@ -36,14 +36,14 @@ Text the dashboard shows can come from an untrusted source (a remote session rel
 | Directive | Sources | Why |
 |---|---|---|
 | `default-src` | `'self'` | Anything not listed below stays same-origin |
-| `script-src` | `'self' https://app.lemonsqueezy.com https://assets.lemonsqueezy.com` | Only the dashboard's own files (all libraries are vendored in `public/vendor/`). No inline script, no `eval`. The one third party is the Pro checkout overlay's `lemon.js`, loaded only on the Pro teaser: served live by LemonSqueezy, so it cannot be pinned or vendored (`app.` redirects to `assets.`) |
+| `script-src` | `'self'` | Only the dashboard's own files (all libraries are vendored in `public/vendor/`). No inline script, no `eval`, no third-party script origin |
 | `style-src` | `'self' 'unsafe-inline' https://fonts.googleapis.com` | Inline style attributes in the UI and in rendered html fences; Monaco, MathJax and xterm inject `<style>`. The Google Fonts stylesheet |
 | `font-src` | `'self' data: https://fonts.gstatic.com` | Vendored and embedded faces, Google Fonts files |
 | `img-src` | `'self' data: blob:` | Pasted / inline images, attachment previews. Remote image URLs are not loaded |
 | `media-src` | `'self' data: blob:` | Audio and video players |
 | `connect-src` | `'self' ws: wss: https://fonts.googleapis.com https://fonts.gstatic.com` | REST and the dashboard WebSocket; the font hosts for the service worker's font cache |
 | `worker-src` | `'self' blob:` | The service worker; Monaco starts its language workers from a blob that loads the vendored worker file |
-| `frame-src` | `'self' https://*.lemonsqueezy.com` | Apps are framed same-origin (`/apps/<name>/`); the checkout overlay |
+| `frame-src` | `'self'` | Apps are framed same-origin (`/apps/<name>/`) |
 | `frame-ancestors` | `'self'` | The dashboard cannot be framed by another site |
 | `object-src` | `'none'` | |
 | `base-uri` | `'self'` | |
