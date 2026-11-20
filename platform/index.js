@@ -101,7 +101,7 @@ const MCP_EXEMPT_PATTERNS = [
 const VC_COMPONENTS = [
   'vc-input-bar', 'vc-chat-log', 'vc-progress', 'vc-empty-state',
   'vc-model-picker', 'vc-media-viewer', 'vc-markdown', 'vc-dialog', 'vc-sysmon',
-  'vc-gauge', 'vc-stage-graph',
+  'vc-gauge', 'vc-stage-graph', 'vc-site-status',
 ];
 
 // Inter-component deps: a single-component request (/pro/vc-<name>.js) also gets
@@ -245,6 +245,10 @@ function init(ctx) {
   // Route-mounted and proxied apps (before static serving)
   router.use('/apps', appsDispatcher(ctx));
 
+  // Sites' byte-proxy (docs/sites.md): /s/<app>/<site>/ → the site's port,
+  // pass-through only, public sites only; anonymous by EXEMPT_RE below.
+  router.use(require('./src/apps/sites-proxy').middleware({ authToken: ctx.authToken }));
+
   router.get('/pro/manifest.json', (req, res) => {
     res.json({ version: '1.0.0', features: ['apps'] });
   });
@@ -379,7 +383,7 @@ function init(ctx) {
   // Live array core reads on every request (vistaclair/src/addons.js iterates the
   // descriptor each time). Mutating it grants/revokes per-app public access with no
   // restart. Per-app surface patterns are layered onto the static MCP patterns.
-  const authExemptPatterns = [...MCP_EXEMPT_PATTERNS];
+  const authExemptPatterns = [...MCP_EXEMPT_PATTERNS, require('./src/apps/sites-proxy').EXEMPT_RE];
 
   // Recompute every per-app exemption from current manifests. Called at startup
   // and whenever an app's config changes (src/apps/index.js app:setConfig).
@@ -388,7 +392,7 @@ function init(ctx) {
   // kit) from the manifest.
   function rebuildPublicExemptions() {
     authExemptPatterns.length = 0;
-    authExemptPatterns.push(...MCP_EXEMPT_PATTERNS);
+    authExemptPatterns.push(...MCP_EXEMPT_PATTERNS, require('./src/apps/sites-proxy').EXEMPT_RE);
     try {
       for (const app of appManager.list()) {
         if (!app) continue;
@@ -497,8 +501,13 @@ function init(ctx) {
     // gate (an older core ignores the field). Everything else falls through to
     // core's dashboard WS.
     authExemptUpgradePaths: [require('./src/apps/peer-channel').CHANNEL_PATH],
+    // Sites' byte-proxy upgrades (/s/<app>/<site>/…): anonymous like the HTTP
+    // side; sites-proxy claims every one and answers 404 unless the site is
+    // public and running (an older core ignores the field: owner-only then).
+    authExemptUpgradePatterns: [require('./src/apps/sites-proxy').EXEMPT_RE],
     handleUpgrade: (req, socket, head) =>
-      require('./src/apps/peer-channel').handleUpgrade(req, socket, head),
+      require('./src/apps/sites-proxy').handleUpgrade(req, socket, head, { authToken: ctx.authToken })
+      || require('./src/apps/peer-channel').handleUpgrade(req, socket, head),
     shutdown,
   };
 }

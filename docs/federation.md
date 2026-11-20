@@ -44,7 +44,7 @@
   is `CHANNEL_PATH`, declared in `authExemptUpgradePaths` so core skips the
   owner gate for it). Slave →
   master flows are read-only, summary-level senses: status snapshots
-  (versions, deployed commits, per-app health), app errors / crash loops,
+  (versions, deployed commits, per-app health and sites, `docs/sites.md`), app errors / crash loops,
   sysmon pressure, terminal peer-job transitions, a daily spend/storage
   summary; the snapshot also carries `claude` (below) and `specs` (hardware, `docs/fleet-specs.md`), and the
   progress of an app's remote jobs (`fr:job`, `docs/fleet-remote.md`), and

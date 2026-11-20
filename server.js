@@ -130,7 +130,7 @@ dashboardApp.use(csp.middleware({ reportOnlyWhen: () => addons.cspBlockers().len
 // X-Hub-Signature-256) can validate against exactly what was sent, since this
 // global parser consumes the stream before per-route express.raw() can run.
 dashboardApp.use(express.json({ limit: '50mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
-dashboardApp.use(express.urlencoded({ extended: false }));
+dashboardApp.use(express.urlencoded({ extended: false, verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 // Owner authentication — one definition (src/auth.js) shared by the HTTP
 // middleware, the WS upgrade, host-local endpoints, and the addon ctx.

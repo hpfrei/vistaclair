@@ -462,6 +462,13 @@ function init(options) {
   // Attributed app failures (runtime errors outside requests, crash loops) —
   // feeds app status, the dashboard and Horst's app:error / app:crashloop senses.
   appGuard.init({ broadcaster });
+  // Sites: children of this process (docs/sites.md); autostarted below.
+  require('./sites').init({
+    broadcast: (m) => broadcaster.broadcast(m),
+    dashboardPort: require('./core-services').core.dashboardPort,
+    proxyPort: require('./core-services').core.proxyPort,
+    isEnabled: (n) => hostConfig.isEnabled(n),
+  });
 
   // --- Spend policy + ledger (admin-owned, under core's dataHome). Every
   // metered platform call is ledgered and gated (spend-gate) wherever it
@@ -655,6 +662,7 @@ function init(options) {
     ensureStorageJob();
     ensureArtifactsJob();
     require('./platform-extras-unity-license').start();
+    await require('./sites').autostartAll().catch(err => console.warn('[sites] autostart failed:', err.message));
     await autostartApps();
     // After autostart, so the copies carry the live tool registry.
     try { require('./doc-copies').bootRefresh(); } catch (err) { console.warn('[apps] doc copies refresh failed:', err.message); }
@@ -1133,7 +1141,7 @@ async function handleMessage(ws, msg, bc) {
       // app may be open in another browser or doing its own work. Shared
       // implementation (app-lifecycle) — the same one the governed app.stop runs.
       case 'app:stop': {
-        appLifecycle.stopApp(msg.name).catch(err => {
+        appLifecycle.stopApp(msg.name, { stopSites: msg.stopSites === true }).catch(err => {
           send({ type: 'app:error', appName: msg.name, error: err.message });
         });
         break;
@@ -1196,6 +1204,27 @@ async function handleMessage(ws, msg, bc) {
           send({ type: 'app:accessInfo', appName: msg.name, info: appManager.accessInfo(msg.name) });
         } catch (err) {
           send({ type: 'app:accessInfo', appName: msg.name, error: err.message });
+        }
+        break;
+      }
+
+      // Sites tab (docs/sites.md): one engine, one dispatcher (sites.ownerAction).
+      // Reads and per-host settings answer the asking socket; state changes
+      // also reach every dashboard as app:site events.
+      case 'app:sites:list':
+      case 'app:site:detail':
+      case 'app:site:checkDomain':
+      case 'app:site:start':
+      case 'app:site:stop':
+      case 'app:site:restart':
+      case 'app:site:settings':
+      case 'app:site:rollback': {
+        const action = msg.type === 'app:sites:list' ? 'list' : msg.type.slice('app:site:'.length);
+        try {
+          const result = await require('./sites').ownerAction(action, msg.name, msg.site, msg);
+          send({ type: 'app:site:result', appName: msg.name, site: msg.site || null, action, reqId: msg.reqId || null, result });
+        } catch (err) {
+          send({ type: 'app:site:result', appName: msg.name, site: msg.site || null, action, reqId: msg.reqId || null, error: err.message });
         }
         break;
       }
@@ -2647,6 +2676,8 @@ async function shutdown() {
   whatsapp.shutdown();
   try { require('./ai-usage').flushAll(); } catch {}
   appBridge.cleanup();
+  // Sites go down with the dashboard (no keeper); stopped first, cleanly.
+  await require('./sites').stopAll().catch(() => {});
   await appDb.cleanup();
   await appManager.cleanupAll();
 }

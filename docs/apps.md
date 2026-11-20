@@ -52,6 +52,10 @@ The Apps table keeps the start-failed state on the app's row and the Runtime
 errors list in its Attention group (detail, Dismiss, Clear all); neither
 offers an AI fix. The table itself is `docs/apps-view.md`.
 
+**Sites.** Besides its dashboard part, an app may declare `sites`: public web servers in
+their own processes on their own ports, children of the dashboard (`sites.md`). Stopping the
+app leaves its sites running unless the owner picks "Stop sites too".
+
 ## GUI-reload resilience (every feature)
 
 Long-running operations persist their status server-side (`ctx.jobs`), are

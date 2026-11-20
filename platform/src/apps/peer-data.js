@@ -34,7 +34,7 @@ function run(cmd, args) {
 // a deploy. Everything else in the app dir is replaced by the archive, so
 // files deleted on the master really disappear here too. .peer-bundles holds
 // the kept code bundles that make rollback possible — it must ride along.
-const CODE_PRESERVE = ['.data', '.settings.json', '.host-config.json', '.state.json', '.env', '.db-config.json', '.secrets_key', '.history', '.peer-backup', '.peer-bundles', 'node_modules'];
+const CODE_PRESERVE = ['.data', '.settings.json', '.host-config.json', '.sites.json', '.state.json', '.env', '.db-config.json', '.secrets_key', '.history', '.peer-backup', '.peer-bundles', 'node_modules'];
 
 // Workspace material (`workspaces/<id>/`, cli.workspace): the tracked half
 // (scripts, small data) rides in the bundle, the untracked half — sources,

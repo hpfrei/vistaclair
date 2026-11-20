@@ -851,6 +851,18 @@ function lint(appDir) {
     }
   }
 
+  // ---- Sites (docs/sites.md): the one validator, sites-manifest.js ----
+  {
+    let manifest = null;
+    try { manifest = JSON.parse(read(path.join(appDir, 'manifest.json')) || 'null'); } catch {}
+    if (manifest && manifest.sites !== undefined) {
+      const r = require('./sites-manifest').validateSites(manifest.sites, { appDir });
+      const mf = path.join(appDir, 'manifest.json');
+      for (const e of r.errors) add('error', 'sites', mf, 0, e);
+      for (const w of r.warnings) add('warn', 'sites', mf, 0, w);
+    }
+  }
+
   // ---- Access level (docs/apps.md "Access levels") ----------------
   // The auth block is the level; the cookieless surface is always `app`. An
   // anonymous /api/app/pub route in a private app is dead (nothing exempts it

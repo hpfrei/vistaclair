@@ -423,6 +423,22 @@ function cleanClaude(cl) {
   };
 }
 
+// A slave's per-app sites summary, reduced to what the master's rows show.
+function cleanSites(apps) {
+  const out = {};
+  for (const a of apps) {
+    if (!Array.isArray(a.sites) || !a.sites.length) continue;
+    out[a.name] = a.sites.slice(0, 20).filter(x => x && /^[a-z][a-z0-9-]{0,30}$/.test(x.site)).map(x => ({
+      site: x.site,
+      state: /^[a-z]{1,16}$/.test(x.state) ? x.state : 'unknown',
+      port: Number.isInteger(x.port) ? x.port : null,
+      crashCount: Number.isInteger(x.crashCount) ? x.crashCount : 0,
+      fence: x.fence === 'fenced' ? 'fenced' : 'unfenced',
+    }));
+  }
+  return out;
+}
+
 function applySnapshot(c, snap) {
   const prev = c.appHealth || {};
   const next = {};
@@ -434,6 +450,7 @@ function applySnapshot(c, snap) {
     }
   }
   c.appHealth = next;
+  c.appSites = cleanSites(apps);
   c.snapshot = {
     at: Date.now(),
     versions: snap.versions || null,
@@ -531,6 +548,7 @@ function fleetState() {
         claude: c?.snapshot?.claude || null,
         specs: c?.snapshot?.specs || null,
         appHealth: c?.appHealth || {},
+        appSites: c?.appSites || {},
         lastJobs: c?.lastJobs || {},
       };
     }),
@@ -695,7 +713,10 @@ async function slaveSnapshot(t) {
       const commit = peerData.deployedCommit(name);
       if (commit) deployed[name] = commit;
       const status = appManager.getAppStatus(name);
-      apps.push({ name, health: status.health || 'unknown', running: status.health === 'ok' || undefined });
+      // per-app sites (docs/sites.md): state only; their settings are edited on this host
+      let sites;
+      try { sites = require('./sites').summary(name); } catch { sites = []; }
+      apps.push({ name, health: status.health || 'unknown', running: status.health === 'ok' || undefined, sites: sites.length ? sites : undefined });
     } catch {
       apps.push({ name, health: 'unknown' });
     }

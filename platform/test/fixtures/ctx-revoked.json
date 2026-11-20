@@ -274,6 +274,21 @@
     "sfx": {
       "kind": "function"
     },
+    "sites": {
+      "kind": "object",
+      "keys": {
+        "config": "function",
+        "list": "function",
+        "onCall": "function",
+        "publish": "function",
+        "restart": "function",
+        "rollback": "function",
+        "snapshots": "function",
+        "start": "function",
+        "status": "function",
+        "stop": "function"
+      }
+    },
     "spendStatus": {
       "kind": "function"
     },

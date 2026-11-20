@@ -14,7 +14,7 @@ module.exports = {
   prefixes: ['apps.'],
   ctx: ['apps'],
   keywords: /\b(another app'?s bot|other apps?'? (bot|number|channel)|cross-app (bot|link|lookup)|showcase|deep ?link|t\.me|wa\.me|qr code)\b/i,
-  summary: '`ctx.apps.access(app)` — another app\'s bot/number/URL front doors; never tokens',
+  summary: '`ctx.apps.access(app)` — another app\'s bot/number/URL; never tokens',
   visibility: { standalone: false },
   revocable: true,
 

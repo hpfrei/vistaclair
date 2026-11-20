@@ -1099,6 +1099,18 @@ Memory and CPU render as side-by-side figures (hero value + area chart + hover c
 - **`manual` mode**: suppresses auto-subscribe for contexts with no app Bridge, or when you already have the data. Feed it via the properties above.
 - **Events**: `sysmon-sample` `{sample}` re-emitted on each tick, so the host page can react (e.g. warn on swap) without its own subscription.
 <!-- /API:DETAIL -->
+<!-- API:DETAIL key=ui-site-status -->
+### `<vc-site-status>` — one site's live state
+
+A compact card for one of your own sites (`manifest.sites`): state dot and label, port, uptime, requests/s, memory, crash count, fenced/unfenced and the last error. It reads `sites.status` on connect and then follows `site:status`, `site:crashed` and `site:published` for its site; it does not poll. Advertise `sites` in the manifest when you use it.
+
+```html
+<vc-site-status site="main"></vc-site-status>
+<vc-site-status site="main" compact></vc-site-status>   <!-- one line -->
+```
+- **Attributes**: `site` (required; the manifest key), `compact` (one line, no error text).
+- **Properties**: `status` (get/set the status object; setting it renders it).
+<!-- /API:DETAIL -->
 <!-- /API:SECTION -->
 
 ## Platform Bus, Governance & Horst Surfaces (Architecture D)
@@ -2502,6 +2514,83 @@ publish a dead link. Errors (`App "<name>" not found`) are thrown/returned like 
 error. This surface is strictly read-only and is available to owner dashboard sessions and
 routes.js `ctx` only (absent from the standalone ctx and from an app the admin revoked it for).
 
+<!-- /API:SECTION -->
+
+<!-- API:SECTION key=sites -->
+### Sites (own web servers)
+
+A **site** is a public web server of your app: its own process on its own port, a child of the
+dashboard (it stops when the dashboard stops or restarts and comes back when it starts — no
+pm2/systemd). The dashboard part of an app always stays behind the owner login; everything the
+outside world reaches goes through a site. nginx (or the dashboard's byte-proxy at
+`/s/<app>/<site>/`) maps a domain onto the site's port.
+
+Declare it in `manifest.json`:
+
+```jsonc
+"sites": {
+  "main": {
+    "handler": "site/index.js",   // a .js file in its OWN directory (not the app root)
+    "defaultPort": 8080,          // 1024–65535, not 3456/3457; the owner may change it per host
+    "bind": "127.0.0.1",          // default; "0.0.0.0" only when no proxy sits in front
+    "autostart": true,            // default true
+    "access": "public",           // required; the only value built today
+    "platform": "none"            // default; "controlled" = may call your registered onCall handlers
+  }
+}
+```
+
+`access` "users" / "vc" and `platform` "loose" are refused as not built yet (`npm run lint:app`).
+
+The handler runs in `platform/site-runner.js`, never in the dashboard, with no platform env
+(no `AUTH_TOKEN`, no provider keys). On Node ≥ 22.13 it is **fenced** (Node's permission
+model): it may read only its handler directory, the app's `node_modules`, `package.json` and
+`.data/sites/<site>/`, write only `.data/sites/<site>/data/`, and spawn no child process or
+worker. Keep everything the site needs inside its directory.
+
+```js
+// site/index.js
+module.exports = function createSite(site) {
+  const serve = site.static();                 // the active snapshot (see publish)
+  return async (req, res) => {
+    if (req.url === '/api/subscribe' && req.method === 'POST') {
+      const body = await readJson(req);          // your own helper
+      const r = await site.call('subscribe', { email: body.email }, { timeoutMs: 5000 });
+      res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify(r));
+    }
+    await serve(req, res);                        // 404 when nothing matches
+  };
+};
+// or return { request(req, res), upgrade(req, socket, head) } to take WebSocket upgrades
+```
+
+The `site` object: `site.content` (active snapshot dir or null), `site.snapshot` (its id),
+`site.static(dir?, { maxAge, immutable, cacheControl, index, fallthrough })` (ETag, ranges,
+304s; refuses `..` and every dotfile; serves only inside `dir`, default the active snapshot —
+switched per request, no restart), `site.config` (live object; `site.onConfig(fn)`),
+`site.call(name, args, { timeoutMs })` (only with `platform: "controlled"`; JSON args ≤ 64 KB,
+result ≤ 256 KB, 60 calls/min per client /24 or /64, default timeout 5 s, max 30 s; rejects
+with `err.code` `platform_none` | `unknown_call` | `too_large` | `rate_limited` |
+`app_stopped` | `timeout`), `site.log.info/warn/error`, `site.dataDir`, `site.port`,
+`site.fenced`. `GET /_vc/id` is answered by the runner (the domain check).
+
+routes.js (`ctx.sites`, in-process apps) and the iframe (`Bridge.call('sites.<m>', { site, … })`):
+
+| ctx | Bridge | |
+|---|---|---|
+| `list()` | `sites.list` | every declared site's status |
+| `status(site)` | `sites.status` | `{ state, pid, port, bind, uptimeMs, mem, reqPerSec, lastError, crashCount, fence: 'fenced'\|'unfenced', snapshot, … }` |
+| `start/stop/restart(site)` | `sites.start/stop/restart` | stopping the app does NOT stop its sites |
+| `config(site[, obj])` | `sites.config` `{ site, config? }` | read / replace `site.config` live |
+| `onCall(name, async (args, { site, ipPrefix }) => result)` | — | the names `site.call` may reach; returns unregister. Register in `setup`. |
+| `publish(site, dir, { note })` | `sites.publish` `{ site, dir, note }` | copies `dir` (iframe: a path inside the app) into a new snapshot and serves it — no restart; symlinks are skipped |
+| `snapshots(site)` | `sites.snapshots` | `[{ id, at, note, files, bytes, active }]`, the owner sets how many are kept (default 5) |
+| `rollback(site, id)` | `sites.rollback` | serve an older snapshot (< 1 s) |
+
+Events (no polling): `site:status`, `site:crashed`, `site:published` — `Bridge.subscribe` in the
+iframe, and on the bus. A crash restarts the site with backoff (1 s … 60 s). `<vc-site-status
+site="main">` (see the UI section) shows a site's live state in your page.
 <!-- /API:SECTION -->
 <!-- API:SECTION key=platform-cron -->
 ### Platform Cron (Persistent Scheduling)

@@ -341,10 +341,12 @@ function createPeerRouter(opts = {}) {
           meta: { peer: true, bundleBytes: fs.statSync(bundlePath).size, commit },
           // The deployed bundle carries manifest.json — a changed `public` flag
           // must reach the auth-exempt patterns now, not at the next restart.
-          run: (job) => peerData.deployCode(name, bundlePath, commit, job).then((result) => {
+          run: (job) => peerData.deployCode(name, bundlePath, commit, job).then(async (result) => {
             if (typeof opts.rebuildPublicExemptions === 'function') {
               try { opts.rebuildPublicExemptions(); } catch {}
             }
+            // Sites restart only where hash(handler dir + lock + runner) changed (docs/sites.md).
+            try { await require('./sites').afterCodeSwap(name); } catch (err) { console.warn(`[sites] after deploy of ${name}:`, err.message); }
             return result;
           }),
         });
@@ -391,12 +393,13 @@ function createPeerRouter(opts = {}) {
       const { id } = appJobs.startJob(name, {
         name: 'peer:rollback',
         meta: { peer: true, commit },
-        run: (job) => peerData.rollbackCode(name, commit, job).then((result) => {
+        run: (job) => peerData.rollbackCode(name, commit, job).then(async (result) => {
           // The restored bundle carries an older manifest.json — a reverted
           // `surfaces`/public flip must reach the auth exemptions now.
           if (typeof opts.rebuildPublicExemptions === 'function') {
             try { opts.rebuildPublicExemptions(); } catch {}
           }
+          try { await require('./sites').afterCodeSwap(name); } catch (err) { console.warn(`[sites] after rollback of ${name}:`, err.message); }
           return result;
         }),
       });
@@ -436,8 +439,11 @@ function createPeerRouter(opts = {}) {
     // to the app would carry core's owner token (x-vistaclair-internal) into
     // app code, so the probe never authenticates against an app.
     const serving = !!(appManager.getMountedRouter(name) || appManager.getRunningApp(name)?.port);
-    const probe = serving ? { ok: status.health === 'ok', source: 'app-manager' } : null;
-    res.json({ ...status, enabled: hostConfig.isEnabled(name), probe });
+    // Publish health includes the app's sites: every autostart site must run.
+    let sites = null;
+    try { sites = require('./sites').health(name); } catch { /* no sites engine */ }
+    const probe = serving ? { ok: status.health === 'ok' && (!sites || sites.ok), source: sites && !sites.ok ? 'sites' : 'app-manager' } : null;
+    res.json({ ...status, enabled: hostConfig.isEnabled(name), probe, sites });
   });
 
   router.get('/jobs/:name/:id', (req, res) => {
