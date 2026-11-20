@@ -3,7 +3,7 @@
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge
 // methods it dispatches (bridge). See src/apps/capabilities.js for the
-// contract and vistaclair-pro/docs/capabilities.md.
+// contract and docs/capabilities.md.
 
 // The tool call a put runs inside (app-tools' AsyncLocalStorage), feature-
 // probed: without it the caller is simply not granted read automatically.

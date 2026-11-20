@@ -224,7 +224,7 @@ function createPeerRouter(opts = {}) {
   // gets a clear error instead.
   router.get('/access', async (req, res) => {
     if (req.query.v !== '2') {
-      return res.status(426).json({ error: 'this slave no longer hands out its dashboard token: update the master (vistaclair-pro) to open its dashboard with a one-time login link' });
+      return res.status(426).json({ error: 'this slave no longer hands out its dashboard token: update the master (vc) to open its dashboard with a one-time login link' });
     }
     let link;
     try { link = await mintLoginLink(); } catch (err) {
@@ -479,7 +479,7 @@ function createPeerRouter(opts = {}) {
   // ---- Fleet data publish (docs/fleet-data.md) -----------------------------
   // The receiver side of the master's fleet-data.js. Every answer of these
   // routes carries a `code`, so a master can tell a refusal from a slave whose
-  // vistaclair-pro predates them (bare 404).
+  // vc predates them (bare 404).
   const fd = (fn) => async (req, res) => {
     const name = appParam(req, res); if (!name) return;
     try {

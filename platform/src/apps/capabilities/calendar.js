@@ -3,7 +3,7 @@
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge
 // methods it dispatches (bridge). See src/apps/capabilities.js for the
-// contract and vistaclair-pro/docs/capabilities.md.
+// contract and docs/capabilities.md.
 
 // Guests are calendar.invite's alone. Attendees on a write make Google mail
 // them (writeQuery: attendees ⇒ sendUpdates=all), which is outward-facing — so

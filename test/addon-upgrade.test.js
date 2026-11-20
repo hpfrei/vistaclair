@@ -57,7 +57,7 @@ function upgrade(port, path, { owner = false } = {}) {
 function addon(t, id, { exempt = [], mode = 'claim', claimPaths = null } = {}) {
   const seen = [];
   const d = {
-    contractVersion: addons.CONTRACT_VERSION, id,
+    id,
     authExemptUpgradePaths: exempt,
     handleUpgrade(req, socket) {
       seen.push(req.url);
@@ -124,7 +124,7 @@ for (const mode of ['false', 'throw']) {
 
 test('exempt path declared by an add-on without handleUpgrade → 401', async (t) => {
   const s = await startServer(t);
-  addons.registerAddon({ contractVersion: addons.CONTRACT_VERSION, id: 't-nohandler', authExemptUpgradePaths: [PEER] });
+  addons.registerAddon({ id: 't-nohandler', authExemptUpgradePaths: [PEER] });
   t.after(() => addons.removeAddon('t-nohandler'));
   const r = await upgrade(s.port, PEER, { owner: true });
   assert.strictEqual(r.status, 401);

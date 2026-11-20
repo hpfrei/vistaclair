@@ -1,5 +1,5 @@
 // <vc-empty-state> — placeholder shown when a list/table/grid has no items.
-// Part of the vistaclair-pro `vc-*` component system. Shadow-DOM, theme-aware,
+// Part of the vistaclair `vc-*` component system. Shadow-DOM, theme-aware,
 // built on vc-core (`Vc.Element`).
 //
 // Usage:

@@ -39,7 +39,7 @@ over HTTP, and nothing new is opened. Two existing links carry it:
 
 A request from a host that is no linked peer of this master is refused
 (`unknown-peer`); a master without the handler answers `no-handler` ("update
-vistaclair-pro on the master").
+vc on the master").
 
 | Slave route (peer-token authed) | Serves |
 |---|---|

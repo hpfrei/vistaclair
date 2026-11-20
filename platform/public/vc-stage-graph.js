@@ -1,6 +1,6 @@
 // <vc-stage-graph> — a multi-step job as plan → progress → receipt in ONE drawing:
 // which steps will run, which are skipped and why, which is active, which are
-// done or failed. Part of the vistaclair-pro `vc-*` component system. Shadow-DOM,
+// done or failed. Part of the vistaclair `vc-*` component system. Shadow-DOM,
 // theme-aware, built on vc-core (`Vc.Element`).
 //
 // Why it exists: apps driving ctx.jobs with named steps all hand-roll this strip

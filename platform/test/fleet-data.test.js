@@ -400,8 +400,8 @@ test('own-process apps are refused, on both sides', async () => {
   await assert.rejects(fleetData.plan('sidecar', 's1', { name: 'x', manifest: { blobs: [b] } }), /own process/);
 });
 
-test('a slave without the routes → "update vistaclair-pro there"; a wrong token is refused', async () => {
-  await assert.rejects(fleetData.plan('world', 'old', { name: 'world-a', manifest: manifestA }), /update vistaclair-pro there/);
+test('a slave without the routes → "update vc there"; a wrong token is refused', async () => {
+  await assert.rejects(fleetData.plan('world', 'old', { name: 'world-a', manifest: manifestA }), /update vc there/);
   await assert.rejects(fleetData.plan('world', 'bad', { name: 'world-a', manifest: manifestA }), /forbidden/);
 });
 

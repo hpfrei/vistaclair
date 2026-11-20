@@ -19,7 +19,7 @@ const platformLogin = require('./platform-login');
 // owner has already seen, so it is journalled and read through an app
 // (ctx.horst.briefing()) instead of landing in this chat.
 //
-// Control capabilities: launch app-change / vistaclair-pro CLI sessions (interaction via the
+// Control capabilities: launch app-change / platform CLI sessions (interaction via the
 // /pro/tg-session/ Mini App, notifications in chat), restart the server, and
 // end a bound session with a safety assessment. While a session is bound,
 // plain messages go to that session — /menu always shows the buttons.
@@ -321,7 +321,7 @@ async function handleCallback(cq) {
       return;
     }
     chatStates.set(chatId, { mode: 'awaiting-pro-prompt' });
-    await reply(chatId, 'Reply with your instruction for the vistaclair-pro CLI.\n\n(Or /cancel to abort.)');
+    await reply(chatId, 'Reply with your instruction for the platform CLI.\n\n(Or /cancel to abort.)');
   } else if (data === 'vc_cancel') {
     chatStates.delete(chatId);
     await reply(chatId, 'Cancelled.', mainKeyboard(chatId));

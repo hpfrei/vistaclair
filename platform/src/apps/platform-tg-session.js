@@ -7,7 +7,7 @@ const tgRuns = require('./platform-tg-runs');
 
 // Telegram-driven CLI sessions for the platform control bot. A chat can bind
 // ONE session Telegram launched itself (an app change flow, or a generic
-// vistaclair-pro CLI); plain chat text is relayed to it. Interaction happens in
+// platform CLI); plain chat text is relayed to it. Interaction happens in
 // the Mini App (/pro/tg-session/); the chat receives push notifications with
 // an "Open session" web_app button. An app change is an orchestration run: its
 // binding records the runId and resolves the run's current orchestrator tab
@@ -69,7 +69,7 @@ function init(options) {
 }
 
 function describeTarget(target) {
-  return target?.type === 'app' ? `app "${target.name}"` : 'vistaclair-pro';
+  return target?.type === 'app' ? `app "${target.name}"` : 'platform';
 }
 
 function getBinding(chatId) {
@@ -164,7 +164,7 @@ function launch(chatId, target, prompt) {
     tabId = 'tg-pro';
     deps.cliSessionManager.launchSession(tabId, {
       cwd: deps.proDir,
-      title: 'TG: vistaclair-pro',
+      title: 'TG: platform',
       prompt,
       autoSubmit: true,
     });
@@ -343,7 +343,7 @@ async function endSession(chatId, { force } = {}) {
 
 // --- Mini App API ---
 
-// Mounted by vistaclair-pro/index.js on the pro router (auth-exempt subtree;
+// Mounted by platform/index.js on the pro router (auth-exempt subtree;
 // every endpoint self-authenticates via initData exchange / bearer token —
 // the shared implementation lives in tg-miniapp-auth.js).
 function mountApi(router) {

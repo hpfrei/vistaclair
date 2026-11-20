@@ -490,7 +490,7 @@ async function installAndroidBuild(id) {
   // wrapper stays machine-independent.
   fs.writeFileSync(ANDROID_ENV, [
     '#!/bin/sh',
-    '# Written by vistaclair-pro platform-extras (android-build). Source, do not run.',
+    '# Written by vistaclair platform-extras (android-build). Source, do not run.',
     `JAVA_HOME=${javaHome}`,
     `ANDROID_HOME=${ANDROID_SDK}`,
     `ANDROID_SDK_ROOT=${ANDROID_SDK}`,
@@ -512,7 +512,7 @@ async function installAndroidBuild(id) {
 function renderBlenderWrapper(ver) {
   return [
     '#!/bin/sh',
-    '# Written by vistaclair-pro platform-extras (blender). The blender apps run.',
+    '# Written by vistaclair platform-extras (blender). The blender apps run.',
     '# VC_BLENDER_VERSION selects another version fetched with bin/blender-fetch.',
     `ROOT=${BLENDER_ROOT}`,
     `VER="\${VC_BLENDER_VERSION:-${ver}}"`,
@@ -533,7 +533,7 @@ function renderBlenderWrapper(ver) {
 function renderBlenderEnv(ver) {
   return [
     '#!/bin/sh',
-    '# Written by vistaclair-pro platform-extras (blender). Source, do not run.',
+    '# Written by vistaclair platform-extras (blender). Source, do not run.',
     `VC_BLENDER_ROOT=${BLENDER_ROOT}`,
     'VC_BLENDER="$VC_BLENDER_ROOT/bin/blender"',
     `VC_BLENDER_VERSION="\${VC_BLENDER_VERSION:-${ver}}"`,
@@ -556,7 +556,7 @@ function renderBlenderEnv(ver) {
 function renderBlenderFetch() {
   return [
     '#!/bin/sh',
-    '# Written by vistaclair-pro platform-extras (blender). Usage: blender-fetch <version>',
+    '# Written by vistaclair platform-extras (blender). Usage: blender-fetch <version>',
     'set -eu',
     `ROOT=${BLENDER_ROOT}`,
     'VER="${1:?usage: blender-fetch <version>, e.g. 5.2.2}"',
@@ -664,7 +664,7 @@ async function installBlender(id) {
 function renderRustEnv() {
   return [
     '#!/bin/sh',
-    '# Written by vistaclair-pro platform-extras (rust). Source, do not run.',
+    '# Written by vistaclair platform-extras (rust). Source, do not run.',
     `VC_RUST_ROOT=${RUST_ROOT}`,
     'RUSTUP_HOME="$VC_RUST_ROOT/rustup"',
     'CARGO_HOME="$VC_RUST_ROOT/cargo"',

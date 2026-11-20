@@ -3,7 +3,7 @@
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge
 // methods it dispatches (bridge). See src/apps/capabilities.js for the
-// contract and vistaclair-pro/docs/capabilities.md.
+// contract and docs/capabilities.md.
 
 // email.modify plus the sugar verbs — thin wrappers over the canonical modify.
 async function modify(app, params, io) {

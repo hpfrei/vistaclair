@@ -3,7 +3,7 @@
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge
 // methods it dispatches (bridge). See src/apps/capabilities.js for the
-// contract and vistaclair-pro/docs/capabilities.md.
+// contract and docs/capabilities.md.
 
 // A file riding along with a governed Telegram message. Kept deliberately
 // narrow: the three things Telegram renders differently, a payload that is

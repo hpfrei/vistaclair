@@ -1,4 +1,4 @@
-// vc-core — shared foundation for the vistaclair-pro `vc-*` Web Component system.
+// vc-core — shared foundation for the vistaclair `vc-*` Web Component system.
 //
 // Every `vc-*` component builds on this. It is idempotent and redefine-guarded:
 // loading it more than once (e.g. an app loads the bundle AND an individual

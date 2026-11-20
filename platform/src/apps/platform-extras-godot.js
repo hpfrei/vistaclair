@@ -63,7 +63,7 @@ const GODOT_DEBS = ['unzip', 'curl'];
 function renderGodotWrapper(ver) {
   return [
     '#!/bin/sh',
-    '# Written by vistaclair-pro platform-extras (godot). The godot apps run.',
+    '# Written by vistaclair platform-extras (godot). The godot apps run.',
     '# Runs versions/$VC_GODOT_VERSION in self-contained mode (._sc_ + editor_data/',
     '# beside the binary: never ~/.local/share/godot).',
     `ROOT=${GODOT_ROOT}`,
@@ -83,7 +83,7 @@ function renderGodotWrapper(ver) {
 function renderGodotEnv(ver, vendorsVer) {
   return [
     '#!/bin/sh',
-    '# Written by vistaclair-pro platform-extras (godot). Source, do not run.',
+    '# Written by vistaclair platform-extras (godot). Source, do not run.',
     '#',
     '# Signed release APK/AAB: the platform holds no release key. The app keeps the',
     '# keystore and passwords in its secrets and calls, before --export-release:',

@@ -367,7 +367,7 @@ function mapError(err, peer, { timedOut } = {}) {
   if (code && SLAVE_CODES[code]) return new RemoteError(SLAVE_CODES[code], W.cleanError(body.error) || code, { slaveCode: code });
   if (code === 'no-job') return new RemoteError('E_REMOTE', W.cleanError(body.error) || code, { slaveCode: code });
   if (err?.status === 404 && !code) {
-    return new RemoteError('E_NO_HANDLER', `vistaclair-pro on "${peer.name}" predates fleet remote calls — update vistaclair-pro there`);
+    return new RemoteError('E_NO_HANDLER', `vc on "${peer.name}" predates fleet remote calls — update vc there`);
   }
   if (!err?.status || err.status === 403 || err.status === 429 || err.status >= 502) {
     return new RemoteError('E_OFFLINE', `slave "${peer.name}" is not reachable: ${W.cleanError(err?.message)}`);

@@ -175,11 +175,11 @@ test('an owner action on an installed extra is a warning naming the peer, not a 
   assert.match(r.detail, /⚠ hetzner-1: Unity licence missing/);
 });
 
-test('a slave without the extras route or without the extra fails with "update vistaclair-pro"', async () => {
+test('a slave without the extras route or without the extra fails with "update vc"', async () => {
   await assert.rejects(publish.ensureToolchains(PEER, ['unity'], { client: fakeSlave({ notFound: true }).client, waitOpts: FAST }),
-    /hetzner-1 cannot report its platform extras \(HTTP 404\) — update vistaclair-pro there/);
+    /hetzner-1 cannot report its platform extras \(HTTP 404\) — update vc there/);
   await assert.rejects(publish.ensureToolchains(PEER, ['unity'], { client: fakeSlave({ extras: {} }).client, waitOpts: FAST }),
-    /hetzner-1 does not know the "unity" extra — update vistaclair-pro there/);
+    /hetzner-1 does not know the "unity" extra — update vc there/);
 });
 
 test('no declared toolchains: nothing is asked of the slave', async () => {

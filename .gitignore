@@ -38,7 +38,7 @@ mcp-servers/blank/
 sessions.json
 mcp-broker/
 
-# vistaclair-pro runtime data: artifact store, tool-job ledger
+# platform runtime data: artifact store, tool-job ledger
 artifacts/
 tool-jobs/
 

@@ -1377,7 +1377,7 @@ const off = ctx.fleet.jobs.on('progress' | 'done', (ev) => {})   // the iframe e
   `ctx.jobs` 256 KB cap applies).
 - Errors (`err.code`): `E_OFFLINE` (not connected), `E_NOT_RUNNING` (the app
   is stopped / not enabled there), `E_NO_HANDLER` (no such `onCall` / `onJob`
-  there — or an older vistaclair-pro there: update it), `E_TIMEOUT`,
+  there — or an older vc there: update it), `E_TIMEOUT`,
   `E_TOO_LARGE` (args > 256 KB, result > 1 MB), `E_REMOTE` (the handler threw;
   `err.message` is its message), `E_REFUSED` (governance, `err.proposalId`).
 - **Who may.** From a route the OWNER requested (the owner's click, or a

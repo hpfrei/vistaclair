@@ -65,7 +65,7 @@ const appTools = require('./app-tools');
 const spendContext = require('./spend-context');
 const { core } = require('./core-services');
 
-const SERVER_INFO = { name: 'vistaclair-pro', version: require('../../../package.json').version };
+const SERVER_INFO = { name: 'vistaclair', version: require('../../../package.json').version };
 // Newest first; initialize echoes the client's version when we support it.
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const DEFAULT_TTL_MIN = 60;

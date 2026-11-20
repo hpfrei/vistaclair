@@ -29,7 +29,7 @@ named by the caller: no cross-app call, no admin surface.
 
 HTTP, slave side, peer-token authed (`/api/peer/fleet-remote/:app`). Every
 answer carries `code`; a bare 404 is a slave that predates the routes → the
-master's `E_NO_HANDLER` "update vistaclair-pro there".
+master's `E_NO_HANDLER` "update vc there".
 
 | Route | Does |
 |---|---|

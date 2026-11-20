@@ -3,7 +3,7 @@
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge
 // methods it dispatches (bridge). See src/apps/capabilities.js for the
-// contract and vistaclair-pro/docs/capabilities.md.
+// contract and docs/capabilities.md.
 //
 // NO horst facet, deliberately (phase 6): Horst never reads secrets — no
 // sense, no tool, no kind. Secrets writes are owner-click-only by doctrine

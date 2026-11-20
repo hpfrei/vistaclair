@@ -1,5 +1,5 @@
 // <vc-chat-log> — scrolling message thread (user / AI bubbles) with auto-scroll
-// and a busy "Thinking…" indicator. Part of the vistaclair-pro `vc-*` system.
+// and a busy "Thinking…" indicator. Part of the vistaclair `vc-*` system.
 // Shadow-DOM, theme-aware, built on vc-core (`Vc.Element`). Pairs naturally
 // with <vc-input-bar>.
 //

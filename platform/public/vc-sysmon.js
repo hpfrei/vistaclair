@@ -1,7 +1,7 @@
 // <vc-sysmon> — live host monitor: RAM/CPU/swap/disk/load with history charts and
 // the top memory consumers on the box.
 //
-// Part of the vistaclair-pro `vc-*` component system. Shadow-DOM, theme-aware,
+// Part of the vistaclair `vc-*` component system. Shadow-DOM, theme-aware,
 // built on vc-core (`Vc.Element`). Backed by the platform sysmon service, so the
 // page does not sample anything itself — it subscribes and draws.
 //

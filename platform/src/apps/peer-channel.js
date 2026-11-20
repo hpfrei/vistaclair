@@ -291,7 +291,7 @@ function answerSlaveRequest(c, msg) {
       : raw;
     try { c.ws?.send(out); } catch {}
   };
-  if (!slaveRequestHandler) return reply({ ok: false, error: { code: 'no-handler', message: 'the master does not serve this request (update vistaclair-pro there)' } });
+  if (!slaveRequestHandler) return reply({ ok: false, error: { code: 'no-handler', message: 'the master does not serve this request (update vc there)' } });
   Promise.resolve()
     .then(() => slaveRequestHandler(c.peer.name, msg.op, msg.args && typeof msg.args === 'object' ? msg.args : {}))
     .then((result) => reply({ ok: true, result: result ?? null }))

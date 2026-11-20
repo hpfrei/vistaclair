@@ -150,7 +150,7 @@ const UNITY_DEBS = ['curl', 'unzip', 'xz-utils', 'cpio', 'p7zip-full', 'util-lin
 function renderUnityWrapper(ver) {
   return [
     '#!/bin/bash',
-    '# Written by vistaclair-pro platform-extras (unity). The unity apps run.',
+    '# Written by vistaclair platform-extras (unity). The unity apps run.',
     '# Runs versions/$VC_UNITY_VERSION/Editor/Unity (-batchmode -nographics friendly).',
     '# The licence comes first (bin/unity-license ensure: a lapsed Personal licence is',
     '# re-activated while the account is still signed in); exit 3 when there is none.',
@@ -176,7 +176,7 @@ function renderUnityWrapper(ver) {
 function renderUnityEnv(ver) {
   return [
     '#!/bin/sh',
-    '# Written by vistaclair-pro platform-extras (unity). Source, do not run.',
+    '# Written by vistaclair platform-extras (unity). Source, do not run.',
     `VC_UNITY_ROOT=${UNITY_ROOT}`,
     `VC_UNITY_VERSION="\${VC_UNITY_VERSION:-${ver}}"`,
     'VC_UNITY="$VC_UNITY_ROOT/bin/unity"',
@@ -211,7 +211,7 @@ const UNITY_LICENSE_MODE = path.join(UNITY_ROOT, 'license-mode');
 function renderUnityLicense() {
   return [
     '#!/bin/bash',
-    '# Written by vistaclair-pro platform-extras (unity). The Unity licence of the user',
+    '# Written by vistaclair platform-extras (unity). The Unity licence of the user',
     '# running it (state in ~/.config/unityhub). No password ever reaches this box.',
     '#   status    print `unity license status --json`; exit 0 active, 3 not',
     '#   account   print `unity auth status --json` (who is signed in)',
@@ -270,7 +270,7 @@ function renderUnityLicense() {
 function renderUnityLogin() {
   return [
     '#!/bin/bash',
-    '# Written by vistaclair-pro platform-extras (unity). One-time owner step: sign in to',
+    '# Written by vistaclair platform-extras (unity). One-time owner step: sign in to',
     '# the Unity account (prints a link: open it in ANY browser within ~5 minutes and',
     '# approve), then activate Unity Personal. Run it as the user the apps run as.',
     'set -eu',
@@ -404,7 +404,7 @@ function renderUnityReadme(ver = UNITY_VERSION, release = UNITY_RELEASES[UNITY_V
   return [
     '# /opt/vistaclair-unity — the `unity` platform extra',
     '',
-    'Written by vistaclair-pro (Apps → Setup → Extras → Unity). Reinstalling rewrites',
+    'Written by vistaclair (Apps → Setup → Extras → Unity). Reinstalling rewrites',
     'everything here except `dl/` and `upm/` (verified downloads) and `keystores/`.',
     '',
     '| Path | What |',

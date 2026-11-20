@@ -224,9 +224,9 @@ test('E_NOT_RUNNING: app not enabled, or enabled but not running on the slave', 
   await rejectsCode(asOwner(() => remote.call('stopped', 's1', 'echo', {})), 'E_NOT_RUNNING', /not running/);
 });
 
-test('E_NO_HANDLER: unknown handler; a slave without the routes says update vistaclair-pro there', async () => {
+test('E_NO_HANDLER: unknown handler; a slave without the routes says update vc there', async () => {
   await rejectsCode(asOwner(() => world.call('s1', 'nope', {})), 'E_NO_HANDLER', /no onCall handler "nope"/);
-  await rejectsCode(asOwner(() => world.call('old', 'echo', {})), 'E_NO_HANDLER', /update vistaclair-pro there/);
+  await rejectsCode(asOwner(() => world.call('old', 'echo', {})), 'E_NO_HANDLER', /update vc there/);
 });
 
 test('E_TIMEOUT: a handler slower than timeoutMs has its signal aborted', async () => {

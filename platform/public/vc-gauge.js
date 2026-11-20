@@ -1,5 +1,5 @@
 // <vc-gauge> — live resource-utilisation meter: a level against a capacity.
-// Part of the vistaclair-pro `vc-*` component system. Shadow-DOM, theme-aware,
+// Part of the vistaclair `vc-*` component system. Shadow-DOM, theme-aware,
 // built on vc-core (`Vc.Element`).
 //
 // Distinct from <vc-progress> on purpose: progress models job COMPLETION

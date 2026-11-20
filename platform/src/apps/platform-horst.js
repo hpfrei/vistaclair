@@ -1,4 +1,4 @@
-// Horst — vc-pro's built-in resident agent (docs/horst.md).
+// Horst — the platform's built-in resident agent (docs/horst.md).
 //
 // Phase 1 spine: chat with persistent threads, versioned directives (hard,
 // guaranteed-injection steering), agenda observations, heartbeat + morning
@@ -6,7 +6,7 @@
 //
 // Placement follows the platform-tg-session.js shape: a first-class pro module
 // (NOT an app in vistaclair-apps), init() from src/apps/index.js after the
-// engines, mountApi() from vistaclair-pro/index.js on the owner-authed router.
+// engines, mountApi() from platform/index.js on the owner-authed router.
 //
 // Storage (v1): plain JSON under APPS_DIR/.horst/ (dot-prefixed → invisible to
 // app-manager list()). Chat must work with only an AI key configured, so the

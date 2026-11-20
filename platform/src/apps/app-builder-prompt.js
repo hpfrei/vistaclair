@@ -724,19 +724,19 @@ function writeCrossAppSidecars(appDir, appName, { files = [], changed = [] } = {
 
 // What produced the copies: the vc version (root package.json) and, from a git
 // checkout, its short sha. Read once per process.
-const PRO_ROOT = path.resolve(__dirname, '..', '..', '..');
-let proVersion = null;
+const VC_ROOT = path.resolve(__dirname, '..', '..', '..');
+let vcVersion = null;
 function platformVersion() {
-  if (proVersion) return proVersion;
+  if (vcVersion) return vcVersion;
   let version = '';
-  try { version = JSON.parse(fs.readFileSync(path.join(PRO_ROOT, 'package.json'), 'utf-8')).version || ''; } catch {}
+  try { version = JSON.parse(fs.readFileSync(path.join(VC_ROOT, 'package.json'), 'utf-8')).version || ''; } catch {}
   let commit = '';
   try {
     commit = require('child_process').execFileSync('git', ['rev-parse', '--short', 'HEAD'],
-      { cwd: PRO_ROOT, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim();
+      { cwd: VC_ROOT, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim();
   } catch {}
-  proVersion = { version, commit };
-  return proVersion;
+  vcVersion = { version, commit };
+  return vcVersion;
 }
 
 // The platform-doc copies in `<appDir>/.vistaclair/`: api/<key>.md,

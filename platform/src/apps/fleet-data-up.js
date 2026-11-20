@@ -196,7 +196,7 @@ async function master(app) {
       masterCache.set(app, info);
       Object.assign(row, info);
     } catch (err) {
-      row.error = err.code === 'no-handler' ? 'update vistaclair-pro on the master' : err.message;
+      row.error = err.code === 'no-handler' ? 'update vc on the master' : err.message;
     }
   }
   return row;
@@ -215,7 +215,7 @@ function masterError(err) {
   if (err.code === 'offline' || err.code === 'disconnected' || err.code === 'timeout') {
     return Object.assign(new Error(`the master is not reachable (${err.code}) — try again when it is connected`), { code: 'E_OFFLINE' });
   }
-  if (err.code === 'no-handler') return Object.assign(new Error('the master does not take data publishes from slaves — update vistaclair-pro there'), { code: err.code });
+  if (err.code === 'no-handler') return Object.assign(new Error('the master does not take data publishes from slaves — update vc there'), { code: err.code });
   return err;
 }
 
@@ -475,7 +475,7 @@ function endpoint(rec, peer) {
       try {
         src = await d('client').download(peer, `${base}/blobs/${sha}?offset=${offset}&length=${length}`, { signal, timeoutMs: 10 * 60 * 1000 });
       } catch (err) {
-        if (err.status === 404 && !err.body?.code) throw d('engine').fatal(`${peer.name} has no fleet data up routes (HTTP 404) — update vistaclair-pro there`);
+        if (err.status === 404 && !err.body?.code) throw d('engine').fatal(`${peer.name} has no fleet data up routes (HTTP 404) — update vc there`);
         throw err;
       }
       if (src.length !== length) {
@@ -503,12 +503,12 @@ async function fetchManifest(peer, app, name, msha) {
   try {
     r = await d('client').call(peer, `/fleet-data-up/${app}/${name}/${msha}/manifest`, { timeoutMs: 2 * 60 * 1000, maxBytes: M.MAX_MANIFEST_BYTES + 1024 * 1024 });
   } catch (err) {
-    if (err.status === 404 && !err.body?.code) throw new UpError(`${peer.name} has no fleet data up routes — update vistaclair-pro there`, 409, 'no-route');
+    if (err.status === 404 && !err.body?.code) throw new UpError(`${peer.name} has no fleet data up routes — update vc there`, 409, 'no-route');
     throw new UpError(`reading the manifest from ${peer.name} failed: ${err.message}`, 409, err.body?.code || 'no-manifest');
   }
   let v;
   try { v = M.validateManifest(r?.manifest); } catch (err) { throw new UpError(err.message, 400, 'bad-manifest'); }
-  if (v.sha !== msha) throw new UpError('the manifest sha256 differs between the slave and this master — both must run a vistaclair-pro with the same manifest format', 400, 'sha-differs');
+  if (v.sha !== msha) throw new UpError('the manifest sha256 differs between the slave and this master — both must run a vc with the same manifest format', 400, 'sha-differs');
   return v;
 }
 

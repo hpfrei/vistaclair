@@ -1,6 +1,6 @@
 # App sessions: standing rules
 
-<!-- Generated from vistaclair-pro src/apps/prompts/_standing-rules.md by
+<!-- Generated from platform/src/apps/prompts/_standing-rules.md by
      `npm run apps:claudemd`. Edit the source there, not this file. -->
 
 You are in one app directory of the vistaclair Apps platform

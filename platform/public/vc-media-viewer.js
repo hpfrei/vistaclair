@@ -1,5 +1,5 @@
 // <vc-media-viewer> — one viewer for image / video / audio / pdf / file, with a
-// zoomable image canvas and an optional gallery. Part of the vistaclair-pro
+// zoomable image canvas and an optional gallery. Part of the vistaclair
 // `vc-*` system. Shadow-DOM, theme-aware, built on vc-core (`Vc.Element`).
 //
 // Two modes:

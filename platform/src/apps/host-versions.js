@@ -1,6 +1,5 @@
-// Software versions of THIS host's vistaclair (core) and vistaclair-pro
-// checkouts, and comparison of a slave's reported versions against the
-// master's. Used by /ping on the slave and by app:peer:test on the master so
+// Software version of THIS host's vistaclair checkout (one repo, one SHA), and
+// comparison of a slave's reported version against the master's. Used by /ping on the slave and by app:peer:test on the master so
 // the GUI can flag a slave running outdated code.
 //
 // "Current" deliberately means "same commit as the master's checkout": the
@@ -12,9 +11,8 @@ const { exec: execCb } = require('child_process');
 
 const execAsync = promisify(execCb);
 
-// This file lives at <core>/platform/src/apps/host-versions.js.
-const PRO_DIR = path.join(__dirname, '..', '..');
-const CORE_DIR = path.join(PRO_DIR, '..');
+// This file lives at <vc>/platform/src/apps/host-versions.js.
+const VC_DIR = path.join(__dirname, '..', '..', '..');
 const SHA_RX = /^[0-9a-f]{7,40}$/i;
 
 async function gitHead(dir) {
@@ -23,10 +21,9 @@ async function gitHead(dir) {
   } catch { return null; }
 }
 
-// { vc: <sha>|null, vcPro: <sha>|null } for this host.
+// { vc: <sha>|null } for this host.
 async function getVersions() {
-  const [vc, vcPro] = await Promise.all([gitHead(CORE_DIR), gitHead(PRO_DIR)]);
-  return { vc, vcPro };
+  return { vc: await gitHead(VC_DIR) };
 }
 
 // Compare one repo: slave's sha vs this host's sha, using this host's history
@@ -53,12 +50,11 @@ async function compareOne(dir, slaveHead, masterHead) {
 }
 
 // slaveVersions is the `versions` object from the slave's /ping (may be absent
-// on slaves too old to report — every repo then compares as 'unknown').
+// on a slave that does not report — it then compares as 'unknown').
 async function compareToSlave(slaveVersions) {
   const mine = await getVersions();
   return {
-    vc: await compareOne(CORE_DIR, slaveVersions?.vc, mine.vc),
-    vcPro: await compareOne(PRO_DIR, slaveVersions?.vcPro, mine.vcPro),
+    vc: await compareOne(VC_DIR, slaveVersions?.vc, mine.vc),
   };
 }
 

@@ -2,7 +2,7 @@
   {
     "id": "spend-guard",
     "name": "Spend Guard",
-    "slug": "Stops a vistaclair-pro ai.prompt session mid-run once its app's or user's spend cap is exhausted (marker file per instanceId written by Pro's spend gate). Sessions without a marker are untouched.",
+    "slug": "Stops a platform ai.prompt session mid-run once its app's or user's spend cap is exhausted (marker file per instanceId written by Pro's spend gate). Sessions without a marker are untouched.",
     "enabled": true,
     "builtin": true
   },

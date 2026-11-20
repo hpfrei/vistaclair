@@ -1,5 +1,5 @@
 // <vc-model-picker> — inline <select> of platform AI models, populated from the
-// bridge (ai.models). Part of the vistaclair-pro `vc-*` system. Shadow-DOM,
+// bridge (ai.models). Part of the vistaclair `vc-*` system. Shadow-DOM,
 // theme-aware, built on vc-core (`Vc.Element`). Use this when you want a model
 // dropdown embedded in your own form. (For a full-screen modal chooser, use the
 // host-rendered window.pickModel().)

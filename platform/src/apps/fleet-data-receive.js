@@ -288,7 +288,7 @@ async function plan(app, { name, manifest: raw, sha: claimed, open = false, dir:
   if (!M.isName(name)) throw new FleetDataError('bad transfer name', 400, 'bad-name');
   let v;
   try { v = M.validateManifest(raw); } catch (err) { throw new FleetDataError(err.message, 400, 'bad-manifest'); }
-  if (claimed && claimed !== v.sha) throw new FleetDataError('manifest sha256 differs from the master\'s — both sides must run a vistaclair-pro with the same manifest format', 400, 'sha-differs');
+  if (claimed && claimed !== v.sha) throw new FleetDataError('manifest sha256 differs from the master\'s — both sides must run a vc with the same manifest format', 400, 'sha-differs');
   const rec = findReceiver(app, name);
   if (!rec) throw new FleetDataError(`app "${app}" has no data receiver for "${name}" here (is it running?)`, 409, 'no-receiver');
   const root = inboxRootFor(app);

@@ -1,4 +1,4 @@
-// <vc-input-bar> — first element of the vistaclair-pro `vc-*` component system.
+// <vc-input-bar> — first element of the vistaclair `vc-*` component system.
 //
 // A reusable prompt input: textarea + microphone (record → ai.transcribe →
 // insert at caret) + send. Shadow-DOM encapsulated so it renders identically in

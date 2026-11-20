@@ -3,7 +3,7 @@
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge
 // methods it dispatches (bridge). See src/apps/capabilities.js for the
-// contract and vistaclair-pro/docs/capabilities.md.
+// contract and docs/capabilities.md.
 //
 // ctx.events is the app's end of the platform bus (agent/horst-events.js):
 // emit/declare publish, subscribe/history receive. Fire-and-forget only —

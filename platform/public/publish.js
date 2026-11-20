@@ -7,7 +7,7 @@
 // Slave side: the Slave-mode pairing card in Setup → Remote (with the remote
 // sessions opt-in, the only control there) and a persistent "SLAVE" badge.
 //
-// Server surface: app:peer:* / app:publish:* WS messages (vistaclair-pro/
+// Server surface: app:peer:* / app:publish:* WS messages (platform/
 // src/apps/publish.js). The publish itself is a persistent server job — while
 // the wizard is open it polls app:publish:status once a second, so a page
 // reload can reattach at any time.
@@ -64,7 +64,7 @@
   // --- Slave software-version display (from app:peer:testResult.versions) ---
 
   function versionsCurrent(v) {
-    return !!v && v.vc?.status === 'current' && v.vcPro?.status === 'current';
+    return !!v && v.vc?.status === 'current';
   }
 
   function fmtVersions(v) {
@@ -75,7 +75,7 @@
       if (r.status === 'behind') return `${label} ${r.behind != null ? r.behind + ' behind' : 'outdated'}`;
       return `${label} ahead of master`;
     };
-    return `${one('vc', v.vc)} · ${one('vc-pro', v.vcPro)}`;
+    return one('vc', v.vc);
   }
 
   // Label + css class for a cached/incoming test result.
@@ -302,7 +302,7 @@
   // slave reports (the Unity licence is per machine).
   function toolchainPlanHtml(m) {
     if (m.error) return `<span class="publish-git bad">${escHtml(m.error)}</span>`;
-    const verb = { present: 'present', install: 'will install', installing: 'installing on the slave', unknown: 'unknown to the slave — update vistaclair-pro there' };
+    const verb = { present: 'present', install: 'will install', installing: 'installing on the slave', unknown: 'unknown to the slave — update vc there' };
     const rows = (m.rows || []).map((r) => {
       const cls = r.state === 'present' ? 'clean' : r.state === 'unknown' ? 'bad' : 'ahead';
       const extra = r.state === 'install' ? ` (${escHtml(r.size || '')})${r.sudoOk ? '' : ' — the slave lacks passwordless sudo, the install will fail'}${r.lastError ? ` — last attempt: ${escHtml(r.lastError)}` : ''}`

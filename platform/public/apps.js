@@ -757,7 +757,7 @@
       ? `It needs a change to the <b>${kind}</b> <code>${name}</code>${inCap}, which ${target} already provides. It must stay backwards compatible.`
       : `It needs a new <b>${kind}</b> <code>${name}</code>${inCap} from ${target}.`;
     const platformNote = platform
-      ? `<div class="vc-fixbar warn"><span>Open starts a Claude session in <b>vistaclair-pro</b> with the request above as its first message. It may edit the platform source, never core and never an app; it runs the full test suite and reports back. The change takes effect only after <b>you</b> restart the control room.</span></div>`
+      ? `<div class="vc-fixbar warn"><span>Open starts a Claude session in <b>platform</b> with the request above as its first message. It may edit the platform source, never core and never an app; it runs the full test suite and reports back. The change takes effect only after <b>you</b> restart the control room.</span></div>`
       : '';
     const today = extend && rec.before?.params?.length
       ? ` It takes <code>${rec.before.params.map(escHtml).join('</code>, <code>')}</code> today.`
@@ -2069,9 +2069,9 @@
             <line x1="320" y1="90" x2="390" y2="90" stroke="var(--text-dim)" stroke-width="1.5" marker-end="url(#arrowhead)"/>
             <text x="355" y="82" text-anchor="middle" fill="var(--text-dim)" font-size="9">loads</text>
 
-            <!-- vistaclair-pro box -->
+            <!-- platform box -->
             <rect x="400" y="30" width="280" height="120" rx="8" fill="none" stroke="#2d7d46" stroke-width="2"/>
-            <text x="540" y="55" text-anchor="middle" fill="#2d7d46" font-weight="700" font-size="14">vistaclair-pro (plugin)</text>
+            <text x="540" y="55" text-anchor="middle" fill="#2d7d46" font-weight="700" font-size="14">platform (add-on module)</text>
             <text x="540" y="78" text-anchor="middle" fill="var(--text-dim)" font-size="11">App Manager &bull; App Bridge</text>
             <text x="540" y="95" text-anchor="middle" fill="var(--text-dim)" font-size="11">DB provisioning &bull; AI proxy</text>
             <text x="540" y="112" text-anchor="middle" fill="var(--text-dim)" font-size="11">Builder prompts &bull; Setup</text>

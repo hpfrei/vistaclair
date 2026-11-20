@@ -57,6 +57,7 @@
     "!platform/test/"
   ],
   "scripts": {
+    "postinstall": "node bin/postinstall.js",
     "start": "node bin/supervisor.js",
     "dev": "node bin/supervisor.js dev",
     "test": "node --test \"test/*.test.js\" \"platform/test/*.test.js\"",

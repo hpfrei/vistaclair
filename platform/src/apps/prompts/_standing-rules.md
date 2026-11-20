@@ -1,7 +1,7 @@
 ### Scope
 
 - Modify files only inside this app's directory. Never read or write
-  vistaclair-pro source, other apps, or anything outside the cwd.
+  platform source, other apps, or anything outside the cwd.
 - The one exception: appending a line to `../PLATFORM_GAPS.md` when the
   platform lacks something you need. Append only, never rewrite.
 - Never start, stop, restart or kill the app or any other process. Lifecycle

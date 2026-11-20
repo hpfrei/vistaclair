@@ -5,9 +5,9 @@
 // versioned descriptor returned by each add-on's init(core). The only thing the
 // composition root (server.js) knows by name is the add-on it loads: ./platform.
 //
-// Descriptor shape (contractVersion CONTRACT_VERSION):
+// Descriptor shape:
 //   {
-//     contractVersion, id,
+//     id,
 //     router,                 // express.Router mounted after auth
 //     clientModules: [{ styles, scripts }],
 //     cspReady: true,         // optional; the client modules run under the
@@ -31,23 +31,16 @@
 //     _module,                 // raw module handle
 //   }
 //
-// Additive fields (toolPacks here, registerToolPack on the ctx) do not change
-// CONTRACT_VERSION: an add-on that omits them is unaffected, and one that
-// wants them feature-detects (`typeof ctx.registerToolPack === 'function'`).
+// Fields are additive: an add-on that omits one is unaffected, and one that
+// wants a ctx field feature-detects it (`typeof ctx.registerToolPack === 'function'`).
 
 const toolPacks = require('./tool-packs');
 const { originAllowed: defaultOriginAllowed } = require('./auth');
-
-const CONTRACT_VERSION = 2;
 
 const addons = [];
 
 function registerAddon(descriptor) {
   if (!descriptor) return null;
-  if (descriptor.contractVersion !== CONTRACT_VERSION) {
-    console.error(`  Addon "${descriptor.id || '?'}": contract v${descriptor.contractVersion} != core v${CONTRACT_VERSION} — skipped`);
-    return null;
-  }
   addons.push(descriptor);
   // A malformed pack is skipped, never the add-on.
   for (const pack of Array.isArray(descriptor.toolPacks) ? descriptor.toolPacks : []) {
@@ -234,7 +227,6 @@ function platformTools() {
 }
 
 module.exports = {
-  CONTRACT_VERSION,
   platformTools,
   registerAddon,
   removeAddon,

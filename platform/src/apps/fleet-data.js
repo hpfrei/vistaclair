@@ -215,7 +215,7 @@ function resolvePeer(ref) {
 // --- Slave calls --------------------------------------------------------------------
 
 function routeMissing(peer) {
-  return fatal(`${peer.name} has no fleet data routes (HTTP 404) — update vistaclair-pro there`);
+  return fatal(`${peer.name} has no fleet data routes (HTTP 404) — update vc there`);
 }
 async function slave(peer, apiPath, o = {}) {
   try {
@@ -274,7 +274,7 @@ async function peers(app) {
       row.receivers = r.receivers || [];
     } catch (err) {
       if (err.status) row.online = true;
-      if (err.status === 404 && !err.body?.code) { row.supported = false; row.error = 'update vistaclair-pro there'; } else row.error = err.message;
+      if (err.status === 404 && !err.body?.code) { row.supported = false; row.error = 'update vc there'; } else row.error = err.message;
     }
     return row;
   }));

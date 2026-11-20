@@ -68,7 +68,7 @@ const textOf = (r) => r.result.content.map((c) => c.text).join('\n');
 test('initialize negotiates the protocol and identifies the server', async () => {
   const r = await broker.handleMessage(null, rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 't' } }));
   assert.equal(r.result.protocolVersion, '2025-03-26');
-  assert.equal(r.result.serverInfo.name, 'vistaclair-pro');
+  assert.equal(r.result.serverInfo.name, 'vistaclair');
   assert.ok(r.result.capabilities.tools);
   const unknown = await broker.handleMessage(null, rpc('initialize', { protocolVersion: '1900-01-01' }));
   assert.match(unknown.result.protocolVersion, /^\d{4}-\d{2}-\d{2}$/);

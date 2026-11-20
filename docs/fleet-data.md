@@ -51,7 +51,7 @@ direction (slave → master, the same API and run) is `docs/fleet-data-up.md`.
 ## Slave routes (`/api/peer/fleet-data`, peer-token authed)
 
 Every answer carries `code` (`ok` or an error code); a bare 404 without one is
-a slave that predates the routes → the master reports "update vistaclair-pro
+a slave that predates the routes → the master reports "update vc
 there". App names are validated as elsewhere; transfer name and shas as above.
 
 | Route | Does |

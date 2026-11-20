@@ -3,7 +3,7 @@
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge
 // methods it dispatches (bridge). See src/apps/capabilities.js for the
-// contract and vistaclair-pro/docs/capabilities.md. The engine is
+// contract and docs/capabilities.md. The engine is
 // platform-print.js; the app's identity is app.name, never a parameter.
 // Owner-side methods (printer list, settings, test page, job log) are the
 // Setup → Drucker panel's (index.js `app:print:*`), not part of this surface.

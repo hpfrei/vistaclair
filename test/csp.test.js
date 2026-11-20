@@ -100,7 +100,7 @@ test('VISTACLAIR_CSP=off sends no header; report-only sends the report-only head
 
 test('an add-on that is not cspReady downgrades the policy to report-only', async () => {
   const addons = require('../src/addons');
-  const base = { contractVersion: addons.CONTRACT_VERSION, clientModules: [{ scripts: ['/x/a.js'] }] };
+  const base = { clientModules: [{ scripts: ['/x/a.js'] }] };
   addons.registerAddon({ ...base, id: 'csp-test-ready', cspReady: true });
   assert.deepStrictEqual(addons.cspBlockers(), []);
   addons.registerAddon({ ...base, id: 'csp-test-legacy' });

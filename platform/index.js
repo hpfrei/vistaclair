@@ -145,10 +145,10 @@ function makeVcBundler(publicDir) {
 }
 
 function init(ctx) {
-  // Seam guard: the fields below are additive contract v2 (see docs/seam.md).
+  // Seam guard: the fields below are additive (see docs/seam.md).
   // Core catches this throw and logs "Pro: init failed".
-  if (ctx.contractVersion !== 2 || typeof ctx.isOwnerRequest !== 'function' || !ctx.dataHome || !ctx.coreDir) {
-    throw new Error('vistaclair-pro requires a vistaclair core that provides contractVersion 2 with isOwnerRequest/dataHome/coreDir on the addon ctx — update core');
+  if (typeof ctx.isOwnerRequest !== 'function' || !ctx.dataHome || !ctx.coreDir) {
+    throw new Error('platform init needs isOwnerRequest/dataHome/coreDir on the addon ctx (see docs/seam.md)');
   }
 
   // Pro owns its own router (mounted by core AFTER auth) instead of mutating
@@ -162,7 +162,7 @@ function init(ctx) {
 
   router.use('/pro', express.static(path.join(__dirname, 'public')));
 
-  // Same location as before the merge: Pro lived at <DATA_HOME>/vistaclair-pro
+  // Same location as before the merge: Pro lived in its own checkout
   // and used its sibling <DATA_HOME>/vistaclair-apps.
   const appsDir = process.env.VISTACLAIR_APPS_DIR || path.join(ctx.dataHome, 'vistaclair-apps');
 
@@ -440,8 +440,7 @@ function init(ctx) {
   require('./src/apps/app-artifacts').mountApi(router);
 
   return {
-    contractVersion: 2,
-    id: 'vistaclair-pro',
+    id: 'platform',
     router,
     // Read by core (addons.platformTools()) for the dashboard's voice input.
     platformTools: require('./src/apps/platform-tools'),

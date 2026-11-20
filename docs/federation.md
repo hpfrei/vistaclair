@@ -85,7 +85,7 @@
   persisted progress is the job the master polls (5 s; fails after 5 min
   unreachable or 8 h). Present → skipped; missing → installed one by one, the
   slave's phase label relayed; an install error fails the publish with that
-  error; a slave without the route or the extra → "update vistaclair-pro
+  error; a slave without the route or the extra → "update vc
   there". An owner action on the slave (the Unity licence is per machine) ends
   the step as `warn` and lands in `result.warnings`, shown in the wizard. A
   cancelled or master-restarted publish leaves the slave's install running; the

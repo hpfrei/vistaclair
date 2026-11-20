@@ -692,7 +692,7 @@
       renderInput();
       return;
     }
-    titleEl.textContent = s.target && s.target.type === 'app' ? 'App: ' + s.target.name : 'vistaclair-pro CLI';
+    titleEl.textContent = s.target && s.target.type === 'app' ? 'App: ' + s.target.name : 'platform CLI';
     renderHeader();
     if (s.cliStatus === 'exited') setStatus('exited', 'exited');
     else if (s.cliStatus !== 'running') setStatus('exited', 'not running');

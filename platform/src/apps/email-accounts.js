@@ -114,7 +114,7 @@ async function testConnection(account) {
   try {
     ImapFlow = require('imapflow').ImapFlow;
   } catch {
-    return { ok: false, error: 'imapflow not installed — run npm install in vistaclair-pro' };
+    return { ok: false, error: 'imapflow not installed — run npm install in the vc root' };
   }
 
   const client = new ImapFlow({

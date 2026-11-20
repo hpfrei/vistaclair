@@ -1042,7 +1042,7 @@ async function maintainChannels(account, token, cals) {
 }
 
 // Route handler body for POST /pro/calendar/webhook (mounted in
-// vistaclair-pro/index.js, auth-exempt). Google sends headers only, no body:
+// platform/index.js, auth-exempt). Google sends headers only, no body:
 // channel id + token identify/authenticate the channel, resource state says
 // why. Returns true for a known+authentic channel (route answers 200; false
 // → 404 so Google backs off forged/forgotten channels).

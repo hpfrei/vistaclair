@@ -25,7 +25,7 @@ async function fetchAccess(client, peer) {
   if (r?.token) {
     return {
       ok: true, url: base, token: r.token,
-      warning: 'This slave is outdated: it still hands out its permanent dashboard token. Update vistaclair-pro on the slave to get one-time login links instead.',
+      warning: 'This slave is outdated: it still hands out its permanent dashboard token. Update vc on the slave to get one-time login links instead.',
     };
   }
   return { ok: true, url: base, warning: 'The slave offered no way to log in.' };

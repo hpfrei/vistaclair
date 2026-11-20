@@ -161,14 +161,14 @@ async function slaveExtras(client, peer, ids, { signal, actions = false } = {}) 
   try {
     return await client.call(peer, `/extras?ids=${encodeURIComponent(ids.join(','))}${actions ? '&actions=1' : ''}`, { signal, timeoutMs: actions ? 120000 : 30000 });
   } catch (err) {
-    if (err.status === 404) throw new Error(`${peer.name} cannot report its platform extras (HTTP 404) — update vistaclair-pro there`);
+    if (err.status === 404) throw new Error(`${peer.name} cannot report its platform extras (HTTP 404) — update vc there`);
     throw err;
   }
 }
 
 // What publishing this app does to the slave's toolchains: one row per extra,
 // in install order. state: present | install | installing | unknown (the
-// slave's vistaclair-pro does not know the extra).
+// slave's vc does not know the extra).
 async function toolchainPlan(peer, toolchains, { signal, actions = false, client = peerClient } = {}) {
   const { ids, unknown } = platformExtras.extrasForToolchains(toolchains);
   if (!ids.length) return { ids, unknown, rows: [], actions: [] };
@@ -227,7 +227,7 @@ async function ensureToolchains(peer, toolchains, { signal, onProgress, client =
   const n = plan.rows.length;
   for (let i = 0; i < n; i++) {
     const row = plan.rows[i];
-    if (row.state === 'unknown') throw new Error(`${peer.name} does not know the "${row.id}" extra — update vistaclair-pro there`);
+    if (row.state === 'unknown') throw new Error(`${peer.name} does not know the "${row.id}" extra — update vc there`);
     if (row.state === 'present') { present.push(row.id); continue; }
     onProgress?.(i, n, 0, `${row.id}: starting on ${peer.name}`);
     const r = await client.call(peer, `/extras/${encodeURIComponent(row.id)}/install`, { method: 'POST', signal });
@@ -480,7 +480,7 @@ async function handleWs(msg, send, bc) {
       if (!peer) { send({ type: 'app:peer:testResult', id: msg.id, ok: false, error: 'unknown peer' }); return true; }
       try {
         const ping = await peerClient.call(peer, '/ping', { timeoutMs: 10000 });
-        // Compare the slave's vc / vc-pro checkouts against this master's —
+        // Compare the slave's vc checkout against this master's —
         // the GUI flags slaves running outdated software.
         let versions = null;
         try { versions = await hostVersions.compareToSlave(ping.versions); } catch {}

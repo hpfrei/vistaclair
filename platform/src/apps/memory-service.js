@@ -1,5 +1,5 @@
 // Platform memory service — a single shared, self-tending knowledge store for all
-// vistaclair-pro apps. Reuses the existing MariaDB pool (no new server).
+// platform apps. Reuses the existing MariaDB pool (no new server).
 //
 // Three storage layers (see plan Part E):
 //   1. memory_observations  — raw append-only intake. remember() = one cheap INSERT.

@@ -58,7 +58,7 @@ function withSrc(d) {
   return { ...d, src: `api/artifacts/${encodeURIComponent(d.artifactId)}?k=${ticketFor(d.artifactId)}` };
 }
 
-// Mounted by vistaclair-pro/index.js on the pro router (auth-exempt subtree).
+// Mounted by platform/index.js on the pro router (auth-exempt subtree).
 function mountApi(router) {
   const base = '/pro/vista/api';
   const { authed, resolveToken } = miniAppAuth.mountAuth(router, base, { key: KEY, header: SESSION_HEADER });

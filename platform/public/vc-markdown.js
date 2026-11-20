@@ -1,4 +1,4 @@
-// <vc-markdown> — rich document renderer for the vistaclair-pro `vc-*` system.
+// <vc-markdown> — rich document renderer for the vistaclair `vc-*` system.
 // Shadow-DOM, theme-aware, built on vc-core (`Vc.Element`). Renders a "VistaDoc":
 // an extended-markdown document that also carries inline LaTeX math, sized media
 // previews (image/video/audio/pdf/file), and SVG — all in one safe surface.
