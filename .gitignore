@@ -5,8 +5,7 @@ interactions/
 outputs/
 docs/api/
 
-# Pro extensions (separate repos)
-vistaclair-pro/
+# Apps (separate repo)
 vistaclair-apps/
 
 # platform: capability-check scratch dirs, logs
