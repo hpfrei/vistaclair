@@ -469,6 +469,8 @@ function init(options) {
     proxyPort: require('./core-services').core.proxyPort,
     isEnabled: (n) => hostConfig.isEnabled(n),
   });
+  // Site analytics (docs/analytics.md): ingests the sites' spools, answers query/live/csv.
+  require('./analytics').init({ broadcast: (m) => broadcaster.broadcast(m) });
 
   // --- Spend policy + ledger (admin-owned, under core's dataHome). Every
   // metered platform call is ledgered and gated (spend-gate) wherever it
@@ -663,6 +665,10 @@ function init(options) {
     ensureArtifactsJob();
     require('./platform-extras-unity-license').start();
     await require('./sites').autostartAll().catch(err => console.warn('[sites] autostart failed:', err.message));
+    // Analytics: the platform crons (daily rollup/prune, monthly country table) and a first ingest of
+    // whatever the spools collected while the dashboard was down.
+    try { require('./analytics').registerCron(platformCron); } catch (err) { console.warn('[analytics] cron setup failed:', err.message); }
+    require('./analytics').scanAll().catch(() => {});
     await autostartApps();
     // After autostart, so the copies carry the live tool registry.
     try { require('./doc-copies').bootRefresh(); } catch (err) { console.warn('[apps] doc copies refresh failed:', err.message); }
@@ -1225,6 +1231,17 @@ async function handleMessage(ws, msg, bc) {
           send({ type: 'app:site:result', appName: msg.name, site: msg.site || null, action, reqId: msg.reqId || null, result });
         } catch (err) {
           send({ type: 'app:site:result', appName: msg.name, site: msg.site || null, action, reqId: msg.reqId || null, error: err.message });
+        }
+        break;
+      }
+
+      // Analytics in the Sites tab: one engine, scoped to the named app; replies carry the caller's reqId.
+      case 'app:analytics:call': {
+        try {
+          const result = await require('./analytics').ownerCall(msg.name, String(msg.method || ''), msg);
+          send({ type: 'app:analytics:result', appName: msg.name, site: msg.site || null, reqId: msg.reqId || null, result });
+        } catch (err) {
+          send({ type: 'app:analytics:result', appName: msg.name, site: msg.site || null, reqId: msg.reqId || null, error: err.message, code: err.code || null });
         }
         break;
       }
@@ -2678,6 +2695,7 @@ async function shutdown() {
   appBridge.cleanup();
   // Sites go down with the dashboard (no keeper); stopped first, cleanly.
   await require('./sites').stopAll().catch(() => {});
+  try { require('./analytics').shutdown(); } catch {}
   await appDb.cleanup();
   await appManager.cleanupAll();
 }

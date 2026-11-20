@@ -284,6 +284,7 @@ async function remove(name) {
   if (_bridgeCleanupFn) _bridgeCleanupFn(name);
   // Uninstall stops its sites and forgets them (docs/sites.md).
   await require('./sites').removeApp(name).catch(() => {});
+  await require('./analytics').removeApp(name).catch(() => {}); // the app's analytics rows go with it
   await stopApp(name);
   const dir = appDir(name);
   if (!fs.existsSync(dir)) return { error: 'App not found' };
@@ -623,6 +624,7 @@ async function rename(oldName, newName) {
     replaceInTextFiles(newDir, oldName, newName);
     appDb.renameAppDb(oldName, newName);
     platformCron.renameApp(oldName, newName);
+    require('./analytics').renameApp(oldName, newName).catch(() => {});
   } catch (err) {
     try { fs.renameSync(newDir, oldDir); } catch {}
     return { error: `Rename failed: ${err.message}` };

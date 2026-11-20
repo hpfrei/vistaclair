@@ -35,7 +35,7 @@ module.exports = {
   prefixes: ['governance.'],
   ctx: ['governance', 'horst'],
   keywords: /\b(approval|propose|confirm before|human in the loop|governance)\b/i,
-  summary: '`governance.propose/list/decide/registerKind` — the one owner-approval plane',
+  summary: '`governance.propose/list/decide/registerKind` — owner approvals',
   migration: 'App-local approval queues/cards (pending maps, approval-log tables, client-side approve execution) → `governance.propose` + rendering `governance.list`; an app-local record of what was approved per message → `governance.decisions`. NOTE: granting this capability makes the app an approval surface — `decide` lets app code approve proposals.',
   visibility: { standalone: false },
   revocable: true,

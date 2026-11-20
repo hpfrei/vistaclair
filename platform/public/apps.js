@@ -5435,6 +5435,10 @@
       case 'app:site:log':
         if (apps._onSiteMsg) { apps._onSiteMsg(msg); }
         break;
+      case 'app:analytics:result':
+      case 'app:analytics':
+        if (apps._onAnalyticsMsg) { apps._onAnalyticsMsg(msg); }
+        break;
       case 'app:configSaved':
         if (apps._onConfigSaved) { apps._onConfigSaved(msg.appName); }
         break;
@@ -7196,6 +7200,22 @@
     return `<span class="vc-site-dot ${SITE_DOT[st.state] || 'dim'}"></span>${bits.join(' &middot; ')}`;
   }
 
+  // <vc-analytics> is not in the dashboard page: load its script on first use.
+  let vcAnalyticsLoad = null;
+  function loadVcAnalytics() {
+    if (window.customElements && window.customElements.get('vc-analytics')) return Promise.resolve();
+    if (!vcAnalyticsLoad) {
+      vcAnalyticsLoad = new Promise((resolve, reject) => {
+        const el = document.createElement('script');
+        el.src = '/pro/vc-analytics.js';
+        el.onload = () => resolve();
+        el.onerror = () => { vcAnalyticsLoad = null; reject(new Error('could not load the analytics component')); };
+        document.head.appendChild(el);
+      });
+    }
+    return vcAnalyticsLoad;
+  }
+
   function paneSites(name, pane) {
     pane.innerHTML = paneHead('Sites', 'The app&rsquo;s own web servers. Each runs on its own port as a child of the dashboard and stops with it.')
       + '<div class="vc-sites" data-sx-root><div class="vc-hint">Loading&hellip;</div></div>';
@@ -7205,6 +7225,7 @@
     let gone = false;
     let seq = 0;
     const pending = new Map();
+    const liveSubs = new Map();   // event -> Set<fn>: analytics:live pushes for the mounted components
     const req = (type, extra = {}) => new Promise((resolve) => {
       const reqId = 'sx' + (++seq);
       pending.set(reqId, resolve);
@@ -7234,6 +7255,50 @@
       f('autostart').checked = st.autostart !== false;
       f('keep').value = st.keep != null ? st.keep : 5;
       f('domain').value = st.domain || '';
+      f('analyticsRawDays').value = st.analyticsRawDays != null ? st.analyticsRawDays : 90;
+      f('analyticsMonths').value = st.analyticsMonths != null ? st.analyticsMonths : 13;
+      for (const el of v.el.querySelectorAll('[data-sx="anaf"]')) el.style.display = st.analytics ? '' : 'none';
+    };
+
+    // The analytics block of one site: the component on the dashboard's own WS, no polling.
+    const transport = {
+      call: (method, params) => req('app:analytics:call', { method, site: params && params.site, params: params ? Object.fromEntries(Object.entries(params).filter(([k]) => k !== 'site')) : {} })
+        .then((m) => { if (m.error) { const e = new Error(m.error); e.code = m.code; throw e; } return m.result; }),
+      on: (ev, fn) => {
+        if (!liveSubs.has(ev)) liveSubs.set(ev, new Set());
+        liveSubs.get(ev).add(fn);
+        return () => { const set = liveSubs.get(ev); if (set) set.delete(fn); };
+      },
+    };
+    const mountAnalytics = async (v) => {
+      const st = v.st;
+      const holder = v.q('analytics');
+      const note = v.q('anastate');
+      if (!st.analytics) {
+        holder.textContent = '';
+        v.anaMounted = false;
+        note.innerHTML = `Off. Turn it on with <code>"analytics": true</code> under <code>sites.${escHtml(st.site)}</code> in the manifest. No cookies, no IP addresses stored.`;
+        return;
+      }
+      if (v.anaMounted) return;
+      v.anaMounted = true;
+      let info = null;
+      try { info = (await transport.call('status', { site: st.site })); } catch { /* shown by the component */ }
+      if (gone) return;
+      const bits = [];
+      if (info) {
+        if (!info.db) bits.push('<span class="warn">No database on this host: requests are kept in the spool, statistics need a configured database.</span>');
+        if (info.geo && !info.geo.available) bits.push('Country table not built yet (countries show as unknown until the monthly refresh).');
+        if (info.credit && info.credit.url) bits.push(`<a href="${escHtml(info.credit.url)}" target="_blank" rel="noopener">${escHtml(info.credit.text)}</a>`);
+      }
+      note.innerHTML = bits.join(' &middot; ');
+      try { await loadVcAnalytics(); } catch (e) { holder.innerHTML = `<div class="vc-hint warn">${escHtml(e.message)}</div>`; v.anaMounted = false; return; }
+      if (gone) return;
+      const comp = document.createElement('vc-analytics');
+      comp.setAttribute('site', st.site);
+      comp.transport = transport;
+      holder.textContent = '';
+      holder.appendChild(comp);
     };
 
     const addLines = (v, lines) => {
@@ -7300,8 +7365,15 @@
               <div class="vc-field"><label>keep snapshots</label><input type="number" min="1" max="50" class="vc-inp" data-sx-f="keep"></div>
               <div class="vc-field"><label>autostart</label><label class="vc-site-check"><input type="checkbox" data-sx-f="autostart"> with the dashboard</label></div>
               <div class="vc-field vc-site-wide"><label>domain</label><input type="text" class="vc-inp" data-sx-f="domain" placeholder="optional, e.g. www.example.com" autocomplete="off" spellcheck="false"></div>
+              <div class="vc-field" data-sx="anaf"><label>raw hits kept (days)</label><input type="number" min="7" max="365" class="vc-inp" data-sx-f="analyticsRawDays"></div>
+              <div class="vc-field" data-sx="anaf"><label>daily totals kept (months)</label><input type="number" min="1" max="36" class="vc-inp" data-sx-f="analyticsMonths"></div>
             </div>
             <div><button class="vc-btn signal" data-sx-act="save">Save</button> <span class="vc-hint" data-sx="msg"></span></div>
+          </div>
+          <div class="vc-row col">
+            <span class="vc-lbl">analytics</span>
+            <div class="vc-hint" data-sx="anastate"></div>
+            <div data-sx="analytics"></div>
           </div>
           <div class="vc-row col">
             <span class="vc-lbl">domain &amp; nginx</span>
@@ -7330,10 +7402,11 @@
         setStatus(v, m.result);
       } else if (a === 'save') {
         const f = (k) => v.el.querySelector(`[data-sx-f="${k}"]`);
-        const next = { port: Number(f('port').value), bind: f('bind').value, autostart: f('autostart').checked, keep: Number(f('keep').value), domain: f('domain').value.trim() };
+        const next = { port: Number(f('port').value), bind: f('bind').value, autostart: f('autostart').checked, keep: Number(f('keep').value), domain: f('domain').value.trim(), analyticsRawDays: Number(f('analyticsRawDays').value), analyticsMonths: Number(f('analyticsMonths').value) };
         const patch = {};
         for (const k of Object.keys(next)) {
           const cur = k === 'domain' ? (v.st.domain || '') : v.st[k];
+          if ((k === 'analyticsRawDays' || k === 'analyticsMonths') && !v.st.analytics) continue;
           if (next[k] !== cur) patch[k] = next[k];
         }
         if (!Object.keys(patch).length) { msgEl.textContent = 'No changes.'; return; }
@@ -7373,6 +7446,16 @@
       if (v) act(v, btn);
     });
 
+    apps._onAnalyticsMsg = (msg) => {
+      if (gone || msg.appName !== name) return;
+      if (msg.type === 'app:analytics:result') {
+        const done = pending.get(msg.reqId);
+        if (done) { pending.delete(msg.reqId); done(msg); }
+        return;
+      }
+      if (msg.type === 'app:analytics') for (const fn of liveSubs.get(msg.event) || []) { try { fn(msg.data); } catch { /* a component's own error */ } }
+    };
+
     apps._onSiteMsg = (msg) => {
       if (gone || msg.appName !== name) return;
       if (msg.type === 'app:site:result') {
@@ -7400,11 +7483,12 @@
         setForm(v, st);
         setStatus(v, st);
         loadDetail(v);
+        mountAnalytics(v);
       }
       if (!views.size) root.innerHTML = '<div class="vc-hint">This app declares no sites.</div>';
     });
 
-    return { detach: () => { gone = true; pending.clear(); if (apps._onSiteMsg) apps._onSiteMsg = null; } };
+    return { detach: () => { gone = true; pending.clear(); liveSubs.clear(); if (apps._onSiteMsg) apps._onSiteMsg = null; if (apps._onAnalyticsMsg) apps._onAnalyticsMsg = null; } };
   }
 
   function paneSpend(name, pane) {

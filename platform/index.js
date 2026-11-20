@@ -111,7 +111,7 @@ const MCP_EXEMPT_PATTERNS = [
 const VC_COMPONENTS = [
   'vc-input-bar', 'vc-chat-log', 'vc-progress', 'vc-empty-state',
   'vc-model-picker', 'vc-media-viewer', 'vc-markdown', 'vc-dialog', 'vc-sysmon',
-  'vc-gauge', 'vc-stage-graph', 'vc-site-status',
+  'vc-gauge', 'vc-stage-graph', 'vc-site-status', 'vc-analytics',
 ];
 
 // Inter-component deps: a single-component request (/pro/vc-<name>.js) also gets

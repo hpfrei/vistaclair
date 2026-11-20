@@ -778,7 +778,7 @@ test('the remote list and its answer refuse unauthenticated and non-owner reques
     assert.equal((await runs({ 'x-tg-session': 'forged' })).status, 401);
     assert.equal((await answer({ 'x-tg-session': 'forged' })).status, 401);
     assert.equal((await hit('POST /pro/tg-session/api/auth', { initData: initData({ id: 9999 }) })).status, 403, 'not the owner');
-    assert.equal((await hit('POST /pro/tg-session/api/auth', { initData: initData({ id: CHAT }).replace(/hash=./, 'hash=0') })).status, 401);
+    assert.equal((await hit('POST /pro/tg-session/api/auth', { initData: initData({ id: CHAT }).replace(/hash=(.)/, (_m, c) => `hash=${c === '0' ? '1' : '0'}`) })).status, 401);
     assert.deepEqual(owners.answers, []);
 
     const { body } = await hit('POST /pro/tg-session/api/auth', { initData: initData({ id: CHAT }) });

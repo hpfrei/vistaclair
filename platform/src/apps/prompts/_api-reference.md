@@ -2535,7 +2535,8 @@ Declare it in `manifest.json`:
     "bind": "127.0.0.1",          // default; "0.0.0.0" only when no proxy sits in front
     "autostart": true,            // default true
     "access": "public",           // required; the only value built today
-    "platform": "none"            // default; "controlled" = may call your registered onCall handlers
+    "platform": "none",           // default; "controlled" = may call your registered onCall handlers
+    "analytics": false            // true = the platform counts visitors for this site (see Site analytics)
   }
 }
 ```
@@ -2573,7 +2574,8 @@ switched per request, no restart), `site.config` (live object; `site.onConfig(fn
 result ≤ 256 KB, 60 calls/min per client /24 or /64, default timeout 5 s, max 30 s; rejects
 with `err.code` `platform_none` | `unknown_call` | `too_large` | `rate_limited` |
 `app_stopped` | `timeout`), `site.log.info/warn/error`, `site.dataDir`, `site.port`,
-`site.fenced`. `GET /_vc/id` is answered by the runner (the domain check).
+`site.fenced`, `site.track(name, props)` (a goal into the analytics table; `false` unless the site opted in).
+`GET /_vc/id` is answered by the runner (the domain check).
 
 routes.js (`ctx.sites`, in-process apps) and the iframe (`Bridge.call('sites.<m>', { site, … })`):
 
@@ -2591,6 +2593,70 @@ routes.js (`ctx.sites`, in-process apps) and the iframe (`Bridge.call('sites.<m>
 Events (no polling): `site:status`, `site:crashed`, `site:published` — `Bridge.subscribe` in the
 iframe, and on the bus. A crash restarts the site with backoff (1 s … 60 s). `<vc-site-status
 site="main">` (see the UI section) shows a site's live state in your page.
+<!-- /API:SECTION -->
+<!-- API:SECTION key=analytics -->
+### Site analytics
+
+Privacy-friendly counting for your own sites with **no code in the site**: set
+`"analytics": true` in `manifest.sites.<site>` and the platform's site runner records every
+request before your handler sees it. It stores: time, the path (query string dropped except
+`utm_*` and `ref`; id-like segments become `:id`), method, status, bytes, duration, the referrer
+**host** (never your own host), browser + major version, OS, device class, the first
+Accept-Language tag, the country, a bot flag and a visitor hash. It never stores an IP, a raw
+user agent or a cookie. The visitor hash is `sha256(dailySalt ∥ site ∥ ip-prefix ∥ UA)` with a
+random salt destroyed at midnight UTC: the same visitor is **1 within a day and 2 across two
+days** — a visitor is a person who loaded at least one page that day. Bots (a UA list, or pages
+loaded without ever loading an asset) are counted separately, not discarded. Needs a platform
+database; without one the hits wait in the site's spool and the owner's tab says "no database".
+Country comes from a platform-wide offline table refreshed monthly (until it exists: `''`);
+wherever you show countries, show the credit `result.credit` ("IP geolocation by DB-IP", link).
+
+```js
+// routes.js
+const r = await ctx.analytics.query({ site: 'main', from: '2026-11-01', to: '2026-11-20',
+  metrics: ['visitors', 'pageviews', 'bounceRate'], groupBy: ['day'] });
+// r.rows = [{ day, visitors, pageviews, bounceRate }], r.totals = { … }, r.source = { raw, rollup, skipped }
+const top = await ctx.analytics.query({ site: 'main', groupBy: ['path'], metrics: ['pageviews', 'visitors'], limit: 10 });
+const de = await ctx.analytics.query({ site: 'main', groupBy: ['referrer'], filters: { country: 'DE' } });
+```
+
+| ctx | Bridge | |
+|---|---|---|
+| `query({ site, from, to, metrics, groupBy, filters, bots, scope, limit })` | `analytics.query` (same object) | rows + totals. `from`/`to` are UTC days, default the last 7 |
+| `live(site)` | `analytics.live` `{ site }` → `{ live }` | human visitors with a page load in the last 5 minutes |
+| `csv({ site, …query })` | `analytics.csv` → `{ csv }` | the same query as CSV (cells that start with `= + - @` are quoted) |
+| `track(site, name, props)` | — | a goal from your server code; `props` ≤ 8 keys of short strings/numbers/booleans (never personal data) |
+| `importAccessLog(site, file, { format: 'nginx-combined' })` | — | `file` inside your app; anonymised like live hits; `{ lines, imported, duplicates, bad, tooOld, bots, days }`; rows older than the raw retention are skipped; importing the same file twice adds nothing |
+| `status(site)` | — | `{ enabled, db, spool, rawDays, months, geo, credit }` |
+
+- **metrics** (allowlist): `visitors`, `pageviews`, `hits`, `events`, `bytes`, `errors`, `avgMs`,
+  `bounces`, `bounceRate` (visitor-days with exactly one page load ÷ visitors).
+- **groupBy** (≤ 2): `day`, `hour`, `bot`, `path`, `referrer`, `utm_source`, `utm_medium`,
+  `utm_campaign`, `country`, `browser`, `os`, `device`, `lang`, `status`, `event`.
+  **filters**: equality on the same dimensions (not `day`/`hour`/`bot`). `bots`: `exclude`
+  (default) | `only` | `include`; `groupBy: ['bot']` with `bots: 'include'` splits them.
+- **scope** follows the dimensions: page loads (default), every request (`status`), custom
+  events (`event`); set `scope: 'requests'` to count assets and API calls too.
+- Raw hits are kept 90 days, daily totals 13 months (the owner changes both per site). Older
+  days answer a total, one dimension, or one equality filter; a query that needs more skips them
+  and says so in `source.skipped`.
+- Events (no polling): `analytics:live` `{ site, live, added }` — `Bridge.subscribe` in the iframe.
+- In `site/index.js`: `site.track('signup', { plan: 'pro' })` (only with `analytics: true`).
+- `<vc-analytics site="main">` draws all of it (tiles, charts, drill-down, CSV); see the UI section.
+
+<!-- API:DETAIL key=ui-analytics -->
+### `<vc-analytics>` — a site's statistics
+
+Live tiles (visitors now, visitors and pageviews today / 7 d / 30 d with the change against the previous period, bounce rate) and inline-SVG charts: visitors per day, top pages, referrers and UTM campaigns, countries (with the DB-IP credit), browser / OS / device, languages, 404s, goals. Click a row to filter the whole view (click the chip to clear); pick the range (7 / 30 / 90 days); **CSV** exports the current table. It reads `analytics.query` and follows `analytics:live`; it never polls. Advertise `analytics` in the manifest when you use it.
+
+```html
+<vc-analytics site="main"></vc-analytics>
+<vc-analytics site="main" range="30"></vc-analytics>
+```
+- **Attributes**: `site` (required; a manifest key with `analytics: true`), `range` (days: 7, 30 or 90; default 30).
+- **Properties**: `transport` (`{ call(method, params), on(event, fn) }` — only for pages without an app Bridge).
+- **Events**: `analytics-filter` `{ filters }` when a drill-down changes.
+<!-- /API:DETAIL -->
 <!-- /API:SECTION -->
 <!-- API:SECTION key=platform-cron -->
 ### Platform Cron (Persistent Scheduling)

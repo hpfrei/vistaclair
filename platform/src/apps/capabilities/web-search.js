@@ -1,4 +1,4 @@
-// Capability: web-search — `ai.webSearch` — live web/news/video search via Brave Search
+// Capability: web-search — `ai.webSearch` — live web/news/video search
 //
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge

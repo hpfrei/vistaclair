@@ -2,7 +2,7 @@
 // The manifest's `sites` block: the one validator (app-lint and the sites
 // engine both call it). Pure: no requires beyond fs/path, so app-lint stays cheap.
 //
-//   "sites": { "<site>": { handler, defaultPort, bind, autostart, access, platform } }
+//   "sites": { "<site>": { handler, defaultPort, bind, autostart, access, platform, analytics } }
 //
 // docs/sites.md. P1 builds access "public" and platform "none" | "controlled";
 // the other values are refused with a "not built yet" message.
@@ -16,7 +16,7 @@ const ACCESS_BUILT = ['public'];
 const ACCESS_LATER = ['users', 'vc'];
 const PLATFORM_BUILT = ['none', 'controlled'];
 const PLATFORM_LATER = ['loose'];
-const KNOWN_KEYS = new Set(['handler', 'defaultPort', 'bind', 'autostart', 'access', 'platform']);
+const KNOWN_KEYS = new Set(['handler', 'defaultPort', 'bind', 'autostart', 'access', 'platform', 'analytics']);
 const MIN_PORT = 1024;
 const RESERVED_PORTS = [3456, 3457]; // core's proxy and dashboard defaults; the engine adds the live ones
 
@@ -74,7 +74,11 @@ function validateSites(block, { appDir = null, reservedPorts = RESERVED_PORTS } 
     if (PLATFORM_LATER.includes(platform)) errors.push(`${at}.platform: "${platform}" is not built yet — use "none" (default) or "controlled"`);
     else if (!PLATFORM_BUILT.includes(platform)) errors.push(`${at}.platform: "none" (default) or "controlled"`);
     else s.platform = platform;
-    if (Object.keys(s).length === 6) sites[name] = s;
+    // analytics: opt in to the platform's privacy-friendly counting (docs/analytics.md)
+    let analytics = false;
+    if (raw.analytics !== undefined && typeof raw.analytics !== 'boolean') errors.push(`${at}.analytics: true or false`);
+    else analytics = raw.analytics === true;
+    if (Object.keys(s).length === 6) sites[name] = { ...s, analytics };
   }
   return { errors, warnings, sites };
 }
