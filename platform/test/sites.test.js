@@ -36,6 +36,7 @@ module.exports = function createSite(site) {
       }
       if (u.pathname === '/echo') { res.setHeader('set-cookie', ['sid=evil; Path=/', 'keep=1']); return res.end(JSON.stringify({ cookie: req.headers.cookie || null, prefix: req.headers['x-forwarded-prefix'] || null, url: req.url })); }
       if (u.pathname === '/config') return res.end(JSON.stringify(site.config));
+      if (u.pathname === '/body') { const c = []; for await (const x of req) c.push(x); return res.end(Buffer.concat(c).toString()); }
       await serve(req, res);
     },
     upgrade(req, socket) {
@@ -294,6 +295,22 @@ test('9. the byte-proxy passes HTTP and WebSocket through and strips the sid/tok
     assert.equal(seen.url, '/echo?q=1');
     assert.deepEqual(r.headers['set-cookie'], ['keep=1'], 'a site cannot set sid/token');
     assert.equal((await get(pp, '/s/fx/nosuch/x')).status, 404);
+    // a POST body passes, also when a host-level parser already consumed it (core's express.json keeps req.rawBody)
+    const post = (port, p, body) => new Promise((resolve, reject) => {
+      const rq = http.request({ host: '127.0.0.1', port, path: p, method: 'POST', headers: { 'content-type': 'application/json' }, agent: false }, (rs) => {
+        let b = ''; rs.on('data', d => { b += d; }); rs.on('end', () => resolve(b));
+      });
+      rq.on('error', reject); rq.end(body);
+    });
+    assert.equal(await post(pp, '/s/fx/main/body', '{"a":1}'), '{"a":1}');
+    const parsed = http.createServer((req, res) => {
+      const c = []; req.on('data', x => c.push(x)); req.on('end', () => {
+        req.rawBody = Buffer.concat(c); req._body = true; req.body = JSON.parse(req.rawBody);
+        sitesProxy.middleware()(req, res, () => { res.statusCode = 418; res.end(); });
+      });
+    });
+    await new Promise(r => parsed.listen(0, '127.0.0.1', r));
+    try { assert.equal(await post(parsed.address().port, '/s/fx/main/body', '{"b":2}'), '{"b":2}'); } finally { parsed.close(); }
     assert.equal((await get(pp, '/s/fx/main')).status, 301);
     // WebSocket-style upgrade
     const sock = net.connect(pp, '127.0.0.1');

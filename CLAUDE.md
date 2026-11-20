@@ -25,6 +25,7 @@ below that start with `src/`, `public/` or `scripts/` are under `platform/`.
 | `docs/extras.md` | platform extras and toolchains (`platform-extras.js`, `platform-extras-godot.js`): Setup → Extras installs, probes, `capabilities.json`, `manifest.toolchains` |
 | `docs/extras-unity.md` | the `unity` extra (`platform-extras-unity.js`, `src/apps/unity/`): Unity editor + Android pins, `bin/unity*`, the licence scripts, the signing package, the Quest APK probe |
 | `docs/print.md` | local printing: `platform-print.js`, `ctx.print`, the Setup → Drucker panel (`public/apps.js`, `printSetup`), CUPS, the daily page cap |
+| `docs/sites.md` | an app's sites (`site-runner.js`, `sites*.js`, `capabilities/sites.js`): manifest `sites`, the runner and its fence, the supervisor, snapshots, the `/s/<app>/<site>/` byte-proxy, deploy hash restart, the Sites tab |
 | `docs/apps-view.md` | the dashboard's Apps tab: the grouped apps table, its columns and actions, the Setup button in the tab strip (`public/apps.js`) |
 | `docs/ai-read-scope.md` | `readRoots` of an aiPrompt run: which paths a run granted a file tool may touch, the PreToolUse hook, defaults per caller (`ai-read-scope.js`) |
 | `docs/app-tools.md` | the MCP broker, `authorizeToolCall`, the tool contract, app-to-app dependencies, tool grants for orchestration runs |

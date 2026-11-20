@@ -54,7 +54,7 @@ Fields are added additively; removing or reshaping one means updating
 ## The descriptor
 
 `init()` returns `{ id, router, clientModules,
-authExemptPaths, authExemptPatterns, authExemptUpgradePaths, handleUpgrade, platformTools,
+authExemptPaths, authExemptPatterns, authExemptUpgradePaths, authExemptUpgradePatterns, handleUpgrade, platformTools,
 shutdown }`. Core
 mounts `router` after its auth middleware (there is no `dashboardApp` on the
 ctx — routes go through the descriptor), reads `authExemptPatterns` per request
@@ -64,6 +64,10 @@ first. `authExemptUpgradePaths` holds exact pathnames (today
 pathname matches is offered only to this add-on's `handleUpgrade`, without the
 owner gate, and core answers 401 if it isn't claimed. `handleUpgrade` must
 self-authenticate and claim (return true for) every request on those paths.
+`authExemptUpgradePatterns` (RegExps over the pathname; a dot-segment never
+matches) is the same contract for a family of paths: today the sites
+byte-proxy `/s/<app>/<site>/…` (`sites-proxy.js` `EXEMPT_RE`, `docs/sites.md`),
+which claims every match and answers 404 unless the site is public and running.
 
 `clientModules` reach the dashboard through core's owner-authed
 `GET /api/addons/client-modules` (`addons.getClientModules()`), which

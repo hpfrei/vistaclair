@@ -81,9 +81,18 @@ function middleware({ authToken } = {}) {
     const target = sites.proxyTarget(m.app, m.site);
     if (!target) { res.statusCode = 404; res.setHeader('content-type', 'text/plain; charset=utf-8'); return res.end('Not found'); }
     if (!m.rest) { res.statusCode = 301; res.setHeader('location', `${m.site}/`); return res.end(); }
+    // Core's host-level json/urlencoded parsers may already have read the
+    // body; their verify hook keeps the exact bytes on req.rawBody.
+    const consumed = req._body === true || req.readableEnded;
+    const headers = forwardHeaders(req, m.prefix, authToken);
+    let raw = null;
+    if (consumed) {
+      raw = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.alloc(0);
+      delete headers['transfer-encoding'];
+      headers['content-length'] = String(raw.length);
+    }
     const up = http.request({
-      host: '127.0.0.1', port: target.port, method: req.method, path: m.rest,
-      headers: forwardHeaders(req, m.prefix, authToken),
+      host: '127.0.0.1', port: target.port, method: req.method, path: m.rest, headers,
     }, (pr) => {
       res.writeHead(pr.statusCode, pr.statusMessage, cleanResponseHeaders(pr.headers));
       pr.pipe(res);
@@ -96,7 +105,7 @@ function middleware({ authToken } = {}) {
       if (!res.headersSent) { res.statusCode = 502; res.setHeader('content-type', 'text/plain; charset=utf-8'); res.end('The site is not answering'); } else res.destroy();
     });
     res.on('close', () => { if (!res.writableFinished) up.destroy(); });
-    req.pipe(up);
+    if (consumed) up.end(raw); else req.pipe(up);
   };
 }
 

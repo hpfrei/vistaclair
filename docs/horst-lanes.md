@@ -101,6 +101,7 @@ Model, voice and size default to the configured media defaults
 | telegram | status → `telegram_status` | send, sendPhoto, sendAudio, sendDocument → `telegram.send` (text or media) | call, downloadFile |
 | whatsapp | status → `whatsapp_status` | send → `whatsapp.send`; sendMedia, sendPhoto, sendLocation (missing) | sendButtons, sendList, sendCta, requestLocation, react, markRead, call |
 | apps | apps.access (deferred) | — | — |
+| sites | sites.list, sites.status, sites.snapshots → `sites_status` | sites.start → `site.start`, sites.stop → `site.stop`, sites.restart → `site.restart` | sites.config, sites.publish, sites.rollback |
 | platform-cron | platform.cron.list → `cron_list` | schedule, cancel, enable, disable → `cron.set` | — |
 | sysmon | sysmon.get → `sysmon_get`; processes (deferred) | — | subscribe, unsubscribe |
 | print | — | — | pdf; status (deferred) |
