@@ -386,7 +386,7 @@ async function waitHealthy(peer, appName, job, timeoutMs = 30000) {
       return last.probe ? `HTTP ${last.probe.status}` : 'running';
     }
     if (Date.now() > deadline) {
-      throw new Error(`app is not healthy on the slave: ${JSON.stringify({ health: last.health, db: last.db, probe: last.probe })}`);
+      throw new Error(`app is not healthy on the slave: ${JSON.stringify({ health: last.health, db: last.db, probe: last.probe, sitesDown: last.sites?.down })}`);
     }
     await new Promise((r) => setTimeout(r, 2000));
   }

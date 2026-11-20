@@ -59,8 +59,10 @@ async function deleteApp(name) {
 // Stop an app and everything it runs: spawned helpers, the AI sessions it
 // launched at runtime (cli.edit, cli.workspace — kill() keeps their history
 // so the work can be resumed). Closing a dashboard tab is NOT a stop.
-async function stopApp(name) {
+// Its sites keep running unless `stopSites` (the owner's "Stop sites too").
+async function stopApp(name, { stopSites = false } = {}) {
   require('./app-bridge').cleanupApp(name);
+  if (stopSites) await require('./sites').stopApp(name);
   if (deps.cliSessionManager) {
     deps.cliSessionManager.kill(`app-${name}`);
     deps.cliSessionManager.kill(`app-${name}-tools`);

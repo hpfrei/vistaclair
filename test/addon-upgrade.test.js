@@ -156,3 +156,27 @@ test('removeAddon drops the exemption', async (t) => {
   assert.strictEqual((await upgrade(s.port, PEER)).status, 401);
   assert.deepStrictEqual(s.wssPaths, []);
 });
+
+test('authExemptUpgradePatterns: a pattern-matched pathname reaches its add-on without the owner gate; dot-segments never', async (t) => {
+  const s = await startServer(t);
+  const seen = [];
+  addons.registerAddon({
+    id: 't-sites',
+    authExemptUpgradePatterns: [/^\/s\/[a-z0-9-]+\/[a-z0-9-]+(\/|$)/],
+    handleUpgrade(req, socket) {
+      seen.push(req.url);
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Marker: t-sites\r\n\r\n');
+      socket.destroy();
+      return true;
+    },
+  });
+  t.after(() => addons.removeAddon('t-sites'));
+  const r = await upgrade(s.port, '/s/app/main/ws?x=1');
+  assert.strictEqual(r.status, 101);
+  assert.strictEqual(r.headers['x-marker'], 't-sites');
+  assert.deepStrictEqual(s.ownerChecks, [], 'no owner gate');
+  assert.strictEqual((await upgrade(s.port, '/s/app/main/../../ws')).status, 401, 'a dot-segment is never exempt');
+  assert.strictEqual((await upgrade(s.port, '/sx/app/main/')).status, 401);
+  assert.deepStrictEqual(seen, ['/s/app/main/ws?x=1']);
+  assert.deepStrictEqual(s.wssPaths, []);
+});

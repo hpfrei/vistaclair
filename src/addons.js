@@ -22,6 +22,9 @@
 //                             // only — it must authenticate them itself (e.g.
 //                             // Pro's '/api/peer/channel' peer token). Falsy
 //                             // return or throw → 401; never reaches the dashboard.
+//     authExemptUpgradePatterns: [...], // optional; RegExps over the pathname,
+//                             // same contract as authExemptUpgradePaths (Pro's
+//                             // sites byte-proxy /s/<app>/<site>/); dot-segments never match.
 //     pinnedSessions() -> iterable of sessId,  // optional; exempt from the
 //                                              // interactions TTL sweep
 //     toolPacks: [pack, ...],  // optional; MCP servers / tool restrictions /
@@ -125,6 +128,14 @@ function exemptUpgradeOwner(req) {
   for (const a of addons) {
     const paths = a.authExemptUpgradePaths;
     if (Array.isArray(paths) && paths.includes(pathname)) return a;
+  }
+  // authExemptUpgradePatterns: RegExps over the pathname (a dot-segment is
+  // never exempt, as on the HTTP side).
+  if (hasDotSegment(String(req.url || '').split('?')[0])) return null;
+  for (const a of addons) {
+    for (const rx of a.authExemptUpgradePatterns || []) {
+      try { if (rx.test(pathname)) return a; } catch {}
+    }
   }
   return null;
 }

@@ -14,7 +14,7 @@ module.exports = {
   aliases: ['license'],
   ctx: ['license'],
   keywords: /\b(licen[cs]e|licen[cs]ing|paid app|premium|paywall|entitlement|subscription tier|checkout|seat limit|freemium)\b/i,
-  summary: '`manifest.auth.license` + `ctx.license.*` — paid/freemium apps, seats, tiers',
+  summary: '`ctx.license.*` — paid/freemium apps, seats, tiers',
   migration: 'Hand-rolled licence-key validation, entitlement caching, or `http.fetch` calls to the licence server with an app-held secret → declare `manifest.auth.license` and read `ctx.license.entitlement()` / `me.license`.',
 
   buildCtx(app) {

@@ -869,7 +869,7 @@
       const behind = (dep && typeof dep === 'object' && dep.behind != null) ? dep.behind : null;
       const disabled = !!(dep && typeof dep === 'object' && dep.disabled) || (f.disabled || []).includes(name);
       const health = disabled ? 'off' : (f.appHealth?.[name] || 'unknown');
-      rows.push({ peer: f.name, connected: !!f.connected, lastSeen: f.lastSeen, commit, behind, disabled, health, job: f.lastJobs?.[name] || null });
+      rows.push({ peer: f.name, connected: !!f.connected, lastSeen: f.lastSeen, commit, behind, disabled, health, job: f.lastJobs?.[name] || null, sites: f.appSites?.[name] || [] });
     }
     return { peers: fleet.length, reporting, rows };
   }

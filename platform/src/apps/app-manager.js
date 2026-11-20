@@ -282,6 +282,8 @@ function create(name, description) {
 
 async function remove(name) {
   if (_bridgeCleanupFn) _bridgeCleanupFn(name);
+  // Uninstall stops its sites and forgets them (docs/sites.md).
+  await require('./sites').removeApp(name).catch(() => {});
   await stopApp(name);
   const dir = appDir(name);
   if (!fs.existsSync(dir)) return { error: 'App not found' };
@@ -612,6 +614,7 @@ async function rename(oldName, newName) {
   if (fs.existsSync(newDir)) return { error: `App "${newName}" already exists` };
 
   if (_bridgeCleanupFn) _bridgeCleanupFn(oldName);
+  await require('./sites').removeApp(oldName).catch(() => {});
   await stopApp(oldName);
 
   fs.renameSync(oldDir, newDir);
@@ -665,6 +668,7 @@ async function rename(oldName, newName) {
     }
   }
 
+  require('./sites').autostartApp(newName).catch(() => {});
   return { ok: true, oldName, newName, warnings };
 }
 

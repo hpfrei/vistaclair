@@ -623,6 +623,7 @@ function doStart(rt) {
 
 async function start(app, site) {
   effective(app, site);
+  if (opts.isEnabled && !opts.isEnabled(app)) throw Object.assign(new Error(`app "${app}" is disabled on this host`), { code: 'disabled' });
   const rt = rtOf(app, site);
   rt.wanted = true;
   if (rt.timer) { clearTimeout(rt.timer); rt.timer = null; }
@@ -659,17 +660,19 @@ async function restart(app, site) {
 }
 
 // Boot: every declared site whose (host) autostart is on.
-async function autostartAll() {
+async function autostartApp(app) {
+  if (opts.isEnabled && !opts.isEnabled(app)) return;
   const out = [];
-  for (const app of appsWithSites()) {
-    for (const site of Object.keys(declared(app).sites)) {
-      let eff;
-      try { eff = effective(app, site); } catch { continue; }
-      if (!eff.autostart) continue;
-      out.push(start(app, site).catch((e) => console.warn(`[sites] autostart ${app}/${site}: ${e.message}`)));
-    }
+  for (const site of Object.keys(declared(app).sites)) {
+    let eff;
+    try { eff = effective(app, site); } catch { continue; }
+    if (!eff.autostart) continue;
+    out.push(start(app, site).catch((e) => console.warn(`[sites] autostart ${app}/${site}: ${e.message}`)));
   }
   await Promise.allSettled(out);
+}
+async function autostartAll() {
+  await Promise.allSettled(appsWithSites().map(autostartApp));
 }
 
 async function stopApp(app) {
@@ -836,7 +839,27 @@ async function checkDomain(app, site, domainArg, { fetchImpl = globalThis.fetch,
   return { app, site, domain, ok: false, status: 'not-here', text: `${domain} answers, but not from ${app}/${site} on this host — check the nginx proxy_pass port (${eff.port}).` };
 }
 
+// The owner's Sites tab (dashboard WS `app:site:*`): one dispatcher, the
+// engine methods above; returns what the tab renders.
+async function ownerAction(action, app, site, args = {}) {
+  switch (action) {
+    case 'list': return { sites: list(app), fenceMinNode: FENCE_MIN_NODE, node: process.version };
+    case 'detail': return {
+      status: status(app, site), logs: logs(app, site, 200), crashes: crashes(app, site),
+      snapshots: snapshots(app, site), nginx: nginxSnippet(app, site),
+    };
+    case 'start': return start(app, site);
+    case 'stop': return stop(app, site);
+    case 'restart': return restart(app, site);
+    case 'settings': return hostSettings(app, site, args.patch || {});
+    case 'rollback': return rollback(app, site, args.id);
+    case 'checkDomain': return checkDomain(app, site, args.domain);
+    default: throw new Error(`unknown site action "${action}"`);
+  }
+}
+
 module.exports = {
+  ownerAction, autostartApp,
   init, onEvent,
   list, status, crashes, logs, effective, declared,
   start, stop, restart, autostartAll, stopApp, removeApp, stopAll, afterCodeSwap,

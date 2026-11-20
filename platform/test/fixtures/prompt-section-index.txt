@@ -37,8 +37,9 @@ BEFORE using it — app-lint checks (`unread-capability`). Advertise what you us
 - `browser` — `browser.screenshot` — headless page render
 - `telegram` — `telegram.status/send/…` + Web App (mini-app)
 - `whatsapp` — `whatsapp.status/send/sendButtons/sendList/…`
-- `apps` — `ctx.apps.access(app)` — another app's bot/number/URL front doors; never tokens
-- `licensing` — `manifest.auth.license` + `ctx.license.*` — paid/freemium apps, seats, tiers
+- `apps` — `ctx.apps.access(app)` — another app's bot/number/URL; never tokens
+- `sites` — `ctx.sites` — own web servers per app
+- `licensing` — `ctx.license.*` — paid/freemium apps, seats, tiers
 - `platform-cron` — `platform.cron.schedule/list` — cross-app persistent jobs
 - `sysmon` — `sysmon.get/subscribe/processes` — host RAM/CPU/disk/load; `<vc-sysmon>`
 - `print` — `print.status/pdf` — print a PDF on the owner's printer
