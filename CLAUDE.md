@@ -1,12 +1,25 @@
-# Vistaclair Pro
+# Vistaclair
 
 This file is the index. Start here, then open the one doc for the area you are
 about to touch — before changing it, not after.
 
 ## Documentation map
 
+One product: the core (`server.js`, `src/`, `lib/`, `public/`, `test/`) and the
+Apps Platform (`platform/`, loaded unconditionally). Paths in the platform rows
+below that start with `src/`, `public/` or `scripts/` are under `platform/`.
+
 | Doc | Read it when you touch |
 |---|---|
+| `README.md`, `SECURITY.md` | the install, the ports, the dashboard login, the threat model |
+| `src/proxy.js`, `src/proxy-rule-handler.js`, `src/providers/`, `src/sse-passthrough.js` | the proxy on `:3456`: routing to providers, proxy rules, streaming passthrough (README "Provider routing", "Proxy rules") |
+| `public/inspector*.js`, `src/inspector-sessions.js`, `src/trace-index.js` | the Inspector: instance traces, lanes, retention |
+| `src/cli-session*.js`, `src/sdk-session.js`, `src/session-*.js`, `public/cli.js`, `public/sdk-panel.js` | CLI and Agent SDK sessions: launch, resume, uploads, totals, tokens |
+| `src/orchestration.js`, `lib/orchestrator-mcp.js`, `lib/orchestration-hook.js` | orchestrator runs: workers, queue, reports, the run board |
+| `docs/desks.md` | Desks and TabHost: the window manager for second-level tabs |
+| `src/login.js`, `src/login-routes.js`, `src/auth.js` | dashboard login: the token, one-time links, login challenges and providers (README "Dashboard login") |
+| `src/csp.js`, `SECURITY.md` (Content-Security-Policy) | the CSP of dashboard pages; `public/vendor/README.md` for the vendored libraries |
+| `docs/app-origin-design.md`, `docs/defensive-code-audit.md` | the apps-origin design (not built), the defensive code audit |
 | `docs/seam.md` | anything that crosses into core: the ctx contract, the descriptor, the proxy, `app-runner.js` |
 | `docs/apps.md` | app shape and runtimes, app-guard, cron, access levels and surfaces |
 | `docs/extras.md` | platform extras and toolchains (`platform-extras.js`, `platform-extras-godot.js`): Setup → Extras installs, probes, `capabilities.json`, `manifest.toolchains` |
@@ -35,8 +48,8 @@ about to touch — before changing it, not after.
 | `docs/fleet-remote.md` | the fleet remote call / job (`fleet-remote.js`, `fleet-remote-host.js`, `fleet-remote-wire.js`, the `/api/peer/fleet-remote` routes, `fr:job` frames): an app calling its own copy on a slave and starting jobs there, records, the grant for a retried call, `remoteContext()`, progress push (`ctx.fleet.call` / `jobs` / `onCall` / `onJob`, `dataPublish.on`) |
 | `docs/fleet-specs.md` | peer hardware specs (`host-specs.js`): what is measured and when, the snapshot transport and its sanitising, `ctx.fleet.peers()[].specs` / `ctx.fleet.self()`, the `fleet.specs` flag |
 | `docs/remote-sessions.md` | `peer-remote-master.js` / `peer-remote-host.js` / `peer-remote-agent.js`: Agent SDK sessions launched on a slave and shown on the master — remote workers via `launch_cli({ host })`, Horst's and the owner's launches, the `peer.session.launch` card (tabs, relayed questions, billing totals, `app:peer:session:*`, the module API) |
-| `src/apps/prompts/_api-reference.md` | the APP-facing API. It is what build/change sessions read (as the `.vistaclair/` sidecar); `build.md` / `extend.md` / `build-tools.md` are the session prompts. `capabilities-check` validates its headings |
-| `src/apps/agent/README.md`, `src/apps/governance/README.md` | the one-way dependency rule between the two halves of Horst |
+| `platform/src/apps/prompts/_api-reference.md` | the APP-facing API. It is what build/change sessions read (as the `.vistaclair/` sidecar); `build.md` / `extend.md` / `build-tools.md` are the session prompts. `capabilities-check` validates its headings |
+| `platform/src/apps/agent/README.md`, `platform/src/apps/governance/README.md` | the one-way dependency rule between the two halves of Horst |
 
 ## Documentation rules (standing)
 
@@ -79,8 +92,9 @@ says so — the decision to launch it belongs here.
 - **Never restart, stop, kill or interfere with the running control-room
   server** (`/home/hp/vistaclair`) or its ports. Verify with tests and
   throwaway harnesses in a temp dir, never against the live process.
-- **The core ⇄ Pro seam is contract** (`docs/seam.md`): one core file loaded by
-  path, everything else through the ctx and the descriptor.
+- **The seam is contract** (`docs/seam.md`): `platform/` reaches core only
+  through the ctx and `src/addon-host.js`; core loads `platform/` by one path
+  and never imports its internals.
 - **One duty, one implementation** (`docs/capabilities.md`): the engine
   enforces, Horst judges, the owner decides; no second copy of a duty in an
   app or a kind.

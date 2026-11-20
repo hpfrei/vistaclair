@@ -5,8 +5,8 @@ Date: 2026-11-11.
 
 ## Why this exists
 
-Vistaclair apps (the separate repo `vistaclair-apps`, mounted by the Pro
-plugin) are served under `/apps/<name>/` on the **same web origin** as the
+Vistaclair apps (the separate repo `vistaclair-apps`, mounted by the
+platform) are served under `/apps/<name>/` on the **same web origin** as the
 owner dashboard. In a browser, "same origin" means "same trust". Any script
 that runs inside an app page — the owner's own app code, a library it pulls
 in, or an attacker who found an injection flaw in it — can do everything the
@@ -52,7 +52,7 @@ code is a separate project (see "Related server-side gaps" at the end).
 ## 1. Inventory: how app pages depend on the dashboard origin today
 
 File references are relative to each repo: **core** = `/home/hp/vistaclair`,
-**pro** = `vistaclair-pro`, **apps** = `vistaclair-apps`. Line numbers are
+**platform** = `platform/`, **apps** = `vistaclair-apps`. Line numbers are
 from `main` on 2026-11-11.
 
 ### 1.1 Owner credentials and what guards them
@@ -75,14 +75,14 @@ Origin checks pass because the Origin *is* the dashboard.
 
 | What | Where |
 |---|---|
-| Pro mounts one router after core's auth gate; `/pro` static, then `/apps` | pro `index.js:140-153`, core `server.js:318`, `:460-461` |
-| `/apps/<name>/` is behind the owner gate unless a manifest declares a public surface; exemptions are built from manifests | pro `index.js:432-442`, `src/apps/surfaces.js:279-297`, core `src/addons.js` (`isAuthExempt`) |
-| Every `/apps/*` response: drops `Set-Cookie` for `sid`/`token`, adds `nosniff` and `frame-ancestors 'self' https://web.telegram.org; base-uri 'self'` | pro `src/apps/app-headers.js:1-16`, `:51-62` |
+| The platform mounts one router after core's auth gate; `/pro` static, then `/apps` | platform `index.js:140-153`, core `server.js:318`, `:460-461` |
+| `/apps/<name>/` is behind the owner gate unless a manifest declares a public surface; exemptions are built from manifests | platform `index.js:432-442`, `src/apps/surfaces.js:279-297`, core `src/addons.js` (`isAuthExempt`) |
+| Every `/apps/*` response: drops `Set-Cookie` for `sid`/`token`, adds `nosniff` and `frame-ancestors 'self' https://web.telegram.org; base-uri 'self'` | platform `src/apps/app-headers.js:1-16`, `:51-62` |
 | Core's dashboard CSP is deliberately **not** applied under `/apps/` | core `src/csp.js:10`, `:77-79`, `:90` |
-| In-process apps: a router per app inside the dashboard process; static `public/` last | pro `index.js:53-58`, `src/apps/app-manager.js:831-913` |
-| Own-process apps: proxied to a loopback port; the proxy strips `cookie`, `authorization` and every `x-vistaclair-*` header | pro `index.js:14-39`, `src/apps/internal-headers.js` |
-| The own-process runner already mounts the app at both `/apps/<n>` and `/` | pro `app-runner.js:189-190` |
-| Only `my-desktop` is own-process in the apps repo (manifest `runtime`) | apps `my-desktop` manifest; pro `src/apps/app-manager.js:79-100` |
+| In-process apps: a router per app inside the dashboard process; static `public/` last | platform `index.js:53-58`, `src/apps/app-manager.js:831-913` |
+| Own-process apps: proxied to a loopback port; the proxy strips `cookie`, `authorization` and every `x-vistaclair-*` header | platform `index.js:14-39`, `src/apps/internal-headers.js` |
+| The own-process runner already mounts the app at both `/apps/<n>` and `/` | platform `app-runner.js:189-190` |
+| Only `my-desktop` is own-process in the apps repo (manifest `runtime`) | apps `my-desktop` manifest; platform `src/apps/app-manager.js:79-100` |
 
 ### 1.3 Embedding: iframe, new tab, or both
 
@@ -90,13 +90,13 @@ Origin checks pass because the Origin *is* the dashboard.
 
 | What | Where |
 |---|---|
-| Apps tab: `<iframe src="/apps/<name>/" data-app-iframe="<name>">` with no `sandbox` attribute; `allow=` only for microphone/camera | pro `public/apps.js:1666-1667`, `:1752-1764` |
-| Reload / re-point after start/stop sets `iframe.src = '/apps/<name>/'` | pro `public/apps.js:5101-5103`, `:5131-5132` |
-| `display: fullscreen` apps open a new tab on `/pro/app-launcher.html?app=<name>`, which itself frames `/apps/<name>/` | pro `public/apps.js:2356`, `public/app-launcher.html:40`, `:63` |
-| The launcher page opens the **owner WebSocket** itself and, if that works, loads the bridge relay; otherwise it runs "REST-only" for public visitors | pro `public/app-launcher.html:93-130` |
+| Apps tab: `<iframe src="/apps/<name>/" data-app-iframe="<name>">` with no `sandbox` attribute; `allow=` only for microphone/camera | platform `public/apps.js:1666-1667`, `:1752-1764` |
+| Reload / re-point after start/stop sets `iframe.src = '/apps/<name>/'` | platform `public/apps.js:5101-5103`, `:5131-5132` |
+| `display: fullscreen` apps open a new tab on `/pro/app-launcher.html?app=<name>`, which itself frames `/apps/<name>/` | platform `public/apps.js:2356`, `public/app-launcher.html:40`, `:63` |
+| The launcher page opens the **owner WebSocket** itself and, if that works, loads the bridge relay; otherwise it runs "REST-only" for public visitors | platform `public/app-launcher.html:93-130` |
 | Dashboard CSP allows framing only `'self'` (plus the payment provider) | core `src/csp.js:59-60` |
-| App responses allow being framed only by `'self'` and Telegram | pro `src/apps/app-headers.js:16` |
-| Custom-domain apps (`pixachat.com`) are opened by visitors directly, not framed; nginx maps `/` onto `/apps/<n>/` | pro `src/apps/app-manager.js:418-426`, `:520-537` |
+| App responses allow being framed only by `'self'` and Telegram | platform `src/apps/app-headers.js:16` |
+| Custom-domain apps (`pixachat.com`) are opened by visitors directly, not framed; nginx maps `/` onto `/apps/<n>/` | platform `src/apps/app-manager.js:418-426`, `:520-537` |
 
 ### 1.4 The bridge (how apps reach platform features)
 
@@ -105,15 +105,15 @@ options below.
 
 | What | Where |
 |---|---|
-| App side: `Bridge.call()` posts `{type:'bridge', id, method, params}` to `window.parent` with target `'*'` | pro `public/app-runtime.js:14-29` |
-| App side listeners check neither `e.origin` nor `e.source` | pro `public/app-runtime.js:46-56` |
-| Dashboard side: the relay finds the sending frame by window identity (`iframe.contentWindow === e.source`) and takes the app name from the iframe's `data-app-iframe`, never from the message | pro `public/app-bridge-client.js:12-17`, `:41-45` |
-| The relay forwards over the owner WebSocket as `app:bridge` | pro `public/app-bridge-client.js:55-61` |
-| Replies and events go back with `postMessage(..., window.location.origin)` — **silently dropped if the frame is on another origin** | pro `public/app-bridge-client.js:6`, `:75-79`, `:89-93` |
-| Same pattern in the overlay host and model picker | pro `public/app-overlays.js:14`, `:26`, `:358`, `:401`; `public/app-model-picker.js:15`, `:54` |
-| Server side runs every bridge call as the owner | pro `src/apps/index.js:1251`, `src/apps/app-bridge.js:41-82` |
-| The bridge is **open-world**: declared capabilities are "advertisements, not gates" | pro `src/apps/app-bridge.js:7-10` |
-| Bridge method `cli.edit` launches a Claude Code change session for the app | pro `src/apps/capabilities/cli.js:14`, `src/apps/index.js:1251-1300` |
+| App side: `Bridge.call()` posts `{type:'bridge', id, method, params}` to `window.parent` with target `'*'` | platform `public/app-runtime.js:14-29` |
+| App side listeners check neither `e.origin` nor `e.source` | platform `public/app-runtime.js:46-56` |
+| Dashboard side: the relay finds the sending frame by window identity (`iframe.contentWindow === e.source`) and takes the app name from the iframe's `data-app-iframe`, never from the message | platform `public/app-bridge-client.js:12-17`, `:41-45` |
+| The relay forwards over the owner WebSocket as `app:bridge` | platform `public/app-bridge-client.js:55-61` |
+| Replies and events go back with `postMessage(..., window.location.origin)` — **silently dropped if the frame is on another origin** | platform `public/app-bridge-client.js:6`, `:75-79`, `:89-93` |
+| Same pattern in the overlay host and model picker | platform `public/app-overlays.js:14`, `:26`, `:358`, `:401`; `public/app-model-picker.js:15`, `:54` |
+| Server side runs every bridge call as the owner | platform `src/apps/index.js:1251`, `src/apps/app-bridge.js:41-82` |
+| The bridge is **open-world**: declared capabilities are "advertisements, not gates" | platform `src/apps/app-bridge.js:7-10` |
+| Bridge method `cli.edit` launches a Claude Code change session for the app | platform `src/apps/capabilities/cli.js:14`, `src/apps/index.js:1251-1300` |
 
 Consequence: after any origin split, the bridge becomes the *only* way from
 app script to owner power. It must then be narrowed (stage 5 below).
@@ -122,10 +122,10 @@ app script to owner power. It must then be narrowed (stage 5 below).
 
 | What | Where |
 |---|---|
-| Scaffold: `/pro/app-runtime.js`, `/pro/vc.js` | pro `src/apps/app-manager.js:264-265` |
-| Also used: `/pro/app-auth.js`, `/pro/app-theme.css`, `/pro/apps.css`, `/pro/app-overlays.js`, `/pro/marked.min.js`, `/pro/purify.min.js` | pro `index.js:512` (`authExemptPaths`) |
-| `/pro/app-runtime.js` and `/pro/vc*.js` are **not** auth-exempt — a cookieless page cannot load them | pro `index.js:151`, `:512` |
-| `apiFetch` uses relative `api/...` paths and adds `Authorization: Bearer <app-user token>` from localStorage | pro `public/app-runtime.js:327-358` |
+| Scaffold: `/pro/app-runtime.js`, `/pro/vc.js` | platform `src/apps/app-manager.js:264-265` |
+| Also used: `/pro/app-auth.js`, `/pro/app-theme.css`, `/pro/apps.css`, `/pro/app-overlays.js`, `/pro/marked.min.js`, `/pro/purify.min.js` | platform `index.js:512` (`authExemptPaths`) |
+| `/pro/app-runtime.js` and `/pro/vc*.js` are **not** auth-exempt — a cookieless page cannot load them | platform `index.js:151`, `:512` |
+| `apiFetch` uses relative `api/...` paths and adds `Authorization: Bearer <app-user token>` from localStorage | platform `public/app-runtime.js:327-358` |
 | Custom-domain apps already avoid `/pro/*` and re-serve shared assets themselves | apps `pixachat/routes.js:645-700`, `pixachat/public/app/boot.js:3`, `my-gym/public/app.html:8`, `mt4/public/app.html:7`, `vidat/public/client/client.js:7` |
 
 Per-app details: see 1.9.
@@ -134,14 +134,14 @@ Per-app details: see 1.9.
 
 | What | Where |
 |---|---|
-| App-user sessions use **no cookie**: a signed token in localStorage, sent as a Bearer header | pro `src/apps/app-identity.js:21-28`, `:154-182`; `public/app-runtime.js:335-342`; `public/app-auth.js:37-38` |
-| Telegram Mini App pages send `X-Telegram-Init-Data` | pro `src/apps/app-identity.js:65-93`, `src/apps/capabilities/identity.js:44-56` |
-| If no app-user credential is present, a valid **owner cookie** maps to the app's owner account | pro `src/apps/capabilities/identity.js:57-70`, `src/apps/app-auth.js:152-157` |
-| Users-level apps deny `/api/*` by default except auth and declared public API | pro `src/apps/app-auth.js:13`, `:384` |
-| Telegram `web_app` button URL is built from the platform public URL (or the custom domain) | pro `src/apps/telegram.js:489-503` |
-| Email verification links are built from the request's forwarded host | pro `src/apps/app-auth.js:408-410` |
-| The platform already warns that one app on two origins has two separate sessions | pro `src/apps/app-manager.js:462-467` |
-| Platform Mini Apps (`/pro/tg-session`, `/pro/vista`) use their own per-mount bearer headers, not the owner cookie | pro `public/tg-session/tg-session.js:59-60`, `public/vista/vista.js:32-33` |
+| App-user sessions use **no cookie**: a signed token in localStorage, sent as a Bearer header | platform `src/apps/app-identity.js:21-28`, `:154-182`; `public/app-runtime.js:335-342`; `public/app-auth.js:37-38` |
+| Telegram Mini App pages send `X-Telegram-Init-Data` | platform `src/apps/app-identity.js:65-93`, `src/apps/capabilities/identity.js:44-56` |
+| If no app-user credential is present, a valid **owner cookie** maps to the app's owner account | platform `src/apps/capabilities/identity.js:57-70`, `src/apps/app-auth.js:152-157` |
+| Users-level apps deny `/api/*` by default except auth and declared public API | platform `src/apps/app-auth.js:13`, `:384` |
+| Telegram `web_app` button URL is built from the platform public URL (or the custom domain) | platform `src/apps/telegram.js:489-503` |
+| Email verification links are built from the request's forwarded host | platform `src/apps/app-auth.js:408-410` |
+| The platform already warns that one app on two origins has two separate sessions | platform `src/apps/app-manager.js:462-467` |
+| Platform Mini Apps (`/pro/tg-session`, `/pro/vista`) use their own per-mount bearer headers, not the owner cookie | platform `public/tg-session/tg-session.js:59-60`, `public/vista/vista.js:32-33` |
 
 ### 1.7 Service workers and storage
 
@@ -150,18 +150,18 @@ Per-app details: see 1.9.
 | The dashboard registers `/sw.js` with scope `/`, which covers `/apps/*`; it claims open pages immediately | core `public/mobile.js:16`, `public/sw.js:10`, `:16`; it only touches Google Fonts requests (`:20`) |
 | The PWA manifest has scope `/` | core `public/manifest.webmanifest`, `public/index.html:12` |
 | `vr-moritz` registers its own worker under its app path | apps `vr-moritz/client/src/swreg.js:44` |
-| Nothing strips a `Service-Worker-Allowed` response header from `/apps/*`, so an app route could widen its worker's scope to `/` and sit in front of the dashboard | pro `src/apps/app-headers.js:51-62` (no such rule) |
-| localStorage is one store per origin, shared by the dashboard and every app: `vista:identity:<app>`, `va.<app>.session`, `gymi.token`, and dashboard keys such as `vc.apps.view` | pro `public/app-runtime.js:335`, `public/app-auth.js:37`, `public/apps.js:316` |
+| Nothing strips a `Service-Worker-Allowed` response header from `/apps/*`, so an app route could widen its worker's scope to `/` and sit in front of the dashboard | platform `src/apps/app-headers.js:51-62` (no such rule) |
+| localStorage is one store per origin, shared by the dashboard and every app: `vista:identity:<app>`, `va.<app>.session`, `gymi.token`, and dashboard keys such as `vc.apps.view` | platform `public/app-runtime.js:335`, `public/app-auth.js:37`, `public/apps.js:316` |
 
 ### 1.8 Deployment shapes as found in code
 
 | Shape | What the code assumes | Where |
 |---|---|---|
 | (a) Owner's machine: `localhost:3457` plus one ngrok domain | Dashboard on 3457 (3456 is the model proxy, loopback only); trust proxy = loopback; no ngrok or nginx config in the repo | core `server.js:111-113`, `:149`, `:585-586`; `src/port-cleanup.js` |
-| (b) Deployed host behind nginx, real domain, optional per-app domains | Custom domain = an nginx block mapping `/` to `/apps/<n>/` on the dashboard port; no Host-based routing in code | pro `src/apps/app-manager.js:520-537` |
-| (c) Slaves managed by a master | The master opens a slave's **own** dashboard with a one-time login link; it does not frame slave apps | pro `docs/federation.md:25-32` |
-| Google OAuth callback is hard-wired to `http://localhost:<port>/pro/auth/google/callback` | — | pro `src/apps/google-api.js:15-22` |
-| No setting for a separate apps host or port exists anywhere | — | searched core and pro |
+| (b) Deployed host behind nginx, real domain, optional per-app domains | Custom domain = an nginx block mapping `/` to `/apps/<n>/` on the dashboard port; no Host-based routing in code | platform `src/apps/app-manager.js:520-537` |
+| (c) Slaves managed by a master | The master opens a slave's **own** dashboard with a one-time login link; it does not frame slave apps | platform `docs/federation.md:25-32` |
+| Google OAuth callback is hard-wired to `http://localhost:<port>/pro/auth/google/callback` | — | platform `src/apps/google-api.js:15-22` |
+| No setting for a separate apps host or port exists anywhere | — | searched core and platform |
 
 ### 1.9 Per-app inventory
 
@@ -295,7 +295,7 @@ blocks and other browsers increasingly restrict. Then the pass must be a
 in stage 4) or the fullscreen launcher must open the app top-level. The
 simple rule for the owner: **put both names under one domain you own.**
 
-Effort: **8–10 worker-days** (core host gate and apps pass 3, pro serving,
+Effort: **8–10 worker-days** (core host gate and apps pass 3, platform serving,
 framing, relay and CSP changes 3, Telegram/links/accessInfo 1, tests 1.5,
 per-app fixes and browser testing 0.5–1.5).
 
@@ -312,7 +312,7 @@ another app's API, pass or storage. This is the end state custom-domain apps
 
 What breaks: everything in A, plus apps that read each other's pages or
 assets by relative URL, plus the Host-based routing being needed for every
-app (the runner already serves at `/`, pro `app-runner.js:189-190`, which
+app (the runner already serves at `/`, platform `app-runner.js:189-190`, which
 helps).
 
 Owner must provide:
@@ -407,7 +407,7 @@ Every stage below lands on its own, is behind a setting until stage 6, and is
 rolled back by turning the setting off (or reverting its commit). Stages 1
 and 2 change nothing visible.
 
-### Stage 1 — the apps host exists, serving nothing private (core + pro, 2 days)
+### Stage 1 — the apps host exists, serving nothing private (core + platform, 2 days)
 
 - New setting `appsOrigin` (empty = today's behaviour). Locally a second
   listener on a port (default 3458); deployed, a Host name.
@@ -419,12 +419,12 @@ and 2 change nothing visible.
 - Objective check: new core tests — on the apps host `/api/sessions` with a
   valid `sid` cookie → 404; `/` → 404; WebSocket upgrade → refused; a public
   surface (`/apps/<n>/app.html`) → 200 anonymously; an owner-private app →
-  403 without a pass. Existing `npm test` in core and pro passes.
+  403 without a pass. Existing `npm test` in core and platform passes.
 - Owner test: none needed (setting off by default). Optional: set it, open
   `http://localhost:3458/` and see a 404.
 - Rollback: unset `appsOrigin`.
 
-### Stage 2 — the apps pass (core + pro, 2 days)
+### Stage 2 — the apps pass (core + platform, 2 days)
 
 - `POST /api/apps-pass` (dashboard origin, owner only, Origin-checked) mints
   a one-time code, 60 seconds, single use, bound to the apps origin.
@@ -433,7 +433,7 @@ and 2 change nothing visible.
   revocable from the sessions list; on HTTPS named with the `__Host-`
   prefix and `Secure`; for a cross-site pair see Option A) and redirects to `next`
   (only paths under `/apps/`).
-- Pro's owner decision for `/apps/*` (`ctx.isOwnerRequest`, and the
+- The platform's owner decision for `/apps/*` (`ctx.isOwnerRequest`, and the
   identity fallback in `capabilities/identity.js:57-70`) accepts the pass on
   the apps origin and nothing else there.
 - Objective check: tests — a pass works on the apps origin for `/apps/<n>/api`;
@@ -443,7 +443,7 @@ and 2 change nothing visible.
 - Owner test: none (still off).
 - Rollback: revert; nothing uses it yet.
 
-### Stage 3 — the bridge works across origins (pro, 1.5 days)
+### Stage 3 — the bridge works across origins (platform, 1.5 days)
 
 - `app-bridge-client.js`, `app-overlays.js`, `app-model-picker.js` and the
   launcher's toast shim post to the frame's expected origin instead of
@@ -460,7 +460,7 @@ and 2 change nothing visible.
   dashboard origin while `appsOrigin` is off).
 - Rollback: revert.
 
-### Stage 4 — frame apps from the apps origin (pro + core CSP, 1.5 days)
+### Stage 4 — frame apps from the apps origin (platform + core CSP, 1.5 days)
 
 - With `appsOrigin` set, the Apps tab and the launcher frame
   `<appsOrigin>/__apps-pass?code=…&next=/apps/<n>/` for owner-private apps
@@ -481,11 +481,11 @@ and 2 change nothing visible.
   to one users-level app. Then the same through the second tunnel name.
 - Rollback: unset `appsOrigin` — the frames go back to `/apps/<n>/`.
 
-### Stage 5 — narrow the bridge (pro, 2 days)
+### Stage 5 — narrow the bridge (platform, 2 days)
 
 - The bridge stops being open-world for app frames: a method is allowed only
   if the app's manifest declares the capability it belongs to
-  (`capabilities.gatingCapabilityForMethod`, pro `src/apps/app-bridge.js:36`).
+  (`capabilities.gatingCapabilityForMethod`, platform `src/apps/app-bridge.js:36`).
   `cli.*` methods additionally need an owner confirmation in the dashboard.
 - A log-only week first: record undeclared calls per app, then enforce.
 - Objective check: tests — an undeclared method is refused with a clear
@@ -503,7 +503,7 @@ and 2 change nothing visible.
 - Remove my-shodan's fallback WebSocket (1.9) and add an app-lint rule that
   flags `/pro/` assets outside the shared set, `window.parent.document` and
   WebSockets to the page host's root.
-- Objective check: core and pro `npm test`; `npm run lint:app` (pro) passes
+- Objective check: core and platform `npm test`; `npm run lint:app` (platform) passes
   for every app.
 - Owner test: a full day of normal use, then confirm no app is stuck.
 - Rollback: set the default back to empty.
@@ -524,9 +524,9 @@ Each is small, lands alone and helps whether or not the move happens.
 
 | # | Mitigation | Why | Effort |
 |---|---|---|---|
-| I1 | Drop the `Service-Worker-Allowed` header from every `/apps/*` response (pro `src/apps/app-headers.js`, beside the cookie rule) | Without it, an app route can register a worker with scope `/` that sits in front of the dashboard and survives the app's removal | 0.25 day |
+| I1 | Drop the `Service-Worker-Allowed` header from every `/apps/*` response (platform `src/apps/app-headers.js`, beside the cookie rule) | Without it, an app route can register a worker with scope `/` that sits in front of the dashboard and survives the app's removal | 0.25 day |
 | I2 | Make the dashboard's own `sw.js` ignore `/apps/*` explicitly and keep its scope `/` | Keeps the dashboard worker from ever caching or touching app responses (today it only touches fonts, core `public/sw.js:20`) | 0.25 day |
-| I3 | Strip `cookie` and `authorization` from in-process app requests once the owner decision is taken, as the own-process proxy already does (pro `index.js:53-58` vs `:16-17`) | Today in-process `routes.js` code can read the owner's static token from the cookie header | 0.5 day |
+| I3 | Strip `cookie` and `authorization` from in-process app requests once the owner decision is taken, as the own-process proxy already does (platform `index.js:53-58` vs `:16-17`) | Today in-process `routes.js` code can read the owner's static token from the cookie header | 0.5 day |
 | I4 | Audit dashboard `GET` routes for side effects and move any to `POST` | `GET` is not Origin-checked; after the split it is the one request a same-site page can still make with the owner cookie | 1 day |
 | I5 | Relay hardening now: `app-bridge-client.js` drops messages whose `e.origin` is not the expected app origin; `app-runtime.js` ignores messages from anything but its parent | Costs nothing today and is stage 3's first half | 0.5 day |
 | I6 | Bridge log-only mode: record undeclared method calls per app (stage 5's first half) | Gives the owner the data for Q5 before anything breaks | 0.5 day |
@@ -557,10 +557,10 @@ None of these closes the main hole: same-origin script can still call
 Found while taking the inventory; listed so they are not lost.
 
 - In-process apps run inside the dashboard process and can read
-  `req.headers.cookie` (pro `index.js:53-58`); I3 above closes the cookie part
+  `req.headers.cookie` (platform `index.js:53-58`); I3 above closes the cookie part
   only.
 - The own-process runner loads core's `.env`, so the child process can read
   the owner token despite the narrow spawn environment; the code says so
-  itself (pro `app-runner.js:21-26`, `src/apps/app-manager.js:1011-1020`).
+  itself (platform `app-runner.js:21-26`, `src/apps/app-manager.js:1011-1020`).
 - Isolating app *server* code needs its own design (separate OS user, no
   access to the core data directory).
