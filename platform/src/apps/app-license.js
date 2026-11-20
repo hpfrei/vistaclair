@@ -1,127 +1,113 @@
 // App licensing — the platform side of manifest `auth.license`.
 //
-// Licences are MASTERED on the external licence server (hpfrei-licencing,
-// base URL in platform-settings `licenseServerUrl`). The
-// platform persists exactly ONE thing per account: the claimed key
-// (`accounts.license_key`, column owned by app-auth.js). Status, tier and
-// expiry are never stored — they come from the server's public POST
-// /api/validate and live in an in-memory cache (stale-while-revalidate), so a
-// revocation or renewal reaches a running app within `licenseCacheTtlMinutes`
-// of the user's next request, with no cron sweep and no duplicate state.
+// The app-facing surface (manifest `auth.license`, `ctx.license.*`, the
+// /api/auth/license/* routes, /api/auth/me.license, the route gate) is stable.
+// Its BACKEND is a provider slot: `setProvider(p)` installs an in-process
+// object, and with none installed licensing is "unavailable" — no network
+// call is ever made from here. Owners are always entitled; everyone else gets
+// the app's free tier (or none); a key cannot be claimed.
 //
-// Seat model: the server's machine activations double as account seats. The
-// server treats machineId as an opaque string, so one seat is
-// `machineId vc:<app>:acct:<id>` — deterministic, re-derivable, nothing extra
-// stored. `machine_limit` on a licence therefore means "max accounts per key
-// per app" (0 = unlimited, no activation rows at all). Activation is
-// transactional and idempotent server-side; DEACTIVATION IS BEST-EFFORT (the
-// server rate-limits /api/deactivate per IP and the whole platform shares
-// one), so local key clearing never depends on it.
+// Provider shape (all methods may be async; a throw means "unreachable"):
+//   validate(key, { product, machineId? })        -> { valid, error?, license?, product?, customerPortalUrl? }
+//   activate(key, { product, seat })              -> same shape as validate
+//   deactivate(key, { seat })                     -> any (best-effort)
+//   products(product)                             -> variants[] or { variants[] }
+// `seat` = { machineId, hostname, username } (see seatIdentity). Error codes a
+// provider returns in `error`: 'seat_not_activated' (validate with a machineId
+// that holds no seat — the platform activates once and retries),
+// 'machine_limit' (no seat left), anything else is passed through.
 //
-// Only PUBLIC server endpoints are used — no admin credential ever enters the
-// platform. Validate responses carry an Ed25519 `signedFields`/`signature`
-// pair; pinning the server's public key is a future hardening hook (the
-// server is first-party over HTTPS), not done here.
+// The platform persists exactly ONE thing per account: the claimed key
+// (`accounts.license_key`, column owned by app-auth.js), kept untouched even
+// with no provider so a later provider can honour it. Status, tier and expiry
+// are never stored — with a provider they live in an in-memory cache
+// (stale-while-revalidate, `licenseCacheTtlMinutes`, `licenseGraceHours`).
 //
-// Nothing here runs at app mount time except pure parsing (`parseManifest`) —
-// a licence-server outage must never break an app mount.
+// Seat model: one seat is machineId `vc:<app>:acct:<id>`, deterministic and
+// re-derivable. Deactivation is best-effort; local key clearing never depends
+// on it.
+//
+// Nothing here runs at app mount time except pure parsing (`parseManifest`).
 
-const DEFAULT_TIMEOUT_MS = 10_000; // background / claim calls
 const GATE_TIMEOUT_MS = 4_000;     // blocking validate inside a request (cold cache)
 const NEGATIVE_TTL_MS = 5 * 60 * 1000;  // invalid/grace entries re-check quickly
 const PRODUCT_TTL_MS = 60 * 60 * 1000;  // checkout/variant info
 const CACHE_MAX = 10_000;
 
-// ---- HTTP client (public endpoints only) ------------------------------------
-// Every function takes opts {baseUrl, timeoutMs} so a standalone script can
-// exercise the client without initializing the platform.
+const UNAVAILABLE = 'licensing_unavailable';
 
-function baseUrl(opts) {
-  const url = (opts && opts.baseUrl) || require('./platform-settings').get('licenseServerUrl') || '';
-  return String(url).replace(/\/+$/, '');
+// ---- provider slot -----------------------------------------------------------
+
+let provider = null;
+
+function setProvider(p) {
+  if (p == null) { provider = null; }
+  else {
+    for (const m of ['validate', 'activate', 'deactivate', 'products']) {
+      if (typeof p[m] !== 'function') throw new Error(`licence provider needs a ${m}() function`);
+    }
+    provider = p;
+  }
+  entCache.clear();
+  productCache.clear();
 }
+const getProvider = () => provider;
 
-// The server signals licence problems in-body ({valid:false, error}) with 2xx/4xx.
-// Only transport failure, timeout, 5xx or non-JSON throw — tagged err.network,
-// the "unreachable ≠ invalid" boundary everything else builds on.
-async function api(method, path, body, opts = {}) {
-  let res;
+// A provider call bounded by a timeout; a throw/timeout is tagged err.network,
+// the "unreachable != invalid" boundary everything below builds on.
+async function call(fn, timeoutMs) {
+  let timer;
   try {
-    res = await fetch(baseUrl(opts) + path, {
-      method,
-      headers: body ? { 'Content-Type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(opts.timeoutMs || DEFAULT_TIMEOUT_MS),
-    });
+    return await Promise.race([
+      Promise.resolve().then(fn),
+      new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('licence provider timed out')), timeoutMs || 10_000); }),
+    ]);
   } catch (err) {
-    const e = new Error(`licence server unreachable: ${err.message}`);
+    const e = new Error(`licence provider unreachable: ${err && err.message}`);
     e.network = true;
     throw e;
-  }
-  if (res.status >= 500) {
-    const e = new Error(`licence server error (HTTP ${res.status})`);
-    e.network = true;
-    throw e;
-  }
-  const json = await res.json().catch(() => null);
-  if (!json || typeof json !== 'object') {
-    const e = new Error('licence server returned non-JSON');
-    e.network = true;
-    throw e;
-  }
-  return json;
+  } finally { clearTimeout(timer); }
 }
 
-const validateKey = ({ key, product, machineId }, opts) =>
-  api('POST', '/api/validate', { key, product, ...(machineId ? { machineId } : {}) }, opts);
-const activateSeat = ({ key, product, machineId, hostname, username }, opts) =>
-  api('POST', '/api/activate', { key, product, machineId, hostname, username }, opts);
-const deactivateSeat = ({ key, machineId, hostname, username }, opts) =>
-  api('POST', '/api/deactivate', { key, machineId, hostname, username }, opts);
+const validateKey = ({ key, product, machineId }, opts = {}) => {
+  if (!provider) return Promise.resolve({ valid: false, error: UNAVAILABLE });
+  return call(() => provider.validate(key, { product, ...(machineId ? { machineId } : {}) }), opts.timeoutMs);
+};
+const activateSeat = ({ key, product, machineId, hostname, username }, opts = {}) => {
+  if (!provider) return Promise.resolve({ valid: false, error: UNAVAILABLE });
+  return call(() => provider.activate(key, { product, seat: { machineId, hostname, username } }), opts.timeoutMs);
+};
+const deactivateSeat = ({ key, machineId, hostname, username }, opts = {}) => {
+  if (!provider) return Promise.resolve({ ok: true });
+  return call(() => provider.deactivate(key, { seat: { machineId, hostname, username } }), opts.timeoutMs);
+};
 
 // ---- product / checkout info (cached) ---------------------------------------
 
-const productCache = new Map(); // 'info:<slug>' | 'group:<pattern>' -> {at, data}
+const productCache = new Map(); // product -> {at, data: variants[]}
 
-async function productInfo(slug, opts) {
-  const ck = 'info:' + slug;
-  const hit = productCache.get(ck);
+async function productGroup(product, opts) {
+  if (!provider) return [];
+  const hit = productCache.get(product);
   if (hit && Date.now() - hit.at < PRODUCT_TTL_MS) return hit.data;
   try {
-    const json = await api('GET', `/api/product/${encodeURIComponent(slug)}/info`, null, opts);
-    const data = json && json.slug ? json : null;
-    productCache.set(ck, { at: Date.now(), data });
-    return data;
-  } catch { return hit ? hit.data : null; }
-}
-
-async function productGroup(pattern, opts) {
-  const ck = 'group:' + pattern;
-  const hit = productCache.get(ck);
-  if (hit && Date.now() - hit.at < PRODUCT_TTL_MS) return hit.data;
-  try {
-    const json = await api('GET', `/api/product/group/${encodeURIComponent(pattern)}`, null, opts);
-    const data = Array.isArray(json && json.variants) ? json.variants : [];
-    productCache.set(ck, { at: Date.now(), data });
+    const r = await call(() => provider.products(product), opts && opts.timeoutMs);
+    const data = Array.isArray(r) ? r : Array.isArray(r && r.variants) ? r.variants : [];
+    productCache.set(product, { at: Date.now(), data });
     return data;
   } catch { return hit ? hit.data : []; }
 }
 
-// Live lookup (used from error responses where we already went to the network).
+// Live lookup (used from error responses where we already went to the provider).
 async function checkoutUrl(cfg, opts) {
-  const info = await productInfo(cfg.product, opts);
-  if (info && info.checkoutUrl) return info.checkoutUrl;
   const variants = await productGroup(cfg.product, opts);
   const v = (variants || []).find((x) => x.checkoutUrl);
   return v ? v.checkoutUrl : null;
 }
 
-// Cache-only lookup for the request path (a licence-server outage must not add
-// latency to every 402).
+// Cache-only lookup for the request path.
 function checkoutFromCache(cfg) {
-  const i = productCache.get('info:' + cfg.product);
-  if (i && i.data && i.data.checkoutUrl) return i.data.checkoutUrl;
-  const g = productCache.get('group:' + cfg.product);
+  const g = productCache.get(cfg.product);
   const v = g && Array.isArray(g.data) ? g.data.find((x) => x.checkoutUrl) : null;
   return v ? v.checkoutUrl : null;
 }
@@ -175,7 +161,7 @@ function resolveTier(cfg, productSlug) {
 }
 
 // The platform owner's account (is_owner=1, see app-auth) is always entitled
-// on their own installation — never sent to the licence server. Features =
+// on their own installation — never sent to a provider. Features =
 // every declared tier merged in declaration order (later tiers win), so the
 // admin sees the full app.
 function ownerEntitlement(cfg) {
@@ -231,7 +217,7 @@ function pruneCache() {
 // Network errors propagate.
 async function liveValidate(cfg, key, seat, opts) {
   let resp = await validateKey({ key, product: cfg.product, machineId: seat.machineId }, opts);
-  if (!resp.valid && resp.error === 'Machine not activated') {
+  if (!resp.valid && resp.error === 'seat_not_activated') {
     const act = await activateSeat({ key, product: cfg.product, ...seat }, opts);
     resp = act.valid
       ? await validateKey({ key, product: cfg.product, machineId: seat.machineId }, opts)
@@ -245,7 +231,7 @@ async function liveValidate(cfg, key, seat, opts) {
 // NEGATIVE_TTL); without that anchor the error propagates and the entry drops.
 // A definitive {valid:false} is authoritative — no grace from it, but a short
 // negative TTL so a re-claimed key recovers fast.
-async function fetchEntitlement(appName, cfg, accountId, key, opts = {}) {
+async function loadEntitlement(appName, cfg, accountId, key, opts = {}) {
   const ck = `${appName}:${accountId}`;
   let resp;
   try {
@@ -274,22 +260,22 @@ async function fetchEntitlement(appName, cfg, accountId, key, opts = {}) {
 // → serve stale NOW, refresh behind (deduped); miss → one short blocking check.
 async function getEntitlement(ctx, cfg, acctRow) {
   if (acctRow && acctRow.is_owner) return ownerEntitlement(cfg);
-  if (!acctRow || !acctRow.license_key) return freeEntitlement(cfg);
+  if (!provider || !acctRow || !acctRow.license_key) return freeEntitlement(cfg);
   const ck = `${ctx.appName}:${acctRow.id}`;
   const hit = entCache.get(ck);
   if (hit && Date.now() < hit.freshUntil) return hit.ent;
   if (hit) {
     if (!hit.inflight) {
-      hit.inflight = fetchEntitlement(ctx.appName, cfg, acctRow.id, acctRow.license_key)
+      hit.inflight = loadEntitlement(ctx.appName, cfg, acctRow.id, acctRow.license_key)
         .catch(() => {})
         .finally(() => { const e = entCache.get(ck); if (e) e.inflight = null; });
     }
     return hit.ent;
   }
   try {
-    return await fetchEntitlement(ctx.appName, cfg, acctRow.id, acctRow.license_key, { timeoutMs: GATE_TIMEOUT_MS });
+    return await loadEntitlement(ctx.appName, cfg, acctRow.id, acctRow.license_key, { timeoutMs: GATE_TIMEOUT_MS });
   } catch {
-    // Cold cache during a licence-server outage (e.g. control-room restart mid-
+    // Cold cache during a provider outage (e.g. control-room restart mid-
     // outage): no known-good anchor exists, so deny rather than fabricate grace.
     return { ...freeEntitlement(cfg), status: cfg.free ? 'free' : 'unreachable' };
   }
@@ -307,6 +293,7 @@ async function currentKey(ctx, accountId) {
 // seat, take the new seat, persist the key, seed the cache.
 async function claim(ctx, cfg, accountId, rawKey) {
   const key = String(rawKey || '').trim();
+  if (!provider) return { ok: false, error: UNAVAILABLE };
   if (!key || key.length > 64) return { ok: false, error: 'invalid_key_format' };
 
   let v;
@@ -329,7 +316,7 @@ async function claim(ctx, cfg, accountId, rawKey) {
   try { act = await activateSeat({ key, product: cfg.product, ...seat }); }
   catch { return { ok: false, error: 'license_server_unreachable', retryable: true }; }
   if (!act.valid) {
-    const limit = /^machine limit reached/i.test(act.error || '');
+    const limit = act.error === 'machine_limit';
     return {
       ok: false,
       error: limit ? 'machine_limit' : (act.error || 'activation_failed'),
@@ -348,7 +335,7 @@ async function claim(ctx, cfg, accountId, rawKey) {
 // Drop the key and free the seat. The local clear NEVER depends on the remote
 // deactivate succeeding (shared-IP rate limit).
 async function release(ctx, cfg, accountId) {
-  const row = await currentKey(ctx, accountId);
+  const row = provider ? await currentKey(ctx, accountId) : null;
   if (row && row.license_key) {
     try { await deactivateSeat({ key: row.license_key, ...seatIdentity(ctx.appName, accountId) }); }
     catch (err) { console.warn(`[app:${ctx.appName}] licence seat release failed (cleared locally anyway): ${err.message}`); }
@@ -380,15 +367,13 @@ function subscribedFromCache(appName, accountId) {
   return !!(hit && hit.ent && hit.ent.licensed);
 }
 
-// Tier variants + checkout links (for pricing/landing pages). The group
-// endpoint lists subscription tiers matching the family; a lifetime product
-// with an exact slug comes back via /info.
+// Tier variants + checkout links (for pricing/landing pages), from the
+// provider's products(product); `[]` with no provider.
 async function products(cfg) {
-  const [info, variants] = await Promise.all([productInfo(cfg.product), productGroup(cfg.product)]);
-  const list = variants && variants.length ? variants : info ? [info] : [];
+  const variants = await productGroup(cfg.product);
   return {
     product: cfg.product,
-    variants: list.map((v) => ({
+    variants: (variants || []).map((v) => ({
       slug: v.slug, name: v.name, licenseType: v.licenseType,
       durationDays: v.durationDays, machineLimit: v.machineLimit,
       checkoutUrl: v.checkoutUrl || null,
@@ -424,10 +409,11 @@ function gate(ctx, cfg) {
 module.exports = {
   parseManifest, seatIdentity, resolveTier,
   freeEntitlement, invalidEntitlement, activeEntitlement, ownerEntitlement,
-  validateKey, activateSeat, deactivateSeat, productInfo, productGroup,
+  setProvider, getProvider,
+  validateKey, activateSeat, deactivateSeat, productGroup,
   checkoutUrl, checkoutFromCache,
   getEntitlement, claim, release, entitlement, refresh, products, gate,
   subscribedFromCache,
-  // Test seam (standalone smoke script): direct cache access + the fetch path.
-  _internal: { entCache, fetchEntitlement, cacheTtlMs, NEGATIVE_TTL_MS },
+  // Test seam: direct cache access.
+  _internal: { entCache, loadEntitlement, cacheTtlMs, NEGATIVE_TTL_MS },
 };

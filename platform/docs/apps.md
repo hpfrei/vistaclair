@@ -195,6 +195,47 @@ lists each slave running the app with the domain it reports
 (`federation.md`). The mini-app URL never follows the domain. Tests:
 `test/access-info.test.js`.
 
+## App licensing: provider
+
+The app-facing surface is stable: manifest `auth.license`, `ctx.license.*`,
+`/api/auth/license/{claim,release,products}`, `/api/auth/me.license`, the route
+gate, the surface-kit "Plans" block, and the `subscribed` principal for spend.
+Its backend is a **provider slot** in `src/apps/app-license.js`
+(`setProvider(p)` / `getProvider()`); no code path here makes a network call.
+
+**No provider (the default today)**: the owner is always entitled
+(`ownerEntitlement`, every declared tier merged); everyone else gets the free
+tier (`freeEntitlement`: `auth.license.free`, or none, so a non-freemium app
+answers 402 `license_required`). `claim` returns `licensing_unavailable`
+(`POST /api/auth/license/claim` answers 503), `ctx.license.validate` returns
+`{ valid: false, error: 'licensing_unavailable' }`, `products` returns
+`{ product, variants: [] }` (the Plans block stays hidden), `release` drops
+`accounts.license_key` and returns ok, and `subscribedFromCache` is false.
+Stored `accounts.license_key` values are never touched, so a later provider
+can honour them.
+
+**Provider shape** (in-process platform code; any method may be async, a throw
+or timeout reads as "unreachable"):
+
+```js
+setProvider({
+  validate(key, { product, machineId? }),   // -> { valid, error?, license: { expiresAt }, product: { slug }, customerPortalUrl? }
+  activate(key, { product, seat }),         // -> same shape; seat = { machineId, hostname, username }
+  deactivate(key, { seat }),                // best-effort
+  products(product),                        // -> variants[] | { variants[] }: { slug, name, licenseType, durationDays, machineLimit, checkoutUrl }
+});
+```
+
+Error codes a provider returns in `error`: `seat_not_activated` (validate with
+a machineId that holds no seat; the platform activates once and retries),
+`machine_limit` (no seat left; surfaced to the app as `machine_limit`), any
+other string is passed through. With a provider the entitlement cache stays:
+`licenseCacheTtlMinutes` (default 30) freshness, `licenseGraceHours` (default
+72) of access after the provider becomes unreachable. A seat is
+`vc:<app>:acct:<accountId>`. There is no setting for a URL: App licensing is
+to be recoded later as a vc app that installs itself as the provider.
+Tests: `test/app-license-provider.test.js`.
+
 ## Platform extras & toolchains
 
 The Setup → Extras components and the toolchains apps shell out to are in

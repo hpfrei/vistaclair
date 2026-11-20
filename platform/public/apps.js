@@ -2191,7 +2191,7 @@
             </div>
             <div class="app-help-cap">
               <strong>App Licensing (auth.license)</strong>
-              <span>Turnkey paid or freemium apps: one manifest field gates routes behind a licence key from the platform's licence server &mdash; key claim, per-key account seats, tiers with feature maps, revocation and checkout links. Apps just read entitlements.</span>
+              <span>Turnkey paid or freemium apps: one manifest field gates routes behind a licence key from the platform's licence provider &mdash; key claim, per-key account seats, tiers with feature maps, revocation and checkout links. Apps just read entitlements.</span>
             </div>
           </div>
         </div>

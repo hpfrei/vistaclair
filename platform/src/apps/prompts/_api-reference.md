@@ -2526,47 +2526,7 @@ Platform cron jobs survive server restarts. Use this for recurring automation (p
 <!-- API:SECTION key=licensing -->
 ### App Licensing
 
-Turnkey paid/freemium apps against the platform's licence server. One manifest field is the whole integration — the platform gates routes, claims seats, tracks revocation/renewal and resolves tiers; the app only reads entitlements:
-
-```json
-"auth": { "email": true, "license": "buddy" }
-```
-
-or the full form:
-
-```json
-"auth": {
-  "email": true,
-  "license": {
-    "product": "buddy",
-    "tiers": { "roblox-buddy-basic": { "dailyOps": 20 }, "roblox-buddy-pro": { "dailyOps": 200 } },
-    "free":  { "dailyOps": 3 },
-    "graceHours": 72
-  }
-}
-```
-
-- `product` (string form = just this) — the product/family slug on the licence server. A family slug matches every tier product ending in `-<family>` (e.g. `buddy` matches `roblox-buddy-pro`); which tier a user's key belongs to comes back as the entitlement's `tier`.
-- `tiers` — per-tier feature/quota objects, keyed by the tier's product slug (short suffixes like `"pro"` also match). The APP enforces these values; the platform only resolves them.
-- `free` — optional freemium tier. When present, unlicensed accounts PASS the route gate and get these features; licence problems degrade to `free` instead of blocking. Without it, unlicensed accounts get **402** on every `/api/*` route.
-- Licensing requires a login method (`email`/`telegram`/`whatsapp`) — a licence key is claimed by a signed-in account.
-
-**How gating works**: the turnkey auth guard extends to `401 not_authenticated` → `402 { error: 'license_required', status, product, checkoutUrl }`. `/api/auth/*` and the declared `surfaces.public.api` prefixes stay exempt. Accounts claim a key any time after signup (soft-gate — account creation is never blocked by licensing).
-
-**Auth endpoints added automatically** (under `/api/auth/`, so they work pre-entitlement):
-- `POST /api/auth/license/claim { key }` — bind a key to the signed-in account and take a seat. Errors: `400` (`invalid_key`, `machine_limit`, server text like `License has been revoked`, plus `checkoutUrl`), `503 license_server_unreachable` (retryable).
-- `POST /api/auth/license/release` — drop the key, free the seat.
-- `GET /api/auth/license/products` — `{ product, variants: [{ slug, name, licenseType, durationDays, machineLimit, checkoutUrl }] }` — public, for pricing/landing pages.
-- `GET /api/auth/me` gains `license: { licensed, status, tier, features, expiresAt, checkoutUrl? }` — the frontend's one source of licence state. Statuses: `active`, `grace` (licence server unreachable, still allowed), `free`, `invalid`, `none`, `unreachable`.
-- Email signup accepts an optional `licenseKey` field (best-effort — a bad key never fails signup; the result is attached as `license`).
-
-**routes.js server-side** (`ctx.license`, only when `auth.license` is set):
-- `ctx.license.entitlement(accountId)` → `{ licensed, status, tier, features, expiresAt }` — cached, cheap; call it wherever you enforce a tier limit.
-- `ctx.license.refresh(accountId)` — drop the cache and re-validate now (e.g. right after an upgrade purchase).
-- `ctx.license.validate(key)` — live pre-check of a raw key without taking a seat.
-- `ctx.license.release(accountId)` / `ctx.license.products()` — same as the endpoints above.
-
-**Model** (why there is no licence table in your app DB): licences are mastered on the licence server; the app DB stores only `accounts.license_key`. Entitlements are validated live and cached in memory ~30 min (platform setting), so a revocation or subscription lapse lands within that window of the user's next request; if the licence server is unreachable, already-validated users keep working for a grace window (default 72h). Seats: one licence key supports `machineLimit` accounts per app (0 = unlimited) — the anti-sharing bound. Do NOT hand-roll key validation, entitlement caching or `http.fetch` calls to the licence server; declare `auth.license` and read entitlements.
+Paid/freemium apps: declare `"auth": { "email": true, "license": "<product>" }` or the object form `{ "product", "tiers": { "<slug>": { ..features } }, "free": { ..features }, "graceHours" }` and read `ctx.license.entitlement(accountId)` (`{ licensed, status, tier, features, expiresAt }`) where you enforce tier limits; the platform adds `/api/auth/license/{claim,release,products}` and `license` on `/api/auth/me` (statuses `active`, `grace`, `free`, `invalid`, `none`, `unreachable`), and a login method is required. The backend is the platform's licence provider, a slot that is **empty by default**: the owner is always entitled, every other account gets the `free` tier (without `free`: `402 license_required`), `claim` answers `503 licensing_unavailable`, `products` is `{ product, variants: [] }`. Also available: `ctx.license.refresh`, `validate(key)`, `release`, `products()`. Do NOT hand-roll key validation, entitlement caching or `http.fetch` calls to a licence service, and do not add licence tables to the app DB; declare `auth.license` and read entitlements.
 
 <!-- /API:SECTION -->
 

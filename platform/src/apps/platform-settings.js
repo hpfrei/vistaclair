@@ -60,13 +60,12 @@ const DEFAULTS = {
   todoWatchStrict: false,
 
   // --- App licensing (manifest auth.license; see app-license.js) ---
-  // Base URL of the self-hosted licence server. Only its PUBLIC endpoints are
-  // used — no admin credential is ever configured platform-side.
-  licenseServerUrl: 'https://licencing.hpfreilabs.com',
+  // Backend is a provider slot (app-license.setProvider); the two settings
+  // below only matter once a provider is installed.
   // Entitlement cache freshness (minutes). Also the worst-case latency for a
   // revocation/renewal to reach a running app (checked lazily per request).
   licenseCacheTtlMinutes: 30,
-  // How long already-validated users keep access while the licence server is
+  // How long already-validated users keep access while the licence provider is
   // unreachable, measured from their last successful validation.
   licenseGraceHours: 72,
 

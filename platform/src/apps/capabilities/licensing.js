@@ -30,8 +30,8 @@ module.exports = {
     // the object being assembled, dereferenced only at call time.
     const ctx = app.ctx;
     // App licensing (manifest auth.license — see _api-reference "App Licensing").
-    // Licences are MASTERED on the external licence server; entitlements are
-    // fetched live and cached in memory (app-license.js) — the only local state
+    // The backend is the licence provider slot (app-license.setProvider; empty
+    // by default); entitlements are cached in memory (app-license.js) — the only local state
     // is accounts.license_key, owned by app-auth. ctx-only, like ctx.identity:
     // frontends read licence state from /api/auth/me, no bridge methods.
     return {

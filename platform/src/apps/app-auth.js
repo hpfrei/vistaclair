@@ -57,7 +57,7 @@ const SCHEMA = [
   `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS wa_id VARCHAR(32) UNIQUE NULL`,
   // Licence key this account claimed (manifest auth.license apps; harmless
   // elsewhere). The ONLY licensing state persisted app-side — status/tier/
-  // expiry are mastered on the licence server and cached in memory.
+  // expiry are held by the licence provider (if any) and cached in memory.
   `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS license_key VARCHAR(64) NULL`,
   // Platform-owner auto-login: the dashboard admin's owner credentials resolve
   // (via:'owner') to the single is_owner=1 row, provisioned on first touch —
@@ -178,7 +178,7 @@ async function mount(appRouter, ctx, manifest) {
   // Guard exemptions come from the manifest's surfaces declaration
   // (surfaces.public.api; legacy auth.publicRoutes is normalized in there).
   const publicRoutes = require('./surfaces').publicApiPrefixes(manifest);
-  // Licence gating (pure parse — never touches the licence server at mount time).
+  // Licence gating (pure parse — never calls the licence provider at mount time).
   const appLicense = require('./app-license');
   const licenseCfg = appLicense.parseManifest(auth.license);
   if (licenseCfg && !(auth.email || auth.telegram || auth.whatsapp)) {
@@ -350,7 +350,7 @@ async function mount(appRouter, ctx, manifest) {
   // --- Licensing (manifest auth.license; see app-license.js) ---------------
   if (licenseCfg) {
     // POST /api/auth/license/claim {key} — bind a licence key to the current
-    // account and take a seat on the licence server.
+    // account and take a seat from the licence provider.
     r.post('/license/claim', async (req, res) => {
       const resolved = ctx.identity.resolve(req);
       const acct = await accountFromIdentity(ctx, resolved);
@@ -358,7 +358,7 @@ async function mount(appRouter, ctx, manifest) {
       if (throttled(`claim:${ip(req)}`)) return res.status(429).json({ error: 'rate_limited' });
       const result = await appLicense.claim(ctx, licenseCfg, acct.id, req.body?.key);
       if (result.ok) return res.json(result);
-      res.status(result.error === 'license_server_unreachable' ? 503 : 400).json(result);
+      res.status(result.error === 'license_server_unreachable' || result.error === 'licensing_unavailable' ? 503 : 400).json(result);
     });
 
     // POST /api/auth/license/release — drop the key and free the seat.
