@@ -8,9 +8,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
-const os = require('os');
 const net = require('net');
-const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { waitFor } = require('./wait-for');
 const { killStalePortListeners, lsofListenerPids, procListenerPids } = require('../src/port-cleanup');
@@ -26,10 +24,10 @@ function freePort() {
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-// Starts `node -e script` (or a copy named `bin`) and resolves once it prints READY.
-function start(t, script, bin = process.execPath) {
+// Starts `node -e script` and resolves once it prints READY.
+function start(t, script) {
   return new Promise((resolve, reject) => {
-    const p = spawn(bin, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const p = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
     t.after(() => { try { p.kill('SIGKILL'); } catch {} });
     p.stdout.on('data', (d) => { if (/READY/.test(d)) resolve(p); });
     p.on('exit', (code) => reject(new Error(`exited early (${code})`)));
@@ -63,12 +61,12 @@ test('only the listener is found and killed; a connected client survives', { ski
 });
 
 test('a listener named ngrok is never killed', { skip: !hasLsof && !hasProcNet && 'no lsof or /proc' }, async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-ngrok-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const fake = path.join(dir, 'ngrok');
-  fs.symlinkSync(process.execPath, fake);
+  // The fake names itself: process.title sets the command name (prctl
+  // PR_SET_NAME) that the check reads. A symlink named ngrok is not enough:
+  // Node >= 24 renames its main thread to "MainThread". The real ngrok is a
+  // Go binary and keeps its name.
   const port = await freePort();
-  const srv = await start(t, listener(port), fake);
+  const srv = await start(t, `process.title = 'ngrok'; ${listener(port)}`);
   assert.deepStrictEqual(killStalePortListeners([port]), []);
   await new Promise(r => setTimeout(r, 300));
   assert.strictEqual(alive(srv.pid), true);
