@@ -14,7 +14,7 @@ module.exports = {
   prefixes: ['sysmon.'],
   ctx: ['sysmon'],
   keywords: /\b(system monitor|host (pressure|stats)|meminfo|free (ram|memory)|swap usage|disk (free|space)|load ?avg|top (processes|consumers))\b/i,
-  summary: '`sysmon.get/subscribe/processes` — host RAM/CPU/disk/load; `<vc-sysmon>`',
+  summary: '`sysmon.get/subscribe/processes` — host RAM/CPU/disk; `<vc-sysmon>`',
   migration: 'App-private host samplers (`/proc/meminfo` and `/proc/stat` readers, `statfsSync` polls, `os.freemem`/`os.cpus` timers) and client-side `setInterval` polls of an `/api/sys` route → `sysmon.subscribe()` once and listen for `sysmon:sample`. Hand-rolled RAM/CPU/swap/disk gauges → `<vc-sysmon>`, which also charts RAM and CPU history, draws a per-core strip, and lists the top memory consumers.',
 
   buildCtx(app) {

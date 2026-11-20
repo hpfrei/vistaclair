@@ -20,7 +20,7 @@ module.exports = {
   runtime: ['getRoute', 'getRouteMatrix', 'geocode', 'findPlaces', 'getPlacePhoto', 'getStreetView', 'get3dTiles'],
   ctx: ['route', 'routeMatrix', 'geocode', 'places', 'placePhoto', 'streetview', 'tiles3d'],
   keywords: /\b(rout(e|es|ing)|directions|navigation|geocod|places?|address(es)?|map|distance matrix|eta|travel time|itinerar|waypoint|lat\/?lng|coordinates|3d tiles|tileset|photorealistic|street ?view|panorama|facade|fa\u00e7ade|exterior photo)\b/i,
-  summary: '`ai.route/geocode/places/streetview/tiles3d` — Google maps, tiles',
+  summary: '`ai.route/geocode/places/streetview/tiles3d` — Google maps',
   migration: 'Google Maps/Directions/Distance Matrix/Geocoding/Places called via `http.fetch` with an app-held key → `ai.route` / `ai.routeMatrix` / `ai.geocode` / `ai.places`. Remove the app\'s own Maps key.',
 
   buildCtx(app) {

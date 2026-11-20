@@ -157,7 +157,7 @@ const ALLOW = {
   'app:peer:remoteSessions': 'the remote-session opt-in — owner-click on this host only, deliberately no kind',
   'app:print:save': 'printer settings (Setup → Drucker) — owner-click only; Horst does not print or configure printing (docs/print.md)',
   'app:print:test': 'the owner\'s test page button (Setup → Drucker) — owner-click only, a physical act; no kind (docs/print.md)',
-  'app:site:settings': 'a site\'s per-host port / bind / autostart / snapshot count / domain — owner-click in this host\'s Configure; no kind (docs/sites.md)',
+  'app:site:settings': 'a site\'s per-host port / bind / autostart / snapshot count / domain / analytics retention — owner-click in this host\'s Configure; no kind (docs/sites.md)',
   'app:site:rollback': 'owner click: switch a site\'s served snapshot (Sites tab); the app does its own through ctx.sites.rollback — Horst lane never',
   'app:fleet:data:cancel': 'cancel of a running app data publish — the app\'s own control (Horst lane never) and the owner\'s click on the peers panel; no kind',
 };
@@ -182,6 +182,8 @@ const READONLY = new Set([
   'app:publish:history', 'app:publish:rollbackStatus', 'app:fleet:state', 'app:fleet:data:list',
   // sites (docs/sites.md)
   'app:sites:list', 'app:site:detail', 'app:site:checkDomain',
+  // site analytics (docs/analytics.md): reads only (query / live / csv / status); Horst has analytics_query
+  'app:analytics:call',
 ]);
 
 test('every dashboard WS mutation maps to a governed kind or the explicit allowlist', () => {

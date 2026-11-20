@@ -15,6 +15,7 @@ const { validateSites, validPort, SITE_NAME_RE, BINDS, RESERVED_PORTS } = requir
 const ports = require('./sites-ports');
 
 const RUNNER = path.join(__dirname, '..', '..', 'site-runner.js');
+const ANALYTICS_LIB = path.join(__dirname, '..', '..', 'site-analytics.js');
 const HOST_FILE = '.sites.json';            // per-host: port, bind, autostart, keep, domain (CODE_PRESERVE)
 const BACKOFF_MS = [1000, 2000, 5000, 10000, 30000, 60000];
 const STABLE_MS = 60000;                     // up this long → the backoff resets
@@ -114,6 +115,9 @@ function effective(app, site) {
     autostart: typeof rec.autostart === 'boolean' ? rec.autostart : def.autostart,
     keep: Number.isInteger(rec.keep) && rec.keep >= 1 && rec.keep <= KEEP_MAX ? rec.keep : KEEP_DEFAULT,
     domain: typeof rec.domain === 'string' && rec.domain ? rec.domain : null,
+    // analytics retention (docs/analytics.md): raw hits days, daily totals months
+    analyticsRawDays: Number.isInteger(rec.analyticsRawDays) && rec.analyticsRawDays >= 7 && rec.analyticsRawDays <= 365 ? rec.analyticsRawDays : 90,
+    analyticsMonths: Number.isInteger(rec.analyticsMonths) && rec.analyticsMonths >= 1 && rec.analyticsMonths <= 36 ? rec.analyticsMonths : 13,
   };
 }
 
@@ -177,6 +181,9 @@ function status(app, site) {
     platform: eff ? eff.platform : null,
     keep: eff ? eff.keep : null,
     domain: eff ? eff.domain : null,
+    analytics: eff ? !!eff.analytics : false,
+    analyticsRawDays: eff ? eff.analyticsRawDays : null,
+    analyticsMonths: eff ? eff.analyticsMonths : null,
     defaultPort: eff ? eff.defaultPort : null,
     startedAt: rt.readyAt,
     uptimeMs: rt.child && rt.readyAt ? Date.now() - rt.readyAt : 0,
@@ -262,6 +269,7 @@ function codeHash(app, site) {
   try { h.update(fs.readFileSync(path.join(dir, 'package-lock.json'))); } catch { /* none */ }
   h.update('\0runner\0');
   try { h.update(fs.readFileSync(RUNNER)); } catch { /* impossible */ }
+  if (eff.analytics) { h.update('\0analytics\0'); try { h.update(fs.readFileSync(ANALYTICS_LIB)); } catch { /* impossible */ } }
   return h.digest('hex');
 }
 
@@ -386,7 +394,7 @@ function setConfig(app, site, obj) {
 }
 
 // ── host settings (the owner's Configure on THIS host) ─────────────────────
-const HOST_KEYS = ['port', 'bind', 'autostart', 'keep', 'domain'];
+const HOST_KEYS = ['port', 'bind', 'autostart', 'keep', 'domain', 'analyticsRawDays', 'analyticsMonths'];
 async function hostSettings(app, site, patch = {}) {
   const before = effective(app, site);
   const key = `${app}/${site}`;
@@ -413,6 +421,12 @@ async function hostSettings(app, site, patch = {}) {
     const d = patch.domain ? appManager().normalizeDomain(patch.domain) : null;
     if (patch.domain && !d) throw Object.assign(new Error('domain: a bare hostname like www.example.com'), { code: 'bad_domain' });
     next.domain = d;
+  }
+  for (const [k, lo, hi, what] of [['analyticsRawDays', 7, 365, 'days of raw hits'], ['analyticsMonths', 1, 36, 'months of daily totals']]) {
+    if (patch[k] === undefined) continue;
+    const n = Number(patch[k]);
+    if (!Number.isInteger(n) || n < lo || n > hi) throw Object.assign(new Error(`${k}: ${lo}–${hi} ${what}`), { code: 'bad_retention' });
+    next[k] = n;
   }
   const file = path.join(appDirOf(app), HOST_FILE);
   const rec = hostRecord(app);
@@ -443,6 +457,11 @@ function childEnv(app, site, eff) {
     VC_SITE_PLATFORM: eff.platform,
     NODE_ENV: 'production',
   };
+  if (eff.analytics) {
+    env.VC_SITE_ANALYTICS = '1';
+    env.VC_SITE_GEO = require('./analytics-geo').tableFile({ ensure: true });
+    if (eff.domain) env.VC_SITE_DOMAIN = eff.domain;
+  }
   for (const k of ['TZ', 'LANG', 'LC_ALL']) if (process.env[k]) env[k] = process.env[k];
   return env;
 }
@@ -459,6 +478,8 @@ function fenceArgs(app, site, eff) {
     `--allow-fs-read=${path.join(dir, 'package.json')}`,
     `--allow-fs-read=${root}`,
     `--allow-fs-write=${path.join(root, 'data')}`,
+    // analytics (opt-in): the capture lib and the platform's country table (read-only)
+    ...(eff.analytics ? [`--allow-fs-read=${ANALYTICS_LIB}`, `--allow-fs-read=${path.dirname(require('./analytics-geo').tableFile({ ensure: true }))}`] : []),
   ];
 }
 
@@ -531,6 +552,7 @@ function onChildMessage(rt, child, m) {
       rt.stats = { reqs: Number(m.reqs) || 0, errs: Number(m.errs) || 0, rss: Number(m.rss) || null, at: now };
       break;
     }
+    case 'spool': try { require('./analytics').notify(rt.app, rt.site); } catch { /* analytics not loaded */ } break;
     case 'contentAck': { const w = rt.contentWaiters.get(m.id); if (w) { rt.contentWaiters.delete(m.id); w(); } break; }
     case 'call': handleCall(rt, child, m); break;
     default: break;

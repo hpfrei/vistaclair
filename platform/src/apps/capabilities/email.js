@@ -1,4 +1,4 @@
-// Capability: email — `accounts.email.*`, `email.list/get/send/…` — always-synced master mail store
+// Capability: email — `accounts.email.*`, `email.list/get/send/…` — synced master mail store
 //
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge

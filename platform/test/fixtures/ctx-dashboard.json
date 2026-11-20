@@ -9,6 +9,17 @@
     "aiUsage": {
       "kind": "function"
     },
+    "analytics": {
+      "kind": "object",
+      "keys": {
+        "csv": "function",
+        "importAccessLog": "function",
+        "live": "function",
+        "query": "function",
+        "status": "function",
+        "track": "function"
+      }
+    },
     "appDir": {
       "kind": "string"
     },

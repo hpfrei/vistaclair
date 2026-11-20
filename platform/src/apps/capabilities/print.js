@@ -17,7 +17,7 @@ module.exports = {
   prefixes: ['print.'],
   ctx: ['print'],
   keywords: /\b(print(er|ing)?|drucken|drucker|cups|print (a |the )?(pdf|sheet|page)|worksheet|practice sheet)\b/i,
-  summary: '`print.status/pdf` — print a PDF on the owner\'s printer',
+  summary: '`print.status/pdf` — print a PDF',
   migration: 'App-private `lp` / `lpr` / `cupsd` shell-outs, `window.print()` buttons that need the browser\'s own printer, and e-mailing a PDF "to print" → `ctx.print.pdf({ pdf, title })` (gated by the owner in Setup → Drucker); show the button only when `status().available`.',
   visibility: { standalone: false },
 

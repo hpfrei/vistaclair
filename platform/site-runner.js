@@ -26,6 +26,9 @@ const SITE = {
   dataDir: E.VC_SITE_DATA || '',
   idToken: E.VC_SITE_ID || '',
   platform: E.VC_SITE_PLATFORM || 'none',
+  analytics: E.VC_SITE_ANALYTICS === '1',   // manifest sites.<site>.analytics (docs/analytics.md)
+  geo: E.VC_SITE_GEO || '',                 // the platform's country table (read-only, may not exist)
+  domains: (E.VC_SITE_DOMAIN || '').split(',').filter(Boolean),
 };
 const CALL_ARGS_MAX = 64 * 1024;
 const CALL_TIMEOUT_MS = 5000;
@@ -69,6 +72,45 @@ function clientIp(peer, h) {
   const last = xff.length ? xff[xff.length - 1] : '';
   if (net.isIP(last)) return last;
   return net.isIP(p) ? p : '';
+}
+
+// ── analytics (opt-in): one record per request, before the handler ─────────
+// docs/analytics.md. The lib is a sibling file; the record is written to the
+// spool when the response ends. Nothing here ever stores the IP or the raw UA.
+let capture = null;
+function startCapture() {
+  if (!SITE.analytics || capture) return;
+  try {
+    capture = require('./site-analytics').createCapture({
+      siteKey: `${SITE.app}/${SITE.name}`, dataDir: SITE.dataDir, geoFile: SITE.geo, internalHosts: SITE.domains,
+      notify: () => send({ t: 'spool' }), log: (m) => log.warn(m),
+    });
+  } catch (e) { log.warn('analytics is off: ' + (e && e.message)); return; }
+  const midnight = () => {
+    const n = new Date();
+    const next = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate() + 1, 0, 0, 1);
+    const t = setTimeout(() => { try { capture.sweepSalt(); } catch { /* keep going */ } midnight(); }, Math.max(1000, next - Date.now()));
+    if (t.unref) t.unref();
+  };
+  midnight();
+}
+const chunkLen = (c, enc) => (c == null || typeof c === 'function' ? 0 : typeof c === 'string' ? Buffer.byteLength(c, typeof enc === 'string' ? enc : 'utf8') : (c.length || 0));
+// The record is written inside the wrapped end(), i.e. before the client can see the last byte.
+function instrument(req, res, facts) {
+  const t0 = Date.now();
+  let bytes = 0, done = false;
+  const finish = (aborted) => {
+    if (done) return;
+    done = true;
+    if (aborted && !res.headersSent) return;
+    try {
+      capture.record(facts, { method: req.method, status: res.statusCode, ctype: String(res.getHeader('content-type') || ''), bytes: req.method === 'HEAD' ? 0 : bytes, ms: Date.now() - t0 });
+    } catch { /* never break a request for a statistic */ }
+  };
+  const write = res.write, end = res.end;
+  res.write = function (chunk, enc) { bytes += chunkLen(chunk, enc); return write.apply(this, arguments); };
+  res.end = function (chunk, enc) { if (!done) { bytes += chunkLen(chunk, enc); finish(false); } return end.apply(this, arguments); };
+  res.on('close', () => finish(true));
 }
 
 // ── static files ──────────────────────────────────────────────────────────
@@ -219,6 +261,12 @@ const site = {
   static: makeStatic,
   call,
   log,
+  // a custom event (a goal) into the analytics table; false when analytics is off or the name is bad
+  track(name, props) {
+    if (!capture) return false;
+    const st = als.getStore();
+    return capture.track(name, props, st && st.facts);
+  },
   onConfig(fn) { if (typeof fn === 'function') configListeners.add(fn); return () => configListeners.delete(fn); },
 };
 
@@ -238,7 +286,9 @@ const server = http.createServer((req, res) => {
   const p = String(req.url || '/').split('?')[0];
   if (p === '/_vc/id') return plain(res, 200, SITE.idToken, { 'cache-control': 'no-store' });
   const ip = clientIp(req.socket.remoteAddress, req.headers);
-  als.run({ ip }, () => {
+  let facts = null;
+  if (capture) { try { facts = capture.describe(req, ip); instrument(req, res, facts); } catch { facts = null; } }
+  als.run({ ip, facts }, () => {
     Promise.resolve().then(() => handler(req, res)).catch((e) => {
       errTotal++;
       log.error(`handler error on ${req.method} ${p.slice(0, 200)}: ${e && e.message}`);
@@ -264,6 +314,7 @@ function fatal(code, message) {
 }
 
 async function boot(init) {
+  startCapture();
   setConfig(init.config);
   site.content = init.content || null;
   site.snapshot = init.snapshot || null;

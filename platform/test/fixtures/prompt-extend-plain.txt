@@ -168,14 +168,14 @@ BEFORE using it — app-lint checks (`unread-capability`). Advertise what you us
 - `dialogs` — `showConfirm`, `showModal` (host overlays) and `<vc-dialog>` (in-iframe)
 - `tasks` — `tasks.list/kill` — inspect and stop spawned processes
 - `events` — `Bridge.on/subscribe`, `ctx.broadcaster`; bus `ctx.events`/`Bridge.bus`
-- `ui` — `<vc-input-bar>`, `<vc-chat-log>`, `<vc-progress>`, `<vc-dialog>` and more
+- `ui` — `<vc-input-bar>`, `<vc-chat-log>`, `<vc-progress>`, `<vc-dialog>`…
 - `tools` — register AI-callable tools; `expose: self|platform|apps`
 - `artifacts` — `vc-artifact://` file refs for tool results
 - `identity` — `ctx.identity` — one user across dashboard session and Telegram mini-app
 - `capabilities` — `ctx.capabilities.has/list` — feature-detect this platform
-- `audio` — `ai.transcribe/tts/image/sfx/translate/detect` — speech, sfx, images, i18n
+- `audio` — `ai.transcribe/tts/image/sfx/translate/detect` — speech, sfx, images
 - `music` — `ai.music.generate/analyze/status` — local MusicGen (optional extra)
-- `maps` — `ai.route/geocode/places/streetview/tiles3d` — Google maps, tiles
+- `maps` — `ai.route/geocode/places/streetview/tiles3d` — Google maps
 - `web-search` — `ai.webSearch` — live web/news/video search via Brave Search
 - `embeddings` — `embed` — local 384-dim vectors
 - `memory` — `memory.remember/rememberBatch/recall` — shared knowledge store
@@ -186,15 +186,16 @@ BEFORE using it — app-lint checks (`unread-capability`). Advertise what you us
 - `browser` — `browser.screenshot` — headless page render
 - `telegram` — `telegram.status/send/…` + Web App (mini-app)
 - `whatsapp` — `whatsapp.status/send/sendButtons/sendList/…`
-- `apps` — `ctx.apps.access(app)` — another app's bot/number/URL; never tokens
+- `apps` — `ctx.apps.access(app)` — another app's bot/number/URL
 - `sites` — `ctx.sites` — own web servers per app **(inlined)**
+- `analytics` — `ctx.analytics` — site stats, no IPs stored
 - `licensing` — `ctx.license.*` — paid/freemium apps, seats, tiers
 - `platform-cron` — `platform.cron.schedule/list` — cross-app persistent jobs
-- `sysmon` — `sysmon.get/subscribe/processes` — host RAM/CPU/disk/load; `<vc-sysmon>`
-- `print` — `print.status/pdf` — print a PDF on the owner's printer
-- `governance` — `governance.propose/list/decide/registerKind` — the one owner-approval plane
+- `sysmon` — `sysmon.get/subscribe/processes` — host RAM/CPU/disk; `<vc-sysmon>`
+- `print` — `print.status/pdf` — print a PDF
+- `governance` — `governance.propose/list/decide/registerKind` — owner approvals
 - `spend` — `spend.status` / `ctx.spendStatus()` — the policy in force
-- `fleet` — `ctx.fleet` — slaves, specs; data publish; remote call / job
+- `fleet` — `ctx.fleet` — slaves, specs, data publish, remote calls
 - `config` — Named configurations — platform-side, no app API
 
 Not capabilities, same dir: `api/routes-ctx.md` (routes.js setup, loader ctx, OAuth
@@ -263,7 +264,8 @@ Declare it in `manifest.json`:
     "bind": "127.0.0.1",          // default; "0.0.0.0" only when no proxy sits in front
     "autostart": true,            // default true
     "access": "public",           // required; the only value built today
-    "platform": "none"            // default; "controlled" = may call your registered onCall handlers
+    "platform": "none",           // default; "controlled" = may call your registered onCall handlers
+    "analytics": false            // true = the platform counts visitors for this site (see Site analytics)
   }
 }
 ```
@@ -301,7 +303,8 @@ switched per request, no restart), `site.config` (live object; `site.onConfig(fn
 result ≤ 256 KB, 60 calls/min per client /24 or /64, default timeout 5 s, max 30 s; rejects
 with `err.code` `platform_none` | `unknown_call` | `too_large` | `rate_limited` |
 `app_stopped` | `timeout`), `site.log.info/warn/error`, `site.dataDir`, `site.port`,
-`site.fenced`. `GET /_vc/id` is answered by the runner (the domain check).
+`site.fenced`, `site.track(name, props)` (a goal into the analytics table; `false` unless the site opted in).
+`GET /_vc/id` is answered by the runner (the domain check).
 
 routes.js (`ctx.sites`, in-process apps) and the iframe (`Bridge.call('sites.<m>', { site, … })`):
 

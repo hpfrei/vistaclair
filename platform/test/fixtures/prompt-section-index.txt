@@ -19,14 +19,14 @@ BEFORE using it — app-lint checks (`unread-capability`). Advertise what you us
 - `dialogs` — `showConfirm`, `showModal` (host overlays) and `<vc-dialog>` (in-iframe)
 - `tasks` — `tasks.list/kill` — inspect and stop spawned processes
 - `events` — `Bridge.on/subscribe`, `ctx.broadcaster`; bus `ctx.events`/`Bridge.bus`
-- `ui` — `<vc-input-bar>`, `<vc-chat-log>`, `<vc-progress>`, `<vc-dialog>` and more
+- `ui` — `<vc-input-bar>`, `<vc-chat-log>`, `<vc-progress>`, `<vc-dialog>`…
 - `tools` — register AI-callable tools; `expose: self|platform|apps`
 - `artifacts` — `vc-artifact://` file refs for tool results
 - `identity` — `ctx.identity` — one user across dashboard session and Telegram mini-app
 - `capabilities` — `ctx.capabilities.has/list` — feature-detect this platform
-- `audio` — `ai.transcribe/tts/image/sfx/translate/detect` — speech, sfx, images, i18n
+- `audio` — `ai.transcribe/tts/image/sfx/translate/detect` — speech, sfx, images
 - `music` — `ai.music.generate/analyze/status` — local MusicGen (optional extra)
-- `maps` — `ai.route/geocode/places/streetview/tiles3d` — Google maps, tiles
+- `maps` — `ai.route/geocode/places/streetview/tiles3d` — Google maps
 - `web-search` — `ai.webSearch` — live web/news/video search via Brave Search
 - `embeddings` — `embed` — local 384-dim vectors
 - `memory` — `memory.remember/rememberBatch/recall` — shared knowledge store
@@ -37,15 +37,16 @@ BEFORE using it — app-lint checks (`unread-capability`). Advertise what you us
 - `browser` — `browser.screenshot` — headless page render
 - `telegram` — `telegram.status/send/…` + Web App (mini-app)
 - `whatsapp` — `whatsapp.status/send/sendButtons/sendList/…`
-- `apps` — `ctx.apps.access(app)` — another app's bot/number/URL; never tokens
+- `apps` — `ctx.apps.access(app)` — another app's bot/number/URL
 - `sites` — `ctx.sites` — own web servers per app
+- `analytics` — `ctx.analytics` — site stats, no IPs stored
 - `licensing` — `ctx.license.*` — paid/freemium apps, seats, tiers
 - `platform-cron` — `platform.cron.schedule/list` — cross-app persistent jobs
-- `sysmon` — `sysmon.get/subscribe/processes` — host RAM/CPU/disk/load; `<vc-sysmon>`
-- `print` — `print.status/pdf` — print a PDF on the owner's printer
-- `governance` — `governance.propose/list/decide/registerKind` — the one owner-approval plane
+- `sysmon` — `sysmon.get/subscribe/processes` — host RAM/CPU/disk; `<vc-sysmon>`
+- `print` — `print.status/pdf` — print a PDF
+- `governance` — `governance.propose/list/decide/registerKind` — owner approvals
 - `spend` — `spend.status` / `ctx.spendStatus()` — the policy in force
-- `fleet` — `ctx.fleet` — slaves, specs; data publish; remote call / job
+- `fleet` — `ctx.fleet` — slaves, specs, data publish, remote calls
 - `config` — Named configurations — platform-side, no app API
 
 Not capabilities, same dir: `api/routes-ctx.md` (routes.js setup, loader ctx, OAuth

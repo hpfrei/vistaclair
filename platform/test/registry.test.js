@@ -10,7 +10,7 @@ const capabilities = require('../src/apps/capabilities');
 test('registry loads every module in ORDER', () => {
   const dirKeys = fs.readdirSync(path.join(PRO, 'src/apps/capabilities')).filter((f) => f.endsWith('.js')).map((f) => f.slice(0, -3)).sort();
   assert.deepEqual(dirKeys, capabilities.ORDER.slice().sort());
-  assert.equal(capabilities.all().length, 44);
+  assert.equal(capabilities.all().length, 45);
   assert.deepEqual(capabilities.all().map((c) => c.key), capabilities.ORDER);
 });
 

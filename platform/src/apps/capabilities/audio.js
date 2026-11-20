@@ -23,7 +23,7 @@ module.exports = {
   runtime: ['transcribe', 'speak', 'generateImage', 'generateSound', 'translate', 'detectLanguage', 'getMediaModels'],
   ctx: ['transcribe', 'tts', 'ttsRender', 'image', 'sfx', 'translate', 'detect', 'mediaModels', 'voiceSample'],
   keywords: /\b(audio|voice|speech|transcrib|tts|text-to-speech|speech-to-text|whisper|image gen|generate (an? )?image|dall|gemini image|sound effect|sfx|foley|elevenlabs|translat|localiz|localis|multilingual|language|i18n)/i,
-  summary: '`ai.transcribe/tts/image/sfx/translate/detect` — speech, sfx, images, i18n',
+  summary: '`ai.transcribe/tts/image/sfx/translate/detect` — speech, sfx, images',
   migration: 'Direct OpenAI Whisper/TTS, Gemini/DALL·E image, or Google/DeepL translation calls via `http.fetch` with an app-held key → `ai.transcribe` / `ai.tts` / `ai.image` / `ai.translate` / `ai.detect` (platform-managed keys). Remove the app\'s own key.',
 
   buildCtx(app) {

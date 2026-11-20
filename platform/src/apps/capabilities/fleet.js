@@ -259,7 +259,7 @@ module.exports = {
       try { return typeof remote().start === 'function' && typeof remoteHost().registerJob === 'function'; } catch { return false; }
     },
   },
-  summary: '`ctx.fleet` — slaves, specs; data publish; remote call / job',
+  summary: '`ctx.fleet` — slaves, specs, data publish, remote calls',
   keywords: /\b(federation|fleet|slaves?|peer host|publish to (a )?(peer|slave|master)|data ?publish|dataPublish|onDataReceive|fleet\.master|fleet\.sync|fleet\.call|fleet\.jobs|onCall|onJob|remote (call|job|build))\b/i,
 
   buildCtx(app) {

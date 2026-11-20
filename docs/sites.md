@@ -42,6 +42,7 @@ Nothing detects, requires or calls nginx, and no test needs it.
 | `autostart` | default `true` |
 | `access` | required; only `public` is built ("not built yet" for `users`, `vc`) |
 | `platform` | `none` (default) or `controlled`; `loose` is "not built yet" |
+| `analytics` | boolean, default `false`; `true` makes the runner record every request (`docs/analytics.md`) |
 
 `validateSites` returns errors/warnings. app-lint (rule `sites`) reports them, and the engine
 refuses a site that has any.
@@ -85,6 +86,10 @@ Per-site state lives in `<appDir>/.data/sites/<site>/`: `snapshots/<id>/`, `acti
   A directory without a trailing slash gets a relative 301.
 - **`/_vc/id`** answers `HMAC(host nonce, app/site)` (32 hex) before the handler sees the
   request.
+- **Analytics** (`sites.<site>.analytics: true`): the runner records each request before the
+  handler's answer ends, and `site.track(name, props)` records a goal. The fence additionally
+  reads `site-analytics.js` and the platform's country table. Everything else is in
+  `docs/analytics.md`.
 - The runner sends `stats` every 2 s (requests, errors, rss), which gives req/s and memory.
 
 ## Supervisor
@@ -207,7 +212,6 @@ idempotent). config, publish and rollback are never his: they are the app's own.
 - A `{ server }` handler form, `instances`, and `command` sites (P3).
 - Migrating existing apps onto sites, and retiring the private/users/open levels and
   `surfaces.public` (P3).
-- Per-site analytics (P2).
 - `ctx.sites` in own-process / standalone apps (`visibility.standalone: false`).
 - A platform-owned fleet-data receiver for `.data/sites/**`. Receivers are per app
   (`fleet-data-receive.js`) and need the app's `receive()`, so snapshots travel only through

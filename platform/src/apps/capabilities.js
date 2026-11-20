@@ -71,7 +71,7 @@ const ORDER = [
   'fs', 'exec', 'cron', 'jobs', 'ai', 'cli', 'db', 'state', 'settings', 'secrets', 'files', 'http', 'notify',
   'dialogs', 'tasks', 'events', 'ui', 'tools', 'artifacts', 'identity', 'capabilities',
   'audio', 'music', 'maps', 'web-search', 'embeddings', 'memory', 'google', 'email', 'calendar', 'todos',
-  'browser', 'telegram', 'whatsapp', 'apps', 'sites', 'licensing', 'platform-cron', 'sysmon', 'print', 'governance', 'spend', 'fleet', 'config',
+  'browser', 'telegram', 'whatsapp', 'apps', 'sites', 'analytics', 'licensing', 'platform-cron', 'sysmon', 'print', 'governance', 'spend', 'fleet', 'config',
 ];
 
 // Members the loader itself owns on every ctx (not produced by any module):
