@@ -710,14 +710,23 @@
     for (const r of crActive()) {
       if (r.from === name) {
         const target = r.to === 'platform' ? 'the platform' : `"${r.to}"`;
+        if (r.state === 'queued') {
+          // Not invisible: it says whose session it waits for, and a click opens
+          // the modal that can inject it now or cancel it.
+          const tip = `This session asked for the ${crKindLabel(r)} "${r.interface.name}" from ${target}, which has a session open — click to inject it now or cancel`;
+          out.push(`<span class="vc-chip click warn" title="${escHtml(tip)}" ${vcAct.attrs('click', 'appsModule.showChangeRequestModal', [r.id], { stop: true })}>${escHtml(`waiting for ${r.to === 'platform' ? 'the platform' : r.to}'s open session`)}</span>`);
+          continue;
+        }
         const what = r.state === 'pending' ? `asking you about ${target}` : `waiting on ${target}`;
         out.push(`<span class="vc-chip click info" title="${escHtml(`This session asked for the ${crKindLabel(r)} "${r.interface.name}" from ${target} — click to cancel`)}" ${vcAct.attrs('click', 'appsModule.cancelChangeRequest', [r.id], { stop: true })}>${escHtml(what)} &times;</span>`);
       } else if (r.to === name) {
         const label = r.state === 'queued' ? `queued for "${r.from}"` : `requested by "${r.from}"`;
         const tip = r.state === 'queued'
-          ? `"${r.from}" is waiting for the ${crKindLabel(r)} "${r.interface.name}" — the change session starts when this app's tab closes`
+          ? `"${r.from}" is waiting for the ${crKindLabel(r)} "${r.interface.name}" — the change session starts when this app's tab closes, or inject it into this tab now`
           : `A change session is open here for "${r.from}": the ${crKindLabel(r)} "${r.interface.name}"`;
-        out.push(`<span class="vc-chip ${r.state === 'queued' ? 'warn' : 'info'}" title="${escHtml(tip)}">${escHtml(label)}</span>`);
+        out.push(r.state === 'queued'
+          ? `<span class="vc-chip click warn" title="${escHtml(`${tip} — click to inject it now or cancel`)}" ${vcAct.attrs('click', 'appsModule.showChangeRequestModal', [r.id], { stop: true })}>${escHtml(label)}</span>`
+          : `<span class="vc-chip info" title="${escHtml(tip)}">${escHtml(label)}</span>`);
       }
     }
     for (const r of crRecentUnverified()) {
@@ -735,11 +744,15 @@
   function showChangeRequestModal(id) {
     const rec = (apps.changeRequests || []).find((r) => r.id === id);
     document.querySelector('.app-change-request-modal')?.remove();
-    if (!rec || rec.state !== 'pending') return;
+    if (!rec || (rec.state !== 'pending' && rec.state !== 'queued')) return;
 
-    const busy = rec.to === 'platform'
-      ? crActive().some((r) => r.id !== rec.id && r.to === 'platform' && (r.state === 'queued' || r.state === 'launched'))
-      : (apps.list.find((a) => a.name === rec.to) && crActive().some((r) => r.to === rec.to && r.state === 'queued'));
+    // The server says whether the target is occupied right now (rec.targetBusy,
+    // live) and whether the request can be written into the open session
+    // (rec.canInject, never for a platform target). A queued request is shown
+    // again here so it can still be injected or cancelled.
+    const queued = rec.state === 'queued';
+    const busy = !!rec.targetBusy;
+    const canInject = !!rec.canInject;
     // A platform target is a different decision: the session it opens runs in
     // the platform repository, on text an app session wrote. Nothing opens
     // until this click, and the modal says exactly that.
@@ -766,6 +779,11 @@
       ? `<div class="app-cr-adds">Missing: <code>${rec.adds.map(escHtml).join('</code>, <code>')}</code>.${today}</div>`
       : (today ? `<div class="app-cr-adds">${today.trim()}</div>` : '');
     const chain = (rec.chain || []).length > 2 ? `<div class="app-cr-chain">chain: ${escHtml(rec.chain.join(' → '))}</div>` : '';
+    const busyNote = !busy ? '' : platform
+      ? `<div class="vc-fixbar warn"><span>${target} already has a session open — ${queued ? 'this request starts' : 'queueing it starts it'} when that session closes (a platform request is never injected).</span></div>`
+      : (canInject
+        ? `<div class="vc-fixbar warn"><span>${target} has a change session open${rec.targetTab ? ` (<code>${escHtml(rec.targetTab)}</code>)` : ''}. ${queued ? 'This request is waiting for it to close; you can inject it now.' : 'Inject the request into that session as a new message (it waits for the current turn), or queue it until the session closes.'}</span></div>`
+        : `<div class="vc-fixbar warn"><span>${target} is being opened for another request — this one starts when that session closes.</span></div>`);
     const modal = document.createElement('div');
     modal.className = 'app-tools-modal app-change-request-modal';
     modal.innerHTML = `
@@ -780,15 +798,19 @@
           ${rec.reason ? `<div class="app-cr-reason">${escHtml(rec.reason)}</div>` : ''}
           ${chain}
           ${platformNote}
-          ${busy ? `<div class="vc-fixbar warn"><span>${target} already has a change tab open — this request starts when that tab closes.</span></div>` : ''}
-          <label class="app-cr-label">The request that will be sent to the change session on ${target} (editable):</label>
+          ${busyNote}
+          ${rec.injectError ? `<div class="vc-fixbar warn"><span>Injecting failed: ${escHtml(rec.injectError)}. The request stays queued.</span></div>` : ''}
+          <label class="app-cr-label">The request that will be sent to ${busy && canInject ? 'the open session on' : 'the change session on'} ${target} (editable):</label>
           <textarea class="app-cr-prompt" spellcheck="false">${escHtml(rec.prompt)}</textarea>
-          <label class="app-cr-label">Reason to give back if you deny (optional):</label>
-          <input class="app-cr-deny-reason" type="text" placeholder="${platform ? 'e.g. batched with the other gaps, not now' : 'e.g. that belongs in the platform, not in this app'}">
+          ${queued ? '' : `<label class="app-cr-label">Reason to give back if you deny (optional):</label>
+          <input class="app-cr-deny-reason" type="text" placeholder="${platform ? 'e.g. batched with the other gaps, not now' : 'e.g. that belongs in the platform, not in this app'}">`}
         </div>
         <div class="app-tools-footer app-cr-footer">
-          <button class="app-cr-deny">Deny</button>
-          <button class="app-cr-open primary">Open change on ${target}</button>
+          ${queued
+            ? `<button class="app-cr-cancel">Cancel request</button>${canInject ? '<button class="app-cr-inject primary">Inject now</button>' : ''}`
+            : `<button class="app-cr-deny">Deny</button>${busy
+              ? `<button class="app-cr-queue${canInject ? '' : ' primary'}">Queue until it closes</button>${canInject ? '<button class="app-cr-inject primary">Inject into the open session</button>' : ''}`
+              : `<button class="app-cr-open primary">Open change on ${target}</button>`}`}
         </div>
       </div>`;
     document.body.appendChild(modal);
@@ -796,14 +818,17 @@
     const close = () => modal.remove();
     modal.querySelector('.app-log-modal-close').onclick = close;
     modal.onclick = (e) => { if (e.target === modal) close(); };
-    modal.querySelector('.app-cr-open').onclick = () => {
-      sendWs({ type: 'app:changeRequest:decide', id: rec.id, ok: true, prompt: modal.querySelector('.app-cr-prompt').value });
-      close();
-    };
-    modal.querySelector('.app-cr-deny').onclick = () => {
-      sendWs({ type: 'app:changeRequest:decide', id: rec.id, ok: false, reason: modal.querySelector('.app-cr-deny-reason').value });
-      close();
-    };
+    const promptText = () => modal.querySelector('.app-cr-prompt').value;
+    const on = (sel, fn) => { const el = modal.querySelector(sel); if (el) el.onclick = () => { fn(); close(); }; };
+    on('.app-cr-open', () => sendWs({ type: 'app:changeRequest:decide', id: rec.id, ok: true, prompt: promptText() }));
+    on('.app-cr-queue', () => sendWs({ type: 'app:changeRequest:decide', id: rec.id, ok: true, mode: 'queue', prompt: promptText() }));
+    on('.app-cr-deny', () => sendWs({ type: 'app:changeRequest:decide', id: rec.id, ok: false, reason: modal.querySelector('.app-cr-deny-reason').value }));
+    on('.app-cr-cancel', () => sendWs({ type: 'app:changeRequest:cancel', id: rec.id }));
+    // The click is the confirm: a pending request is decided and written in one
+    // step, a queued one is written now.
+    on('.app-cr-inject', () => sendWs(queued
+      ? { type: 'app:changeRequest:inject', id: rec.id, prompt: promptText() }
+      : { type: 'app:changeRequest:decide', id: rec.id, ok: true, mode: 'inject', prompt: promptText() }));
   }
 
   function cancelChangeRequest(id) {

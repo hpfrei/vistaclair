@@ -1567,7 +1567,15 @@ async function handleMessage(ws, msg, bc) {
       // The owner's single confirmation. The prompt may be edited in the modal
       // before it is sent to the target session.
       case 'app:changeRequest:decide': {
-        const res = appChangeRequests.decide(msg.id, { ok: !!msg.ok, prompt: msg.prompt, reason: msg.reason });
+        const res = appChangeRequests.decide(msg.id, { ok: !!msg.ok, prompt: msg.prompt, reason: msg.reason, mode: msg.mode });
+        if (res.error) send({ type: 'app:error', error: res.error });
+        break;
+      }
+
+      // A queued request, injected into the target's open session now (the
+      // click is the confirm, as on the modal's "Inject into the open session").
+      case 'app:changeRequest:inject': {
+        const res = appChangeRequests.inject(msg.id, { prompt: msg.prompt });
         if (res.error) send({ type: 'app:error', error: res.error });
         break;
       }

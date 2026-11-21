@@ -27,6 +27,9 @@ function harness({ apps = ['alpha', 'beta', 'gamma'], maxDepth = 1, running = []
     dataHome,
     proDir,
     running: new Set(running),
+    sdkTabs: new Set(),
+    submits: [],
+    submitError: null,
     writes: [],
     launches: [],
     proLaunches: [],
@@ -58,7 +61,15 @@ function harness({ apps = ['alpha', 'beta', 'gamma'], maxDepth = 1, running = []
   state.writeReference();
 
   const cliSessionManager = {
-    get: (tabId) => (state.running.has(tabId) ? { running: true, tabId } : null),
+    // A tab in state.sdkTabs is an Agent SDK session: submit() is its way in,
+    // and state.submitError (a message) makes it throw, as a session that died.
+    get: (tabId) => (state.running.has(tabId) ? {
+      running: true, tabId,
+      ...(state.sdkTabs.has(tabId) ? { submit: (text) => {
+        if (state.submitError) throw new Error(state.submitError);
+        state.submits.push({ tabId, text });
+      } } : {}),
+    } : null),
     list: () => [...state.running].map((tabId) => {
       const s = [...state.sessions.values()].find((x) => x.tabId === tabId);
       return { tabId, status: 'running', cwd: s?.cwd, settings: s?.settings || {} };
@@ -301,6 +312,185 @@ test('a busy target is queued, and launches when its tab closes', async (t) => {
   await afterGrace();
   assert.equal(h.launches.length, 1);
   assert.equal(cr.status(id).state, 'launched');
+});
+
+// --- A busy target: inject into its open session, or queue ----------------
+// The request used to queue behind the target's open tab with nothing to show
+// for it. Now the owner's modal reads the busy state while the request is still
+// `pending`, and its click either writes the request into the open session or
+// queues it — and a queued one can still be injected.
+
+const shown = (id) => cr.list().find((r) => r.id === id);
+
+test('the state the modal reads says the target is busy, and in which tab, while pending', (t) => {
+  const h = harness({ running: ['app-beta'] });
+  t.after(h.cleanup);
+  const asked = ask(h);
+  assert.equal(asked.targetBusy, true);
+  assert.match(asked.note, /"beta" has a change session open/);
+  const r = shown(asked.id);
+  assert.equal(r.state, 'pending');
+  assert.equal(r.targetBusy, true);
+  assert.equal(r.targetTab, 'app-beta');
+  assert.equal(r.canInject, true);
+  assert.match(r.queueNote, /inject/);
+  // The asking session's own poll says it too, so it is not left guessing.
+  assert.match(cr.status(asked.id).text, /has a change session open/);
+  assert.match(cr.status(asked.id).note, /offered/);
+
+  // A target nobody has open is unchanged: not busy, nothing to inject into.
+  const h2 = harness();
+  t.after(h2.cleanup);
+  const idle = shown(ask(h2).id);
+  assert.equal(idle.targetBusy, false);
+  assert.equal(idle.canInject, false);
+});
+
+test('inject writes the request into the open pty session and binds the request to that tab', async (t) => {
+  const h = harness({ running: ['app-beta'] });
+  t.after(h.cleanup);
+  h.manifests.set('beta', { name: 'beta', events: { emits: { 'beta:reading': { description: 'a reading' } } } });
+  const { id } = ask(h, { interface: { kind: 'event', name: 'beta:reading' } });
+  const waiting = cr.wait(id, 5000);
+
+  const res = cr.decide(id, { ok: true, mode: 'inject', prompt: 'Edited by the owner: expose beta:reading.' });
+  assert.equal(res.state, 'launched');
+  assert.equal(h.launches.length, 0, 'the open tab is not relaunched');
+  assert.equal(h.proLaunches.length, 0);
+  // The text and then a separate Enter, in the tab that was open.
+  assert.equal(h.writes.length, 2);
+  assert.equal(h.writes[0].tabId, 'app-beta');
+  assert.equal(h.writes[1].data, '\r');
+  const text = h.writes[0].data;
+  assert.match(text, /INTO THIS OPEN SESSION/);
+  assert.match(text, new RegExp(`request id \`${id}\``));
+  assert.match(text, /"alpha"/);
+  assert.match(text, new RegExp(`app-change\\.js done --id ${id}`), 'how to report is in the message');
+  assert.match(text, /hop 1 of 1|hop limit 1 reached|third app/);
+  assert.match(text, /Edited by the owner: expose beta:reading\./, 'the edited request text, not the original');
+  const rec = cr._internals.byId(id);
+  assert.equal(rec.targetTabId, 'app-beta');
+  assert.equal(rec.injected, true);
+  assert.equal(shown(id).state, 'launched');
+  assert.equal(shown(id).targetBusy, false, 'it is no longer waiting on the target');
+
+  // It is the target's request now: done from that tab completes it and the
+  // outcome reaches the asker.
+  const out = cr.done({ instanceId: 'cli-beta', id, summary: 'emits beta:reading' });
+  assert.equal(out.state, 'done');
+  assert.equal(out.deliveredVia, 'waiter');
+  assert.equal((await waiting).state, 'done');
+});
+
+test('inject goes through submit() of an Agent SDK session, which queues it for its next turn', (t) => {
+  const h = harness({ running: ['app-beta'] });
+  t.after(h.cleanup);
+  h.sdkTabs.add('app-beta');
+  const { id } = ask(h);
+  assert.equal(cr.decide(id, { ok: true, mode: 'inject' }).state, 'launched');
+  assert.equal(h.submits.length, 1);
+  assert.equal(h.submits[0].tabId, 'app-beta');
+  assert.match(h.submits[0].text, /Please expose a tool that returns the current reading\./);
+  assert.equal(h.writes.length, 0, 'no keystrokes into an SDK session');
+});
+
+test('an injected request ends when the open session closes without reporting, and extends the chain', async (t) => {
+  const h = harness({ running: ['app-beta'], maxDepth: 2 });
+  t.after(h.cleanup);
+  const { id } = ask(h);
+  cr.decide(id, { ok: true, mode: 'inject' });
+  // beta (the injected session) asking gamma continues alpha → beta.
+  const sub = cr.request({ instanceId: 'cli-beta', to: 'gamma', prompt: 'need it', interface: { kind: 'tool', name: 'x' } });
+  assert.deepEqual(cr._internals.byId(sub.id).chain, ['alpha', 'beta', 'gamma']);
+  h.exit('beta');
+  await afterGrace();
+  assert.equal(cr.status(id).state, 'ended');
+});
+
+test('Queue keeps the old behaviour, and a queued request can be injected now', async (t) => {
+  const h = harness({ running: ['app-beta'] });
+  t.after(h.cleanup);
+  const { id } = ask(h);
+  assert.equal(cr.decide(id, { ok: true, mode: 'queue' }).state, 'queued');
+  assert.equal(h.writes.length, 0);
+  const q = shown(id);
+  assert.equal(q.targetBusy, true);
+  assert.equal(q.canInject, true);
+  assert.match(q.queueNote, /waiting for it to close; the owner can still inject/);
+  assert.match(cr.status(id).text, /is queued\./);
+
+  assert.equal(cr.inject(id, { prompt: 'inject now' }).state, 'launched');
+  assert.equal(h.writes.length, 2);
+  assert.match(h.writes[0].data, /inject now/);
+  assert.equal(cr._internals.byId(id).targetTabId, 'app-beta');
+  assert.equal(cr.inject(id).error, 'request is launched', 'not twice');
+});
+
+test('a failed write leaves the request queued, with the reason on the record', async (t) => {
+  const h = harness({ running: ['app-beta'] });
+  t.after(h.cleanup);
+  h.sdkTabs.add('app-beta');
+  h.submitError = 'this session is not running';
+  const { id } = ask(h);
+  const res = cr.decide(id, { ok: true, mode: 'inject' });
+  assert.match(res.error, /could not write into the open session/);
+  const r = shown(id);
+  assert.equal(r.state, 'queued');
+  assert.match(r.injectError, /this session is not running/);
+  assert.match(r.queueNote, /Injecting failed/);
+  assert.match(cr.status(id).note, /Injecting failed/);
+  assert.equal(h.submits.length, 0);
+
+  // Still released by the tab closing, as any queued request.
+  h.exit('beta');
+  await afterGrace();
+  assert.equal(cr.status(id).state, 'launched');
+  assert.equal(h.launches.length, 1);
+});
+
+test('an inject on a target that has since closed just opens it', (t) => {
+  const h = harness({ running: ['app-beta'] });
+  t.after(h.cleanup);
+  const { id } = ask(h);
+  h.running.delete('app-beta');
+  assert.equal(cr.decide(id, { ok: true, mode: 'inject' }).state, 'launched');
+  assert.equal(h.launches.length, 1, 'opened normally, nothing to write into');
+  assert.equal(h.writes.length, 0);
+});
+
+test('a worker tab is never an injection target, and a platform request is queue-only', (t) => {
+  const h = harness();
+  t.after(h.cleanup);
+  // beta has only an orchestration worker open (stamped, not the change tab).
+  h.sessions.set('cli-w', { tabId: 'tab-w-1', sessId: 'sw', settings: { [cr._internals.STAMP_APP]: 'beta', orchestration: { role: 'worker', orchestrator: 'app-beta' } } });
+  h.running.add('tab-w-1');
+  const { id } = ask(h);
+  assert.equal(shown(id).canInject, false);
+  assert.equal(cr.decide(id, { ok: true, mode: 'inject' }).state, 'launched', 'idle target: opened, the worker is not in the way');
+  assert.equal(h.writes.length, 0);
+
+  const h2 = harness({ running: ['tg-pro'] });
+  t.after(h2.cleanup);
+  const p = cr.request({ instanceId: 'cli-alpha', to: 'platform', prompt: 'p', interface: { kind: 'method', name: 'email.list' }, adds: ['x'] });
+  const r = shown(p.id);
+  assert.equal(r.targetBusy, true);
+  assert.equal(r.canInject, false);
+  assert.match(r.queueNote, /never injected/);
+  const res = cr.decide(p.id, { ok: true, mode: 'inject' });
+  assert.equal(res.state, 'queued');
+  assert.match(shown(p.id).injectError, /platform request is never injected/);
+  assert.equal(h2.writes.length, 0);
+});
+
+test('an injected request survives a restart like any launched one', (t) => {
+  const h = harness({ running: ['app-beta'] });
+  t.after(h.cleanup);
+  const { id } = ask(h);
+  cr.decide(id, { ok: true, mode: 'inject' });
+  const saved = JSON.parse(fs.readFileSync(path.join(h.dataHome, 'change-requests.json'), 'utf8')).requests.find((r) => r.id === id);
+  assert.equal(saved.state, 'launched');
+  assert.equal(saved.injected, true);
+  assert.equal(saved.targetTabId, 'app-beta');
 });
 
 test('done verifies the interface is really there before saying so', async (t) => {

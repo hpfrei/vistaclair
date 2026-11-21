@@ -94,6 +94,7 @@ const ALLOW = {
   'app:snapshot': 'file-editor companion (snapshot before manual edits)',
   'app:spawnCli': 'launches a CLI session (owner surface)',
   'app:changeRequest:decide': 'the owner answers one app asking another for a change — the click IS the approval, and denying is a first-class outcome',
+  'app:changeRequest:inject': 'the owner writes a queued change request into the target\'s open session — the click IS the approval',
   'app:changeRequest:cancel': 'owner withdraws a change request (owner-click teardown)',
   'app:bridge': 'the owner Bridge dispatch surface (audiences + spend-gate govern it per method)',
   'app:tools:test': 'owner diagnostic — executes an app tool as a test probe',
