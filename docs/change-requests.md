@@ -76,6 +76,43 @@ API-key billing); the target counts as busy meanwhile. A decline puts the
 request back to `pending` (Open again or Deny) and releases a request queued
 behind it; a failure ends it; a restart mid-`opening` returns it to `pending`.
 
+**A busy target** (its change tab is open, or the platform's pro tab) is never
+relaunched — core would kill the owner's session. `list()` reports it live while
+the request is still `pending`: `targetBusy`, `targetTab` (the open tab),
+`canInject`, `queueNote` (also `note` in the `request` / `wait` / `status`
+answers, which the script prints, so the asking session is told the target is
+busy and the owner is being offered injection). The modal then offers three
+choices: **Inject into the open session** (primary; the click is the confirm),
+**Queue until it closes**, **Deny**. Not busy: Open / Deny as before.
+
+- **Inject** (`decide(id, { ok: true, mode: 'inject' })`, ws `app:changeRequest:decide`;
+  `inject(id)`, ws `app:changeRequest:inject`, for a queued one): the request is
+  written into the target's RUNNING session as a user message and the record
+  becomes `launched`, `injected: true`, `targetTabId` the tab. From there it is
+  a launched request: `callerOf` / `partyOf`, `done`, the exit hooks
+  (`ended` when the tab closes unreported), the chain (the injected session's own
+  requests extend it) and the outcome ladder behave as for a session the request
+  opened. An open session cannot get a system prompt, so the message carries
+  `targetPromptSection(cr, { injected: true })` — who asked, the chain, the
+  compatibility rules, how to run `done --id` — and then the (owner-edited)
+  request. `writeInto`: `session.submit(text)` when the session has it (an Agent
+  SDK session or orchestrator: its input queue holds the message until the
+  current turn ends; it throws when the session is gone), else the text and a
+  separate Enter through `writeWhenReady` (a terminal tab; Claude Code queues
+  typed input during a turn). A worker tab is never the target; an
+  orchestrator is.
+- **Queue** (default `decide`): `queued` until the tab closes (`armExitHook` →
+  `launchQueued`). A queued request stays visible: the asking card's chip reads
+  "waiting for <target>'s open session", the target's chip is clickable, and
+  both open the modal with **Inject now** and **Cancel request**.
+- **A failed write** (session gone, `submit` threw) leaves the request `queued`
+  with `injectError`, shown in the modal and in `queueNote` / `note`; the tab
+  closing still releases it. If the target closed meanwhile, an inject click
+  just opens it.
+- **Platform targets are queue-only**: the pro tab is bound to its own request
+  id (`callerOf`), and `tg-pro` is the Telegram session, so `inject` refuses
+  with `injectError` and the request waits as before, visibly.
+
 Every outcome — including deny — reaches the asking session through the same
 three-tier ladder (`deliver`, recorded as `deliveredVia`):
 
@@ -150,5 +187,5 @@ the path for a denial or a need outside the current task.
 Chains are bounded by the `changeRequestMaxDepth` platform setting (default 1,
 clamped 1..3): B may only ask C when the setting allows another hop, and an app
 already in the chain is refused as a cycle. One outgoing request per session,
-and a busy target queues rather than losing its running tab. Active and
+and a busy target is injected into or queued, never relaunched. Active and
 recently settled requests show as a chip on the app's row in the Apps table.

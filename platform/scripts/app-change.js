@@ -115,6 +115,7 @@ function report(result) {
 async function pollUntilTerminal(id, maxHours) {
   const deadline = Date.now() + maxHours * 3600000;
   let attempt = 0;
+  let lastNote = null;
   while (Date.now() < deadline) {
     let res;
     try {
@@ -131,6 +132,9 @@ async function pollUntilTerminal(id, maxHours) {
     }
     if (res.json.state === 'unknown') fail(`change request ${id} is unknown to the platform`, 4);
     if (TERMINAL.has(res.json.state)) report(res.json);
+    // The target is busy: say what is happening once per change, so the session
+    // is not left guessing why nothing started.
+    if (res.json.note && res.json.note !== lastNote) { lastNote = res.json.note; console.log(res.json.note); }
   }
   fail(`change request ${id} was still open after ${maxHours}h — check the dashboard, or run: app-change.js status --id ${id}`, 4);
 }
@@ -207,7 +211,9 @@ async function main() {
       ? `the platform${res.json.capability ? ` (capability "${res.json.capability}")` : ''}`
       : `"${args.to}"`;
     console.log(`Change request ${id} submitted: asking the owner to open a change session on ${target} for the ${iface.kind} "${iface.name}".`);
-    if (res.json.targetBusy) console.log(`${target} has a change tab open — the request starts when that tab closes.`);
+    if (res.json.targetBusy) {
+      console.log(res.json.note || `${target} has a change session open — the owner is offered to inject this request into it, or queue it until it closes.`);
+    }
     if (!willWait) {
       console.log(`Not waiting (--no-wait). The outcome will reach this tab when it arrives.`);
       process.exit(0);
@@ -252,7 +258,7 @@ async function main() {
       if (res.status !== 200 || !res.json) fail(`cannot read request ${id} (HTTP ${res.status})`, 4);
       if (res.json.state === 'unknown') fail(`change request ${id} is unknown to the platform`, 4);
       if (TERMINAL.has(res.json.state)) report(res.json);
-      console.log(`Change request ${id} is ${res.json.state}.`);
+      console.log(`Change request ${id} is ${res.json.state}.${res.json.note ? ` ${res.json.note}` : ''}`);
       process.exit(0);
     }
     await pollUntilTerminal(id, parseFloat(args['max-hours']) || DEFAULT_MAX_HOURS);

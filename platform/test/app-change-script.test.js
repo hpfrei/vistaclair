@@ -132,13 +132,13 @@ test('--no-wait returns at once and leaves delivery to the platform', async (t) 
   const server = await stubServer({
     'POST /pro/apps/change-requests': ({ body }) => {
       assert.equal(body.wait, false);
-      return { json: { id: 'cr-5', state: 'pending', targetBusy: true } };
+      return { json: { id: 'cr-5', state: 'pending', targetBusy: true, note: '"beta" has a change session open — the owner is being offered to inject this request into it.' } };
     },
   });
   t.after(() => server.close());
   const r = await run(server, [...REQ, '--no-wait']);
   assert.equal(r.code, 0);
-  assert.match(r.out, /has a change tab open/);
+  assert.match(r.out, /has a change session open.*inject/);
   assert.match(r.out, /Not waiting/);
 });
 
