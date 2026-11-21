@@ -171,8 +171,11 @@ Desks (`public/desks.js`) is the provider:
 
 - **Desk sub-tabs:**
   - **+** creates a desk.
-  - Double-click renames.
-  - Right-click offers Rename, Tile all and Delete desk.
+  - Double-click renames. Rename (also in the right-click menu, with Tile
+    all and Delete desk) opens the dashboard's `showPrompt` dialog ("Rename
+    desk", prefilled name, Enter / Escape), which lives outside the strip, so
+    a strip re-render cannot drop it. Empty, unchanged or cancelled sends
+    nothing. `createDesks({ prompt })` overrides the dialog (tests).
   - The active desk is remembered per browser (localStorage).
 - **Windows:**
   - Drag by the title bar. Resize from any edge or corner. A click raises.

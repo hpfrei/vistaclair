@@ -425,9 +425,9 @@
         if (d.windows.length) b.appendChild(mk('span', 'desk-tab-count', String(d.windows.length)));
         b.title = 'Double-click to rename; right-click for more';
         b.addEventListener('click', () => setActive(d.id));
-        b.addEventListener('dblclick', () => editName(b, d));
+        b.addEventListener('dblclick', () => askRename(d.id));
         root.tabContextMenu?.attach(b, () => [
-          { label: 'Rename', onClick: () => editName(b, d) },
+          { label: 'Rename', onClick: () => askRename(d.id) },
           { label: 'Tile all', onClick: () => tileAll(d.id) },
           { divider: true },
           { label: 'Delete desk', danger: true, title: 'Its tabs go back to their strips', onClick: () => deleteDesk(d.id) },
@@ -458,27 +458,22 @@
       els.headerTab?.classList.toggle('instance-running', any);
     }
 
-    function editName(btn, d) {
-      const input = mk('input', 'desk-tab-input');
-      input.value = d.name;
-      input.maxLength = 80;
-      btn.replaceChildren(input);
-      input.focus();
-      input.select?.();
-      let done = false;
-      const finish = (save) => {
-        if (done) return;
-        done = true;
-        if (save) renameDesk(d.id, input.value);
-        renderStrip();
-      };
-      input.addEventListener('keydown', (e) => {
-        e.stopPropagation();
-        if (e.key === 'Enter') finish(true);
-        else if (e.key === 'Escape') finish(false);
-      });
-      input.addEventListener('blur', () => finish(true));
-      input.addEventListener('click', (e) => e.stopPropagation());
+    // Rename asks in the dashboard's own dialog (core.js showPrompt), which
+    // lives on document.body, outside the strip: a re-render of the strip
+    // (a state broadcast, a busy dot, the click that selects the tab) cannot
+    // drop it. Empty, unchanged or cancelled sends nothing.
+    let renaming = null;             // desk id of the open dialog
+    async function askRename(deskId) {
+      const d = deskById(deskId);
+      const ask = o.prompt || root.showPrompt;
+      if (!d || !ask || renaming) return;
+      renaming = deskId;
+      try {
+        const name = await ask('Rename desk', { defaultValue: d.name, confirmLabel: 'Rename' });
+        const cur = deskById(deskId);
+        if (name == null || !cur || String(name).trim() === cur.name) return;
+        renameDesk(deskId, name);
+      } finally { renaming = null; }
     }
 
     function renderTaskbar() {
@@ -636,7 +631,7 @@
 
     return {
       handleMessage, applyState, render, onAreaResize, flush, provider,
-      createDesk, deleteDesk, renameDesk, tileAll, moveTo, createAndMove, returnHome, show, raise,
+      createDesk, deleteDesk, renameDesk, askRename, tileAll, moveTo, createAndMove, returnHome, show, raise,
       activeDesk: () => activeDeskId, setActive, state: () => state, enabled,
       _patchWindow: patchWindow, _deskEls: deskEls,
       destroy() { offHosts(); registry.setDeskProvider(null); },
