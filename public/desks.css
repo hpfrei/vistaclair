@@ -115,6 +115,8 @@
   color: var(--text);
 }
 .desk-win-btns { display: flex; gap: 2px; }
+/* A busy tab: the shared .busy-dot (style.css) in the title bar. */
+.desk-win-busy-dot { margin-right: 2px; }
 .desk-win-btn {
   width: 24px;
   height: 22px;

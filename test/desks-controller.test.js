@@ -18,7 +18,7 @@ function setup({ phone = false } = {}) {
   const d = dom.doc;
   const mkEl = (cls) => { const e = d.createElement('div'); e.className = cls; d.body.appendChild(e); return e; };
   const strip = mkEl('strip'), content = mkEl('content');
-  const els = { strip: mkEl('desks-strip'), area: mkEl('desks-area'), taskbar: mkEl('desks-taskbar'), empty: mkEl('desks-empty') };
+  const els = { headerTab: mkEl('header-tab'), strip: mkEl('desks-strip'), area: mkEl('desks-area'), taskbar: mkEl('desks-taskbar'), empty: mkEl('desks-empty') };
   const sent = [], toasts = [], views = [], reopened = [], closed = [];
   let phoneNow = phone;
   const host = window.createTabHost({
@@ -216,4 +216,57 @@ test('a rekeyed tab keeps its window', () => {
   assert.deepStrictEqual(t.sent.find(m => m.type === 'desks:rekey'), { type: 'desks:rekey', kind: 'cli', from: 'tab:1', to: 'orch-x' });
   assert.strictEqual(a.root.parentNode, t.body('orch-x'));
   assert.ok(t.host.isOnDesk('orch-x'));
+});
+
+test('busy: host.setBusy shows the dot on the Desks header tab, the desk tab and the window; rekey, rename, delete and phones follow', () => {
+  const t = setup();
+  const running = (e) => e.classList.contains('instance-running');
+  const deskTab = (id) => t.els.strip.querySelectorAll('.desk-tab').find(b => b.dataset.deskId === id);
+  const stripBtn = (key) => t.strip.querySelectorAll('.view-tab[data-tab-key]').find(b => b.dataset.tabKey === key);
+  t.add('a'); t.add('b');
+  t.desks.applyState(t.state([{ id: 'd1', name: 'Work', windows: [t.W('a')] }, { id: 'd2', name: 'Two', windows: [] }]));
+  assert.ok(!running(t.els.headerTab));
+
+  assert.strictEqual(t.host.setBusy('a', true), true);
+  assert.strictEqual(t.host.setBusy('a', true), false, 'no change, no event');
+  assert.ok(t.host.isBusy('a'));
+  assert.deepStrictEqual(Array.from(t.host.busyKeys()), ['a']);
+  assert.ok(running(t.els.headerTab) && running(deskTab('d1')) && !running(deskTab('d2')));
+  assert.ok(t.win('a').classList.contains('desk-win-busy'));
+  assert.ok(running(stripBtn('a')), 'the strip button too (host-drawn)');
+  t.host.render();
+  assert.ok(running(stripBtn('a')), 'and after a redraw');
+
+  // A busy tab at home does not light Desks.
+  t.host.setBusy('b', true);
+  assert.ok(!running(deskTab('d2')));
+  t.host.setBusy('b', false);
+
+  // rekey keeps busy and the window; rename keeps the dot on the tab.
+  t.host.rekey('a', 'a2');
+  assert.ok(running(deskTab('d1')) && running(t.els.headerTab));
+  assert.ok(t.win('a2').classList.contains('desk-win-busy'));
+  t.desks.renameDesk('d1', 'Renamed');
+  assert.ok(running(deskTab('d1')));
+
+  // The window moves to desk 2.
+  t.desks.applyState(t.state([{ id: 'd1', name: 'Renamed', windows: [] }, { id: 'd2', name: 'Two', windows: [t.W('a2')] }]));
+  assert.ok(!running(deskTab('d1')) && running(deskTab('d2')) && running(t.els.headerTab));
+
+  // A phone ignores desks: the tab is home again, nothing lights on Desks.
+  t.setPhone(true);
+  t.desks.render();
+  assert.ok(!running(t.els.headerTab));
+  t.setPhone(false);
+  t.desks.render();
+  assert.ok(running(t.els.headerTab));
+
+  // The desk goes: its tab goes home, the header tab clears. Busy off clears too.
+  t.desks.applyState(t.state([{ id: 'd1', name: 'Renamed', windows: [] }]));
+  assert.ok(!running(t.els.headerTab));
+  t.desks.applyState(t.state([{ id: 'd1', name: 'Renamed', windows: [t.W('a2')] }]));
+  assert.ok(running(t.els.headerTab));
+  t.host.setBusy('a2', false);
+  assert.ok(!running(t.els.headerTab) && !running(deskTab('d1')) && !t.win('a2').classList.contains('desk-win-busy'));
+  assert.ok(!running(stripBtn('a2')));
 });
