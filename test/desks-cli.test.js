@@ -19,7 +19,10 @@ function setup() {
   const plus = d.createElement('button'); plus.id = 'cliTabNew'; strip.appendChild(plus);
   const container = el('cliContainer', 'cli-container');
   const sessions = d.createElement('div'); sessions.id = 'cliSessions'; container.appendChild(sessions);
-  const desksEls = { strip: el('desksTabStrip'), area: el('desksArea'), taskbar: el('desksTaskbar') };
+  const cliHeader = el('hdr-claude', 'header-tab'); cliHeader.dataset.view = 'claude';
+  const desksHeader = el('hdr-desks', 'header-tab'); desksHeader.dataset.view = 'desks';
+  const desksEls = { strip: el('desksTabStrip'), area: el('desksArea'), taskbar: el('desksTaskbar'), headerTab: desksHeader };
+  const busyTabs = new Set();
 
   const sent = [];
   const sdkCalls = [];
@@ -42,7 +45,7 @@ function setup() {
       sdkPanel: {
         mount: (id) => sdkCalls.push(['mount', id]), unmount: (id) => sdkCalls.push(['unmount', id]), update() {},
         setShown: (id, v) => sdkCalls.push(['shown', id, v]), focus() {}, setActive: (id) => sdkCalls.push(['setActive', id]),
-        isBusy: () => false, onTabs() {},
+        isBusy: (id) => busyTabs.has(id), onTabs() {},
       },
       tabHookInfo: (tabId) => ({ tabId }),
     },
@@ -64,7 +67,7 @@ function setup() {
   const tabList = (tabs, bootId = 'boot1') => cli.handleMessage({ type: 'cli:tabs', bootId, tabs });
   const T = (n, extra = {}) => ({ tabId: `tab-boot-${n}`, status: 'running', cwd: '/x', title: `t${n}`, sessId: `sess-${n}`, settings: {}, ...extra });
   const buttons = () => strip.querySelectorAll('.view-tab[data-tab-key]');
-  return { dom, window, cli, desks, desksEls, strip, container, sessions, sent, sdkCalls, tabList, T, buttons, fits };
+  return { cliHeader, desksHeader, busyTabs, dom, window, cli, desks, desksEls, strip, container, sessions, sent, sdkCalls, tabList, T, buttons, fits };
 }
 
 test('the server tab list becomes TabHost tabs keyed by name, else sessId; the Sessions tab stays first', () => {
@@ -148,4 +151,48 @@ test('an SDK tab is told when it is shown, at home or on a desk (never via the o
   assert.deepStrictEqual(shown('tab-boot-2'), [true, false]);
   assert.deepStrictEqual(shown('tab-boot-1'), [true], 'the desk one stays live');
   assert.strictEqual(t.sdkCalls.filter(c => c[0] === 'setActive').length, 0);
+});
+
+test('a busy CLI on a desk marks the Desks header tab, its desk tab and its window, not the CLIs header tab; at home only the CLIs side', () => {
+  const t = setup();
+  const sdk = (n, name) => t.T(n, { settings: { name, engine: 'sdk' }, kind: 'sdk' });
+  const geom = { x: 0, y: 0, w: 0.5, h: 0.5 };
+  const deskTab = (id) => t.desksEls.strip.querySelectorAll('.desk-tab').find(b => b.dataset.deskId === id);
+  const running = (e) => e.classList.contains('instance-running');
+  const stripBtn = (key) => t.buttons().find(b => b.dataset.tabKey === key);
+  const winOf = (key) => t.desksEls.area.querySelectorAll('.desk-win').find(w => w.dataset.key === key);
+  t.desks.applyState({ version: 1, desks: [{ id: 'd1', name: 'Work', windows: [{ kind: 'cli', key: 'a', title: 'a', geom, z: 1 }] }, { id: 'd2', name: 'Other', windows: [] }] });
+  t.tabList([sdk(1, 'a'), sdk(2, 'b')]);
+
+  // 'a' is on desk d1 and busy: the Desks side lights, the CLIs header does not.
+  t.busyTabs.add('tab-boot-1');
+  t.cli.updateStreamingState();
+  assert.ok(running(t.desksHeader), 'Desks header tab');
+  assert.ok(running(deskTab('d1')), 'the desk tab');
+  assert.ok(!running(deskTab('d2')), 'another desk stays quiet');
+  assert.ok(winOf('a').classList.contains('desk-win-busy'), 'the window');
+  assert.ok(!running(t.cliHeader), 'not the CLIs header tab');
+  assert.ok(running(stripBtn('a')), 'its dimmed strip entry keeps the dot');
+  assert.ok(!running(stripBtn('b')));
+
+  // 'b' at home is busy as well: the CLIs header tab lights for it.
+  t.busyTabs.add('tab-boot-2');
+  t.cli.updateStreamingState();
+  assert.ok(running(t.cliHeader));
+  t.busyTabs.delete('tab-boot-2');
+  t.cli.updateStreamingState();
+  assert.ok(!running(t.cliHeader));
+
+  // Moving the busy tab to another desk moves the dot; home moves it back.
+  t.desks.applyState({ version: 1, desks: [{ id: 'd1', name: 'Work', windows: [] }, { id: 'd2', name: 'Other', windows: [{ kind: 'cli', key: 'a', title: 'a', geom, z: 1 }] }] });
+  assert.ok(!running(deskTab('d1')) && running(deskTab('d2')) && running(t.desksHeader));
+  assert.ok(!running(t.cliHeader));
+  t.desks.applyState({ version: 1, desks: [{ id: 'd1', name: 'Work', windows: [] }, { id: 'd2', name: 'Other', windows: [] }] });
+  assert.ok(!running(t.desksHeader) && !running(deskTab('d1')) && !running(deskTab('d2')));
+  assert.ok(running(t.cliHeader), 'a busy tab at home counts for the CLIs header tab again');
+
+  // Busy ends: everything goes quiet.
+  t.busyTabs.clear();
+  t.cli.updateStreamingState();
+  assert.ok(!running(t.cliHeader) && !running(t.desksHeader));
 });

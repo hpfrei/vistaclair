@@ -70,6 +70,16 @@ For each tab, a kind gives its TabHost one object:
   to each one.
 - **icon** (optional): the host's `icon` is used for desk title bars and the
   taskbar.
+- **Busy** is not part of the object: the kind calls `host.setBusy(key, bool)`
+  whenever its tab starts or stops working (a CLI streaming). It is how
+  Desks learns of it, with no per-kind code. Where the dot shows:
+  - the tab's strip button (`.instance-running`, drawn by the host, on a desk
+    too: the dimmed entry keeps it);
+  - on a desk: the window's title bar (`.busy-dot`), that desk's sub-tab and
+    the **Desks** header tab;
+  - the kind's own header tab only for tabs at home. `cli.js` counts a CLI on
+    a desk toward Desks, not toward the **CLIs** header tab.
+  On a phone desks are ignored, so a busy tab counts at home again.
 
 ## createTabHost
 
@@ -105,6 +115,7 @@ const host = createTabHost({
 | `has(key)`, `get(key)` → content, `keys()`, `activeKey()`, `isOnDesk(key)`, `isShown(key)` | Lookups. |
 | `menuItems(key)` | The right-click items (used by the strip; exposed for tests). |
 | `reopen(key)` | Calls `opts.reopen` and turns any error into `false`. |
+| `setBusy(key, bool)`, `isBusy(key)`, `busyKeys()` | The busy flag (see Busy above). A change emits a registry `busy` event; the strip button is patched, not redrawn. |
 
 These methods are for **Desks only**:
 
@@ -144,7 +155,7 @@ kind's own parts.
 
 - `register(host)` is automatic in `createTabHost`.
 - `get(kind)`, `all()`.
-- `on(fn)`: events `{ type: 'register' | 'add' | 'remove' | 'rekey' | 'update', kind, key, from?, to? }`.
+- `on(fn)`: events `{ type: 'register' | 'add' | 'remove' | 'rekey' | 'update' | 'busy', kind, key, from?, to?, busy? }`.
 - `setDeskProvider(p)` / `desks()`: the provider while desks are available.
   It is `null` on a phone and until the server has sent `desks:state`.
 

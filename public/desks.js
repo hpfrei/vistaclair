@@ -36,7 +36,7 @@
     const storage = o.storage || null;
     const switchView = o.switchView || (() => {});
     const newId = o.newId || (() => 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
-    const els = o.elements || {};   // { view, strip, area, taskbar, tileBtn, newBtn, empty }
+    const els = o.elements || {};   // { view, headerTab, strip, area, taskbar, tileBtn, newBtn, empty }
 
     let state = null;                // the server's, null until desks:state
     let activeDeskId = null;
@@ -252,6 +252,9 @@
       const bar = mk('div', 'desk-win-bar');
       const icon = mk('span', 'desk-win-icon');
       const title = mk('span', 'desk-win-title');
+      const busyDot = mk('span', 'busy-dot desk-win-busy-dot');
+      busyDot.title = 'Working';
+      busyDot.style.display = 'none';
       const btns = mk('span', 'desk-win-btns');
       const retBtn = mk('button', 'desk-win-btn desk-win-return', '⤺');
       retBtn.title = 'Return here: back to its own strip (the session keeps running)';
@@ -262,7 +265,7 @@
       const delBtn = mk('button', 'desk-win-btn desk-win-remove', '×');
       delBtn.title = 'Remove from desk';
       btns.append(retBtn, minBtn, maxBtn, delBtn);
-      bar.append(icon, title, btns);
+      bar.append(icon, title, busyDot, btns);
       const body = mk('div', 'desk-win-body');
       el.append(bar, body);
       for (const dir of ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']) {
@@ -270,7 +273,7 @@
         h.dataset.dir = dir;
         el.appendChild(h);
       }
-      const rec = { el, bar, icon, title, body, retBtn, delBtn, maxBtn, deskId: d.id, kind: w.kind, key: w.key, status: null, ph: null };
+      const rec = { el, bar, icon, title, busyDot, body, retBtn, delBtn, maxBtn, deskId: d.id, kind: w.kind, key: w.key, status: null, ph: null };
       const cur = () => locate(rec.kind, rec.key);
       retBtn.addEventListener('click', (e) => { e.stopPropagation(); returnHome(rec.kind, rec.key); });
       delBtn.addEventListener('click', (e) => { e.stopPropagation(); returnHome(rec.kind, rec.key); });
@@ -400,6 +403,7 @@
       syncShown();
       renderStrip();
       renderTaskbar();
+      renderBusy();
       if (els.empty) {
         els.empty.style.display = desks().length && deskById(activeDeskId)?.windows.length ? 'none' : '';
         els.empty.textContent = !state ? 'Desks need the server to be restarted once (the desks store is new).'
@@ -430,6 +434,28 @@
         ]);
         strip.insertBefore(b, els.newBtn && els.newBtn.parentNode === strip ? els.newBtn : null);
       }
+    }
+
+    // A busy tab on a desk (the host's isBusy, any kind) shows the dot on its
+    // window's title bar, on that desk's tab and on the Desks header tab.
+    function renderBusy() {
+      const on = enabled();
+      let any = false;
+      for (const d of desks()) {
+        let deskBusy = false;
+        const de = deskEls.get(d.id);
+        for (const w of d.windows) {
+          const host = registry.get(w.kind);
+          const busy = on && !!host?.has(w.key) && host.isOnDesk(w.key) && host.isBusy?.(w.key) === true;
+          if (busy) deskBusy = true;
+          const rec = de?.wins.get(wid(w.kind, w.key));
+          if (rec) { rec.el.classList.toggle('desk-win-busy', busy); rec.busyDot.style.display = busy ? '' : 'none'; }
+        }
+        if (deskBusy) any = true;
+        const b = els.strip?.querySelectorAll('.desk-tab').find(x => x.dataset.deskId === d.id);
+        if (b) b.classList.toggle('instance-running', deskBusy);
+      }
+      els.headerTab?.classList.toggle('instance-running', any);
     }
 
     function editName(btn, d) {
@@ -600,6 +626,7 @@
           send({ type: 'desks:rekey', kind: ev.kind, from: ev.from, to: ev.to });
         }
       }
+      if (ev.type === 'busy') { renderBusy(); return; }
       if (state) render();
     });
     registry.setDeskProvider(provider);
@@ -630,7 +657,7 @@
     isPhone: phone,
     storage: root.localStorage,
     switchView: (v) => root.switchView?.(v),
-    elements: { view, strip: $('desksTabStrip'), area: $('desksArea'), taskbar: $('desksTaskbar'), tileBtn: $('desksTileBtn'), newBtn: $('desksNewBtn'), empty: $('desksEmpty') },
+    elements: { view, headerTab: root.document.querySelector('.header-tab[data-view="desks"]'), strip: $('desksTabStrip'), area: $('desksArea'), taskbar: $('desksTaskbar'), tileBtn: $('desksTileBtn'), newBtn: $('desksNewBtn'), empty: $('desksEmpty') },
   });
   D.registerModule?.('desks:', (msg) => desksView.handleMessage(msg));
   D.registerView?.('desks', () => {

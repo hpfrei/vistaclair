@@ -23,6 +23,9 @@
 //   host.update(key, { title? }) · rekey(from, to) · render() · setOrder(keys)
 //   host.has(key) · get(key) · keys() · activeKey() · isOnDesk(key) · isShown(key)
 //   host.menuItems(key) · refit(key)
+//   host.setBusy(key, bool) · isBusy(key) · busyKeys()  — the kind says a tab
+//     is working; the strip button gets .instance-running and Desks shows the
+//     same dot on its header tab, the desk's tab and the window's title bar.
 //   Desks only: attachToDesk(key, bodyEl, desk) · detachFromDesk(key)
 //     · setDeskShown(key, bool) · setDeskInfo(key, desk)
 //
@@ -31,7 +34,7 @@
 // kind's own "show this tab" (default: host.activate).
 //
 // Registry (window.tabHosts): register(host) · get(kind) · all() · on(fn)
-// (events { type: 'register'|'add'|'remove'|'rekey'|'update', kind, key, from, to })
+// (events { type: 'register'|'add'|'remove'|'rekey'|'update'|'busy', kind, key, from, to, busy })
 // · setDeskProvider(p) · desks(). desks.js is the desk provider:
 //   { enabled(), list() → [{id, name}], deskOf(kind, key) → {id, name} | null,
 //     moveTo(kind, key, deskId, title), createAndMove(kind, key, name, title),
@@ -105,7 +108,7 @@
     function add(content) {
       check(content);
       if (entries.has(content.key)) throw new Error(`[${kind}] tab ${content.key} is already added`);
-      const e = { content, place: 'home', desk: null, deskShown: false, shown: false };
+      const e = { content, place: 'home', desk: null, deskShown: false, shown: false, busy: false };
       entries.set(content.key, e);
       order.push(content.key);
       if (content.root.parentNode !== o.contentEl) moveInto(o.contentEl, content.root);
@@ -181,6 +184,19 @@
       if (active === from) active = to;
       render();
       emit({ type: 'rekey', from, to, key: to });
+      return true;
+    }
+
+    // The kind says this tab is working (a CLI streaming). Only a change is
+    // announced; the strip button is patched, not redrawn.
+    function setBusy(key, v) {
+      const e = entries.get(key);
+      v = !!v;
+      if (!e || e.busy === v) return false;
+      e.busy = v;
+      const strip = o.stripEl;
+      if (strip) for (const b of strip.querySelectorAll('.view-tab[data-tab-key]')) if (b.dataset.tabKey === key) b.classList.toggle('instance-running', v);
+      emit({ type: 'busy', key, busy: v });
       return true;
     }
 
@@ -279,7 +295,7 @@
         const e = entries.get(key);
         const onDesk = e.place === 'desk' && !!desks;
         const btn = doc.createElement('button');
-        btn.className = 'view-tab tab-host-tab' + (key === active ? ' active' : '') + (onDesk ? ' tab-on-desk' : '');
+        btn.className = 'view-tab tab-host-tab' + (key === active ? ' active' : '') + (onDesk ? ' tab-on-desk' : '') + (e.busy ? ' instance-running' : '');
         btn.dataset.tabKey = key;
         btn.dataset.tabKind = kind;
         const label = doc.createElement('span');
@@ -310,7 +326,7 @@
       label: o.label || kind,
       icon: o.icon || '▣',
       homeView: o.homeView || null,
-      add, remove, activate, select, focus, update, rekey, setOrder, render,
+      add, remove, activate, select, focus, update, rekey, setOrder, setBusy, render,
       attachToDesk, detachFromDesk, setDeskShown, setDeskInfo, refit, menuItems,
       reopen: (key) => Promise.resolve().then(() => (o.reopen ? o.reopen(key) : false)).catch((err) => { console.error(`[${kind}] reopen failed:`, err); return false; }),
       has: (key) => entries.has(key),
@@ -319,6 +335,8 @@
       activeKey: () => active,
       isOnDesk: (key) => entries.get(key)?.place === 'desk',
       isShown: (key) => !!entries.get(key)?.shown,
+      isBusy: (key) => !!entries.get(key)?.busy,
+      busyKeys: () => order.filter(k => entries.get(k)?.busy),
     };
     registry?.register(host);
     return host;

@@ -1796,14 +1796,15 @@
   function updateStreamingState(streamingInstances) {
     if (streamingInstances) _streamingInstances = streamingInstances;
     if (!tabStrip) return;
+    // The host shows the dot on the strip button and Desks on its own tabs;
+    // only a tab at home counts toward the CLIs header tab.
     let anyStreaming = false;
     for (const [tabId, tab] of tabs) {
       const instanceId = tab.instanceId;
       const streaming = (instanceId ? _streamingInstances.has(instanceId) : false)
         || (isSdk(tab) && !!window.sdkPanel?.isBusy(tabId));
-      if (streaming) anyStreaming = true;
-      const tabBtn = tabStrip.querySelector(`[data-tab-id="${tabId}"]`);
-      if (tabBtn) tabBtn.classList.toggle('instance-running', streaming);
+      if (tab.key) tabHost.setBusy(tab.key, streaming);
+      if (streaming && !(tab.key && tabHost.isOnDesk(tab.key))) anyStreaming = true;
     }
     const cliHeaderTab = document.querySelector('[data-view="claude"]');
     if (cliHeaderTab) cliHeaderTab.classList.toggle('instance-running', anyStreaming);
