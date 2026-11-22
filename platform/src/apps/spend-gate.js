@@ -245,6 +245,7 @@ function settle(app, method, info = {}) {
     app, appDir: appDirOf(app), method, principal, origin, subscribed,
     costUsd, priced: priced !== false, units: info.units || 0,
     inTok: info.inTok || 0, outTok: info.outTok || 0, cacheTok: info.cacheTok || 0,
+    model: info.model, apiUsd: info.apiUsd,
   });
   afterSettle(app, method, principal, info.instanceId, subscribed);
   return { costUsd, priced: priced !== false, principal, origin, subscribed };
@@ -266,6 +267,9 @@ function settleInteraction(interaction) {
     app, appDir: appDirOf(app), method: 'ai.prompt',
     principal: info ? info.principal : null, origin: info ? info.origin : 'unknown', subscribed,
     costUsd: costUsd || 0, priced: costUsd != null, units: 1,
+    // The recorded cost IS the API list price (a subscription call is priced
+    // the same; `subscribed` only picks the cap slice), so apiUsd == costUsd.
+    model: (interaction.request && interaction.request.model) || interaction.model || undefined, apiUsd: costUsd || 0,
     inTok: usage.input_tokens || 0, outTok: usage.output_tokens || 0,
     cacheTok: (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0),
   });

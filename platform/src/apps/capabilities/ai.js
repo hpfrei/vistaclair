@@ -25,15 +25,17 @@ module.exports = {
     const ai = require('../ai-service');
     return {
       aiPrompt: (params) => ai.aiPrompt(app.name, app.dir, params),
-      // Per-app AI spend ledger (fed automatically by every aiPrompt; pass
-      // meterKey on aiPrompt to attribute spend to an end user). Read-only.
+      // Per-app spend ledger (fed automatically by every metered call; pass
+      // meterKey on aiPrompt to attribute spend to an end user). Read-only;
+      // takes the params of `ai.usage` ({ meterKey?, days?, from?, to?, groupBy? }).
       aiUsage: (params) => ai.aiUsageQuery(app.name, app.dir, params),
     };
   },
 
   bridge: {
     'ai.prompt': (app, params) => require('../ai-service').aiPrompt(app.name, app.dir, params),
-    'ai.usage': async (app, params) => require('../ai-usage').query(app.dir, params || {}),
+    // Same function as ctx.aiUsage: one code path, so routes.js and the iframe read the same ledger answer.
+    'ai.usage': async (app, params) => require('../ai-service').aiUsageQuery(app.name, app.dir, params),
     'ai.models': async (app, params) => require('../ai-service').modelsPayload(params),
   },
 
