@@ -97,6 +97,8 @@ function publicModelShape(m) {
     maxOutputTokens: m.maxOutputTokens ?? null,
     inputCostPerMTok: m.inputCostPerMTok ?? null,
     outputCostPerMTok: m.outputCostPerMTok ?? null,
+    cacheReadCostPerMTok: m.cacheReadCostPerMTok ?? null,
+    cacheWriteCostPerMTok: m.cacheCreateCostPerMTok ?? null,
     hasApiKey: !!m.apiKey,
     usable: !!m.usable,
     unusableReason: m.unusableReason || null,
@@ -709,9 +711,22 @@ function writeAppToolsMcp(appName, instanceId, sidecarTools, toolToken) {
   return { mcpConfigFile, cleanup };
 }
 
-// ctx.aiUsage — read the per-app spend ledger (see spend-ledger.js).
+// ctx.aiUsage — read the per-app spend ledger (see spend-ledger.js); the same
+// function as the `ai.usage` bridge method, so both take the same params.
 function aiUsageQuery(appName, appDir, params) {
   return spendLedger.query(appDir, params || {});
+}
+
+// `usage` of an aiPrompt result: every model request the call made so far
+// (retries and JSON repair share the instanceId), read from the interaction
+// store without recording anything. Absent when the host has no store or the
+// proxy saw no usage (the field is omitted, never zeroed).
+function usageFieldOf(instanceId) {
+  try {
+    const u = spendLedger.usageOfInstance(instanceId);
+    if (!u.turns) return {};
+    return { usage: { model: u.model, inTok: u.inTok, outTok: u.outTok, cacheTok: u.cacheTok, apiUsd: u.apiUsd } };
+  } catch { return {}; }
 }
 
 function aiPromptOnce(appName, appDir, params, instanceId, sidecarTools = [], toolToken = null, readScope = null) {
@@ -804,23 +819,23 @@ function aiPromptOnce(appName, appDir, params, instanceId, sidecarTools = [], to
       // A scoped run reports what it was held to (and why tools were removed).
       const scope = readScope?.scoped ? { readScope: readScopeLib.publicScope(readScope) } : {};
       if (!params.expectJson) {
-        resolve({ text, instanceId, ...scope });
+        resolve({ text, instanceId, ...scope, ...usageFieldOf(instanceId) });
         return;
       }
       const json = parseAIJson(text);
       if (json !== null) {
-        resolve({ text, json, instanceId, ...scope });
+        resolve({ text, json, instanceId, ...scope, ...usageFieldOf(instanceId) });
         return;
       }
       try {
         const repaired = await aiRepairJson(appName, appDir, text, params.authMode, instanceId);
         if (repaired !== null) {
-          resolve({ text, json: repaired, instanceId, repaired: true, ...scope });
+          resolve({ text, json: repaired, instanceId, repaired: true, ...scope, ...usageFieldOf(instanceId) });
         } else {
-          resolve({ text, json: null, instanceId, ...scope });
+          resolve({ text, json: null, instanceId, ...scope, ...usageFieldOf(instanceId) });
         }
       } catch {
-        resolve({ text, json: null, instanceId, ...scope });
+        resolve({ text, json: null, instanceId, ...scope, ...usageFieldOf(instanceId) });
       }
     });
 
