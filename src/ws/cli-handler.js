@@ -39,6 +39,31 @@ function sendScrollbackChunked(ws, tabId, data) {
   sendNext();
 }
 
+// One saved session removed, the Sessions tab row's delete and the close
+// menu's "remove interaction" alike. Returns { done: true }, or why not:
+// { error } (an orchestrator goes with its run), { refused } (a worker needing
+// a confirm; `force` skips it) or { done: false } (a running session, or not listed).
+function deleteSavedOne(bc, id, force) {
+  const mgr = bc.cliSessionManager;
+  const entry = mgr.findSaved(id);
+  const st = entry?.settings?.orchestration;
+  if (st?.role === 'orchestrator') return { error: 'An orchestrator is deleted with its whole run (Delete run).' };
+  // A worker's worktree goes with it; uncommitted changes there are
+  // confirmed like an unfinished worker (one confirm covers both).
+  if (st?.role === 'worker' && !force) {
+    const group = mgr.getSavedSessions().find(s => s.id === id)?.group;
+    const dirty = bc.orchestration?.memberDirty(entry) || [];
+    const reasons = [];
+    if (group && !group.completed && !group.runMissing) reasons.push('This worker has not finished its work. Deleting it abandons it: its orchestrator will not resume it.');
+    if (dirty.length) reasons.push(`Its worktree has uncommitted changes, lost if it is deleted: ${dirty.map(d => d.path).join(', ')}`);
+    if (reasons.length) return { refused: reasons.join('\n\n') };
+  }
+  mgr.deleteSavedSession(id);
+  if (!entry || mgr.findSaved(id)) return { done: false };
+  if (st?.role === 'worker') bc.orchestration?.noteMemberDeleted(entry, { force });
+  return { done: true };
+}
+
 function handleMessage(ws, msg, bc) {
   const send = (data) => ws.send(JSON.stringify(data));
   // A reply after an await: the requester may have gone meanwhile.
@@ -98,7 +123,12 @@ function handleMessage(ws, msg, bc) {
         const forgetId = msg.forget ? mgr.get(msg.tabId)?.sessId : null;
         clearPendingQuestionsForTab(msg.tabId);
         mgr.remove(msg.tabId);
-        if (forgetId) mgr.deleteSavedSession(forgetId);
+        // The same deletion as the Sessions tab's row, then every client's
+        // Sessions tab hears the new list.
+        if (forgetId) {
+          mgr.deleteSavedSession(forgetId);
+          bc.broadcast(mgr.savedSessionsMessage());
+        }
         mgr.broadcastTabs();
       }
       break;
@@ -221,30 +251,22 @@ function handleMessage(ws, msg, bc) {
       break;
     case 'cli:deleteSavedSession':
       if (msg.sessionId) {
-        const entry = mgr.findSaved(msg.sessionId);
-        const st = entry?.settings?.orchestration;
-        if (st?.role === 'orchestrator') {
-          send({ type: 'cli:actionResult', action: 'delete', error: 'An orchestrator is deleted with its whole run (Delete run).' });
-          break;
-        }
-        // A worker's worktree goes with it; uncommitted changes there are
-        // confirmed like an unfinished worker (one confirm covers both).
-        if (st?.role === 'worker' && !msg.force) {
-          const group = mgr.getSavedSessions().find(s => s.id === msg.sessionId)?.group;
-          const dirty = bc.orchestration?.memberDirty(entry) || [];
-          const reasons = [];
-          if (group && !group.completed && !group.runMissing) reasons.push('This worker has not finished its work. Deleting it abandons it: its orchestrator will not resume it.');
-          if (dirty.length) reasons.push(`Its worktree has uncommitted changes, lost if it is deleted: ${dirty.map(d => d.path).join(', ')}`);
-          if (reasons.length) {
-            send({ type: 'cli:deleteRefused', sessionId: msg.sessionId, canForce: true, reason: reasons.join('\n\n') });
-            break;
-          }
-        }
-        mgr.deleteSavedSession(msg.sessionId);
-        if (st?.role === 'worker') bc.orchestration?.noteMemberDeleted(entry, { force: msg.force === true });
-        send(mgr.savedSessionsMessage());
+        const r = deleteSavedOne(bc, msg.sessionId, msg.force === true);
+        if (r.error) send({ type: 'cli:actionResult', action: 'delete', error: r.error });
+        else if (r.refused) send({ type: 'cli:deleteRefused', sessionId: msg.sessionId, canForce: true, reason: r.refused });
+        else send(mgr.savedSessionsMessage());
       }
       break;
+    case 'cli:deleteSavedSessions': {
+      // The Sessions tab's multiselect: each id through the single-row delete.
+      // One answer with the refreshed list and how many were left (an
+      // orchestrator, an unfinished or dirty worker, a running session).
+      const ids = [...new Set(Array.isArray(msg.ids) ? msg.ids.filter(i => typeof i === 'string' && i) : [])];
+      let removed = 0;
+      for (const id of ids) if (deleteSavedOne(bc, id, false).done) removed++;
+      send({ ...mgr.savedSessionsMessage(), deleted: removed, skipped: ids.length - removed });
+      break;
+    }
     // --- Pause / resume (src/session-control.js, src/orchestration.js) ---
     case 'cli:pause': {
       // A run's orchestrator pauses the whole run; a worker only through it.

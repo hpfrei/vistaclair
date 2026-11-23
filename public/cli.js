@@ -14,6 +14,7 @@
   let _sessionsPinned = false;    // picked by the user: a tab-list sync leaves it
   let _sessionsReqTimer = null;
   let _sessionsHtml = '';
+  const _selectedSaved = new Set();   // Sessions tab multiselect: saved session ids
   // askId -> { overlayEl, tabId, expired, expire(info), setLateBusy(busy) }:
   // an expired one (its tool call ended) stays until sent as a message or discarded.
   const pendingAskOverlays = new Map();
@@ -855,6 +856,17 @@
     sendWs({ type: 'cli:deleteSavedSession', sessionId: sess.id });
   }
 
+  // The multiselect's remove: one confirm, one batch message, one answer.
+  async function deleteSelectedSaved() {
+    const ids = (_savedData?.sessions || []).filter(s => _selectedSaved.has(s.id)).map(s => s.id);
+    if (!ids.length) return;
+    if (!(await showConfirm(`Delete ${ids.length} session${ids.length !== 1 ? 's' : ''} permanently?\n\n`
+      + 'This is not a rollback: your code, commits and merged work are not touched.\n\n'
+      + 'Removed: their conversation history, interaction data and TODO/NOTES folders.\n\n'
+      + 'This cannot be undone.', { confirmLabel: `Delete ${ids.length}`, danger: true }))) return;
+    sendWs({ type: 'cli:deleteSavedSessions', ids });
+  }
+
   function savedTitle(sess) {
     const parts = String(sess.cwd || '').replace(/\/+$/, '').split('/');
     return sess.title || parts[parts.length - 1] || sess.cwd || sess.id;
@@ -998,7 +1010,9 @@
     if (tabId) actions.push(action('Switch to tab', `data-act="switch" data-tab="${escHtml(tabId)}"`, 'vc-btn-primary', 'This session is open in a tab.'));
     else if (!s.isRunning) actions.push(action('Resume', `data-act="resume-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-primary', 'Continue where it left off.'));
     if (!s.isRunning) actions.push(action('Delete permanently', `data-act="delete-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-danger', DELETE_HINT));
-    return `<article class="vc-card sc-card ${SC.accentOf(status)}">`
+    const sel = s.isRunning ? ''
+      : `<label class="sc-sel" title="Select to remove several sessions at once"><input type="checkbox" data-act="sel" data-sess="${escHtml(s.id)}"${_selectedSaved.has(s.id) ? ' checked' : ''}></label>`;
+    return `<article class="vc-card sc-card ${SC.accentOf(status)}">${sel}`
       + SC.head({
         icon: s.kind === 'sdk' ? '✨' : '⌨️', name: cardName || savedTitle(s),
         sub: [cardName && savedTitle(s) !== SC.dirName(s.cwd) ? escHtml(savedTitle(s)) : '', escHtml(s.cwd || '')].filter(Boolean).join(' · '), subTitle: s.cwd || '',
@@ -1036,7 +1050,14 @@
         `${plain.length} session${plain.length !== 1 ? 's' : ''}`,
         tabs.size ? `${tabs.size} open` : '',
       ].filter(Boolean).join(' · ');
-      html = `<div class="sc-toolbar"><h3>Sessions</h3><span class="sc-count">${count}</span>`
+      // Multiselect over the shown session cards (a run goes by its own delete).
+      const selectable = plain.filter(s => !s.isRunning).map(s => s.id);
+      const nSel = selectable.filter(id => _selectedSaved.has(id)).length;
+      const selBar = selectable.length
+        ? `<label class="sc-sel-all"><input type="checkbox" data-act="sel-all"${nSel === selectable.length ? ' checked' : ''}> Select all</label>`
+          + (nSel ? btn(`Remove selected (${nSel})`, 'data-act="delete-selected"', 'vc-btn-danger') : '')
+        : '';
+      html = `<div class="sc-toolbar"><h3>Sessions</h3><span class="sc-count">${count}</span>${selBar}`
         + btn('+ New CLI in directory…', 'data-act="new"', 'vc-btn-primary sc-push') + '</div>'
         + (cards.length
           ? `<div class="sc-grid">${cards.map(c => c.html).join('')}</div>`
@@ -1062,6 +1083,13 @@
     else if (act === 'delete-run') deleteRun(run);
     else if (act === 'resume-saved') { b.disabled = true; resumeSaved(sess); }
     else if (act === 'delete-saved') deleteSaved(saved());
+    else if (act === 'sel') { if (b.checked) _selectedSaved.add(sess); else _selectedSaved.delete(sess); renderSessions(); }
+    else if (act === 'sel-all') {
+      const ids = (_savedData?.sessions || []).filter(s => !s.group?.runId && !s.isRunning).map(s => s.id);
+      for (const id of ids) { if (b.checked) _selectedSaved.add(id); else _selectedSaved.delete(id); }
+      renderSessions();
+    }
+    else if (act === 'delete-selected') deleteSelectedSaved();
   });
 
   // Relative times age while the tab is open.
@@ -1610,6 +1638,12 @@
       }
       case 'cli:savedSessions': {
         _savedData = { sessions: msg.sessions || [], runs: msg.runs || [] };
+        // The selection keeps the ids still listed.
+        const present = new Set(_savedData.sessions.map(s => s.id));
+        for (const id of [..._selectedSaved]) if (!present.has(id)) _selectedSaved.delete(id);
+        if (msg.skipped) {
+          window.dashboard.showToast?.({ sender: 'CLI', title: 'Some sessions were kept', message: `${msg.skipped} of ${msg.skipped + (msg.deleted || 0)} not removed: running, an orchestrator, or a worker that needs its own confirm (use its Delete).`, level: 'warning' });
+        }
         renderSessions();
         for (const w of _savedWaiters.splice(0)) w();
         break;
