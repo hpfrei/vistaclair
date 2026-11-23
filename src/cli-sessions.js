@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const CliSession = require('./cli-session');
 const SdkSession = require('./sdk-session');
+const AgySession = require('./agy-session');
 const { ExternalSession } = require('./external-session');
 const caps = require('./capabilities');
 const folders = require('./session-folders');
@@ -77,6 +78,15 @@ function deleteFullSessionData(store, sessId, cwd) {
   } catch {}
 }
 
+function engineOf(settings) {
+  const e = settings?.engine;
+  return e === 'sdk' || e === 'agy' ? e : 'cli';
+}
+
+function sessionClass(engine) {
+  return engine === 'sdk' ? SdkSession : engine === 'agy' ? AgySession : CliSession;
+}
+
 class CliSessionManager {
   constructor(proxyPort, broadcaster, store, opts = {}) {
     this.proxyPort = proxyPort;
@@ -110,10 +120,11 @@ class CliSessionManager {
     this.isolation = null;
   }
 
-  // engine 'sdk' (settings.engine) makes an Agent SDK session, anything else a
-  // PTY CliSession. Both have the surface everything here uses.
+  // engine 'sdk' (settings.engine) makes an Agent SDK session, 'agy' an
+  // Antigravity CLI session (src/agy-session.js, SDK-shaped), anything else a
+  // PTY CliSession. All have the surface everything here uses.
   _createSession(tabId, engine = 'cli') {
-    const Kind = engine === 'sdk' ? SdkSession : CliSession;
+    const Kind = sessionClass(engine);
     const session = new Kind(
       this.proxyPort,
       this._wrapBroadcaster(tabId),
@@ -121,10 +132,12 @@ class CliSessionManager {
       this.opts
     );
     session.tabId = tabId;
-    if (engine === 'sdk') {
+    if (engine === 'sdk' || engine === 'agy') {
       session.onStateChange = () => this.noteSessionState(session);
       session.onSettingsChange = () => this.noteSettingsChanged(session);
     }
+    // An agy session's turn boundaries, answered by its owner (orchestration).
+    if (engine === 'agy') session.hookHandler = (instanceId, input) => (this._agyHook ? this._agyHook(instanceId, input) : {});
     this.sessions.set(tabId, session);
     return session;
   }
@@ -135,8 +148,10 @@ class CliSessionManager {
   // its exit can never report on the new one.
   _sessionForSpawn(tabId) {
     const session = this.getOrCreate(tabId);
-    const engine = session.getSettings().engine === 'sdk' ? 'sdk' : 'cli';
-    if ((session instanceof SdkSession) === (engine === 'sdk')) return session;
+    const engine = engineOf(session.getSettings());
+    const sdk = session instanceof SdkSession;
+    const agy = session instanceof AgySession;
+    if (engine === 'sdk' ? sdk : engine === 'agy' ? agy : !sdk && !agy) return session;
     session._spawnGen++;
     if (session.running) session.kill('respawn');
     const next = this._createSession(tabId, engine);
@@ -210,7 +225,7 @@ class CliSessionManager {
     deduped.unshift({
       id: sessId,
       // An SDK session resumes as one (its settings carry the engine too).
-      kind: entry.settings?.engine === 'sdk' ? 'sdk' : 'cli',
+      kind: entry.settings?.engine === 'sdk' || entry.settings?.engine === 'agy' ? 'sdk' : 'cli',
       cwd: entry.cwd,
       title: entry.title || null,
       settings: entry.settings || {},
@@ -491,7 +506,21 @@ class CliSessionManager {
 
   _transcriptExists(cwd, sessId) {
     if (!cwd || !sessId) return false;
-    try { return fs.statSync(_jsonlPath(cwd, sessId)).size > 0; } catch { return false; }
+    try { if (fs.statSync(_jsonlPath(cwd, sessId)).size > 0) return true; } catch {}
+    return this._agyResumable(sessId);
+  }
+
+  // An agy session resumes its own agy conversation (agy keeps it per cwd).
+  _agyResumable(sessId) {
+    const live = [...this.sessions.values()].find(s => s.sessId === sessId);
+    const st = live ? live.getSettings() : this.findSaved(sessId)?.settings;
+    return !!(st && st.engine === 'agy' && st.agy?.conversationId);
+  }
+
+  // The answer to an agy session's turn-boundary events (src/agy-session.js):
+  // set by the orchestration (its handleHook).
+  setAgyHookHandler(fn) {
+    this._agyHook = typeof fn === 'function' ? fn : null;
   }
 
   _getJsonlStat(entry) {
@@ -721,7 +750,7 @@ class CliSessionManager {
     const tabs = [];
     for (const [tabId, session] of this.sessions) {
       if (session.hidden) continue;
-      const sdk = session instanceof SdkSession;
+      const sdk = session instanceof SdkSession || session instanceof AgySession;
       tabs.push({
         tabId,
         kind: sdk ? 'sdk' : session.kind === 'shell' ? 'shell' : 'cli',

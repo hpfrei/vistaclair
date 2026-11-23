@@ -1370,6 +1370,7 @@ module.exports.transcriptFile = transcriptFile;
 module.exports.recordedCost = recordedCost;
 module.exports.MODEL_RE = MODEL_RE;
 module.exports.transcriptTotals = transcriptTotals;
+module.exports.totalsAppended = totalsAppended;
 module.exports.costStart = costStart;
 module.exports.usageLimitOf = usageLimitOf;
 module.exports.CONTINUE_TEXT = CONTINUE_TEXT;

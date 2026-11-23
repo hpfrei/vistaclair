@@ -153,6 +153,9 @@ const { landingView } = require('./landing-state');
 const { mergeReplies, pauseText, resumeText } = require('./session-control');
 const { transcriptTotals, MODEL_RE } = require('./sdk-session');
 const { LATE_RE } = require('./ask-lifecycle');
+const agyConfig = require('./agy-worker-config');
+const agyAuth = require('./agy-auth');
+const { resolveAgyModel } = require('./agy-session');
 
 // How many workers of a run may run at once: run.maxWorkers, set by the owner
 // in the orchestrator tab's header (setRunMaxWorkers), clamped to
@@ -164,6 +167,10 @@ const MAX_WORKER_LIMIT = 10;
 // The model a worker may be launched on (launch_cli `model`), as Claude Code's
 // Agent tool takes it. Unset: the dashboard's default model for new tabs.
 const WORKER_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
+// 'neon': an agy worker (Google Gemini on the owner's Google AI subscription,
+// src/agy-session.js, docs/agy-workers.md), model gemini-4-neon-medium.
+const AGY_WORKER_MODELS = ['neon'];
+const AGY_NUDGES = 3;
 const MAX_SUBAGENTS = 3;
 const PUSH_DEBOUNCE_MS = 2000;
 const RELAY_FALLBACK_MS = 120000;
@@ -305,7 +312,8 @@ function areaOf(area) {
 // the router refuses any other key and names these, to fix the call from.
 const TOOL_PARAMS = {
   launch_cli: {
-    title: 'short name, required', task: 'full brief, required', model: WORKER_MODELS.join(' | '),
+    title: 'short name, required', task: 'full brief, required', model: `${[...WORKER_MODELS, ...AGY_WORKER_MODELS].join(' | ')} (or, with engine agy, an agy gemini-… id)`,
+    engine: 'agy: a Gemini worker on the Google subscription (model neon or gemini-…)',
     isolation: 'worktree | none', area: 'repo-relative files or globs it will change',
     after: 'workers it waits for', cwd: 'directory inside the run root', tools: 'add-on tools, by name',
     host: 'another machine, for a remote worker', app: 'with host: the app it runs in',
@@ -420,7 +428,7 @@ function orchestratorCard(run, { hosts = [] } = {}) {
     ]],
     ['D. Shaping the work', [
       'One worker per deliverable, from diagnosis to a gated, landed fix. A test build is its own deliverable: one per owner test session, launched `after` the fixes it bundles, unless the owner wants one urgent fix built alone.',
-      'Pick the worker\'s model for its typical step: haiku for mechanical jobs (installs, device commands, file moves, searches; isolation none), sonnet for most work (fixes, builds, gates, docs, diagnosis), opus only when the whole task is hard design, rendering or pipeline work: it works in its main thread and delegates mechanical steps (runner) and surveys (explorer) downward. "hard" in a brief marks a SUB-TASK for the architect, never a whole task.',
+      'Pick the worker\'s model for its typical step: haiku for mechanical jobs (installs, device commands, file moves, searches; isolation none), sonnet for most work (fixes, builds, gates, docs, diagnosis), opus only when the whole task is hard design, rendering or pipeline work: it works in its main thread and delegates mechanical steps (runner) and surveys (explorer) downward. "hard" in a brief marks a SUB-TASK for the architect, never a whole task. neon: a Gemini worker on the owner\'s Google subscription ($0, its 5 h quota caps it; worktree only, no subagents).',
       `A brief is self-contained: goal, area, the objective check that proves done (a test or the gate; required, the coder's escalation depends on it), constraints, what is ruled out, and a narrowed subagent menu if needed (workers run at most ${MAX_SUBAGENTS} subagents at once). The worker knows only what you write.`,
       'For a fix to something the owner saw, the brief says: reproduce it offline from the owner\'s evidence and show it fixed with a check that fails without the fix, before any device build. Not reproducible: the worker reports blocked and you decide whether to spend the owner\'s time.',
       'Before launching a wave of more than 3 workers, send the owner a 5-line plan with a cost estimate as a message (not an owner item) and go on without waiting. Design workers deliver a "smallest useful slice" and a "not worth building" list.',
@@ -479,6 +487,33 @@ function workerCard(run, worker) {
   ].join('\n');
 }
 
+// launch_cli asks for an agy worker: engine "agy", or model "neon".
+function agyWanted({ engine, model } = {}) {
+  return engine === 'agy' || AGY_WORKER_MODELS.includes(model);
+}
+
+// The agy model id of a launch, or null for a Claude worker. Throws for an
+// engine other than agy, a non-Gemini id, a remote host or isolation none.
+function agyLaunchModel({ engine, model, host, isolation } = {}) {
+  if (engine !== undefined && engine !== null && engine !== '' && engine !== 'agy') throw new Error('engine must be "agy" (or left out: a Claude worker)');
+  if (!agyWanted({ engine, model })) return null;
+  if (host !== undefined && host !== null && host !== '') throw new Error('an agy worker cannot run on a remote host');
+  if (isolation === 'none') throw new Error('an agy worker needs isolation "worktree": its .agents config lives in its own worktree');
+  return resolveAgyModel(model || 'neon');
+}
+
+// What an agy worker's card adds: its tools under agy's names, and what it lacks.
+function agyWorkerNote(worker) {
+  return [
+    '## Running on agy',
+    `You run on agy (Google's Antigravity CLI, model ${worker.model}), not Claude Code. Where this card names Claude tools, use these instead:`,
+    '- report to the orchestrator: `mcp_orchestrator_report`; messages: `mcp_orchestrator_SendMessage`, `mcp_orchestrator_ListAgents`.',
+    '- your own tools (read_file, write_file, edit_file, run_command, search_web …) for the work itself. You may write only inside your worktree and your session folder; other writes are denied.',
+    '- there are no Claude subagents (runner, explorer, coder, architect) for you: do the work yourself. agy\'s own subagents, ask_question, schedule and workflows are denied.',
+    'Messages from the orchestrator can arrive in the middle of a turn, as a system message: read and follow them.',
+  ].join('\n');
+}
+
 function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS, overlapCheckMs = OVERLAP_CHECK_MS, watchCheckMs = WATCH_CHECK_MS, waitPeerMs = WAIT_PEER_MS, ownerUnansweredMs = OWNER_UNANSWERED_MS, watchRepeatMs = WATCH_REPEAT_MS, quietValveMs = QUIET_VALVE_MS, refreshTimeoutMs = REFRESH_TIMEOUT_MS }) {
   // Which Claude credentials exist: { apiKey, subscription }. Read per ask.
   const claudeCredentials = credentials || (() => require('./capabilities').claudeCredentials(dataHome));
@@ -490,6 +525,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   const HOOK_SCRIPT = path.join(coreRoot, 'lib', 'orchestration-hook.js');
   const runDirs = new Map();       // runId -> runDir (rebuilt from stamps on miss)
   const volatile = new Map();      // session name -> { agents, reported, nudged, nudges, stopping }
+  // agy sessions' turn boundaries (src/agy-session.js) are answered as hooks.
+  if (typeof mgr.setAgyHookHandler === 'function') mgr.setAgyHookHandler((id, input) => handleHook(id, input));
   const pushTimers = new Map();    // runId -> timeout
   const pendingAsks = new Map();   // dedupe key -> Promise
   const relayTimers = new Map();   // worker name -> pause fallback timeout
@@ -977,7 +1014,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (run.pausing) throw new Error('this run is being paused: launch nothing new');
     if (typeof args.title !== 'string' || !args.title.trim()) throw new Error('title is required: a short name for the worker (part of its address)');
     if (typeof args.task !== 'string' || !args.task.trim()) throw new Error('task is required: the complete brief, non-empty');
-    if (args.model && !WORKER_MODELS.includes(args.model)) throw new Error(`model must be one of ${WORKER_MODELS.join(', ')}`);
+    if (args.model && !WORKER_MODELS.includes(args.model) && !agyWanted(args)) throw new Error(`model must be one of ${[...WORKER_MODELS, ...AGY_WORKER_MODELS].join(', ')} (or, with engine "agy", an agy Gemini id gemini-…)`);
     const paused = run.workers.filter(w => w.paused);
     if (paused.length) {
       throw new Error(`paused workers must be resumed (resume_worker) before new ones are launched: ${paused.map(w => w.name).join(', ')}`);
@@ -985,6 +1022,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const spec = launchSpec(run, args);
     // No area: overlaps cannot be detected. It is launched, with a warning.
     const warn = (r) => {
+      if (spec.engine === 'agy') {
+        const ignored = ['profile', 'connectors', 'skills'].filter(k => args[k] !== undefined && args[k] !== null);
+        if (ignored.length) r = { ...r, note: `${r.note ? `${r.note} ` : ''}${ignored.join(', ')} ${ignored.length > 1 ? 'have' : 'has'} no effect on an agy worker.` };
+      }
       if (spec.host || spec.area) return r;
       const w = 'no area given, so its overlaps with other workers cannot be detected: pass area (the files or globs it will change) at launch';
       return { ...r, note: r.note ? `${r.note} Also: ${w}.` : `${w}.` };
@@ -1016,8 +1057,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // A launch's checked parameters, as a queue entry keeps them (cwd resolved,
   // `after` as worker ids). Throws, having changed nothing.
-  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app, closeWhenDone, profile, connectors, skills } = {}) {
+  function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app, closeWhenDone, profile, connectors, skills, engine } = {}) {
     title = cleanTitle(title);
+    const agyModel = agyLaunchModel({ engine, model, host, isolation });
+    if (agyModel) model = agyModel;
     if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone, profile, connectors, skills });
     if (app !== undefined && app !== null && app !== '') throw new Error('app is for a remote worker (with host)');
     if (profile !== undefined && profile !== null && profile !== 'lean' && profile !== 'full') throw new Error('profile must be "lean" or "full"');
@@ -1027,7 +1070,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (!isInside(target, run.root)) throw new Error(`cwd must be inside the run root ${run.root}`);
     const spec = {
       title: title || '', task: String(task), cwd: target, isolation: isolation || run.isolation,
-      ...(model ? { model } : {}), ...(tools !== undefined ? { tools } : {}),
+      ...(model ? { model } : {}), ...(agyModel ? { engine: 'agy' } : {}), ...(tools !== undefined ? { tools } : {}),
       ...(closeWhenDone === true ? { closeWhenDone: true } : {}),
       ...(profile === 'full' ? { profile: 'full' } : {}),
       ...(connectors === true ? { connectors: true } : {}),
@@ -1038,6 +1081,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const deps = afterOf(run, after);
     if (deps.length) spec.after = deps;
     if (spec.isolation === 'worktree' && !gitToplevel(target)) throw new Error(`isolation "worktree" needs a git repository; ${target} is not in one`);
+    if (agyModel) {
+      if (spec.isolation !== 'worktree') throw new Error('an agy worker needs isolation "worktree": its .agents config lives in its own worktree (this run\'s default is none: pass isolation "worktree")');
+      const tracked = agyConfig.trackedAgentsFiles(target);
+      if (tracked.length) throw new Error(`an agy worker cannot run in this repo: it tracks ${tracked.join(', ')}`);
+      if (!agyAuth.findAgyBin()) throw new Error('agy (the Antigravity CLI) is not installed on this machine: launch a Claude worker');
+    }
     grantsOf(tools);
     return spec;
   }
@@ -1086,6 +1135,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       sessionDir: path.join(run.sessionsRoot || path.join(dataHome, 'data', 'sessions'), name),
       launchedAt: new Date().toISOString(), exitedAt: null, lastReport: null, boot: BOOT,
       ...(model ? { model } : {}),
+      ...(spec.engine === 'agy' ? { engine: 'agy' } : {}),
       ...(spec.queueId ? { queueId: spec.queueId } : {}),
       ...(spec.closeWhenDone ? { closeWhenDone: true } : {}),
       ...(spec.profile === 'full' ? { profile: 'full' } : {}),
@@ -1863,16 +1913,18 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     // The lean prompt (when the caller gave one) is the default; a worker
     // launched with profile "full" gets the orchestrator's full prompt.
     const workerPrompt = worker.profile === 'full' ? run.base.appendSystemPrompt : (run.base.workerAppendSystemPrompt || run.base.appendSystemPrompt);
+    const agy = worker.engine === 'agy';
+    const role = workerPrompt ? `${workerPrompt}\n\n${card}` : card;
     return {
       ...run.base.stamps,
       ...(worker.stamps || {}),
-      engine: run.engine || 'cli',
+      engine: agy ? 'agy' : (run.engine || 'cli'),
       ...authOf(run),
       ...(worker.auth ? { auth: worker.auth } : {}),
       name: worker.name,
       ...(worker.sessionDir ? { sessionDir: worker.sessionDir } : {}),
       orchestration: { runId: run.runId, role: 'worker', workerId: worker.id, orchestrator: run.orchestrator, runDir: run.runDir },
-      appendSystemPrompt: workerPrompt ? `${workerPrompt}\n\n${card}` : card,
+      appendSystemPrompt: agy ? `${role}\n\n${agyWorkerNote(worker)}` : role,
       settingsFile: write ? writeSessionSettings(run, worker.name, run.base.settingsFile, { worker }) : path.join(run.runDir, 'sessions', `${worker.name}.json`),
       agents: WORKER_AGENTS,
       // No skill listing, Skill tool or slash commands (about 6K tokens of
@@ -5143,7 +5195,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         // it is nudged again, but never more than 3 times in a turn.
         const lastRep = run.workers.find(x => x.id === stamp.workerId)?.lastReport;
         const nudges = v.nudges || 0;
-        if ((!v.nudged && !input.stop_hook_active) || (v.nudged && lastRep && !WAKE_STATUSES.has(lastRep.status) && nudges < 3)) {
+        // An agy worker's turn is one process: each nudge is a turn of its own,
+        // at most AGY_NUDGES of them, whatever its last report.
+        const nudge = session.engine === 'agy' ? nudges < AGY_NUDGES
+          : (!v.nudged && !input.stop_hook_active) || (v.nudged && lastRep && !WAKE_STATUSES.has(lastRep.status) && nudges < 3);
+        if (nudge) {
           v.nudged = true;
           v.nudges = nudges + 1;
           const wrong = lastRep && !WAKE_STATUSES.has(lastRep.status) ? ` Your last report had status "${lastRep.status}", which is NOT a final report and does not end the turn.` : '';
@@ -5154,9 +5210,42 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         addEvent(run, { worker: name, kind: 'idle', text: `${head} Its last message: ${clip(input.last_assistant_message, 500)}` });
         return {};
       }
+      case 'AgyBlocked': {
+        // An agy turn that cannot go on (sign-in, quota, a failed run): the
+        // worker is blocked as by its own report, and the orchestrator hears it.
+        if (isOrch) return {};
+        const w = run.workers.find(x => x.id === stamp.workerId);
+        if (!w) return {};
+        const reason = clip(String(input.reason || 'agy run failed'), 500);
+        w.lastReport = { status: 'blocked', summary: reason, filesChanged: [], verified: '', open: input.kind === 'auth' ? 'it re-runs by itself after the sign-in' : '', at: new Date().toISOString(), by: 'platform', agy: String(input.kind || 'error') };
+        vol(name).reported = true;
+        addEvent(run, { worker: w.name, kind: 'report', text: `${w.name}: blocked — ${reason}` });
+        pumpQueue(run.runDir);
+        return {};
+      }
       default:
         return {};
     }
+  }
+
+  // POST /api/orchestration/agy-hook (lib/agy-hook.js, an agy session's hook).
+  // PreInvocation (once per model call): what reached the session during its
+  // turn — text submitted to it, its inbox, the pause text — as one injected
+  // system message; nothing to inject is {}. unknown-tool: logged once.
+  function agyHook(instanceId, body = {}) {
+    const session = mgr.getByInstanceId(instanceId);
+    if (!session || session.engine !== 'agy') return {};
+    if (body.event === 'unknown-tool') { session.noteUnknownTool?.(body.name); return {}; }
+    if (body.event !== 'PreInvocation') return {};
+    session.syncPolicy?.();
+    const parts = session.takeQueued ? session.takeQueued() : [];
+    // The same delivery a Claude session gets after a tool call.
+    const r = handleHook(instanceId, { hook_event_name: 'PostToolUse', tool_name: '', cwd: session.cwd, agy: true });
+    let ctx = null;
+    try { ctx = r && r.stdout ? JSON.parse(r.stdout)?.hookSpecificOutput?.additionalContext : null; } catch {}
+    if (ctx) parts.push(ctx);
+    const text = parts.filter(Boolean).join('\n\n');
+    return text ? { injectSteps: [{ systemMessage: { systemMessage: text } }] } : {};
   }
 
   // /api/orchestration — mounted behind the dashboard's auth: the hook script
@@ -5171,6 +5260,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     r.post('/hook', (req, res) => {
       try { res.json(handleHook(req.body?.instanceId, req.body?.input)); } catch (e) {
         console.error('[orchestration] hook error:', e.message);
+        res.json({});
+      }
+    });
+    r.post('/agy-hook', (req, res) => {
+      try { res.json(agyHook(req.body?.instanceId, req.body || {})); } catch (e) {
+        console.error('[orchestration] agy hook error:', e.message);
         res.json({});
       }
     });
