@@ -261,3 +261,5 @@
   .ncd-summary { display: none; }
   .ncd-actions { flex: 1; justify-content: flex-end; }
 }
+.ncd-open:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+[data-row="agy-note"] .claude-signin-btn { margin-left: 4px; }

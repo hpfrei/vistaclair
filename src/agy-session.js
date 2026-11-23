@@ -217,12 +217,20 @@ class AgySession {
     this._auth().on?.('change', this._onAuthChange);
     this._mitmEvents().on?.('cloudcode-response', this._onCloudCode);
     this.costUsd = 0;
+    // A context budget (settings.agyContextLimit, tokens) makes the context
+    // ratio countable: an orchestrator's auto-refresh reads tokens / compactAt.
+    const limit = Number(this.settings.agyContextLimit) || null;
+    this.context = { ...this.context, compactAt: limit, window: this.context.window || limit };
     this._setState('idle', { force: true });
     this.broadcaster.broadcast({
       type: 'cli:spawned', tabId: this.tabId, instanceId: this.instanceId, cwd: this.cwd, title: this.title,
       settings: this.settings, autoMemory: this.autoMemory, hidden: this.hidden, kind: 'sdk', engine: 'agy',
     });
     try { writeInternalJson(this, { mode: 'agy', resumed: !!resumeSessionId, resumedFrom: resumeSessionId || null, model }); } catch {}
+    // agy's SessionStart (the role card) fires only for a new conversation: with
+    // settings.agyRoleOnResume, a resume re-sends the card at its first model
+    // call (takeResumeRole, the PreInvocation injection).
+    this._resumeRole = !!resumeSessionId && this.settings.agyRoleOnResume === true;
     const ss = hookText(this._hook({ hook_event_name: 'SessionStart', source: resumeSessionId ? 'resume' : 'startup', cwd }));
     this._startContext = ss.context;
   }
@@ -256,7 +264,7 @@ class AgySession {
     if (servers.orchestrator?.env) servers.orchestrator.env.VISTACLAIR_ORCH_ENGINE = 'agy';
     this._files = config.writeAgyConfig({
       cwd: this.cwd, dir: this._configDir(), name: this.settings.name || this.sessId,
-      servers, policy: this._policy(),
+      servers, policy: this._policy(), eager: config.eagerFor(this.settings.orchestration?.role),
     });
     config.excludeAgents(this.cwd);
   }
@@ -340,6 +348,14 @@ class AgySession {
     this._chain = 0;
     this._startTurn(body, { id, from, fresh: true });
     return { ok: true, id, images: [] };
+  }
+
+  // The role card once after a resume (settings.agyRoleOnResume), else null.
+  takeResumeRole() {
+    if (!this._resumeRole) return null;
+    this._resumeRole = false;
+    const role = this.settings.appendSystemPrompt ? agyToolNames(this.settings.appendSystemPrompt) : '';
+    return role ? `[vistaclair] Your role card, again after a resume (it stays in force):\n\n${role}` : null;
   }
 
   // What the PreInvocation hook injects: the text submitted during the turn.
@@ -522,8 +538,11 @@ class AgySession {
       const model = this.settings.model;
       if (s.step_type === 'agent_response' && s.state === 'DONE') {
         if (s.usage) this._noteUsage(s.usage);
-        if (s.text_delta) {
+        // A blank step text (measured: a final DONE step of "\n") shows
+        // nothing; the turn's result text stands in for it (_turnEnded).
+        if (s.text_delta && String(s.text_delta).trim()) {
           turn.lastText = s.text_delta;
+          turn.shown = `${turn.shown || ''}\n${s.text_delta}`;
           this.emitEvent({ sdk: { type: 'assistant', session_id: this.sessId, parent_tool_use_id: null, message: { id: `agy-${idx}`, role: 'assistant', model, content: [{ type: 'text', text: s.text_delta }], usage: this._usage(s.usage) } } });
         }
         return;
@@ -574,6 +593,12 @@ class AgySession {
     const errText = r?.error ? (typeof r.error === 'string' ? r.error : String(r.error.message || JSON.stringify(r.error))) : '';
     const ok = !err && code === 0 && status !== 'ERROR';
     const interrupted = turn.interrupted || r?.finished_reason === 'interrupted';
+    // The answer the steps did not show (agy's result text), as the turn's last reply.
+    const answer = String(r?.response || '').trim();
+    if (ok && answer && !String(turn.shown || '').includes(answer)) {
+      turn.lastText = answer;
+      this.emitEvent({ sdk: { type: 'assistant', session_id: this.sessId, parent_tool_use_id: null, message: { id: `agy-result-${Date.now()}`, role: 'assistant', model: this.settings.model, content: [{ type: 'text', text: answer }] } } });
+    }
     this.emitEvent({ sdk: {
       type: 'result', subtype: ok ? 'success' : 'error_during_execution', is_error: !ok, session_id: this.sessId,
       result: r?.response || turn.lastText || '', num_turns: r?.num_turns || 0,
