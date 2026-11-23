@@ -190,6 +190,10 @@ Desks (`public/desks.js`) is the provider:
     to the top edge to maximize.
   - Double-click the title bar to maximize or restore.
   - Title bar buttons: ⤺ Return here, – minimize, □ maximize.
+- **Stacking:** `.desks-area` is its own stacking context (`isolation:
+  isolate; z-index: 0`). Window z-indexes (`1 + z`, a raise counter) and the
+  snap preview stay inside it, so toasts (`.toast-container`) and modals
+  always draw above every desk window.
 - **Taskbar** lists every window, minimized ones included. A click restores
   a window and raises it.
 - **Tile all** lays out every window of the desk in a grid.
