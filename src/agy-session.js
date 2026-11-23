@@ -46,13 +46,51 @@ const STDERR_TAIL = 8000;
 const QUOTA_RE = /RESOURCE[_ ]?EXHAUSTED|\b429\b|quota (?:exceeded|exhausted)|rate limit exceeded|exhausted your capacity/i;
 const UNKNOWN_CONV_RE = /conversation[^\n]{0,60}(?:not found|unknown|does not exist|no such)/i;
 
-// 'neon' or an agy Gemini id → the id; anything else throws.
-function resolveAgyModel(model) {
+// The agy short names (docs/agy-workers.md "Launch"). A tier alone runs at
+// medium effort; `<tier>-<effort>` and `flash[-<effort>]` pick the effort.
+const AGY_TIERS = { neon: ['low', 'medium', 'high', 'xhigh'], argon: ['low', 'medium', 'high'], hydrogen: ['low', 'medium', 'high', 'xhigh'] };
+const AGY_FLASH_EFFORTS = ['low', 'medium', 'high'];
+const AGY_ALIAS_RE = /^(neon|argon|hydrogen|flash)(?:-([a-z]+))?$/;
+
+// The one line that names every agy choice (errors, cards, the launch schema).
+function agyNamesText() {
+  return 'neon | argon | hydrogen (medium effort; suffix -low | -medium | -high | -xhigh, e.g. hydrogen-high; argon has no xhigh), flash[-low | -medium | -high], or a full gemini-… id (gemini-4-<tier>-<effort>, gemini-3.8-flash-<effort>, gemini-pro-orchestrator-<neon|g1-pro>)';
+}
+
+// True when the name is one agy runs: a short name or a gemini-… id.
+function isAgyModelName(model) {
   const m = String(model || '').trim();
-  if (m === 'neon') return NEON_MODEL;
+  return AGY_ALIAS_RE.test(m.toLowerCase()) || AGY_MODEL_RE.test(m);
+}
+
+// A short name → its agy id, null when it is not a short name; throws for a
+// short name whose effort does not exist.
+function agyAliasId(model) {
+  const m = String(model || '').trim().toLowerCase();
+  const hit = AGY_ALIAS_RE.exec(m);
+  if (!hit) return null;
+  const [, tier, effort] = hit;
+  if (tier === 'flash') {
+    if (effort && !AGY_FLASH_EFFORTS.includes(effort)) throw new Error(`agy model "${model}": flash has the efforts ${AGY_FLASH_EFFORTS.join(', ')}`);
+    return `gemini-3.8-flash-${effort || 'medium'}`;
+  }
+  if (!effort) return tier === 'neon' ? NEON_MODEL : `gemini-4-${tier}-medium`;
+  if (!AGY_TIERS[tier].includes(effort)) throw new Error(`agy model "${model}": ${tier} has the efforts ${AGY_TIERS[tier].join(', ')}`);
+  return `gemini-4-${tier}-${effort}`;
+}
+
+// A short name or an agy Gemini id → the id; anything else throws, naming the
+// valid choices. `liveIds`: the ids of the last `agy models` probe; when it has
+// some, the id must be one of them.
+function resolveAgyModel(model, { liveIds } = {}) {
+  const m = String(model || '').trim();
   if (REFUSED_MODEL_RE.test(m)) throw new Error(`agy model ${m}: only Google (gemini-…) models run on agy; Claude models run as Claude workers`);
-  if (!AGY_MODEL_RE.test(m)) throw new Error(`agy model must be "neon" or an agy Gemini id (gemini-…), not "${m}"`);
-  return m;
+  const id = agyAliasId(m) || (AGY_MODEL_RE.test(m) ? m : null);
+  if (!id) throw new Error(`agy model must be ${agyNamesText()}, not "${m}"`);
+  if (Array.isArray(liveIds) && liveIds.length && !liveIds.includes(id)) {
+    throw new Error(`agy model ${id} is not in agy's model list. Available: ${liveIds.filter(x => !REFUSED_MODEL_RE.test(x)).join(', ')}`);
+  }
+  return id;
 }
 
 // The role text speaks Claude's tool names; agy names MCP tools mcp_<server>_<tool>.
@@ -737,6 +775,9 @@ class AgySession {
 module.exports = AgySession;
 module.exports.AgySession = AgySession;
 module.exports.resolveAgyModel = resolveAgyModel;
+module.exports.isAgyModelName = isAgyModelName;
+module.exports.agyNamesText = agyNamesText;
+module.exports.parseAgyModelList = agyAuth.parseAgyModelList;
 module.exports.agyToolNames = agyToolNames;
 module.exports.quotaReset = quotaReset;
 module.exports.descendants = descendants;
