@@ -239,7 +239,6 @@ class AgySession {
       mainConversation: this.conversationId,
       pausing: this.pausing === true,
       sessionStartText: role || null,
-      allowSubagentTypes: ['image-generator'],
       ...(s.agyPolicy && typeof s.agyPolicy === 'object' ? s.agyPolicy : {}),
     };
   }

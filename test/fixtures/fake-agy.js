@@ -15,6 +15,9 @@
 //   quota      a RESOURCE_EXHAUSTED result, exit 1
 //   wait       PreInvocation(0), waits for $FAKE_AGY_DIR/release, PreInvocation(1)
 //   sleep      starts `sleep 60` (its pid in the log) and waits to be killed
+//   subagent   a native subagent: invoke_subagent, then in the subagent's own
+//              conversation a write outside and one inside the worktree, then
+//              a swarm call, then `report` as in report mode
 // Every run appends { argv, env, events[] } to $FAKE_AGY_DIR/runs.jsonl.
 const fs = require('fs');
 const path = require('path');
@@ -70,17 +73,21 @@ function runHook(event, input, toolName) {
 let step = 0;
 const stepUpdate = (o) => out({ event: 'step_update', step_update: { conversation_id: conv, step_index: step++, ...o } });
 
-function tool(name, args, run) {
-  const d = runHook('PreToolUse', { stepIdx: step, toolCall: { name, args, id: `call_${step}` } }, name);
-  stepUpdate({ state: 'ACTIVE', step_type: 'tool', tool_name: name, tool_info: { name, parameters: args } });
-  step--;
+// `inConv`: the conversation the tool runs in (a subagent's has its own id).
+function tool(name, args, run, inConv = conv) {
+  const extra = inConv === conv ? {} : { conversationId: inConv };
+  const upd = (o) => out({ event: 'step_update', step_update: { conversation_id: inConv, step_index: step, ...o } });
+  const d = runHook('PreToolUse', { stepIdx: step, toolCall: { name, args, id: `call_${step}` }, ...extra }, name);
+  upd({ state: 'ACTIVE', step_type: 'tool', tool_name: name, tool_info: { name, parameters: args } });
   if (d.decision !== 'allow') {
-    stepUpdate({ state: 'ERROR', step_type: 'tool', tool_name: name, tool_info: { name, error: { type: 'TOOL_ERROR', message: d.reason || 'denied' } } });
+    upd({ state: 'ERROR', step_type: 'tool', tool_name: name, tool_info: { name, error: { type: 'TOOL_ERROR', message: d.reason || 'denied' } } });
+    step++;
     return { denied: true, reason: d.reason };
   }
   const output = run ? run() : '';
-  stepUpdate({ state: 'DONE', step_type: 'tool', tool_name: name, tool_info: { name, parameters: args, output } });
-  runHook('PostToolUse', { stepIdx: step, toolCall: { name, args, id: `call_${step}` } }, name);
+  upd({ state: 'DONE', step_type: 'tool', tool_name: name, tool_info: { name, parameters: args, output } });
+  runHook('PostToolUse', { stepIdx: step, toolCall: { name, args, id: `call_${step}` }, ...extra }, name);
+  step++;
   return { output };
 }
 
@@ -148,7 +155,20 @@ process.on('SIGTERM', () => { log.events.push({ signal: 'SIGTERM' }); save(); pr
     fs.rmSync(path.join(DIR, 'waiting'), { force: true });
     runHook('PreInvocation', { initialNumSteps: 1, invocationNum: 1 });
   }
-  if (mode === 'report') {
+  if (mode === 'subagent') {
+    const sub = crypto.randomUUID();
+    log.subConversation = sub;
+    log.invoke = tool('invoke_subagent', { TypeName: 'researcher', Role: 'Reader', Prompt: 'read README' }, () => sub);
+    if (!log.invoke.denied) {
+      const outside = path.join(path.dirname(cwd), 'outside-sub.txt');
+      log.subOutside = tool('write_file', { Path: outside, Content: 'no' }, () => { fs.writeFileSync(outside, 'no'); return 'written'; }, sub);
+      const inside = path.join(cwd, 'sub-made.txt');
+      log.subInside = tool('write_file', { Path: inside, Content: 'by the subagent\n' }, () => { fs.writeFileSync(inside, 'by the subagent\n'); return 'written'; }, sub);
+      out({ event: 'step_update', step_update: { conversation_id: sub, step_index: 0, state: 'DONE', step_type: 'agent_response', text_delta: 'SUBAGENT-TEXT' } });
+    }
+    log.swarm = tool('swarm', { Tasks: ['a', 'b'] });
+  }
+  if (mode === 'report' || mode === 'subagent') {
     const outside = path.join(path.dirname(cwd), 'outside-agy.txt');
     log.outside = tool('write_file', { Path: outside, Content: 'no' }, () => { fs.writeFileSync(outside, 'no'); return 'written'; });
     const inside = path.join(cwd, 'agy-made.txt');
