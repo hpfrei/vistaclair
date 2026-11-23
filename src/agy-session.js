@@ -163,7 +163,8 @@ class AgySession {
     this.busy = false;
     this.busySince = null;
     this.state = 'idle';
-    this.costUsd = 0;
+    this.costUsd = 0;               // billed: always 0 (the Google AI subscription pays)
+    this.apiUsd = 0;                // what this process's calls would cost at Google's API list prices
     this.context = { tokens: null, window: null, compactAt: null, windowEstimated: false };
     this.autoMemory = false;
     this.actualModel = null;
@@ -255,6 +256,7 @@ class AgySession {
     this._auth().on?.('change', this._onAuthChange);
     this._mitmEvents().on?.('cloudcode-response', this._onCloudCode);
     this.costUsd = 0;
+    this.apiUsd = 0;
     // A context budget (settings.agyContextLimit, tokens) makes the context
     // ratio countable: an orchestrator's auto-refresh reads tokens / compactAt.
     const limit = Number(this.settings.agyContextLimit) || null;
@@ -420,7 +422,18 @@ class AgySession {
   setAwaiting() {}
   unsentInputs() { return []; }
   seedCost() {}
-  addRequestCost() {}
+  // A finished call of this session (cli-sessions noteInteraction): its API-equivalent
+  // price (agy-pricing.js) adds to apiUsd. costUsd, the billed amount, stays 0.
+  addRequestCost(usage, pricing) {
+    if (!usage || !pricing?.apiEquivalent) return;
+    const per = (tok, rate) => (tok || 0) * (rate || 0) / 1e6;
+    const usd = per(usage.input_tokens, pricing.inputCostPerMTok) + per(usage.output_tokens, pricing.outputCostPerMTok)
+      + per(usage.cache_read_input_tokens, pricing.cacheReadCostPerMTok || pricing.inputCostPerMTok)
+      + per(usage.cache_creation_input_tokens, pricing.cacheCreateCostPerMTok || pricing.inputCostPerMTok);
+    if (!(usd > 0)) return;
+    this.apiUsd += usd;
+    this._emitStatus();
+  }
   setAuth() { return { ok: false, error: 'an agy session runs on the Google AI subscription only' }; }
 
   setModel(model) {
@@ -718,7 +731,7 @@ class AgySession {
 
   _emitStatus() {
     this.emitEvent({ platform: {
-      kind: 'status', state: this.state, costUsd: 0, model: this.settings.model, actualModel: this.settings.model,
+      kind: 'status', state: this.state, costUsd: 0, apiUsd: this.apiUsd, model: this.settings.model, actualModel: this.settings.model,
       mappedTo: null, credential: 'agy-subscription', engine: 'agy', context: this.context,
       ...(this.blocked ? { blocked: this.blocked } : {}),
     } });

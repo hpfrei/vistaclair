@@ -4,7 +4,8 @@ agy (the Antigravity CLI) workers send their HTTPS traffic through a loopback
 forward proxy inside the server. Only the Cloud Code model host is decrypted, and
 only with a CA that agy processes alone trust. The proxy passes the bytes
 through unchanged and decodes agy's model calls into Anthropic-shaped Inspector
-interactions under the worker's instance, priced at $0. agy keeps its own Google
+interactions under the worker's instance, billed $0 and shown at Google's API list
+price ("Pricing"). agy keeps its own Google
 login: Vistaclair never reads, stores or reuses its token (`docs/agy-auth.md`).
 
 | Piece | File |
@@ -177,8 +178,33 @@ rejects has opened a TLS session with Google that carries no request.
   text part is dropped, so no empty text block is shown. Google returns thought
   text only on some calls: on others just a `thoughtSignature`, and then there
   is a thinking token count but no thinking block.
-- **Pricing:** all zeros, plus `credential:'agy-subscription'` and
-  `provider:'agy'`, so `toEntry` shows $0, not "no price".
+- **Pricing** (`src/agy-pricing.js`): billed $0, because the Google AI
+  subscription pays; the Inspector shows what the call would have cost at
+  Google's API list prices. `pricing` is the catalog entry
+  (`capabilities/models.json`, `getModelPricing`) of the *requested* model
+  (`request.model`; a side call uses its own model) plus `apiEquivalent: true`,
+  `billedUsd: 0`, `pricedAs` (the catalog name), `credential:'agy-subscription'`
+  and `provider:'agy'`. The effort suffix is stripped (`gemini-4-neon-medium` →
+  `gemini-4-neon`, `-minimal|-low|-medium|-high|-xhigh`). No catalog entry
+  (`gemini-pro-orchestrator-neon`, a new tier) → zero rates and no
+  `apiEquivalent`: $0, never a guess. So `computeCost` / `toEntry` give the
+  API-equivalent figure from the call's final usage (the closing
+  `message_delta`, not `message_start`). Cache accounting needs nothing special:
+  `input_tokens` is prompt − cached, `cache_read_input_tokens` the cached part,
+  so each token is priced once (input rate / `cacheReadCostPerMTok`);
+  `reasoning_tokens` sit inside `output_tokens` and are not priced again; Gemini
+  has no cache-write tokens. Control calls stay at plain $0.
+  Anthropic subscription calls have no such split: their list price is shown as
+  the cost and `credential` marks the bill. The API-equivalent figure is only for
+  display: the spend gate settles `/v1/messages` interactions only, so an agy
+  call never reaches the ledger or a cap.
+  Labels: every cost of an agy call reads `≈ $X` with the tooltip "API-equivalent:
+  what this would cost at Google's API list prices. Billed: $0 (the Google AI
+  subscription pays)" (timeline row, lane separator and stats, Σ footers, turn
+  totals, session cards); the usage bar reads `≈ $X at API prices · billed $0`
+  and the cost tooltip lists `API-equivalent` and `billed`. Session totals
+  (`session-totals.js`) set `apiEquivalent` (entry slot 11) and the session card
+  list carries it; calls recorded before this show $0.
 - **Live view:** `interaction:start` when the request is complete, `sse_event`
   per event, then `interaction:complete`, or `interaction:error` for a non-2xx
   response (stored with its JSON body, as a 429 is) or a connection cut off

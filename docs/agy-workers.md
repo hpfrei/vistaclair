@@ -131,7 +131,11 @@ agy -p <prompt> --model <id> --output-format stream-json [--conversation <id>] -
   skipped, and `result.response` not shown by any step becomes the reply); `tool ACTIVE` →
   `tool_use` (`id agy-<step>`); `tool DONE|ERROR` → `tool_result`; `result` →
   `result` with `total_cost_usd: 0`. Steps of another conversation (an agy
-  subagent's) are skipped. Status lines carry `credential: 'agy-subscription'`.
+  subagent's) are skipped. Status lines carry `credential: 'agy-subscription'`, `costUsd: 0` (billed) and
+  `apiUsd`: the session process's calls at Google's API list prices
+  (`addRequestCost`, fed by each finished call's `pricing`; reset on a restart).
+  The Agent SDK panel caption shows `≈ $apiUsd` with the billed-$0 tooltip.
+  The Inspector's session totals cover the whole history (`docs/agy-inspector.md`).
 
 ## Turn boundaries
 

@@ -26,7 +26,8 @@ function kindOf(raw) {
 }
 
 // [seq, id, startedAt, duration, input, output, cacheRead, cacheCreate, cost, toolCalls, kind]
-// cost is null when the turn has usage but no price.
+// cost is null when the turn has usage but no price. [11] is set (1) only on an
+// API-equivalent cost.
 function toEntry(seq, raw, getPricing) {
   const kind = kindOf(raw);
   const u = raw?.usage || null;
@@ -48,6 +49,8 @@ function toEntry(seq, raw, getPricing) {
     u?.cache_read_input_tokens || 0, u?.cache_creation_input_tokens || 0,
     // A hook's body is the tool's output, not a model's tool_use blocks.
     cost, kind === KIND_API ? raw?.tools || 0 : 0, kind,
+    // [11] 1: the cost is API-equivalent (an agy call: billed $0, list price shown).
+    ...(raw?.pricing?.apiEquivalent && cost != null ? [1] : []),
   ];
 }
 
@@ -233,7 +236,7 @@ class SessionTotals {
     const t = {
       sessId, turns: 0, apiCalls: 0, hookEvents: 0, mcpCalls: 0, toolCalls: 0,
       inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0,
-      cost: 0, hasCost: false, duration: 0, firstAt: null, lastAt: null,
+      cost: 0, hasCost: false, apiEquivalent: false, duration: 0, firstAt: null, lastAt: null,
       complete: s.ready,
       scanned: s.scan ? s.scan.done : 0, toScan: s.scan ? s.scan.total : 0,
     };
@@ -245,7 +248,7 @@ class SessionTotals {
       t.toolCalls += e[9];
       t.inputTokens += e[4]; t.outputTokens += e[5];
       t.cacheRead += e[6]; t.cacheCreate += e[7];
-      if (e[8] != null) { t.cost += e[8]; t.hasCost = true; }
+      if (e[8] != null) { t.cost += e[8]; t.hasCost = true; if (e[11] === 1) t.apiEquivalent = true; }
       t.duration += e[3];
       if (e[2]) {
         if (t.firstAt == null || e[2] < t.firstAt) t.firstAt = e[2];

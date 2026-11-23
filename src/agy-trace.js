@@ -14,10 +14,7 @@ const InteractionStore = require('./store');
 const gemini = new GeminiProvider();
 const IMAGE_INLINE_MAX = 4096;          // inlineData above this becomes a placeholder
 const BODY_CAP = 50 * 1024 * 1024;      // per message, decoded
-const ZERO_PRICING = Object.freeze({
-  inputCostPerMTok: 0, outputCostPerMTok: 0, cacheReadCostPerMTok: 0, cacheCreateCostPerMTok: 0,
-  credential: 'agy-subscription', provider: 'agy',
-});
+const { agyPricing, defaultLookup, ZERO_PRICING } = require('./agy-pricing');
 
 const TRACED_PATHS = new Set(['/v1internal:streamGenerateContent', '/v1internal:generateContent']);
 const HOOK_PATHS = new Set(['/v1internal:loadCodeAssist', '/v1internal:retrieveUserQuotaSummary']);
@@ -372,7 +369,9 @@ class AgyExchange {
       usage: null,
       isStreaming: this.path.endsWith('streamGenerateContent'),
       status: 'pending',
-      pricing: { ...ZERO_PRICING },
+      // The API-equivalent list price of the requested model (agy-pricing.js);
+      // the billed amount is $0. A model with no catalog entry stays at $0.
+      pricing: agyPricing(dec.body.model, this.ctx.getPricing || (this.ctx.getPricing = defaultLookup())),
     };
     if (env.requestId) it.agyRequestId = env.requestId;
     // Side calls: agy's own helper requests (the per-tool safety monitor on a
