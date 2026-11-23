@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { makeDom, loadPublic } = require('./desks-fake-dom');
 
-function setup() {
+function setup({ timers } = {}) {
   const dom = makeDom();
   const d = dom.doc;
   const el = (id, cls = '') => { const e = d.createElement('div'); e.id = id; e.className = cls; d.body.appendChild(e); return e; };
@@ -23,12 +23,14 @@ function setup() {
   const sessions = d.createElement('div'); sessions.id = 'cliSessions'; container.appendChild(sessions);
   const sent = [];
   const confirms = [];
+  const toasts = [];
   const escHtml = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const hooks = { onChange() {}, actionsFor: () => [], runAction() {} };
   const dashboard = {
     sendWs: (m) => sent.push(m), state: {}, escHtml, askFormBuildHTML() {}, askFormBind() {}, showAlert() {},
+    showToast: (m) => toasts.push(m),
     showConfirm: async (text, opts) => { confirms.push({ text, opts }); return true; },
-    _tabHooks: hooks, _tabBadgeEl: () => null, registerModule() {}, isPhone: () => false, showToast() {},
+    _tabHooks: hooks, _tabBadgeEl: () => null, registerModule() {}, isPhone: () => false,
   };
   const { window } = loadPublic(['tab-context-menu.js', 'desk-layout.js', 'tab-host.js', 'session-cards.js'], {
     doc: d,
@@ -36,7 +38,7 @@ function setup() {
   });
   class Terminal { constructor() { this.cols = 80; this.rows = 24; } loadAddon() {} open() {} attachCustomKeyEventHandler() {} onData() {} onResize() {} onScroll() {} focus() {} dispose() {} write() {} reset() {} clear() {} }
   const ctx = vm.createContext(Object.assign(Object.create(null), {
-    window, document: d, console, setTimeout: (fn) => { fn(); return 0; }, clearTimeout() {}, setInterval: () => 0, clearInterval() {}, requestAnimationFrame: (fn) => fn(),
+    window, document: d, console, setTimeout: timers ? timers.set : (fn) => { fn(); return 0; }, clearTimeout: timers ? timers.clear : () => {}, setInterval: () => 0, clearInterval() {}, requestAnimationFrame: (fn) => fn(),
     ResizeObserver: class { observe() {} disconnect() {} },
     Terminal, FitAddon: { FitAddon: class { fit() {} } }, WebLinksAddon: { WebLinksAddon: class {} },
     sessionStorage: { _m: {}, getItem(k) { return this._m[k] ?? null; }, setItem(k, v) { this._m[k] = v; } },
@@ -48,7 +50,7 @@ function setup() {
   // A click on the control with this data-act (and data-id / data-sess): the
   // view's one delegated listener reads closest('[data-act]').
   const click = (dataset, checked) => sessions.dispatch('click', { target: { closest: () => ({ dataset, checked, disabled: false }) } });
-  return { cli, sessions, sent, confirms, html, click };
+  return { cli, sessions, sent, confirms, toasts, html, click };
 }
 
 const plain = (id, extra = {}) => ({ id, cwd: `/p/${id}`, title: id, savedAt: 1, settings: {}, kind: 'cli', ...extra });
@@ -100,4 +102,74 @@ test('the selection keeps ids still listed and drops ones that vanished', () => 
   assert.ok(t.html().includes('Remove selected (4)'));
   t.cli.handleMessage(saved([plain('s2')], [run('r2')]));
   assert.ok(t.html().includes('Remove selected (2)'), 's1 and r1 dropped, s2 and r2 kept');
+});
+
+// The busy indicator of Remove selected: module state, so it survives the
+// re-renders the list answers and tab changes cause; it ends on the server's
+// Done (a toast on error) or on a safety timeout that asks for the list again.
+function busySetup() {
+  const queue = [];
+  const timers = { set: (fn, ms) => { queue.push({ fn, ms }); return queue.length; }, clear: (id) => { if (queue[id - 1]) queue[id - 1].fn = null; } };
+  const t = setup({ timers });
+  t.queue = queue;
+  t.cli.handleMessage(saved([plain('s1'), plain('s2')], [run('r1')]));
+  t.click({ act: 'sel-all' }, true);
+  return t;
+}
+const startRemove = async (t) => { await t.click({ act: 'delete-selected' }); await new Promise(r => setImmediate(r)); };
+
+test('Remove selected goes busy after the confirm: disabled, "Removing N…" with a spinner, boxes disabled', async () => {
+  const t = busySetup();
+  assert.ok(t.html().includes('Remove selected (3)'));
+  await startRemove(t);
+  assert.ok(t.html().includes('Removing 3…'));
+  assert.ok(t.html().includes('class="sc-spin"'));
+  assert.ok(/<button[^>]*data-act="delete-selected" disabled/.test(t.html()), 'the button is disabled');
+  assert.ok(!t.html().includes('Remove selected (3)'));
+  assert.strictEqual(checkboxes(t.html()).filter(b => b.act !== 'sel-all' && /disabled/.test(b.rest)).length, 3, 'the cards being removed cannot be toggled');
+});
+
+test('the busy state survives the list pushes that re-render the tab', async () => {
+  const t = busySetup();
+  await startRemove(t);
+  t.cli.handleMessage(saved([plain('s1'), plain('s2')], [run('r1')]));
+  assert.ok(t.html().includes('Removing 3…'));
+  // A second click while busy sends nothing more.
+  await t.click({ act: 'delete-selected' });
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(t.sent.filter(m => m.type === 'cli:deleteSavedSessions').length, 1);
+  assert.strictEqual(t.confirms.length, 1);
+});
+
+test('the server Done clears the busy state', async () => {
+  const t = busySetup();
+  await startRemove(t);
+  t.cli.handleMessage(saved([], []));
+  t.cli.handleMessage({ type: 'cli:deleteSavedSessionsDone', ok: true, deleted: 3, skipped: 0 });
+  assert.ok(!t.html().includes('Removing'));
+  assert.ok(!t.html().includes('sc-spin'));
+  assert.strictEqual(t.toasts.length, 0);
+});
+
+test('a Done with an error clears the busy state and toasts the error', async () => {
+  const t = busySetup();
+  await startRemove(t);
+  t.cli.handleMessage({ type: 'cli:deleteSavedSessionsDone', ok: false, error: 'disk gone', deleted: 0, skipped: 3 });
+  assert.ok(!t.html().includes('Removing'));
+  assert.ok(t.html().includes('Remove selected (3)'), 'the selection is still there to retry');
+  assert.strictEqual(t.toasts.length, 1);
+  assert.strictEqual(t.toasts[0].level, 'error');
+  assert.ok(t.toasts[0].message.includes('disk gone'));
+});
+
+test('with no answer, the 60 s safety timeout clears the button and asks for the list again', async () => {
+  const t = busySetup();
+  await startRemove(t);
+  const safety = t.queue.find(q => q.ms === 60000 && q.fn);
+  assert.ok(safety, 'a 60 s timer was armed');
+  t.sent.length = 0;
+  safety.fn();
+  assert.ok(!t.html().includes('Removing'));
+  for (const q of t.queue) if (q.fn && q.ms === 0) q.fn();   // requestSavedSessions(0)
+  assert.ok(t.sent.some(m => m.type === 'cli:getSavedSessions'), 'the list is requested again');
 });

@@ -158,8 +158,13 @@ kind's own parts.
   **Remove selected (N)** sends `cli:deleteSavedSessions { ids, runIds }` after
   one confirm: each id goes through the single-row delete (`deleteSavedOne` in
   `src/ws/cli-handler.js`), each run id through `orchestration.deleteRun`
-  unforced. The one answer carries `deleted` / `skipped` (a running session, an
-  orchestrator, a worker or run needing a confirm is skipped; use its own Delete).
+  unforced. The answer is the refreshed `cli:savedSessions` with `deleted` /
+  `skipped` (a running session, an orchestrator, a worker or run needing a
+  confirm is skipped; use its own Delete), then `cli:deleteSavedSessionsDone
+  { ok, error?, deleted, skipped }`. Until that Done the button is disabled
+  ("Removing N…" with a spinner, the boxes of those cards disabled); the state
+  is module state in `public/cli.js` (survives re-renders), an error shows a
+  toast, and a 60 s timeout clears it and re-requests the list.
 
 ### Registry: `window.tabHosts`
 

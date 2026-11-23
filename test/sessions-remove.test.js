@@ -103,3 +103,23 @@ test('the batch deletes run ids through orchestration.deleteRun, unforced; a ref
   assert.strictEqual(ans.skipped, 1);
   assert.deepStrictEqual(t.listed(), []);
 });
+
+test('the batch ends with one cli:deleteSavedSessionsDone, after the list: ok and the counts', () => {
+  const t = setup(['a', 'b']);
+  t.call({ type: 'cli:deleteSavedSessions', ids: ['a', 'nope'] });
+  const types = t.sent.map(m => m.type);
+  assert.deepStrictEqual(types.filter(x => x === 'cli:deleteSavedSessionsDone').length, 1);
+  assert.ok(types.indexOf('cli:savedSessions') < types.indexOf('cli:deleteSavedSessionsDone'));
+  const done = t.sent.find(m => m.type === 'cli:deleteSavedSessionsDone');
+  assert.deepStrictEqual({ ok: done.ok, deleted: done.deleted, skipped: done.skipped, error: done.error }, { ok: true, deleted: 1, skipped: 1, error: undefined });
+});
+
+test('a failing delete still answers Done, with ok false and the error', () => {
+  const t = setup(['a']);
+  t.mgr.deleteSavedSession = () => { throw new Error('disk gone'); };
+  t.call({ type: 'cli:deleteSavedSessions', ids: ['a'] });
+  const done = t.sent.find(m => m.type === 'cli:deleteSavedSessionsDone');
+  assert.ok(done, 'Done is sent on an error too');
+  assert.strictEqual(done.ok, false);
+  assert.strictEqual(done.error, 'disk gone');
+});
