@@ -2250,6 +2250,25 @@ test('landing: links made and recorded at launch; a done report rebases, checks 
   assert.strictEqual(g('ls-tree', '--name-only', 'main', '.data'), '', 'the link was never committed');
 });
 
+test('landing: the worker\'s landing says its step in run.json while the check runs, and nothing after it settles', async (t) => {
+  const ctx = await landingRun(t, { check: 'sleep 1' });
+  const { launch, run, orch } = ctx;
+  const w = launch();
+  commitAll(w.cwd, { 'a.txt': 'a\n' });
+  ctx.orch.report(w.session.instanceId, { status: 'done', summary: 'did it' });
+  let seen = null;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && seen !== 'check') {
+    seen = run().workers[0].landing?.step || null;
+    if (seen !== 'check') await new Promise(r => setTimeout(r, 20));
+  }
+  assert.strictEqual(seen, 'check');
+  assert.ok(run().workers[0].landing.stepAt, 'since when');
+  await orch.landingOf(w.worker);
+  assert.ok(!run().workers[0].landing, 'nothing in flight');
+  assert.strictEqual(run().workers[0].landingResult.outcome, 'landed');
+});
+
 test('landing: a conflict is aborted, the base untouched, the same worker told; a gone worker sends the orchestrator a merge session', async (t) => {
   const { repo, g, launch, done, events, toWorker } = await landingRun(t);
   const w = launch();
