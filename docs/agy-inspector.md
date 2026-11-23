@@ -156,6 +156,11 @@ rejects has opened a TLS session with Google that carries no request.
   - There is a 50 MB cap per message; past it the interaction is marked
     truncated.
   - `traceId`, `responseId` and `modelVersion` go into `response.meta`.
+  - The call's model is the one agy requested (`request.model`, also
+    `response.body.model`). Google's `modelVersion` is what served it and can
+    differ (requested `gemini-4-neon-medium`, served `gemini-4-neon`): it is
+    kept apart as `interaction.agy.servedAs` (shown as "Served as" in the
+    request info) and never replaces the requested model.
 - **Usage:** input = prompt − cached, `cache_read_input_tokens` = cached,
   output = total − prompt.
 - **Pricing:** all zeros, plus `credential:'agy-subscription'` and
@@ -169,6 +174,13 @@ rejects has opened a TLS session with Google that carries no request.
   agentType }`. `agentType` is the `TypeName` of the `invoke_subagent` call
   seen just before, else `agy-subagent`. `requestType:'image_gen'` is labelled
   `image`.
+- **Side calls:** agy sends its own helper requests on the same connection
+  (the per-tool safety monitor runs on a flash-lite tier, in the agy log
+  `sir_flash_lite` / `MODEL_TIER_FLASH_LITE`). `isSideCall`: a `requestType`
+  other than `agent` / `image_gen`, a non-streaming call, or a request without
+  tools. Such an interaction has `agy.side = true` and its own lane
+  (`subagent.agentType = 'agy-side-call'`, the model in its description), and
+  never names the main lane. Its model is its own, not the agent's.
 - **Persistence:** interactions are saved when the worker's instance has a
   session (`store.registerSession`).
 

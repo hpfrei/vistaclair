@@ -124,6 +124,19 @@ function decodeAgyRequest(envelope) {
   return { body, extras, conversationId: m ? m[1] : null, requestType: env.requestType || null };
 }
 
+/**
+ * A Cloud Code call that is not an agent turn: a requestType other than
+ * agent / image_gen, a non-streaming generateContent, or a request without
+ * tools (every agent turn carries agy's tool set).
+ */
+function isSideCall(dec, isStreaming) {
+  const t = dec.requestType;
+  if (t === 'image_gen') return false;
+  if (t && t !== 'agent') return true;
+  if (!isStreaming) return true;
+  return !(dec.body.tools && dec.body.tools.length);
+}
+
 function _parseSSEString(evt) {
   let eventType = null, dataStr = null;
   for (const line of evt.split('\n')) {
@@ -323,9 +336,17 @@ class AgyExchange {
       pricing: { ...ZERO_PRICING },
     };
     if (env.requestId) it.agyRequestId = env.requestId;
+    // Side calls: agy's own helper requests (the per-tool safety monitor on a
+    // flash-lite tier, summaries…) ride the same connection but are not the
+    // agent's turns: they get their own lane and never name the main one.
+    const side = isSideCall(dec, it.isStreaming);
+    it.agy = { requestType: dec.requestType, ...(side ? { side: true } : {}) };
+    if (side) {
+      it.subagent = { agentId: 'agy-side', agentType: 'agy-side-call', description: `side call (${dec.requestType || 'no requestType'}) · ${dec.body.model}` };
+    }
     // Lanes: the first conversation of a tag is its main lane unless B2 named it.
     const conv = dec.conversationId;
-    if (lanes && conv) {
+    if (lanes && conv && !side) {
       if (!lanes.main) lanes.main = conv;
       if (conv !== lanes.main) {
         if (!lanes.types.has(conv)) lanes.types.set(conv, lanes.pendingType || 'agy-subagent');
@@ -415,7 +436,11 @@ class AgyExchange {
         it.response.body = InteractionStore._reconstructBodyFromSSE(it.response.sseEvents);
         if (it.response.body) {
           it.response.body.usage = it.usage;
-          if (this.decoder.meta.modelVersion) it.response.body.model = this.decoder.meta.modelVersion;
+          // The requested model stays the call's model; Google's modelVersion
+          // (what served it) is a separate detail, never a replacement.
+          it.response.body.model = it.request.model;
+          const served = this.decoder.meta.modelVersion;
+          if (served && served !== it.request.model && it.agy) it.agy.servedAs = served;
         }
       }
       if (this.ctx.lanes && this.decoder.lastToolUse?.name === 'invoke_subagent') {
@@ -453,6 +478,6 @@ class AgyExchange {
 }
 
 module.exports = {
-  decodeAgyRequest, AgyResponseDecoder, AgyExchange, BodyReader, classifyPath,
+  decodeAgyRequest, isSideCall, AgyResponseDecoder, AgyExchange, BodyReader, classifyPath,
   ZERO_PRICING, TRACED_PATHS, HOOK_PATHS, IMAGE_INLINE_MAX,
 };

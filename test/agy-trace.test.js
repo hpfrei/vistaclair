@@ -9,7 +9,7 @@ const path = require('path');
 
 process.env.VISTACLAIR_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-trace-'));
 
-const { decodeAgyRequest, AgyResponseDecoder, classifyPath } = require('../src/agy-trace');
+const { decodeAgyRequest, isSideCall, AgyResponseDecoder, AgyExchange, classifyPath } = require('../src/agy-trace');
 const InteractionStore = require('../src/store');
 const GeminiProvider = require('../src/providers/gemini');
 
@@ -119,4 +119,48 @@ test('gemini.js default path (the :3456 route) is unchanged: thoughts dropped, n
     'event: message_stop\ndata: {"type":"message_stop"}\n\n',
   ]);
   assert.strictEqual(p.finalizeStream(ss).length, 0);
+});
+
+// One Cloud Code call through the tee sink, with the recorded fixture shapes.
+function runExchange(envelope, { path: p = '/v1internal:streamGenerateContent?alt=sse', sse = fixture('stream-response.sse'), lanes } = {}) {
+  const store = { added: [], add(i) { this.added.push(i); }, save() {} };
+  const ctx = { store, broadcaster: { broadcast() {} }, instanceId: 'w1', host: 'cloudcode-pa.googleapis.com', lanes: lanes || { main: null, pendingType: null, types: new Map() } };
+  const ex = new AgyExchange(ctx, { path: p, headers: { 'content-type': 'application/json' } });
+  ex.requestBody(Buffer.from(JSON.stringify(envelope)));
+  ex.requestEnd();
+  ex.responseHead(200, { 'content-type': 'text/event-stream' });
+  ex.responseBody(Buffer.from(sse));
+  ex.responseEnd();
+  return { it: store.added[0], ctx };
+}
+
+test('the requested model stays the call\'s model; Google\'s modelVersion is kept apart as servedAs', () => {
+  const env = JSON.parse(fixture('stream-request.json'));
+  const { it } = runExchange(env);
+  assert.strictEqual(it.request.model, 'gemini-3.8-flash-low');
+  assert.strictEqual(it.response.body.model, 'gemini-3.8-flash-low');       // was: the modelVersion
+  assert.strictEqual(it.response.meta.modelVersion, 'gemini-3.8-flash-n');
+  assert.strictEqual(it.agy.servedAs, 'gemini-3.8-flash-n');
+  assert.strictEqual(it.agy.requestType, 'agent');
+  assert.ok(!it.agy.side && !it.subagent);
+});
+
+test('side calls: a non-agent requestType, a non-streaming call or a toolless request is its own lane and never the main lane', () => {
+  const env = JSON.parse(fixture('stream-request.json'));
+  assert.strictEqual(isSideCall(decodeAgyRequest(env), true), false);
+  assert.strictEqual(isSideCall(decodeAgyRequest(env), false), true);
+  assert.strictEqual(isSideCall(decodeAgyRequest({ ...env, requestType: 'image_gen' }), true), false);
+
+  // A flash-lite helper call (e.g. the per-tool safety monitor) arriving first.
+  const side = { model: 'gemini-3.5-flash-lite', requestId: 'monitor/aaaaaaaa-0000-4000-8000-000000000000/1', request: { contents: [{ role: 'user', parts: [{ text: 'Trajectory…' }] }] } };
+  assert.strictEqual(isSideCall(decodeAgyRequest(side), true), true);
+  const lanes = { main: null, pendingType: null, types: new Map() };
+  const s = runExchange(side, { lanes }).it;
+  assert.strictEqual(s.request.model, 'gemini-3.5-flash-lite');
+  assert.strictEqual(s.agy.side, true);
+  assert.strictEqual(s.subagent.agentType, 'agy-side-call');
+  assert.strictEqual(lanes.main, null);
+  const a = runExchange(env, { lanes }).it;                    // the agent turn is still the main lane
+  assert.ok(!a.subagent);
+  assert.strictEqual(lanes.main, 'daf70115-49b0-476a-ac2d-31b44d303f63');
 });
