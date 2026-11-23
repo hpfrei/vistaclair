@@ -17,11 +17,13 @@ test.after(() => fs.rmSync(DIR, { recursive: true, force: true }));
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const live = [];
-test.afterEach(() => { for (const p of live.splice(0)) { try { p.kill('SIGKILL'); } catch {} } });
+// Each wrapper is its own process group: SIGKILL of the wrapper alone would leave its
+// 30 s sleeper holding the stdout pipe and keep this process alive until it ends.
+test.afterEach(() => { for (const p of live.splice(0)) { try { process.kill(-p.pid, 'SIGKILL'); } catch { try { p.kill('SIGKILL'); } catch {} } } });
 
 // Run the wrapper; resolves helpers to watch stderr and the exit.
 function lock(args, { env = {} } = {}) {
-  const child = spawn(process.execPath, [BIN, ...args], { env: { ...process.env, VISTACLAIR_LOCK_DIR: DIR, VISTACLAIR_LANDING: '', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [BIN, ...args], { env: { ...process.env, VISTACLAIR_LOCK_DIR: DIR, VISTACLAIR_LANDING: '', ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   live.push(child);
   let out = '', err = '';
   child.stdout.on('data', d => { out += d; });
@@ -96,7 +98,9 @@ test('several names in any order do not deadlock', async () => {
   const one = lock(['m2,m1,m3', '--', process.execPath, '-e', 'setTimeout(()=>{}, 300)']);
   const two = lock(['m3,m1,m2', '--', 'true']);
   const three = lock(['m1,m3', '--', 'true']);
-  const rs = await Promise.race([Promise.all([one.exit, two.exit, three.exit]), sleep(10000).then(() => null)]);
+  let giveUp;
+  const rs = await Promise.race([Promise.all([one.exit, two.exit, three.exit]), new Promise(r => { giveUp = setTimeout(r, 10000, null); })]);
+  clearTimeout(giveUp);   // a pending timer would hold this process for its 10 s
   assert.ok(rs, 'all finished');
   assert.deepStrictEqual(rs.map(r => r.code), [0, 0, 0]);
 });

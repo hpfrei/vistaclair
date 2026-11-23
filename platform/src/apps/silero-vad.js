@@ -44,7 +44,9 @@ function _download(url, dest, redirects = 0) {
     if (redirects > 5) return reject(new Error('too many redirects'));
     const tmp = dest + '.part';
     const file = fs.createWriteStream(tmp);
-    https.get(url, (res) => {
+    // One-shot download: its own agent, no keep-alive (the global agent keeps the
+    // socket for the server's advertised idle time, minutes, and holds the process open).
+    https.get(url, { agent: false }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         file.close();
         try { fs.unlinkSync(tmp); } catch {}

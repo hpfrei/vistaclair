@@ -161,6 +161,7 @@ function harness({ apps = ['alpha', 'beta', 'gamma'], maxDepth = 1, running = []
 
 // The module debounces a tab exit so an APP.md pre-flight relaunch is not read
 // as "the session ended without reporting".
+cr._internals.setRelaunchGraceMs(100);   // the module's 2 s debounce, shortened for the suite
 const afterGrace = () => new Promise((r) => setTimeout(r, cr._internals.RELAUNCH_GRACE_MS + 60));
 
 const ask = (h, over = {}) => cr.request({
