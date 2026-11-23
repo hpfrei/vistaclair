@@ -10,6 +10,7 @@ Service) and only the unmodified `agy` binary touches them.
 | status probe, login pty, env, needed-detection | `src/agy-auth.js` |
 | WebSocket handler, `reportAgyAuthFailure` | `src/ws/agy-auth-handler.js` (prefix `agy-auth:`, registered in `src/dashboard-ws.js`) |
 | header pill + modal | `public/agy-signin.js`, `#agySignInModal` / `#agyAuthPill` in `public/index.html` (CSS shared with the Claude modal) |
+| Models tab block under the Gemini provider | `public/agy-auth-section.js` (`renderAgyAuthSection(status)`, pure), drawn by `renderModelsPanel` in `public/capabilities.js` for `prov.key === 'gemini'`; `agy-signin.js` keeps `state.agyAuth` and fires `agy-auth:state` |
 | tests (a fake agy script) | `test/agy-auth.test.js` |
 
 ## Status
@@ -47,6 +48,18 @@ plus `\r`. Exit 0 → the probe is re-run and the result sent as
   that socket exists: agy needs the Secret Service, unlocked;
 - login only: `BROWSER=/bin/false`, `DISPLAY` / `WAYLAND_DISPLAY` unset, so no
   browser opens on the server.
+
+## Where it shows
+
+- Header pill (`#agyAuthPill`): only when agy is installed.
+- Models tab → Gemini provider → "Antigravity (Google AI subscription)": always,
+  per state (signed in / signed out / keyring locked / not installed with the
+  install command / unknown / checking). "Sign in to Antigravity" is a
+  `[data-agy-signin]` button that opens the modal and starts the login; it is
+  absent for not installed and keyring locked. A hint says the Gemini API key
+  is separate from the subscription.
+- The binary is found via `$VISTACLAIR_AGY_BIN`, PATH, then `~/.local/bin/agy`,
+  so a server started without `~/.local/bin` on PATH still finds it.
 
 ## Sign-in needed
 

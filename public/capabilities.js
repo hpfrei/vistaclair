@@ -445,6 +445,9 @@ Available templates in this skill directory:
     if (prov.key === 'anthropic') {
       html += renderClaudeAuthSection();
     }
+    if (prov.key === 'gemini' && window.agyAuthSection) {
+      html += window.agyAuthSection.renderAgyAuthSection(state.agyAuth || null);
+    }
 
     // Model cards: active first, then inactive (disabled, retired last), then
     // the provider's native non-text models.
@@ -531,6 +534,11 @@ Available templates in this skill directory:
     const radio = e.target.closest('input[name="claudeAuthPref"]');
     if (!radio) return;
     sendWs({ type: 'prefs:claudeAuth:set', value: radio.value });
+  });
+
+  // agy-signin.js announces each new sign-in state (state.agyAuth).
+  document.addEventListener('agy-auth:state', () => {
+    if (state.providers?.some((p) => p.key === 'gemini')) renderModelsPanel();
   });
 
   function populateProviderKeyDropdown(selectedKey) {
