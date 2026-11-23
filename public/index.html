@@ -60,6 +60,7 @@
       <button id="toastBellBtn" class="toast-bell-btn" title="Notifications">&#128276;<span id="toastBadge" class="toast-badge hidden">0</span></button>
       <button class="restart-server-btn" id="restartServerBtn" title="Restart vistaclair server">&#8635; Restart</button>
       <button id="claudeAuthPill" class="claude-auth-pill hidden" type="button" title="Claude sign-in"></button>
+      <button id="agyAuthPill" class="claude-auth-pill hidden" type="button" title="Antigravity sign-in"></button>
       <span id="status" class="status disconnected">disconnected</span>
     </div>
   </header>
@@ -221,6 +222,35 @@
       <div class="cap-modal-footer">
         <button class="cap-cancel-btn" id="claudeSignInCancel" type="button">Close</button>
         <button class="cap-save-btn hidden" id="claudeSignInRetry" type="button">Try again</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sign in to Antigravity (agy-signin.js): shows the server's `agy acp --login` pty -->
+  <div class="modal-overlay hidden" id="agySignInModal">
+    <div class="modal-box claude-signin-box">
+      <div class="modal-header">
+        <span>Sign in to Antigravity</span>
+        <button class="modal-close" id="agySignInClose" type="button" title="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="agySignInNotice" class="claude-signin-notice hidden"></div>
+        <div id="agySignInStatus" class="claude-signin-status"></div>
+        <button id="agySignInStart" class="claude-signin-btn" type="button">Sign in to Antigravity</button>
+        <div id="agySignInLogin" class="claude-signin-login hidden">
+          <p class="claude-signin-explain">This runs Antigravity's own <code>agy acp --login</code>. Open the link, sign in with Google, then paste the authorization code (or the full URL of the page you land on) below.</p>
+          <button id="agySignInOpenUrl" class="claude-signin-btn" type="button" disabled>Open sign-in page</button>
+          <div id="agySignInTerm" class="claude-signin-term"></div>
+          <form id="agySignInPaste" class="claude-signin-paste" autocomplete="off">
+            <input type="text" id="agySignInCode" placeholder="Paste authorization code or URL" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+            <button type="submit" class="claude-signin-btn">Submit</button>
+          </form>
+          <div id="agySignInResult" class="claude-signin-result hidden"></div>
+        </div>
+      </div>
+      <div class="cap-modal-footer">
+        <button class="cap-cancel-btn" id="agySignInCancel" type="button">Close</button>
+        <button class="cap-save-btn hidden" id="agySignInRetry" type="button">Try again</button>
       </div>
     </div>
   </div>
@@ -920,6 +950,7 @@ jq -r '.tool_input.command' |
   <script src="new-cli.js"></script>
   <script src="cli.js"></script>
   <script src="claude-signin.js"></script>
+  <script src="agy-signin.js"></script>
   <script src="capabilities.js"></script>
   <script src="mcp.js"></script>
   <script src="home.js"></script>

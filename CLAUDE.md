@@ -39,6 +39,7 @@ below that start with `src/`, `public/` or `scripts/` are under `platform/`.
 | `docs/governance.md` | the approval plane: proposals, kinds, undo, dials, ledgers, cards, prior-action check, dedup (`src/apps/governance/`) |
 | `docs/horst-lanes.md` | `horst.lane` in a capability module: Horst's direct / card / never stance per member, the direct media tools (image, speech, transcribe, maps, page render) |
 | `docs/horst-surfaces.md` | Horst's surfaces: the Horst tab, Telegram, event reminders, Mini App, `ctx.horst.chat` |
+| `docs/agy-auth.md` | the Antigravity (`agy`) sign-in: `agy-auth.js`, `ws/agy-auth-handler.js`, `public/agy-signin.js`, the `agy models` probe, the relayed `agy acp --login`, the credential env, `reportAgyAuthFailure` |
 | `docs/telegram-control.md` | the platform Telegram control bot's owner: the claim code, `isOwnerAct` / `isPrivileged`, the dashboard QR login (`platform-login.js`), sessions and alerts, Mini App bearers; every bot's inbound delivery (webhook / long-poll / tunnel-down fallback in `telegram.js`) |
 | `docs/memory.md` | the shared memory store: recall, reinforcement, the long tier, consolidation, retention, compaction, Horst's brains |
 | `docs/models.md` | AI model choice: the media catalog and adapters, the default chain, configured defaults, Horst's daily model review and its alerts |
