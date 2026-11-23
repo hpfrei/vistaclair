@@ -15,6 +15,7 @@
   let _sessionsReqTimer = null;
   let _sessionsHtml = '';
   const _selectedSaved = new Set();   // Sessions tab multiselect: saved session ids
+  const _selectedRuns = new Set();    // ... and run ids (a run card is one selectable unit)
   // askId -> { overlayEl, tabId, expired, expire(info), setLateBusy(busy) }:
   // an expired one (its tool call ended) stays until sent as a message or discarded.
   const pendingAskOverlays = new Map();
@@ -856,15 +857,34 @@
     sendWs({ type: 'cli:deleteSavedSession', sessionId: sess.id });
   }
 
+  // The cards with a "Delete permanently": a plain session not running, a run
+  // whose orchestrator is not running (its worker sessions go with the run).
+  function selectableCards() {
+    const d = _savedData || { sessions: [], runs: [] };
+    return {
+      sess: d.sessions.filter(x => !x.group?.runId && !x.isRunning).map(x => x.id),
+      runs: d.runs.filter(r => !r.orchestratorRunning).map(r => r.runId),
+    };
+  }
+  const selectedCount = () => {
+    const all = selectableCards();
+    return all.sess.filter(x => _selectedSaved.has(x)).length + all.runs.filter(x => _selectedRuns.has(x)).length;
+  };
+
   // The multiselect's remove: one confirm, one batch message, one answer.
   async function deleteSelectedSaved() {
-    const ids = (_savedData?.sessions || []).filter(s => _selectedSaved.has(s.id)).map(s => s.id);
-    if (!ids.length) return;
-    if (!(await showConfirm(`Delete ${ids.length} session${ids.length !== 1 ? 's' : ''} permanently?\n\n`
+    const all = selectableCards();
+    const ids = all.sess.filter(x => _selectedSaved.has(x));
+    const runIds = all.runs.filter(x => _selectedRuns.has(x));
+    const n = ids.length + runIds.length;
+    if (!n) return;
+    const what = [ids.length && `${ids.length} session${ids.length !== 1 ? 's' : ''}`, runIds.length && `${runIds.length} run${runIds.length !== 1 ? 's' : ''}`].filter(Boolean).join(' and ');
+    if (!(await showConfirm(`Delete ${what} permanently?\n\n`
       + 'This is not a rollback: your code, commits and merged work are not touched.\n\n'
-      + 'Removed: their conversation history, interaction data and TODO/NOTES folders.\n\n'
-      + 'This cannot be undone.', { confirmLabel: `Delete ${ids.length}`, danger: true }))) return;
-    sendWs({ type: 'cli:deleteSavedSessions', ids });
+      + 'Removed: conversation history, interaction data and TODO/NOTES folders'
+      + (runIds.length ? "; of a run, its orchestrator, every worker, its session folder and its git worktrees (unmerged branches are kept)" : '') + '.\n\n'
+      + 'This cannot be undone.', { confirmLabel: `Delete ${n}`, danger: true }))) return;
+    sendWs({ type: 'cli:deleteSavedSessions', ids, runIds });
   }
 
   function savedTitle(sess) {
@@ -922,6 +942,12 @@
   const action = (label, attrs, cls, hint) =>
     `<div class="sc-action">${btn(label, attrs, cls)}<span class="sc-action-hint">${escHtml(hint)}</span></div>`;
 
+  // The "Delete permanently" action with its Select box (the multiselect),
+  // on the same row: always visible, never over the status pill.
+  const deleteAction = (attrs, kind, id, checked) =>
+    `<div class="sc-action">${btn('Delete permanently', attrs, 'vc-btn-danger')}<span class="sc-action-hint">${escHtml(DELETE_HINT)}</span>`
+    + `<label class="sc-sel" title="Select to remove several at once"><input type="checkbox" data-act="${kind}" data-id="${escHtml(id)}"${checked ? ' checked' : ''}> Select</label></div>`;
+
   const DELETE_HINT = 'Removes the conversation history and TODO/NOTES. Your code, commits and merged work are not touched.';
 
   // A done worktree worker's landing after its report's status (the run's
@@ -968,7 +994,7 @@
       actions.push(action('Resume', `data-act="resume-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-primary', 'The orchestrator continues its conversation and wakes its paused workers.'));
       actions.push(action('Resume from notes', `data-act="resume-run" data-fresh="1" data-run="${escHtml(r.runId)}"`, '', "Start a fresh orchestrator with a clean memory from the run's TODOs, notes and reports. Use it when the old conversation got too long or confused."));
     }
-    if (!r.orchestratorRunning) actions.push(action('Delete permanently', `data-act="delete-run" data-run="${escHtml(r.runId)}"`, 'vc-btn-danger', DELETE_HINT));
+    if (!r.orchestratorRunning) actions.push(deleteAction(`data-act="delete-run" data-run="${escHtml(r.runId)}"`, 'sel-run', r.runId, _selectedRuns.has(r.runId)));
     return `<article class="vc-card sc-card sc-run ${SC.accentOf(r.status)}">`
       + SC.head({
         icon: '\u{1F9ED}', iconTitle: `Orchestration run ${r.runId}`, name, status: r.status,
@@ -1009,10 +1035,8 @@
     const actions = [];
     if (tabId) actions.push(action('Switch to tab', `data-act="switch" data-tab="${escHtml(tabId)}"`, 'vc-btn-primary', 'This session is open in a tab.'));
     else if (!s.isRunning) actions.push(action('Resume', `data-act="resume-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-primary', 'Continue where it left off.'));
-    if (!s.isRunning) actions.push(action('Delete permanently', `data-act="delete-saved" data-sess="${escHtml(s.id)}"`, 'vc-btn-danger', DELETE_HINT));
-    const sel = s.isRunning ? ''
-      : `<label class="sc-sel" title="Select to remove several sessions at once"><input type="checkbox" data-act="sel" data-sess="${escHtml(s.id)}"${_selectedSaved.has(s.id) ? ' checked' : ''}></label>`;
-    return `<article class="vc-card sc-card ${SC.accentOf(status)}">${sel}`
+    if (!s.isRunning) actions.push(deleteAction(`data-act="delete-saved" data-sess="${escHtml(s.id)}"`, 'sel-sess', s.id, _selectedSaved.has(s.id)));
+    return `<article class="vc-card sc-card ${SC.accentOf(status)}">`
       + SC.head({
         icon: s.kind === 'sdk' ? '✨' : '⌨️', name: cardName || savedTitle(s),
         sub: [cardName && savedTitle(s) !== SC.dirName(s.cwd) ? escHtml(savedTitle(s)) : '', escHtml(s.cwd || '')].filter(Boolean).join(' · '), subTitle: s.cwd || '',
@@ -1050,11 +1074,12 @@
         `${plain.length} session${plain.length !== 1 ? 's' : ''}`,
         tabs.size ? `${tabs.size} open` : '',
       ].filter(Boolean).join(' · ');
-      // Multiselect over the shown session cards (a run goes by its own delete).
-      const selectable = plain.filter(s => !s.isRunning).map(s => s.id);
-      const nSel = selectable.filter(id => _selectedSaved.has(id)).length;
-      const selBar = selectable.length
-        ? `<label class="sc-sel-all"><input type="checkbox" data-act="sel-all"${nSel === selectable.length ? ' checked' : ''}> Select all</label>`
+      // Multiselect over every card that has "Delete permanently".
+      const sel = selectableCards();
+      const selectable = sel.sess.length + sel.runs.length;
+      const nSel = selectedCount();
+      const selBar = selectable
+        ? `<label class="sc-sel-all"><input type="checkbox" data-act="sel-all"${nSel === selectable ? ' checked' : ''}> Select all</label>`
           + (nSel ? btn(`Remove selected (${nSel})`, 'data-act="delete-selected"', 'vc-btn-danger') : '')
         : '';
       html = `<div class="sc-toolbar"><h3>Sessions</h3><span class="sc-count">${count}</span>${selBar}`
@@ -1075,7 +1100,7 @@
   sessionsView?.addEventListener('click', (e) => {
     const b = e.target.closest('[data-act]');
     if (!b || b.disabled) return;
-    const { act, run, sess, tab, fresh } = b.dataset;
+    const { act, run, sess, tab, fresh, id } = b.dataset;
     const saved = () => _savedData?.sessions.find(s => s.id === sess);
     if (act === 'new') openNewCli();
     else if (act === 'switch' && tabs.has(tab)) switchTab(tab);
@@ -1083,10 +1108,15 @@
     else if (act === 'delete-run') deleteRun(run);
     else if (act === 'resume-saved') { b.disabled = true; resumeSaved(sess); }
     else if (act === 'delete-saved') deleteSaved(saved());
-    else if (act === 'sel') { if (b.checked) _selectedSaved.add(sess); else _selectedSaved.delete(sess); renderSessions(); }
+    else if (act === 'sel-sess' || act === 'sel-run') {
+      const set = act === 'sel-run' ? _selectedRuns : _selectedSaved;
+      if (b.checked) set.add(id); else set.delete(id);
+      renderSessions();
+    }
     else if (act === 'sel-all') {
-      const ids = (_savedData?.sessions || []).filter(s => !s.group?.runId && !s.isRunning).map(s => s.id);
-      for (const id of ids) { if (b.checked) _selectedSaved.add(id); else _selectedSaved.delete(id); }
+      const all = selectableCards();
+      for (const x of all.sess) { if (b.checked) _selectedSaved.add(x); else _selectedSaved.delete(x); }
+      for (const x of all.runs) { if (b.checked) _selectedRuns.add(x); else _selectedRuns.delete(x); }
       renderSessions();
     }
     else if (act === 'delete-selected') deleteSelectedSaved();
@@ -1641,8 +1671,10 @@
         // The selection keeps the ids still listed.
         const present = new Set(_savedData.sessions.map(s => s.id));
         for (const id of [..._selectedSaved]) if (!present.has(id)) _selectedSaved.delete(id);
+        const runsPresent = new Set(_savedData.runs.map(r => r.runId));
+        for (const id of [..._selectedRuns]) if (!runsPresent.has(id)) _selectedRuns.delete(id);
         if (msg.skipped) {
-          window.dashboard.showToast?.({ sender: 'CLI', title: 'Some sessions were kept', message: `${msg.skipped} of ${msg.skipped + (msg.deleted || 0)} not removed: running, an orchestrator, or a worker that needs its own confirm (use its Delete).`, level: 'warning' });
+          window.dashboard.showToast?.({ sender: 'CLI', title: 'Some sessions were kept', message: `${msg.skipped} of ${msg.skipped + (msg.deleted || 0)} not removed: running, or still working or with uncommitted changes (use their own Delete).`, level: 'warning' });
         }
         renderSessions();
         for (const w of _savedWaiters.splice(0)) w();

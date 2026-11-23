@@ -23,7 +23,7 @@ const { handleMessage } = require('../src/ws/cli-handler');
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
-function setup(ids, { closeCheck } = {}) {
+function setup(ids, { closeCheck, deleteRun } = {}) {
   const broadcasts = [];
   const mgr = new CliSessionManager(1, { broadcast: (m) => broadcasts.push(m) }, { deleteSessionData() {} });
   const cwd = path.join(HOME, 'proj');
@@ -32,7 +32,7 @@ function setup(ids, { closeCheck } = {}) {
   for (const id of ids) mgr.saveToHistory({ sessId: id, cwd, title: `t-${id}`, settings: {} });
   const sent = [];
   const ws = { readyState: WebSocket.OPEN, send: (d) => sent.push(JSON.parse(d)) };
-  const bc = { cliSessionManager: mgr, broadcast: (m) => broadcasts.push(m), orchestration: closeCheck ? { closeCheck } : undefined };
+  const bc = { cliSessionManager: mgr, broadcast: (m) => broadcasts.push(m), orchestration: closeCheck || deleteRun ? { closeCheck, deleteRun } : undefined };
   const call = (msg) => handleMessage(ws, msg, bc);
   const listed = () => mgr.listSaved().map(h => h.id).sort();
   // An open tab of a saved session.
@@ -91,4 +91,15 @@ test('the batch skips a running session and an orchestrator, and counts them', (
   const ans = t.sent.find(m => m.type === 'cli:savedSessions');
   assert.strictEqual(ans.deleted, 1);
   assert.strictEqual(ans.skipped, 2);
+});
+
+test('the batch deletes run ids through orchestration.deleteRun, unforced; a refused run is skipped', () => {
+  const calls = [];
+  const t = setup(['a'], { deleteRun: (runId, opts) => { calls.push([runId, opts]); return runId === 'busy' ? { refused: true, busy: [{}], dirty: [] } : { deleted: 2 }; } });
+  t.call({ type: 'cli:deleteSavedSessions', ids: ['a'], runIds: ['r1', 'busy', 'r1'] });
+  assert.deepStrictEqual(calls, [['r1', { force: false }], ['busy', { force: false }]]);
+  const ans = t.sent.find(m => m.type === 'cli:savedSessions');
+  assert.strictEqual(ans.deleted, 2);
+  assert.strictEqual(ans.skipped, 1);
+  assert.deepStrictEqual(t.listed(), []);
 });

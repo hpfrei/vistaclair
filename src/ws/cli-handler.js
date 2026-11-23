@@ -258,13 +258,21 @@ function handleMessage(ws, msg, bc) {
       }
       break;
     case 'cli:deleteSavedSessions': {
-      // The Sessions tab's multiselect: each id through the single-row delete.
-      // One answer with the refreshed list and how many were left (an
-      // orchestrator, an unfinished or dirty worker, a running session).
-      const ids = [...new Set(Array.isArray(msg.ids) ? msg.ids.filter(i => typeof i === 'string' && i) : [])];
+      // The Sessions tab's multiselect: each id through the single-row delete,
+      // each run id through the Delete run (orchestration.deleteRun, not
+      // forced). One answer with the refreshed list and how many were left
+      // (an orchestrator, an unfinished or dirty worker, a running session, a
+      // run with working members or dirty worktrees).
+      const clean = (a) => [...new Set(Array.isArray(a) ? a.filter(i => typeof i === 'string' && i) : [])];
+      const ids = clean(msg.ids);
+      const runIds = clean(msg.runIds);
       let removed = 0;
       for (const id of ids) if (deleteSavedOne(bc, id, false).done) removed++;
-      send({ ...mgr.savedSessionsMessage(), deleted: removed, skipped: ids.length - removed });
+      for (const runId of runIds) {
+        try { if (bc.orchestration && !bc.orchestration.deleteRun(runId, { force: false }).refused) removed++; } catch {}
+      }
+      const total = ids.length + runIds.length;
+      send({ ...mgr.savedSessionsMessage(), deleted: removed, skipped: total - removed });
       break;
     }
     // --- Pause / resume (src/session-control.js, src/orchestration.js) ---
