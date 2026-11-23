@@ -155,7 +155,7 @@ const { transcriptTotals, MODEL_RE } = require('./sdk-session');
 const { LATE_RE } = require('./ask-lifecycle');
 const agyConfig = require('./agy-worker-config');
 const agyAuth = require('./agy-auth');
-const { resolveAgyModel } = require('./agy-session');
+const { resolveAgyModel, NEON_MODEL } = require('./agy-session');
 
 // How many workers of a run may run at once: run.maxWorkers, set by the owner
 // in the orchestrator tab's header (setRunMaxWorkers), clamped to
@@ -171,6 +171,15 @@ const WORKER_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
 // src/agy-session.js, docs/agy-workers.md), model gemini-4-neon-medium.
 const AGY_WORKER_MODELS = ['neon'];
 const AGY_NUDGES = 3;
+// An agy orchestrator (docs/agy-workers.md "Orchestrator on agy"): at most
+// AGY_AUTO_TURNS automatic turns (event pushes, Stop continuations) in
+// AGY_AUTO_WINDOW_MS without a worker event or an owner message; then it holds
+// (no new turn, the events wait) until one of those comes. Its context budget
+// in tokens: the auto-refresh runs at AUTO_REFRESH_AT of it.
+const AGY_AUTO_TURNS = 5;
+const AGY_AUTO_WINDOW_MS = 600000;
+const AGY_ORCH_CONTEXT = 200000;
+const AGY_ORCHESTRATOR = { value: 'neon', label: 'Neon', detail: 'Gemini 4 Neon · Antigravity, Google AI subscription', engine: 'agy' };
 const MAX_SUBAGENTS = 3;
 const PUSH_DEBOUNCE_MS = 2000;
 const RELAY_FALLBACK_MS = 120000;
@@ -515,7 +524,47 @@ function agyWorkerNote(worker) {
   ].join('\n');
 }
 
-function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS, overlapCheckMs = OVERLAP_CHECK_MS, watchCheckMs = WATCH_CHECK_MS, waitPeerMs = WAIT_PEER_MS, ownerUnansweredMs = OWNER_UNANSWERED_MS, watchRepeatMs = WATCH_REPEAT_MS, quietValveMs = QUIET_VALVE_MS, refreshTimeoutMs = REFRESH_TIMEOUT_MS }) {
+// The files an agy orchestrator may write (its policy's writeFiles).
+function orchestratorFiles(run) {
+  const dir = orchestratorDir(run);
+  return ['TODO.md', 'NOTES.md', 'ARCHIVE.md'].map(f => path.join(dir, f));
+}
+
+// An agy orchestrator's hook policy (lib/agy-hook.js), over AgySession's
+// defaults: no write root, only its three files; Vistaclair's replacements for
+// agy's own ask / schedule tools.
+function agyOrchestratorPolicy(run) {
+  const dir = orchestratorDir(run);
+  return {
+    writeRoots: [],
+    writeFiles: orchestratorFiles(run),
+    writeDeny: `the orchestrator does not edit project files. Delegate this change to a worker with mcp_orchestrator_launch_cli, or message the worker that owns it. You may only write TODO.md, NOTES.md and ARCHIVE.md in ${dir}.`,
+    deny: {
+      ask_question: 'Ask the owner with the integrated server\'s vista-AskUserQuestion tool (call_mcp_tool, server "integrated"): one form with every question.',
+      ask_permission: 'Not available here: ask the owner with the integrated server\'s vista-AskUserQuestion tool.',
+      ask_custom_permission: 'Not available here: ask the owner with the integrated server\'s vista-AskUserQuestion tool.',
+      schedule: 'Scheduling is not available here: worker events and owner messages wake you.',
+    },
+  };
+}
+
+// What an agy orchestrator's card adds: its tools under agy's names, and what
+// it does instead of the Claude-only tools the card names.
+function agyOrchestratorNote(run) {
+  return [
+    '## Running on agy',
+    `You run on agy (Google's Antigravity CLI, model ${run.orchestratorModel || NEON_MODEL}) on the owner's Google AI subscription, not Claude Code. Where this card names Claude tools, use these instead:`,
+    '- your run tools are `mcp_orchestrator_launch_cli`, `mcp_orchestrator_list_workers`, `mcp_orchestrator_SendMessage`, `mcp_orchestrator_ListAgents`, `mcp_orchestrator_owner_items`, `mcp_orchestrator_resume_worker`, `mcp_orchestrator_close_worker`, `mcp_orchestrator_stop_worker`, `mcp_orchestrator_cancel_launch`, `mcp_orchestrator_undo_landing`, `mcp_orchestrator_end_run`. They are always loaded: there is no ToolSearch, call them directly.',
+    `- the project is ${run.root}. Your working directory is your session folder; read project files by their full path (read_file, view_file, grep_search, run_command for read-only commands such as git -C ${run.root} log).`,
+    `- you write only ${orchestratorFiles(run).join(', ')} (write_file / edit_file); every other write is denied. Code changes go to workers.`,
+    '- read-only helpers are agy\'s own subagents (invoke_subagent), one at a time; swarm is off. They write only where you may. There are no Claude subagents for you.',
+    '- workers run on Claude (fable, opus, sonnet, haiku) or on agy (neon): launch_cli `model` picks it. Work for another provider\'s model is always a separate worker.',
+    '- the owner form ("AskUserQuestion" in this card) is the integrated server\'s `vista-AskUserQuestion` tool, through call_mcp_tool. agy\'s ask_question is denied.',
+    'Worker events, messages and owner text can arrive in the middle of a turn, as a system message: read and act on them.',
+  ].join('\n');
+}
+
+function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dataHome, control = null, credentials = null, models = null, fallbackEngine = null, pushDebounceMs = PUSH_DEBOUNCE_MS, relayFallbackMs = RELAY_FALLBACK_MS, overlapCheckMs = OVERLAP_CHECK_MS, watchCheckMs = WATCH_CHECK_MS, waitPeerMs = WAIT_PEER_MS, ownerUnansweredMs = OWNER_UNANSWERED_MS, watchRepeatMs = WATCH_REPEAT_MS, quietValveMs = QUIET_VALVE_MS, refreshTimeoutMs = REFRESH_TIMEOUT_MS, agyAuthStatus = null }) {
   // Which Claude credentials exist: { apiKey, subscription }. Read per ask.
   const claudeCredentials = credentials || (() => require('./capabilities').claudeCredentials(dataHome));
   // The engine of a new session nobody named one for: 'sdk' | 'terminal'
@@ -585,6 +634,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     { value: 'fable[1m]', label: 'Fable', detail: '1M context' },
   ];
   const MODEL_FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'];
+
+  // The agy sign-in state as last probed (agy-auth's cached answer; never a
+  // new probe here): signed-in | signed-out | keyring-locked | not-installed |
+  // unknown, or null when nothing probed yet.
+  function agyState() {
+    if (!agyAuth.findAgyBin()) return 'not-installed';
+    try { return (agyAuthStatus || agyAuth.authStatus).peek?.()?.state || null; } catch { return null; }
+  }
 
   // The models a session's model family can be routed to (the proxy's tab
   // modelMap): usable, not retired. Only what the dialog shows, never a key.
@@ -679,8 +736,13 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       });
     }
     if (authQuestion) questions.push(authQuestion);
+    // An orchestrator may run on agy (neon): where agy has been seen (a probed
+    // state other than not installed), the dialog is drawn for that choice
+    // even with nothing else to ask.
+    const agy = agyState();
+    const offerAgy = mode !== 'simple' && !!agy && agy !== 'not-installed';
     // Nothing to ask: the mode was given, a terminal or one credential.
-    if (!questions.length) return { mode, engine, auth: auth || onlyAuth, model: null, modelMap: null };
+    if (!questions.length && !offerAgy) return { mode, engine, auth: auth || onlyAuth, model: null, modelMap: null };
     const targets = remapTargets();
     let defaultModel = 'opus';
     try { defaultModel = require('./capabilities').getCliModelPref(dataHome) || 'opus'; } catch { /* the fallback */ }
@@ -692,6 +754,9 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       defaultModel,
       orchestratorModels: ORCHESTRATOR_MODELS.map(m => ({ ...m, available: !!(creds.apiKey || creds.subscription) || engine === 'cli' })),
       orchestratorModel: ORCHESTRATOR_MODELS[0].value,
+      // neon: the orchestrator on agy, Google AI subscription only; `state` is
+      // the agy sign-in state (start is blocked unless signed-in).
+      agyOrchestrator: { ...AGY_ORCHESTRATOR, state: agy || 'unknown' },
       families: MODEL_FAMILIES,
       remapTargets: targets,
       labels: { engine: ENGINE_LABELS, auth: AUTH_LABELS, mode: { simple: 'Simple CLI', orchestrator: 'Orchestrator CLI' } },
@@ -720,7 +785,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     // Only an offered orchestrator model counts; unanswered keeps the default
     // pin (the global CLI model).
     const picked = String(answer.find(a => a?.id === 'model')?.answer || '');
-    const model = mode === 'orchestrator' && ORCHESTRATOR_MODELS.some(m => m.value === picked) ? picked : null;
+    const model = mode === 'orchestrator' && (ORCHESTRATOR_MODELS.some(m => m.value === picked) || picked === AGY_ORCHESTRATOR.value) ? picked : null;
     const modelMap = parseModelMap(answer.find(a => a?.id === 'modelMap')?.answer, targets);
     return { mode, engine, auth: engine === 'sdk' ? auth : null, model, modelMap };
   }
@@ -849,7 +914,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // Create a run and return the settings that make a launch its orchestrator.
   // `settings` is the caller's own launch settings: its system prompt, settings
   // file and stamps become the base every worker inherits.
-  function prepareRun({ cwd, runsDir, isolation, maxBudgetUsd, engine, auth, settings = {} }) {
+  function prepareRun({ cwd, runsDir, isolation, maxBudgetUsd, engine, auth, orchestratorEngine = null, settings = {} }) {
     const root = realpathOr(cwd);
     const runId = crypto.randomBytes(3).toString('hex');
     const dir = realpathOr(runsDir || path.join(root, '.orchestrator'));
@@ -874,6 +939,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       auth: null,
       // The orchestrator's model, for a refresh or a fresh start (orchestratorSettings).
       orchestratorModel: settings.model || null,
+      // 'agy': the orchestrator runs on agy (neon); run.engine stays its workers' engine.
+      ...(orchestratorEngine === 'agy' ? { orchestratorEngine: 'agy' } : {}),
       maxBudgetUsd: maxBudgetUsd || null,
       base: { appendSystemPrompt: appendSystemPrompt || '', ...(typeof workerAppendSystemPrompt === 'string' && workerAppendSystemPrompt ? { workerAppendSystemPrompt } : {}), settingsFile: settingsFile || null, stamps },
       createdAt: new Date().toISOString(),
@@ -906,7 +973,29 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       orchestration: { runId, role: 'orchestrator', runDir },
       appendSystemPrompt: appendSystemPrompt ? `${appendSystemPrompt}\n\n${card}` : card,
       settingsFile: writeSessionSettings(run, run.orchestrator, settingsFile),
+      ...agyOrchestratorOf(run),
     };
+  }
+
+  // An agy orchestrator's launch settings over the Claude ones: the engine,
+  // its model, the hook policy (the edit fence), the context budget, and the
+  // card's agy note. It has no Claude billing: agy runs on the subscription.
+  function agyOrchestratorOf(run) {
+    if (run.orchestratorEngine !== 'agy') return {};
+    const card = orchestratorCard(run, { hosts: hostList() });
+    const base = run.base?.appendSystemPrompt;
+    return {
+      engine: 'agy', auth: undefined, model: run.orchestratorModel || NEON_MODEL,
+      appendSystemPrompt: `${base ? `${base}\n\n` : ''}${card}\n\n${agyOrchestratorNote(run)}`,
+      agyPolicy: agyOrchestratorPolicy(run), agyContextLimit: AGY_ORCH_CONTEXT, agyRoleOnResume: true,
+    };
+  }
+
+  // Where the orchestrator session runs: an agy one in its session folder (its
+  // .agents config is per session, and the project checkout stays untouched),
+  // a Claude one in the run root.
+  function orchestratorCwd(run) {
+    return run.orchestratorEngine === 'agy' ? orchestratorDir(run) : run.root;
   }
 
   // A run's billing as launch settings: an SDK run's members carry it.
@@ -924,7 +1013,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const engine = given === 'cli' || given === 'sdk' ? given : newSessionEngine() === 'terminal' ? 'cli' : 'sdk';
     const givenAuth = opts.auth || opts.settings?.auth;
     let auth = givenAuth === 'apikey' || givenAuth === 'subscription' ? givenAuth : null;
-    let model = null;
+    // A caller may name the orchestrator's model neon (agy) without the dialog.
+    let model = opts.model === AGY_ORCHESTRATOR.value ? opts.model : null;
     let modelMap = null;
     // An Agent SDK session is an orchestrator: only a terminal asks Simple /
     // Orchestrator. That holds for a caller asking a resume too (Pro's app
@@ -942,7 +1032,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const picked = await pendingAsks.get(key);
       if (!picked) return { cancelled: true };
       ({ mode, auth } = picked);
-      model = picked.model || null;
+      model = picked.model || model;
       modelMap = picked.modelMap || null;
     }
     if (engine !== 'sdk') auth = null;
@@ -952,7 +1042,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     // through the stamps; the model is the orchestrator's alone (prepareRun
     // keeps it off the stamps, on the run).
     if (modelMap) callerSettings.modelMap = modelMap;
-    if (model) callerSettings.model = model;
+    if (model === AGY_ORCHESTRATOR.value && mode !== 'orchestrator') model = null;   // neon is an orchestrator's only
+    const agyOrch = mode === 'orchestrator' && model === AGY_ORCHESTRATOR.value;
+    if (agyOrch && !agyAuth.findAgyBin()) throw new Error('agy (the Antigravity CLI) is not installed on this machine: pick a Claude orchestrator');
+    if (model) callerSettings.model = agyOrch ? NEON_MODEL : model;
     const launch = {
       cwd: opts.cwd, cols: opts.cols, rows: opts.rows, title: opts.title,
       settings: { ...callerSettings, engine, ...(auth ? { auth } : {}) }, hidden: opts.hidden, autoMemory: opts.autoMemory,
@@ -967,13 +1060,15 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       launch.settings = prepareRun({
         cwd: opts.cwd, runsDir: opts.runsDir, isolation: opts.isolation,
         maxBudgetUsd: opts.maxBudgetUsd, engine, auth, settings: callerSettings,
+        orchestratorEngine: agyOrch ? 'agy' : null,
       });
+      if (agyOrch) launch.cwd = launch.settings.sessionDir;
       launch.spawnOpts = {};   // a fresh transcript: never resume a plain session into the role
       launch.hidden = false;
     }
     if (opts.beforeLaunch) opts.beforeLaunch(tabId);
     mgr.launchSession(tabId, launch);
-    return { tabId, mode, engine, auth, ...(model ? { model } : {}), ...(modelMap ? { modelMap } : {}) };
+    return { tabId, mode, engine, auth, ...(model ? { model } : {}), ...(agyOrch ? { orchestratorEngine: 'agy' } : {}), ...(modelMap ? { modelMap } : {}) };
   }
 
   // --- Workers ---
@@ -2139,6 +2234,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       orchestratorTabId: orch?.tabId || null,
       orchestratorState: memberState(orch?.session, null),
       orchestratorCost: costOf(orch?.session, run.orchestratorCost, run.engine === 'sdk' ? orchestratorDir(run) : null),
+      // An orchestrator on agy (neon): its engine, a blocked state, a turn-cap hold.
+      ...(run.orchestratorEngine === 'agy' ? { orchestratorEngine: 'agy', orchestratorBlocked: run.orchestratorBlocked || null, orchestratorHeld: !!run.agyTurns?.held } : {}),
       compactions: run.compactions || 0,
       refreshSuggested: (run.compactions || 0) >= REFRESH_SUGGESTED_AFTER,
       // The orchestrator's automatic refresh (setRunAutoRefresh), the one in
@@ -3192,6 +3289,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       if (t) logOwner(run, 'prompt', t, { id, queued: 'refresh' });
       return { how: 'queued-refresh', id, ...(imgs.length ? { imagesDropped: imgs.length } : {}) };
     }
+    if (run.agyTurns) { agyFreshInput(run); saveRun(run); }
     const r = session.submit(body, { images: imgs });
     const id = r?.id || crypto.randomUUID();
     if (t) {
@@ -3327,6 +3425,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       appendSystemPrompt: run.base.appendSystemPrompt ? `${run.base.appendSystemPrompt}\n\n${card}` : card,
       settingsFile: writeSessionSettings(run, run.orchestrator, run.base.settingsFile),
       ...(run.orchestratorModel ? { model: run.orchestratorModel } : {}),
+      ...agyOrchestratorOf(run),
     };
   }
 
@@ -3373,9 +3472,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
 
   // Every saved entry of the run's members but `liveIds` takes `patch`: a
   // resume reads it.
-  function patchSavedMembers(run, liveIds, patch) {
+  function patchSavedMembers(run, liveIds, patch, { skipAgy = false } = {}) {
     for (const e of savedEntries()) {
       if (e.settings?.orchestration?.runId !== run.runId || liveIds.has(e.id)) continue;
+      if (skipAgy && e.settings?.engine === 'agy') continue;
       mgr.patchSavedSettings?.(e.id, (st) => ({ ...st, ...patch }));
     }
   }
@@ -3383,18 +3483,22 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // A run-wide switch's sessions: the run's tabs and the external sessions
   // (an add-on's, src/external-session.js) stamped with it. `live`: those
   // running; the rest only carry the setting (`patch`) to their next launch,
-  // as the saved entries of the members without a tab do.
+  // as the saved entries of the members without a tab do. An agy member (the
+  // neon orchestrator, a neon worker: Google subscription, Gemini model) is
+  // no target of a model or billing switch.
   function switchTargets(run, patch) {
-    const sessions = findByStamp(st => st.runId === run.runId).map(m => m.session);
+    const all = findByStamp(st => st.runId === run.runId).map(m => m.session);
     const ext = mgr.external instanceof Map ? [...mgr.external.values()] : [];
-    for (const s of ext) if (stampOf(s)?.runId === run.runId) sessions.push(s);
+    for (const s of ext) if (stampOf(s)?.runId === run.runId) all.push(s);
+    const sessions = all.filter(s => s.engine !== 'agy');
     const live = sessions.filter(s => s.running);
     for (const s of sessions) {
       if (s.running || s.external) continue;
       s.updateSettings(patch);
       mgr.noteSettingsChanged?.(s);
     }
-    patchSavedMembers(run, new Set(live.map(s => s.sessId).filter(Boolean)), patch);
+    const skip = new Set(all.filter(s => s.engine === 'agy' || s.running).map(s => s.sessId).filter(Boolean));
+    patchSavedMembers(run, skip, patch, { skipAgy: true });
     return live;
   }
 
@@ -3475,8 +3579,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const run = getRun(runId);
     if (!run) throw new Error('run not found');
     run.model = model;
-    run.orchestratorModel = model;
-    for (const w of run.workers) w.model = model;
+    // An agy member (the neon orchestrator, a neon worker) keeps its Gemini
+    // model: a run-wide switch is for the Claude members.
+    if (run.orchestratorEngine !== 'agy') run.orchestratorModel = model;
+    for (const w of run.workers) if (w.engine !== 'agy') w.model = model;
     saveRun(run);
     const live = switchTargets(run, { model });
     const out = { runId: run.runId, model, switched: [], failed: [] };
@@ -3901,7 +4007,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     let failure = null;
     try {
       mgr.launchSession(tabId, {
-        cwd: run.root, cols: 120, rows: 32, title: title || run.orchestrator,
+        cwd: orchestratorCwd(run), cols: 120, rows: 32, title: title || run.orchestrator,
         settings: settings || orchestratorSettings(run), prompt, autoSubmit: true, hidden: false,
       });
       if (!mgr.get(tabId)?.running) failure = 'the new session did not start';
@@ -4523,6 +4629,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     const verb = state === 'dropped' ? 'dropped' : item.kind === 'decision' ? 'decided' : 'did';
     const text = `${verb}: ${item.what}${ans ? ` — ${ans}` : ''}`;
     if (by === 'owner') {
+      agyFreshInput(run);
       logOwner(run, 'owner-item', `${item.id} ${text}`);
       addEvent(run, { worker: item.worker || null, kind: 'owner', text: `owner ${text}` });
       const ts = item.worker ? run.workers.find(w => w.name === item.worker) : null;
@@ -4766,6 +4873,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         ? `${target.name} is not running${target.worker.paused ? ' (paused)' : ''}${stamp.role === 'orchestrator' ? ': bring it back with resume_worker, passing this as its message' : ''}`
         : `the orchestrator ${target.name} is not running`);
     }
+    if (target.role === 'orchestrator' && run.agyTurns) { agyFreshInput(run); saveRun(run); }
     const delivery = target.worker?.remote
       ? submitRemote(ts, target.name, `[message from ${from}] ${text}`, from)
       : deliver(ts, target.name, `[message from ${from}] ${text}`, from);
@@ -4787,6 +4895,18 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (st?.role === 'orchestrator' && st.runDir && loadRun(st.runDir)?.refreshing) {
       queueMessage(st.runDir, name, body);
       return 'queued';
+    }
+    // A blocked agy orchestrator (sign-in, quota, a failed run) starts no turn
+    // by itself: the message waits for the owner's next one (or the sign-in).
+    if (st?.role === 'orchestrator' && ts.engine === 'agy' && st.runDir) {
+      if (ts.blocked) { queueMessage(st.runDir, name, body); return 'queued'; }
+      // An idle one: this message is an automatic turn, under the cap.
+      const run = !ts.busy ? loadRun(st.runDir) : null;
+      if (run) {
+        const ok = agyAutoTurn(run, ts);
+        saveRun(run);
+        if (!ok) { queueMessage(st.runDir, name, body); return 'queued'; }
+      }
     }
     if (ts.kind === 'sdk') {
       ts.submit(body, { priority: 'next', from });
@@ -4851,6 +4971,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (delivered && run.delivered === seq - 1) run.delivered = seq;
     // A mirror run's orchestrator is on another machine: nothing waits here.
     if (run.mirror) run.delivered = seq;
+    if (worker && !quiet && !delivered) agyFreshInput(run);
     const pending = run.delivered < seq;
     if (pending && quiet && !run.quietValve) run.quietValve = { due: new Date(Date.now() + quietValveMs).toISOString() };
     saveRun(run);
@@ -4928,6 +5049,62 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return text;
   }
 
+  // --- An agy orchestrator's automatic turns (AGY_AUTO_TURNS) ---
+  // run.agyTurns = { times: [ms], held: ms|null, itemId }: the automatic turns
+  // since the last worker event or owner message, in the window. In run.json,
+  // so a restart keeps the count.
+  function agyAutoTimes(run, now = Date.now()) {
+    return (run.agyTurns?.times || []).filter(t => now - t < AGY_AUTO_WINDOW_MS);
+  }
+
+  // May an automatic turn start now? Records it when yes; when no, holds (one
+  // panel notice and one owner item per hold). The caller saves the run.
+  function agyAutoTurn(run, session, { now = Date.now() } = {}) {
+    if (session?.engine !== 'agy') return true;
+    const times = agyAutoTimes(run, now);
+    if (times.length < AGY_AUTO_TURNS) {
+      run.agyTurns = { ...(run.agyTurns || {}), times: [...times, now], held: null };
+      return true;
+    }
+    if (!run.agyTurns?.held) {
+      const text = `The neon orchestrator holds: ${AGY_AUTO_TURNS} automatic turns in ${Math.round(AGY_AUTO_WINDOW_MS / 60000)} min without a worker event or an owner message. Pending events wait; a worker event or any message from you continues it.`;
+      const { touched } = addOwnerItems(run, [{ key: 'agy-turn-cap', what: 'The neon orchestrator paused its automatic turns (turn cap)', why: text }]);
+      run.agyTurns = { ...(run.agyTurns || {}), times, held: now, itemId: touched[0]?.id || null };
+      session.emitEvent?.({ platform: { kind: 'notice', level: 'warn', text } });
+    }
+    return false;
+  }
+
+  // A worker event or an owner message: the count starts again, a hold ends.
+  // The caller saves the run.
+  function agyFreshInput(run) {
+    const t = run.agyTurns;
+    if (!t || (!t.times?.length && !t.held)) return;
+    if (t.held && t.itemId) {
+      const item = (run.ownerItems || []).find(i => i.id === t.itemId && i.state === 'open');
+      if (item) Object.assign(item, { state: 'done', resolvedAt: new Date().toISOString(), resolvedBy: 'platform' });
+    }
+    run.agyTurns = { times: [], held: null };
+  }
+
+  // An agy orchestrator's turn ran (a fresh one, or one that reached Stop):
+  // its blocked state and the owner item it raised are over. The caller saves.
+  function agyUnblocked(run) {
+    if (!run.orchestratorBlocked) return;
+    const key = `agy-orchestrator-${run.orchestratorBlocked.kind}`;
+    for (const i of run.ownerItems || []) {
+      if (i.state === 'open' && i.key === key) Object.assign(i, { state: 'done', resolvedAt: new Date().toISOString(), resolvedBy: 'platform' });
+    }
+    delete run.orchestratorBlocked;
+  }
+
+  // Anything waiting for the orchestrator (without taking it).
+  function orchestratorPending(run) {
+    if (run.events.some(e => e.seq > run.delivered && !e.quiet)) return true;
+    const q = readJsonOr(inboxFile(run.runDir), {})[run.orchestrator];
+    return !!q?.length;
+  }
+
   function schedulePush(runId) {
     if (pushTimers.has(runId)) return;
     pushTimers.set(runId, setTimeout(() => {
@@ -4939,6 +5116,12 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       const orch = orchestratorSession(run);
       if (!orch?.session.running) return; // not running: SessionStart(resume) delivers
       if (control?.isPausing(orch.session)) return;      // being refreshed: the fresh one gets them
+      // An agy orchestrator: never a turn while blocked (sign-in, quota, a
+      // failed run: no automatic retry), nor past its automatic-turn cap.
+      if (orch.session.engine === 'agy') {
+        if (orch.session.blocked) return;
+        if (!agyAutoTurn(run, orch.session)) { saveRun(run); return; }
+      }
       // Idle: type a one-line notice, which starts a turn; its UserPromptSubmit
       // hook then attaches the events themselves.
       run.busy = true;
@@ -5115,6 +5298,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
         const sentId = ownerText(prompt) ? takeSent(run, prompt) : null;
         if (sentId) appendOwnerLine(run, { at: new Date().toISOString(), kind: 'started', id: sentId });
         else if (ownerText(prompt)) logOwner(run, 'prompt', prompt);
+        if (ownerText(prompt)) agyFreshInput(run);
+        agyUnblocked(run);
         saveRun(run);
         return ctxOut('UserPromptSubmit', joinContext(inboxOf(), events()));
       }
@@ -5175,6 +5360,14 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       }
       case 'Stop': {
         if (isOrch) {
+          if (session.engine === 'agy' && run.orchestratorBlocked && !input.interrupted) { agyUnblocked(run); saveRun(run); }
+          // An agy orchestrator past its automatic-turn cap: what is pending
+          // waits (not taken), and the turn ends.
+          if (session.engine === 'agy' && !input.interrupted && orchestratorPending(run) && !run.pausing && !run.refreshing && !agyAutoTurn(run, session)) {
+            run.busy = false;
+            saveRun(run);
+            return {};
+          }
           // Quiet events alone do not keep it working: they wait for the next delivery.
           const msgs = inboxOf();
           const pending = joinContext(msgs, events({ wakeOnly: !msgs }));
@@ -5214,7 +5407,23 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       case 'AgyBlocked': {
         // An agy turn that cannot go on (sign-in, quota, a failed run): the
         // worker is blocked as by its own report, and the orchestrator hears it.
-        if (isOrch) return {};
+        if (isOrch) {
+          // The orchestrator on agy: idle and blocked; the owner hears it. A
+          // sign-in re-runs the turn by itself; otherwise the owner's next
+          // message starts a turn. Nothing retries it automatically.
+          const reason = clip(String(input.reason || 'agy run failed'), 500);
+          const kind = String(input.kind || 'error');
+          run.busy = false;
+          run.orchestratorBlocked = { kind, reason, at: new Date().toISOString() };
+          const what = kind === 'auth' ? 'Sign in to Antigravity: the neon orchestrator needs it (agy sign-in needed)'
+            : kind === 'quota' ? 'The neon orchestrator is out of Google AI quota'
+              : 'The neon orchestrator stopped: its agy turn failed';
+          const why = kind === 'auth' ? `${reason} Models → Gemini → Antigravity, or the header pill.`
+            : `${reason} Nothing retries it by itself: send it a message to go on${kind === 'quota' ? ' once the quota is back' : ''}. Worker events and messages wait for it.`;
+          addOwnerItems(run, [{ key: `agy-orchestrator-${kind}`, what, why }], { blocking: true });
+          saveRun(run);
+          return {};
+        }
         const w = run.workers.find(x => x.id === stamp.workerId);
         if (!w) return {};
         const reason = clip(String(input.reason || 'agy run failed'), 500);
@@ -5239,7 +5448,8 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (body.event === 'unknown-tool') { session.noteUnknownTool?.(body.name); return {}; }
     if (body.event !== 'PreInvocation') return {};
     session.syncPolicy?.();
-    const parts = session.takeQueued ? session.takeQueued() : [];
+    const role = session.takeResumeRole ? session.takeResumeRole() : null;
+    const parts = [...(role ? [role] : []), ...(session.takeQueued ? session.takeQueued() : [])];
     // The same delivery a Claude session gets after a tool call.
     const r = handleHook(instanceId, { hook_event_name: 'PostToolUse', tool_name: '', cwd: session.cwd, agy: true });
     let ctx = null;

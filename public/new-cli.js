@@ -11,8 +11,17 @@
  * It answers with the same ids the generic form uses — mode, auth — plus
  * model and modelMap.
  *
+ * newCli.agyOrchestrator (when the server offers it) adds "neon" to the
+ * orchestrator models: the orchestrator runs on agy (Antigravity) on the
+ * Google AI subscription, never an API key. The Billing row stays, labelled
+ * for the run's Claude workers and subagents. Start is blocked until agy is
+ * signed in (newCli.agyOrchestrator.state, then dashboard.state.agyAuth as
+ * agy-signin.js updates it); the row shows the state and, where it helps, the
+ * "Sign in to Antigravity" button ([data-agy-signin]).
+ *
  *   window.newCliDialog.render(newCli, { uid, onSubmit(answer), onCancel() })
  *     -> { el, focus() }
+ *   window.newCliDialog.{ orchestratorOptions, agyBlock, answerOf, NEON }  (pure)
  */
 (function () {
   'use strict';
@@ -38,6 +47,38 @@
     return value || '';
   }
 
+  const NEON = 'neon';
+
+  // The orchestrator models the dialog offers: the Claude ones, then neon.
+  function orchestratorOptions(nc) {
+    const list = [...((nc && nc.orchestratorModels) || [])];
+    const agy = nc && nc.agyOrchestrator;
+    if (agy && agy.value) list.push({ value: agy.value, label: agy.label || 'Neon', detail: agy.detail || '', engine: 'agy', available: true });
+    return list;
+  }
+
+  // Why a neon orchestrator cannot start now, or null (agy signed in).
+  function agyBlock(agyState) {
+    switch (agyState) {
+      case 'signed-in': return null;
+      case 'keyring-locked': return { state: agyState, text: 'Antigravity: the server\'s keyring is locked, so agy cannot use its login. Unlock it on the server machine (log in to its desktop session).', signIn: false };
+      case 'not-installed': return { state: agyState, text: 'Antigravity (agy) is not installed on this server: see Models → Gemini → Antigravity.', signIn: false };
+      case 'signed-out': return { state: agyState, text: 'Antigravity is signed out.', signIn: true };
+      default: return { state: agyState || 'unknown', text: 'Antigravity sign-in state unknown.', signIn: true };
+    }
+  }
+
+  // The form's answer from the dialog's state (labels: newCli.labels).
+  function answerOf(state, labels) {
+    const answer = [{ id: 'mode', question: 'Session type', answer: labels.mode[state.mode] }];
+    if (state.engine === 'sdk' && state.auth) answer.push({ id: 'auth', question: 'Billing', answer: labels.auth[state.auth] });
+    if (state.mode === 'orchestrator' && state.model) answer.push({ id: 'model', question: 'Orchestrator model', answer: state.model });
+    const modelMap = {};
+    for (const f of FAMILIES) if (state.map && state.map[f]) modelMap[f] = state.map[f];
+    if (Object.keys(modelMap).length) answer.push({ id: 'modelMap', question: 'Model routing', answer: modelMap });
+    return answer;
+  }
+
   function render(nc, { uid = 'ncd', onSubmit, onCancel } = {}) {
     nc = nc || {};
     const given = nc.given || {};
@@ -47,7 +88,7 @@
       engine: { cli: 'CLI terminal', sdk: 'Agent SDK panel' },
       auth: { apikey: 'API key', subscription: 'Claude subscription' },
     };
-    const orchModels = nc.orchestratorModels || [];
+    const orchModels = orchestratorOptions(nc);
     const targets = nc.remapTargets || [];
     const bothCreds = !!(creds.apiKey && creds.subscription);
 
@@ -113,13 +154,14 @@
       </div>`}
       <div class="ncd-rows">
         <div class="ncd-row" data-row="auth">
-          <div class="ncd-label">Billing</div>
+          <div class="ncd-label" data-auth-label>Billing</div>
           <div class="ncd-auth-slot"></div>
         </div>
         <div class="ncd-row" data-row="model">
           <div class="ncd-label">Orchestrator</div>
-          ${seg('model', orchModels.map(m => ({ value: m.value, label: m.label, detail: m.detail ? m.detail.replace(' context', '') : '', disabled: m.available === false, title: m.available === false ? 'Needs a Claude credential' : m.value })), state.model)}
+          ${seg('model', orchModels.map(m => ({ value: m.value, label: m.label, detail: m.detail ? m.detail.replace(' context', '') : '', disabled: m.available === false, title: m.engine === 'agy' ? 'The orchestrator on agy (Antigravity), Google AI subscription only' : m.available === false ? 'Needs a Claude credential' : m.value })), state.model)}
         </div>
+        <div class="ncd-note" data-row="agy-note" hidden></div>
         <div class="ncd-note" data-row="model-note"></div>
       </div>
       <div class="ncd-remap">
@@ -192,15 +234,34 @@
       return u.length ? u.join(', ') : 'only if asked for';
     }
 
+    // The agy sign-in state: the dashboard's live one (agy-signin.js), else the server's.
+    function agyState() {
+      const live = window.dashboard && window.dashboard.state && window.dashboard.state.agyAuth;
+      return (live && live.state) || (nc.agyOrchestrator && nc.agyOrchestrator.state) || null;
+    }
+    const neon = () => state.mode === 'orchestrator' && state.model === NEON;
+    const blocked = () => (neon() ? agyBlock(agyState()) : null);
+
     function update() {
       const isOrch = state.mode === 'orchestrator';
       $('[data-row="auth"]').hidden = state.engine !== 'sdk';
       $('[data-row="model"]').hidden = !isOrch;
+      // With neon the billing is the Claude workers' and subagents' only.
+      $('[data-auth-label]').textContent = neon() ? 'Billing (Claude workers)' : 'Billing';
+      const agyNote = $('[data-row="agy-note"]');
+      agyNote.hidden = !neon();
+      if (neon()) {
+        const b = blocked();
+        agyNote.innerHTML = `The orchestrator runs on agy (Antigravity) on your Google AI subscription only: no API key for agy.${state.engine === 'sdk' ? ' Billing above applies to the run\'s Claude workers and their subagents.' : ''}`
+          + (b ? ` <span class="ncd-warn-text" data-agy-state="${esc(b.state)}">${esc(b.text)}${b.signIn ? ' <button type="button" class="claude-signin-btn" data-agy-signin>Sign in to Antigravity</button>' : ''} Start is blocked until agy is signed in.</span>` : '');
+      }
       const note = $('[data-row="model-note"]');
       note.hidden = !isOrch;
-      note.textContent = `Workers: as the orchestrator picks per task, else ${nc.defaultModel || 'opus'} · coder subagents Opus · explorers Sonnet`;
+      note.textContent = `Workers: as the orchestrator picks per task (Claude or neon), else ${nc.defaultModel || 'opus'} · coder subagents Opus · explorers Sonnet`;
       $('.ncd-remap-intro') && ($('.ncd-remap-intro').textContent = isOrch
-        ? 'Applies to the whole run — orchestrator, workers and their subagents. The proxy sends each family\'s requests to the model picked here; the sessions don\'t notice.'
+        ? (neon()
+          ? 'Applies to the run\'s Claude sessions — workers and their subagents; the neon orchestrator runs on agy. The proxy sends each family\'s requests to the model picked here; the sessions don\'t notice.'
+          : 'Applies to the whole run — orchestrator, workers and their subagents. The proxy sends each family\'s requests to the model picked here; the sessions don\'t notice.')
         : 'Applies to this session and its subagents. The proxy sends each family\'s requests to the model picked here; the session doesn\'t notice.');
       let routed = 0;
       for (const f of FAMILIES) {
@@ -222,11 +283,29 @@
       pill.classList.toggle('on', routed > 0);
 
       const parts = [isOrch ? 'Orchestrator' : 'Simple', state.engine === 'sdk' ? 'SDK panel' : 'Terminal'];
-      if (state.engine === 'sdk' && state.auth) parts.push(state.auth === 'apikey' ? 'API key' : 'subscription');
-      if (isOrch && state.model) parts.push(modelLabel(state.model, orchModels));
+      if (neon()) {
+        parts.push('Neon on Google subscription');
+        if (state.engine === 'sdk' && state.auth) parts.push(`Claude workers: ${state.auth === 'apikey' ? 'API key' : 'subscription'}`);
+      } else {
+        if (state.engine === 'sdk' && state.auth) parts.push(state.auth === 'apikey' ? 'API key' : 'subscription');
+        if (isOrch && state.model) parts.push(modelLabel(state.model, orchModels));
+      }
       if (routed) parts.push(`${routed} routed`);
       $('.ncd-summary').textContent = parts.join(' · ');
+      const open = $('.ncd-open');
+      open.disabled = !!blocked();
+      open.title = blocked() ? 'Sign in to Antigravity first' : '';
     }
+
+    // A sign-in elsewhere (the modal) unblocks the dialog while it is open.
+    // (Once drawn and then taken off the page, it stops listening.)
+    let shown = false;
+    const onAgy = () => {
+      if (el.isConnected) shown = true;
+      else if (shown || done) { document.removeEventListener('agy-auth:state', onAgy); return; }
+      update();
+    };
+    document.addEventListener('agy-auth:state', onAgy);
 
     el.addEventListener('change', (e) => {
       const t = e.target;
@@ -252,21 +331,15 @@
 
     let done = false;
     function submit() {
-      if (done) return;
+      if (done || blocked()) return;
       done = true;
-      const modelMap = {};
-      for (const f of FAMILIES) if (state.map[f]) modelMap[f] = state.map[f];
-      const answer = [
-        { id: 'mode', question: 'Session type', answer: labels.mode[state.mode] },
-      ];
-      if (state.engine === 'sdk' && state.auth) answer.push({ id: 'auth', question: 'Billing', answer: labels.auth[state.auth] });
-      if (state.mode === 'orchestrator' && state.model) answer.push({ id: 'model', question: 'Orchestrator model', answer: state.model });
-      if (Object.keys(modelMap).length) answer.push({ id: 'modelMap', question: 'Model routing', answer: modelMap });
-      onSubmit && onSubmit(answer);
+      document.removeEventListener('agy-auth:state', onAgy);
+      onSubmit && onSubmit(answerOf(state, labels));
     }
     function cancel() {
       if (done) return;
       done = true;
+      document.removeEventListener('agy-auth:state', onAgy);
       onCancel && onCancel();
     }
     $('.ncd-open').addEventListener('click', submit);
@@ -280,5 +353,5 @@
     return { el, focus: () => $('.ncd-open').focus() };
   }
 
-  window.newCliDialog = { render };
+  window.newCliDialog = { render, orchestratorOptions, agyBlock, answerOf, NEON };
 })();

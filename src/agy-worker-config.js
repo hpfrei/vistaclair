@@ -66,12 +66,19 @@ function agyMcpServer(server, { eager = [], timeoutSeconds } = {}) {
 }
 
 // The orchestrator server's tools are eager (mcp_orchestrator_report …); every
-// other server stays lazy (call_mcp_tool).
+// other server stays lazy (call_mcp_tool). An orchestrator session (role
+// 'orchestrator') gets every tool its server lists (lib/orchestrator-mcp.js:
+// its role tools plus the messaging pair) eager.
 const EAGER = { orchestrator: ['report', 'SendMessage', 'ListAgents', 'launch_cli', 'list_workers'] };
+const ORCHESTRATOR_TOOLS = ['launch_cli', 'cancel_launch', 'list_workers', 'resume_worker', 'close_worker',
+  'stop_worker', 'end_run', 'undo_landing', 'owner_items', 'SendMessage', 'ListAgents'];
+const EAGER_BY_ROLE = { orchestrator: { orchestrator: ORCHESTRATOR_TOOLS } };
 
-function mcpConfig(servers = {}) {
+function eagerFor(role) { return EAGER_BY_ROLE[role] || EAGER; }
+
+function mcpConfig(servers = {}, eager = EAGER) {
   const mcpServers = {};
-  for (const [name, s] of Object.entries(servers)) mcpServers[name] = agyMcpServer(s, { eager: EAGER[name] || [] });
+  for (const [name, s] of Object.entries(servers)) mcpServers[name] = agyMcpServer(s, { eager: eager[name] || [] });
   return { mcpServers };
 }
 
@@ -93,6 +100,9 @@ function trackedAgentsFiles(cwd) {
 // worktrees read it). Returns the exclude file, or null outside a repo.
 function excludeAgents(cwd) {
   let file;
+  // Only a repo's own top (a worktree): a folder that merely sits inside
+  // some repo (an orchestrator's session folder) leaves that repo alone.
+  try { if (fs.realpathSync(gitIn(cwd, ['rev-parse', '--show-toplevel'])) !== fs.realpathSync(cwd)) return null; } catch { return null; }
   try { file = path.resolve(cwd, gitIn(cwd, ['rev-parse', '--git-path', 'info/exclude'])); } catch { return null; }
   let text = '';
   try { text = fs.readFileSync(file, 'utf8'); } catch {}
@@ -116,10 +126,10 @@ function filesFor({ cwd, dir, name }) {
 }
 
 // Write all four files. `policy` is the hook's (see lib/agy-hook.js).
-function writeAgyConfig({ cwd, dir, name, servers, policy, node }) {
+function writeAgyConfig({ cwd, dir, name, servers, policy, node, eager }) {
   const f = filesFor({ cwd, dir, name });
   writeJson(f.hooksFile, hooksConfig({ node }), 0o644);
-  writeJson(f.mcpFile, mcpConfig(servers), 0o644);
+  writeJson(f.mcpFile, mcpConfig(servers, eager || EAGER), 0o644);
   writeJson(f.settingsFile, settingsConfig({ cwd }));
   writeJson(f.policyFile, policy);
   return f;
@@ -142,7 +152,7 @@ function removeAgyConfig({ cwd, dir, name }) {
 }
 
 module.exports = {
-  AGENTS_FILES, EXCLUDE_PATTERNS, HOOK_SCRIPT, PROXY_ENV, PERMISSIONS,
-  hooksConfig, mcpConfig, agyMcpServer, settingsConfig,
+  AGENTS_FILES, EXCLUDE_PATTERNS, HOOK_SCRIPT, PROXY_ENV, PERMISSIONS, ORCHESTRATOR_TOOLS,
+  hooksConfig, mcpConfig, eagerFor, agyMcpServer, settingsConfig,
   trackedAgentsFiles, excludeAgents, filesFor, writeAgyConfig, writePolicy, readPolicy, removeAgyConfig,
 };

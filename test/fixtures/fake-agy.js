@@ -18,6 +18,12 @@
 //   subagent   a native subagent: invoke_subagent, then in the subagent's own
 //              conversation a write outside and one inside the worktree, then
 //              a swarm call, then `report` as in report mode
+//   { name, writes: [{ path, content }], mcp: [{ server, tool, args }], wait }
+//              a scripted turn (test/agy-orchestrator.test.js): the writes
+//              (write_file through PreToolUse; a relative path is the cwd's),
+//              then the MCP calls (results in log.mcp), then, with `wait`,
+//              waits for $FAKE_AGY_DIR/release and runs PreInvocation(1);
+//              `text` is its answer; `stepText` what its DONE step carries
 // Every run appends { argv, env, events[] } to $FAKE_AGY_DIR/runs.jsonl.
 const fs = require('fs');
 const path = require('path');
@@ -37,8 +43,10 @@ const runs = path.join(DIR, 'runs.jsonl');
 const n = fs.existsSync(runs) ? fs.readFileSync(runs, 'utf8').split('\n').filter(Boolean).length : 0;
 let scenario = ['report'];
 try { scenario = JSON.parse(fs.readFileSync(path.join(DIR, 'scenario.json'), 'utf8')); } catch {}
-const mode = scenario[Math.min(n, scenario.length - 1)];
-log.mode = mode;
+const picked = scenario[Math.min(n, scenario.length - 1)];
+const spec = picked && typeof picked === 'object' ? picked : null;
+const mode = spec ? 'spec' : picked;
+log.mode = spec ? (spec.name || 'spec') : mode;
 const save = () => fs.appendFileSync(runs, JSON.stringify(log) + '\n');
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -168,6 +176,27 @@ process.on('SIGTERM', () => { log.events.push({ signal: 'SIGTERM' }); save(); pr
     }
     log.swarm = tool('swarm', { Tasks: ['a', 'b'] });
   }
+  if (spec) {
+    log.writes = [];
+    for (const w of spec.writes || []) {
+      const abs = path.isAbsolute(w.path) ? w.path : path.join(cwd, w.path);
+      const r = tool('write_file', { TargetFile: w.path, CodeContent: w.content || 'x\n' }, () => { fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, w.content || 'x\n'); return 'written'; });
+      log.writes.push({ path: w.path, ...r });
+    }
+    log.mcp = [];
+    for (const c of spec.mcp || []) {
+      const r = await mcpCall(c.server || 'orchestrator', c.tool, c.args || {});
+      log.mcp.push({ tool: c.tool, result: r });
+      stepUpdate({ state: 'DONE', step_type: 'tool', tool_name: `mcp_${c.server || 'orchestrator'}_${c.tool}`, tool_info: { name: c.tool, parameters: c.args || {}, output: JSON.stringify(r).slice(0, 200) } });
+    }
+    if (spec.wait) {
+      fs.writeFileSync(path.join(DIR, 'waiting'), String(n));
+      while (!fs.existsSync(path.join(DIR, 'release'))) await sleep(20);
+      fs.rmSync(path.join(DIR, 'release'), { force: true });
+      fs.rmSync(path.join(DIR, 'waiting'), { force: true });
+      runHook('PreInvocation', { initialNumSteps: 1, invocationNum: 1 });
+    }
+  }
   if (mode === 'report' || mode === 'subagent') {
     const outside = path.join(path.dirname(cwd), 'outside-agy.txt');
     log.outside = tool('write_file', { Path: outside, Content: 'no' }, () => { fs.writeFileSync(outside, 'no'); return 'written'; });
@@ -178,7 +207,9 @@ process.on('SIGTERM', () => { log.events.push({ signal: 'SIGTERM' }); save(); pr
     stepUpdate({ state: 'DONE', step_type: 'tool', tool_name: 'mcp_orchestrator_report', tool_info: { name: 'mcp_orchestrator_report', parameters: {}, output: JSON.stringify(r).slice(0, 200) } });
     runHook('PreInvocation', { initialNumSteps: 3, invocationNum: 1 });
   }
-  stepUpdate({ state: 'DONE', step_type: 'agent_response', text_delta: `fake agy turn ${n} (${mode})`, usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 50 } });
+  const said = spec?.text || `fake agy turn ${n} (${mode})`;
+  // spec.stepText: what the DONE step carries instead (real agy: "\n" with the answer only in the result).
+  stepUpdate({ state: 'DONE', step_type: 'agent_response', text_delta: spec?.stepText ?? said, usage: { input_tokens: 100, output_tokens: 10, cache_read_tokens: 50 } });
   runHook('Stop', { executionNum: 0, fullyIdle: true, terminationReason: 'done' });
-  finish('SUCCESS', `fake agy turn ${n} (${mode})`, 0);
+  finish('SUCCESS', said, 0);
 })();
