@@ -114,6 +114,8 @@ vistaclair runs on your own machine with your own Claude credential: each user s
 
 **Sign in to Claude** — the pill in the header shows whether Claude Code is signed in (plan and email, from `claude auth status`) and opens a sign-in window when it isn't. It runs `claude auth login` in a small terminal: open the sign-in page it prints, sign in on Anthropic's site, and paste the code it shows if asked. The window also opens by itself when a session's Claude login is refused, so you never need a terminal to sign in again.
 
+**Sign in to Antigravity** — if the `agy` CLI is installed, a second pill shows whether it is signed in and opens the same kind of window: it runs `agy acp --login`, you open the Google link it prints anywhere, and paste the authorization code. A locked keyring (agy keeps its login in the Secret Service) is reported separately. vistaclair never reads agy's credentials. See `docs/agy-auth.md`.
+
 ---
 
 ## What it does

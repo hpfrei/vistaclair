@@ -16,6 +16,7 @@ const CliSessionManager = require('./src/cli-sessions');
 const SdkSession = require('./src/sdk-session');
 const caps = require('./src/capabilities');
 const claudeAuth = require('./src/claude-auth');
+const agyAuth = require('./src/agy-auth');
 const mcp = require('./src/mcp');
 const addons = require('./src/addons');
 const { createAddonCtx } = require('./src/addon-host');
@@ -591,6 +592,7 @@ proxyServer.listen(PROXY_PORT, '127.0.0.1', () => {
 // Clean shutdown: unregister MCP servers and stop running apps
 function gracefulShutdown() {
   claudeAuth.loginProcess.cancel('shutdown');
+  agyAuth.loginProcess.cancel('shutdown');
   cliSessionManager.saveAllToHistory();
   cliSessionManager.killAll();
   addons.shutdownAll();
