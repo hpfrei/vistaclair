@@ -2132,7 +2132,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       runId: d.runId, orchestrator: d.orchestrator, engine: d.engine, root: d.root, isolation: d.isolation, closed: d.closed,
       pausing: d.pausing, paused: d.paused, maxWorkers: d.maxWorkers, maxWorkersRange: d.maxWorkersRange,
       todo: d.todo, notes: d.notes,
-      orchestratorState: d.orchestratorState, orchestratorCost: d.orchestratorCost, compactions: d.compactions, refreshSuggested: d.refreshSuggested,
+      orchestratorState: d.orchestratorState, orchestratorCost: d.orchestratorCost, orchestratorApiCost: d.orchestratorApiCost, compactions: d.compactions, refreshSuggested: d.refreshSuggested,
       refreshing: d.refreshing, pendingEvents: d.pendingEvents,
       openOwnerItems: d.ownerItems.filter(i => i.state === 'open').length, unansweredOwner: d.unansweredOwner,
       counts,
@@ -2228,6 +2228,16 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     return known.length ? Math.max(...known) : null;
   }
 
+  // An agy member's API-equivalent cost (its billed cost is 0): the higher of the
+  // live session's and its folder's transcript total, so a closed member keeps it;
+  // {} when there is none.
+  function apiCostOf(session, dir, key = 'apiCost') {
+    const live = Number.isFinite(session?.apiUsd) ? session.apiUsd : 0;
+    const folder = dir ? transcriptTotals(dir).apiUsd || 0 : 0;
+    const usd = Math.max(live, folder);
+    return usd > 0 ? { [key]: usd } : {};
+  }
+
   function describeRun(run) {
     const orch = orchestratorSession(run);
     const saved = savedEntries();
@@ -2257,6 +2267,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
       orchestratorTabId: orch?.tabId || null,
       orchestratorState: memberState(orch?.session, null),
       orchestratorCost: costOf(orch?.session, run.orchestratorCost, run.engine === 'sdk' ? orchestratorDir(run) : null),
+      ...apiCostOf(orch?.session, run.orchestratorEngine === 'agy' || run.engine === 'sdk' ? orchestratorDir(run) : null, 'orchestratorApiCost'),
       // An orchestrator on agy (neon): its engine, a blocked state, a turn-cap hold.
       ...(run.orchestratorEngine === 'agy' ? { orchestratorEngine: 'agy', orchestratorBlocked: run.orchestratorBlocked || null, orchestratorHeld: !!run.agyTurns?.held } : {}),
       compactions: run.compactions || 0,
@@ -2286,6 +2297,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           model: w.model || live?.session.getSettings().model || null,
           state: memberState(live?.session, w),
           cost: costOf(live?.session, w.costUsd, run.engine === 'sdk' ? w.sessionDir : null),
+          ...apiCostOf(live?.session, w.sessionDir || null),
           cwd: w.cwd, branch: w.branch, launchedAt: w.launchedAt, exitedAt: w.exitedAt, lastReport: reportView(w, live),
           landing: landingOfWorker(run, w),
           paused: !!w.paused, abandoned: !!w.abandoned,

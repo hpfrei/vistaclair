@@ -164,7 +164,7 @@ class AgySession {
     this.busySince = null;
     this.state = 'idle';
     this.costUsd = 0;               // billed: always 0 (the Google AI subscription pays)
-    this.apiUsd = 0;                // what this process's calls would cost at Google's API list prices
+    this.apiUsd = 0;                // this session id's calls at Google's API list prices (seeded from its transcript on a resume)
     this.context = { tokens: null, window: null, compactAt: null, windowEstimated: false };
     this.autoMemory = false;
     this.actualModel = null;
@@ -256,7 +256,12 @@ class AgySession {
     this._auth().on?.('change', this._onAuthChange);
     this._mitmEvents().on?.('cloudcode-response', this._onCloudCode);
     this.costUsd = 0;
+    // A resumed session (same id, same folder) goes on from what its transcript recorded.
     this.apiUsd = 0;
+    try {
+      const dir = this.sessionDir();
+      if (dir) this.apiUsd = require('./sdk-session').transcriptTotals(dir).apiOwn(this.sessId) || 0;
+    } catch {}
     // A context budget (settings.agyContextLimit, tokens) makes the context
     // ratio countable: an orchestrator's auto-refresh reads tokens / compactAt.
     const limit = Number(this.settings.agyContextLimit) || null;

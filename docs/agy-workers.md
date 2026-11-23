@@ -131,11 +131,25 @@ agy -p <prompt> --model <id> --output-format stream-json [--conversation <id>] -
   skipped, and `result.response` not shown by any step becomes the reply); `tool ACTIVE` →
   `tool_use` (`id agy-<step>`); `tool DONE|ERROR` → `tool_result`; `result` →
   `result` with `total_cost_usd: 0`. Steps of another conversation (an agy
-  subagent's) are skipped. Status lines carry `credential: 'agy-subscription'`, `costUsd: 0` (billed) and
-  `apiUsd`: the session process's calls at Google's API list prices
-  (`addRequestCost`, fed by each finished call's `pricing`; reset on a restart).
-  The Agent SDK panel caption shows `≈ $apiUsd` with the billed-$0 tooltip.
-  The Inspector's session totals cover the whole history (`docs/agy-inspector.md`).
+  subagent's) are skipped. Status lines carry `credential: 'agy-subscription'`,
+  `costUsd: 0` (billed) and `apiUsd`: this session id's calls at Google's API list
+  prices (`addRequestCost`, fed by each finished call's `pricing`). A resume seeds
+  it from the transcript, so it only grows.
+
+### API-equivalent cost in the panels
+
+Billed is always $0; the API-equivalent figure travels beside it so every place
+a Claude worker's cost shows has an agy figure that survives a reload and a close:
+
+| Where | Source |
+|---|---|
+| transcript | the status records' `apiUsd` (per id the highest wins, ids in a folder add: `noteTotals` / `transcriptTotals(dir).apiUsd`, `.apiOwn(id)`) |
+| `sdk:history` `totals` | `historyTotals`: `apiUsd` (max of the transcript and the live session), present only when > 0 |
+| run board | `describeRun`: a worker's `apiCost`, the orchestrator's `orchestratorApiCost` (live session or folder transcript, so a closed worker keeps it); `list_workers` detail and header carry them |
+| panel | `public/sdk-panel.js` `costCaption(billed, api)`: box caption, shelf card of a closed worker, toolbar total (`$a + ≈ $b total`) read `≈ $X` with the tooltip "API-equivalent … Billed: $0 (the Google AI subscription pays)" |
+
+The Inspector's session totals cover the whole history (`docs/agy-inspector.md`).
+Nothing here reaches the spend ledger.
 
 ## Turn boundaries
 

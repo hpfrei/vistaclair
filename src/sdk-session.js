@@ -277,7 +277,10 @@ function readTranscriptPage(dir, { sessId, limit = HISTORY_PAGE, before = null }
 function historyTotals(dir, live = null) {
   const t = transcriptTotals(dir);
   const costUsd = live && Number.isFinite(live.costUsd) ? Math.max(t.costUsd, live.costUsd) : t.costUsd;
-  return { costUsd, compactions: t.compactions };
+  // apiUsd: an agy folder's API-equivalent cost (every id's, like costUsd), only
+  // when there is one; the billed costUsd of such a folder is 0.
+  const api = live && Number.isFinite(live.apiUsd) ? Math.max(t.apiUsd, live.apiUsd) : t.apiUsd;
+  return { costUsd, ...(api > 0 ? { apiUsd: api } : {}), compactions: t.compactions };
 }
 
 // The last `limit` envelopes of a transcript (readTranscriptPage's events).
@@ -321,6 +324,9 @@ function noteTotals(t, env) {
   const ev = env.ev || {};
   let own;
   if (ev.platform?.kind === 'status') {
+    // An agy session's API-equivalent cost (billed costUsd stays 0): per id the highest wins.
+    const api = ev.platform.apiUsd;
+    if (typeof api === 'number' && Number.isFinite(api) && api > (t.api.get(env.sessId) || 0)) t.api.set(env.sessId, api);
     const base = Number.isFinite(ev.platform.baseUsd) ? ev.platform.baseUsd : 0;
     own = Number.isFinite(ev.platform.costUsd) ? ev.platform.costUsd - base : undefined;
   } else if (ev.sdk?.type === 'result') {
@@ -338,7 +344,7 @@ function mayCount(buf) {
   return TOTALS_MARKS.some(m => buf.indexOf(m) !== -1);
 }
 
-// { costUsd, compactions, own(sessId) } for a folder's transcript; zeros when
+// { costUsd, apiUsd, compactions, own(sessId), apiOwn(sessId) } for a folder's transcript; zeros when
 // there is none.
 function transcriptTotals(dir) {
   const file = transcriptFile(dir);
@@ -347,7 +353,7 @@ function transcriptTotals(dir) {
   try {
     fd = fs.openSync(file, 'r');
     const st = fs.fstatSync(fd);
-    if (!t || t.ino !== st.ino || st.size < t.pos) t = { ino: st.ino, pos: 0, own: new Map(), last: new Map(), compactions: 0 };
+    if (!t || t.ino !== st.ino || st.size < t.pos) t = { ino: st.ino, pos: 0, own: new Map(), last: new Map(), api: new Map(), compactions: 0 };
     let rest = null;   // a line cut by the chunk's end
     while (t.pos + (rest ? rest.length : 0) < st.size) {
       const at = t.pos + (rest ? rest.length : 0);
@@ -364,7 +370,7 @@ function transcriptTotals(dir) {
       rest = start < data.length ? data.subarray(start) : null;
     }
   } catch (e) {
-    if (!t || e.code === 'ENOENT') t = { ino: null, pos: 0, own: new Map(), last: new Map(), compactions: 0 };
+    if (!t || e.code === 'ENOENT') t = { ino: null, pos: 0, own: new Map(), last: new Map(), api: new Map(), compactions: 0 };
   } finally { if (fd !== undefined) fs.closeSync(fd); }
   totalsCache.delete(file);
   totalsCache.set(file, t);
@@ -375,7 +381,9 @@ function transcriptTotals(dir) {
 function summarizeTotals(t) {
   let costUsd = 0;
   for (const usd of t.own.values()) costUsd += usd;
-  return { costUsd, compactions: t.compactions, own: (sessId) => t.own.get(sessId) || 0, lastResult: (sessId) => t.last.get(sessId) || 0 };
+  let apiUsd = 0;
+  for (const usd of t.api.values()) apiUsd += usd;
+  return { costUsd, apiUsd, compactions: t.compactions, own: (sessId) => t.own.get(sessId) || 0, apiOwn: (sessId) => t.api.get(sessId) || 0, lastResult: (sessId) => t.last.get(sessId) || 0 };
 }
 
 // Where a resumed spawn's query cost starts counting, from its first result

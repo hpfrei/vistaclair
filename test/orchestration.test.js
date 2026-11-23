@@ -4224,3 +4224,18 @@ test('the report tool description matches the worker card: no "started" report',
   assert.match(src, /defect or follow-up in this worker's own deliverable use continue while its context is under ~150k tokens/);
   assert.match(src, /Launch with closeWhenDone to skip this call/);
 });
+
+test('describeRun: an agy member\'s apiCost (API-equivalent, billed cost 0) comes from its session folder\'s transcript', async (t) => {
+  const { orch, orchSession, run } = await openOrchestrator(t, { isolation: 'none' });
+  orch.launchWorker(orchSession.instanceId, { title: 'a', task: 'brief A' });
+  const dir = run().workers[0].sessionDir;
+  assert.ok(dir);
+  assert.ok(!('apiCost' in orch.describeRun(run()).workers[0]), 'no transcript, no figure');
+  fs.mkdirSync(dir, { recursive: true });
+  const line = (sessId, apiUsd) => JSON.stringify({ sessId, ts: 1, ev: { platform: { kind: 'status', state: 'idle', costUsd: 0, apiUsd } } }) + '\n';
+  fs.writeFileSync(path.join(dir, 'transcript.jsonl'), line('s1', 0.02) + line('s1', 0.0635));
+  const d = orch.describeRun(run()).workers[0];
+  assert.ok(Math.abs(d.apiCost - 0.0635) < 1e-12, `apiCost ${d.apiCost}`);
+  assert.ok(!d.cost, 'the billed cost stays 0');
+  assert.ok(Math.abs(orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail[0].apiCost - 0.0635) < 1e-12, 'list_workers detail carries it');
+});
