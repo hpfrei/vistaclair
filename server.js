@@ -364,6 +364,9 @@ broadcaster.sessionControl = sessionControl; // cli:pause / cli:resumeSaved
 broadcaster.askLifecycle = askLifecycle;     // expired forms: replay, ask:late, ask:discard
 setProcessBroadcaster(broadcaster);
 store.setBroadcaster(broadcaster);
+// agy-mitm (docs/agy-inspector.md): references only. No listener and no CA
+// exist until an agy worker awaits ensureStarted().
+require('./src/agy-mitm').configure({ store, broadcaster });
 
 // Add-on auth-exempt upgrade paths (authExemptUpgradePaths) go to their add-on
 // only; everything else: owner gate → add-ons → dashboard wss.

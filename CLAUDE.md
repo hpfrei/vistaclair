@@ -40,6 +40,7 @@ below that start with `src/`, `public/` or `scripts/` are under `platform/`.
 | `docs/horst-lanes.md` | `horst.lane` in a capability module: Horst's direct / card / never stance per member, the direct media tools (image, speech, transcribe, maps, page render) |
 | `docs/horst-surfaces.md` | Horst's surfaces: the Horst tab, Telegram, event reminders, Mini App, `ctx.horst.chat` |
 | `docs/agy-auth.md` | the Antigravity (`agy`) sign-in: `agy-auth.js`, `ws/agy-auth-handler.js`, `public/agy-signin.js`, the `agy models` probe, the relayed `agy acp --login`, the credential env, `reportAgyAuthFailure` |
+| `docs/agy-inspector.md` | the agy MITM (`agy-mitm.js`, `agy-mitm-ca.js`, `agy-tls-hello.js`, `agy-h1-tee.js`, `agy-trace.js`): the loopback CONNECT proxy for agy workers, its name-constrained CA and bundle, ALPN mirroring and byte identity, the kill switch, decoding Cloud Code calls into $0 Inspector interactions, the gemini.js `keepThoughts`/`cacheTokens` options |
 | `docs/telegram-control.md` | the platform Telegram control bot's owner: the claim code, `isOwnerAct` / `isPrivileged`, the dashboard QR login (`platform-login.js`), sessions and alerts, Mini App bearers; every bot's inbound delivery (webhook / long-poll / tunnel-down fallback in `telegram.js`) |
 | `docs/memory.md` | the shared memory store: recall, reinforcement, the long tier, consolidation, retention, compaction, Horst's brains |
 | `docs/models.md` | AI model choice: the media catalog and adapters, the default chain, configured defaults, Horst's daily model review and its alerts |
