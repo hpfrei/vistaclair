@@ -267,12 +267,17 @@ function handleMessage(ws, msg, bc) {
       const ids = clean(msg.ids);
       const runIds = clean(msg.runIds);
       let removed = 0;
-      for (const id of ids) if (deleteSavedOne(bc, id, false).done) removed++;
-      for (const runId of runIds) {
-        try { if (bc.orchestration && !bc.orchestration.deleteRun(runId, { force: false }).refused) removed++; } catch {}
-      }
+      let error;
+      try {
+        for (const id of ids) if (deleteSavedOne(bc, id, false).done) removed++;
+        for (const runId of runIds) {
+          try { if (bc.orchestration && !bc.orchestration.deleteRun(runId, { force: false }).refused) removed++; } catch {}
+        }
+      } catch (e) { error = e?.message || String(e); }
       const total = ids.length + runIds.length;
       send({ ...mgr.savedSessionsMessage(), deleted: removed, skipped: total - removed });
+      // The client's busy indicator ends on this, success or error.
+      send({ type: 'cli:deleteSavedSessionsDone', ok: !error, ...(error ? { error } : {}), deleted: removed, skipped: total - removed });
       break;
     }
     // --- Pause / resume (src/session-control.js, src/orchestration.js) ---

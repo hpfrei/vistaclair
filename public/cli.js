@@ -16,6 +16,10 @@
   let _sessionsHtml = '';
   const _selectedSaved = new Set();   // Sessions tab multiselect: saved session ids
   const _selectedRuns = new Set();    // ... and run ids (a run card is one selectable unit)
+  // The batch delete in flight (module state: it outlives every re-render):
+  // { ids: Set, runIds: Set, timer } until cli:deleteSavedSessionsDone or the timeout.
+  let _removing = null;
+  const REMOVING_TIMEOUT_MS = 60000;
   // askId -> { overlayEl, tabId, expired, expire(info), setLateBusy(busy) }:
   // an expired one (its tool call ended) stays until sent as a message or discarded.
   const pendingAskOverlays = new Map();
@@ -877,14 +881,32 @@
     const ids = all.sess.filter(x => _selectedSaved.has(x));
     const runIds = all.runs.filter(x => _selectedRuns.has(x));
     const n = ids.length + runIds.length;
-    if (!n) return;
+    if (!n || _removing) return;
     const what = [ids.length && `${ids.length} session${ids.length !== 1 ? 's' : ''}`, runIds.length && `${runIds.length} run${runIds.length !== 1 ? 's' : ''}`].filter(Boolean).join(' and ');
     if (!(await showConfirm(`Delete ${what} permanently?\n\n`
       + 'This is not a rollback: your code, commits and merged work are not touched.\n\n'
       + 'Removed: conversation history, interaction data and TODO/NOTES folders'
       + (runIds.length ? "; of a run, its orchestrator, every worker, its session folder and its git worktrees (unmerged branches are kept)" : '') + '.\n\n'
       + 'This cannot be undone.', { confirmLabel: `Delete ${n}`, danger: true }))) return;
+    if (_removing) return;
+    _removing = { ids: new Set(ids), runIds: new Set(runIds), timer: setTimeout(() => endRemoving(null, true), REMOVING_TIMEOUT_MS) };
+    renderSessions();
     sendWs({ type: 'cli:deleteSavedSessions', ids, runIds });
+  }
+
+  // The batch delete is over: the server's Done (or, with `timedOut`, the safety
+  // timeout, which asks for the list again so it is right either way).
+  function endRemoving(msg, timedOut) {
+    if (!_removing) return;
+    clearTimeout(_removing.timer);
+    _removing = null;
+    if (timedOut) {
+      window.dashboard.showToast?.({ sender: 'CLI', title: 'Remove selected', message: 'No answer from the server yet; the list is refreshed.', level: 'warning' });
+      requestSavedSessions(0);
+    } else if (msg && msg.ok === false) {
+      window.dashboard.showToast?.({ sender: 'CLI', title: 'Remove selected failed', message: String(msg.error || 'The delete failed.'), level: 'error' });
+    }
+    renderSessions();
   }
 
   function savedTitle(sess) {
@@ -944,9 +966,13 @@
 
   // The "Delete permanently" action with its Select box (the multiselect),
   // on the same row: always visible, never over the status pill.
-  const deleteAction = (attrs, kind, id, checked) =>
+  const deleteAction = (attrs, kind, id, checked) => {
+    const pending = !!(_removing && (kind === 'sel-run' ? _removing.runIds : _removing.ids).has(id));
+    return deleteActionHtml(attrs, kind, id, checked, pending);
+  };
+  const deleteActionHtml = (attrs, kind, id, checked, pending) =>
     `<div class="sc-action">${btn('Delete permanently', attrs, 'vc-btn-danger')}<span class="sc-action-hint">${escHtml(DELETE_HINT)}</span>`
-    + `<label class="sc-sel" title="Select to remove several at once"><input type="checkbox" data-act="${kind}" data-id="${escHtml(id)}"${checked ? ' checked' : ''}> Select</label></div>`;
+    + `<label class="sc-sel" title="Select to remove several at once"><input type="checkbox" data-act="${kind}" data-id="${escHtml(id)}"${checked ? ' checked' : ''}${pending ? ' disabled' : ''}> Select</label></div>`;
 
   const DELETE_HINT = 'Removes the conversation history and TODO/NOTES. Your code, commits and merged work are not touched.';
 
@@ -1080,7 +1106,9 @@
       const nSel = selectedCount();
       const selBar = selectable
         ? `<label class="sc-sel-all"><input type="checkbox" data-act="sel-all"${nSel === selectable ? ' checked' : ''}> Select all</label>`
-          + (nSel ? btn(`Remove selected (${nSel})`, 'data-act="delete-selected"', 'vc-btn-danger') : '')
+          + (_removing
+            ? btn(`<span class="sc-spin" aria-hidden="true"></span>Removing ${_removing.ids.size + _removing.runIds.size}…`, 'data-act="delete-selected" disabled aria-busy="true"', 'vc-btn-danger')
+            : nSel ? btn(`Remove selected (${nSel})`, 'data-act="delete-selected"', 'vc-btn-danger') : '')
         : '';
       html = `<div class="sc-toolbar"><h3>Sessions</h3><span class="sc-count">${count}</span>${selBar}`
         + btn('+ New CLI in directory…', 'data-act="new"', 'vc-btn-primary sc-push') + '</div>'
@@ -1680,6 +1708,9 @@
         for (const w of _savedWaiters.splice(0)) w();
         break;
       }
+      case 'cli:deleteSavedSessionsDone':
+        endRemoving(msg, false);
+        break;
       case 'cli:fileUploaded': {
         break;
       }

@@ -348,6 +348,7 @@ body.nav-loading .view-nav {
 .sc-count { font-size: 11px; color: var(--text-dim); }
 .sc-push { margin-left: auto; }
 .sc-sel-all { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); cursor: pointer; }
+.sc-spin { display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px; border: 1.5px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: ln-spin .8s linear infinite; }
 .sc-sel { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; font-size: 11px; color: var(--text-dim); cursor: pointer; }
 .sc-grid {
   display: grid;
