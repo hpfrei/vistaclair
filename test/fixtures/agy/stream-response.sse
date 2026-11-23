@@ -1,0 +1,6 @@
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "The file says hello.","thought": true}]}}],"usageMetadata": {"promptTokenCount": 9430,"candidatesTokenCount": 0,"totalTokenCount": 9430,"cachedContentTokenCount": 7281},"modelVersion": "gemini-3.8-flash-n","responseId": "kjIEa87cLJahkdUP5fHTcQ"},"traceId": "58e4ba589c56e021","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "It says: ","thoughtSignature": "c2lnLXJlZGFjdGVkLTI="}]}}],"usageMetadata": {"promptTokenCount": 9430,"candidatesTokenCount": 3,"totalTokenCount": 9445,"cachedContentTokenCount": 7281},"modelVersion": "gemini-3.8-flash-n","responseId": "kjIEa87cLJahkdUP5fHTcQ"},"traceId": "58e4ba589c56e021","metadata": {}}
+
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "hello from note"}]},"finishReason": "STOP"}],"usageMetadata": {"promptTokenCount": 9430,"candidatesTokenCount": 7,"totalTokenCount": 9449,"cachedContentTokenCount": 7281},"modelVersion": "gemini-3.8-flash-n","responseId": "kjIEa87cLJahkdUP5fHTcQ"},"traceId": "58e4ba589c56e021","metadata": {}}
+

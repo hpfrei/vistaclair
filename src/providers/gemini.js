@@ -273,8 +273,17 @@ class GeminiProvider extends BaseProvider {
 
   // --- Response translation (Gemini SSE → Anthropic SSE) ---
 
-  createStreamState() {
+  // opts (agy trace decoding only; the :3456 route passes none):
+  //   keepThoughts — emit thought parts as thinking blocks (with their
+  //                  signature) instead of dropping them; also skips the
+  //                  server-side signature cache, which only the :3456 route needs
+  //   cacheTokens  — report cachedContentTokenCount as cache_read_input_tokens,
+  //                  input as prompt − cached and output as total − prompt
+  createStreamState(opts) {
     return {
+      opts: opts || null,
+      thinkingBlockOpen: false,
+      cacheReadTokens: 0,
       messageId: `msg_${Date.now()}`,
       contentIndex: 0,
       hasStarted: false,
@@ -292,10 +301,12 @@ class GeminiProvider extends BaseProvider {
     return this._finalize(ss);
   }
 
-  translateSSEChunk(data, ss) {
+  translateSSEChunk(data, ss, opts) {
+    const o = opts || ss.opts || {};
     let parsed;
-    try { parsed = JSON.parse(data); }
+    try { parsed = typeof data === 'string' ? JSON.parse(data) : data; }
     catch { return []; }
+    if (!parsed || typeof parsed !== 'object') return [];
 
     const events = [];
 
@@ -319,8 +330,19 @@ class GeminiProvider extends BaseProvider {
 
     // Usage metadata
     if (parsed.usageMetadata) {
-      ss.inputTokens = parsed.usageMetadata.promptTokenCount || ss.inputTokens;
-      ss.outputTokens = parsed.usageMetadata.candidatesTokenCount || ss.outputTokens;
+      const um = parsed.usageMetadata;
+      if (o.cacheTokens) {
+        const prompt = um.promptTokenCount || 0;
+        const cached = um.cachedContentTokenCount || 0;
+        if (prompt) ss.inputTokens = Math.max(0, prompt - cached);
+        ss.cacheReadTokens = cached || ss.cacheReadTokens;
+        const out = um.totalTokenCount ? um.totalTokenCount - prompt
+          : (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0);
+        if (out > 0) ss.outputTokens = out;
+      } else {
+        ss.inputTokens = um.promptTokenCount || ss.inputTokens;
+        ss.outputTokens = um.candidatesTokenCount || ss.outputTokens;
+      }
     }
 
     const candidate = parsed.candidates?.[0];
@@ -329,8 +351,43 @@ class GeminiProvider extends BaseProvider {
     // Process parts
     const parts = candidate.content?.parts || [];
     for (const part of parts) {
-      // Skip thinking parts
-      if (part.thought) continue;
+      if (part.thought) {
+        // Skip thinking parts (the :3456 route), or keep them as a thinking block
+        if (!o.keepThoughts) continue;
+        if (ss.textBlockOpen) {
+          events.push(this._sseEvent('content_block_stop', { type: 'content_block_stop', index: ss.contentIndex }));
+          ss.contentIndex++;
+          ss.textBlockOpen = false;
+        }
+        if (!ss.thinkingBlockOpen) {
+          ss.thinkingBlockOpen = true;
+          events.push(this._sseEvent('content_block_start', {
+            type: 'content_block_start',
+            index: ss.contentIndex,
+            content_block: { type: 'thinking', thinking: '' },
+          }));
+        }
+        if (part.text) {
+          events.push(this._sseEvent('content_block_delta', {
+            type: 'content_block_delta',
+            index: ss.contentIndex,
+            delta: { type: 'thinking_delta', thinking: part.text },
+          }));
+        }
+        if (part.thoughtSignature) {
+          events.push(this._sseEvent('content_block_delta', {
+            type: 'content_block_delta',
+            index: ss.contentIndex,
+            delta: { type: 'signature_delta', signature: part.thoughtSignature },
+          }));
+        }
+        continue;
+      }
+      if (ss.thinkingBlockOpen) {
+        events.push(this._sseEvent('content_block_stop', { type: 'content_block_stop', index: ss.contentIndex }));
+        ss.contentIndex++;
+        ss.thinkingBlockOpen = false;
+      }
 
       // Text content
       if (part.text != null) {
@@ -369,7 +426,7 @@ class GeminiProvider extends BaseProvider {
 
         // Store thoughtSignature server-side — Claude Code won't preserve unknown fields
         // on content blocks, so we cache it by tool ID and re-attach on the next request.
-        if (part.thoughtSignature) {
+        if (part.thoughtSignature && !o.keepThoughts) {
           _storeSignature(toolId, part.thoughtSignature);
         }
 
@@ -406,6 +463,15 @@ class GeminiProvider extends BaseProvider {
     ss.finalized = true;
     const events = [];
 
+    if (ss.thinkingBlockOpen) {
+      events.push(this._sseEvent('content_block_stop', {
+        type: 'content_block_stop',
+        index: ss.contentIndex,
+      }));
+      ss.contentIndex++;
+      ss.thinkingBlockOpen = false;
+    }
+
     // Close open text block
     if (ss.textBlockOpen) {
       events.push(this._sseEvent('content_block_stop', {
@@ -420,7 +486,9 @@ class GeminiProvider extends BaseProvider {
     events.push(this._sseEvent('message_delta', {
       type: 'message_delta',
       delta: { stop_reason: ss.finishReason || 'end_turn', stop_sequence: null },
-      usage: { input_tokens: ss.inputTokens, output_tokens: ss.outputTokens },
+      usage: ss.opts?.cacheTokens
+        ? { input_tokens: ss.inputTokens, output_tokens: ss.outputTokens, cache_read_input_tokens: ss.cacheReadTokens }
+        : { input_tokens: ss.inputTokens, output_tokens: ss.outputTokens },
     }));
 
     // Message stop

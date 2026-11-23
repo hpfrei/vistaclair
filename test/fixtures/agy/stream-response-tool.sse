@@ -1,0 +1,2 @@
+data: {"response": {"candidates": [{"content": {"role": "model","parts": [{"text": "I will run it.","thought": true},{"functionCall": {"name": "run_command","args": {"CommandLine": "ls"}},"thoughtSignature": "c2lnLXJlZGFjdGVkLTM="}]},"finishReason": "STOP"}],"usageMetadata": {"promptTokenCount": 100,"candidatesTokenCount": 5,"totalTokenCount": 130},"modelVersion": "gemini-3.8-flash-n","responseId": "r2"},"traceId": "t2","metadata": {}}
+

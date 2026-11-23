@@ -1,0 +1,27 @@
+{
+  "project": "projects/redacted-project",
+  "requestId": "agent/daf70115-49b0-476a-ac2d-31b44d303f63/1795437199897/8ea6ba1b-63af-438b-99ca-5e30603845c2/2",
+  "request": {
+    "contents": [
+      { "role": "user", "parts": [ { "text": "Read note.txt and tell me what it says." } ] },
+      { "role": "model", "parts": [
+        { "text": "The user wants the file content. I will read it.", "thought": true },
+        { "functionCall": { "name": "read_file", "args": { "AbsolutePath": "/work/note.txt" } }, "thoughtSignature": "c2lnLXJlZGFjdGVkLTE=" }
+      ] },
+      { "role": "user", "parts": [
+        { "functionResponse": { "name": "read_file", "response": { "output": "hello from note" } } }
+      ] }
+    ],
+    "systemInstruction": { "role": "user", "parts": [ { "text": "You are Antigravity, a coding agent." }, { "text": "Workspace: /work" } ] },
+    "tools": [ { "functionDeclarations": [
+      { "name": "read_file", "description": "Read a file.", "parameters": { "type": "OBJECT", "properties": { "AbsolutePath": { "type": "STRING" } }, "required": ["AbsolutePath"] } },
+      { "name": "run_command", "description": "Run a shell command.", "parameters": { "type": "OBJECT", "properties": { "CommandLine": { "type": "STRING" } } } }
+    ] } ],
+    "labels": { "trajectory_id": "redacted" },
+    "generationConfig": { "maxOutputTokens": 65536, "thinkingConfig": { "includeThoughts": true, "thinkingLevel": "LOW" } },
+    "sessionId": "-1234567890123456789"
+  },
+  "model": "gemini-3.8-flash-low",
+  "userAgent": "antigravity",
+  "requestType": "agent"
+}
