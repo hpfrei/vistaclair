@@ -152,11 +152,14 @@ kind's own parts.
   `dashboard.registerTabAction`.
   Close and remove interaction (`cli:closeTab` with `forget`) deletes the
   saved session once the tab really closed (a refused close removes nothing)
-  and pushes `cli:savedSessions` to every client. The Sessions tab's
-  checkboxes and **Remove selected (N)** send `cli:deleteSavedSessions { ids }`:
-  each id goes through the single-row delete (`deleteSavedOne` in
-  `src/ws/cli-handler.js`); the one answer carries `deleted` / `skipped`
-  (running sessions, orchestrators and workers needing a confirm are skipped).
+  and pushes `cli:savedSessions` to every client. Every card with a
+  **Delete permanently** (an idle session, a run whose orchestrator is not
+  running) has a **Select** box on that row; with the toolbar's Select all,
+  **Remove selected (N)** sends `cli:deleteSavedSessions { ids, runIds }` after
+  one confirm: each id goes through the single-row delete (`deleteSavedOne` in
+  `src/ws/cli-handler.js`), each run id through `orchestration.deleteRun`
+  unforced. The one answer carries `deleted` / `skipped` (a running session, an
+  orchestrator, a worker or run needing a confirm is skipped; use its own Delete).
 
 ### Registry: `window.tabHosts`
 
