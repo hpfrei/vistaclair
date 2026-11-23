@@ -37,6 +37,11 @@
   overflow: hidden;
   min-height: 0;
   background: var(--paper-bg, var(--bg));
+  /* Own stacking context: window z-indexes (a raise counter) and the snap
+     preview stay inside the desk area and can never rise above toasts or
+     other page-level overlays. */
+  isolation: isolate;
+  z-index: 0;
 }
 .desk-area {
   position: absolute;
