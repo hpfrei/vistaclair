@@ -20,8 +20,9 @@
 // A closed or ended worker leaves the row for the shelf, a column in the
 // stage's top-left corner, left of the orchestrator's box: one card per
 // worker, newest closed first (foldable to a tab, per run). A card opens that
-// worker's box, dashed, first in the row, one at a time; its caption's ◂ (or
-// the card again) puts it back. A row with no box takes no room: the
+// worker's box, dashed, in the row ahead of the running ones; any number can be
+// open, in the order they were opened (a box already open never moves). Its
+// caption's ◂ (or its card again) puts only that worker back. A row with no box takes no room: the
 // orchestrator's box and the shelf fill the stage.
 //
 // Everything shown is server state: when a box is first shown and after a
@@ -535,7 +536,7 @@
       this.stopBtn.addEventListener('click', () => this.stop());
       this.freshBtn.addEventListener('click', () => this.panel.refresh());
       this.autoBtn.addEventListener('click', () => this.panel.toggleAutoRefresh());
-      q('.sdk-shelve').addEventListener('click', () => this.panel.openShelved(null));
+      q('.sdk-shelve').addEventListener('click', () => this.panel.openShelved(this.sessId, false));
       q('.sdk-insp').addEventListener('click', () => {
         // Straight to this session's tab, opened (and loaded) if need be.
         if (typeof switchView === 'function') switchView('dashboard');
@@ -2073,7 +2074,7 @@
       this.main = null;
       this.workers = new Map();  // sessId -> Area
       this.rowList = [];         // the worker boxes in the row, in order
-      this.openId = null;        // the shelved worker whose box is open
+      this.openIds = new Set();  // the shelved workers whose boxes are open, in opening order
       this.cards = new Map();    // sessId -> its shelf card
       this.active = false;
       wrap.classList.add('sdk-wrap');
@@ -2330,15 +2331,15 @@
       return a;
     }
 
-    // The row: the open shelved box, then the others in id order; with none
+    // The row: the open shelved boxes, then the others in id order; with none
     // it is hidden. Past three boxes, ended ones narrow so the running ones
     // keep their room.
     layoutWorkers() {
       const all = this.sortedWorkers();
       const shelved = all.filter(a => a.shelved());
-      if (this.openId && !shelved.some(a => a.sessId === this.openId)) this.openId = null;
-      const open = shelved.find(a => a.sessId === this.openId);
-      this.rowList = [open, ...all.filter(a => !a.shelved())].filter(Boolean);
+      for (const id of [...this.openIds]) if (!shelved.some(a => a.sessId === id)) this.openIds.delete(id);
+      const open = [...this.openIds].map(id => shelved.find(a => a.sessId === id));
+      this.rowList = [...open, ...all.filter(a => !a.shelved())];
       const want = this.rowList.map(a => a.el);
       // Only a box out of place moves: putting one back into the DOM resets
       // its scrollers to the top. Shelved boxes leave first, so the others
@@ -2348,7 +2349,7 @@
         const at = this.workersEl.children[i] || null;
         if (at !== e) this.workersEl.insertBefore(e, at);
       });
-      for (const a of all) a.el.classList.toggle('sdk-area-opened', a === open);
+      for (const a of all) a.el.classList.toggle('sdk-area-opened', this.openIds.has(a.sessId));
       this.renderShelf(shelved);
       this.panelEl.classList.toggle('has-workers', this.rowList.length > 0);
       this.workersEl.classList.toggle('crowded', this.rowList.length > 3);
@@ -2383,7 +2384,7 @@
           const meta = el('span', 'sdk-shelf-meta');
           meta.append(c.rep, c.ago, c.cost);
           b.append(c.name, meta);
-          b.addEventListener('click', () => this.openShelved(this.openId === a.sessId ? null : a.sessId));
+          b.addEventListener('click', () => this.openShelved(a.sessId, !this.openIds.has(a.sessId)));
           this.cards.set(a.sessId, c);
         }
         const at = this.shelfList.children[i] || null;
@@ -2396,8 +2397,8 @@
         c.cost.textContent = fmtCost(a.cost);
         const lab = landingLabel(a.landing);
         c.el.title = `${a.label}\n${r ? `${r.status || 'report'}: ${r.summary || ''}` : 'No report.'}${lab ? `\n${a.landing.current ? '' : 'earlier report: '}${lab.line}` : ''}`;
-        c.el.classList.toggle('open', a.sessId === this.openId);
-        c.el.setAttribute('aria-pressed', String(a.sessId === this.openId));
+        c.el.classList.toggle('open', this.openIds.has(a.sessId));
+        c.el.setAttribute('aria-pressed', String(this.openIds.has(a.sessId)));
         c.at = t(a);
       });
       this.renderShelfAges();
@@ -2408,9 +2409,10 @@
       for (const c of this.cards.values()) c.ago.textContent = c.at ? fmtAgo(now - c.at) : '';
     }
 
-    // One shelved box open at a time (null: none).
-    openShelved(sessId) {
-      this.openId = sessId;
+    // Open (on) or put back on the shelf (off) the box of one shelved worker;
+    // the others stay as they are.
+    openShelved(sessId, on = true) {
+      if (on) this.openIds.add(sessId); else this.openIds.delete(sessId);
       this.layoutWorkers();
     }
 
