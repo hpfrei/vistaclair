@@ -250,9 +250,13 @@ test('2+3. byte identity both ways (keep-alive: chunked SSE, gzip JSON, gzip SSE
 
   const model = await waitFor(() => {
     const l = store.getAll().filter(i => i.instanceId === TAG && i.provider === 'agy' && i.status !== 'pending');
-    return l.length >= 2 ? l : null;
+    return l.length >= 3 ? l : null;
   });
-  assert.strictEqual(model.length, 2, 'one interaction per model call; loadCodeAssist is not one');
+  // loadCodeAssist is shown too, but marked as a Cloud Code call, not a model call.
+  const control = model.filter(i => i.agy?.control);
+  assert.deepStrictEqual(control.map(i => i.agy.requestType), ['loadCodeAssist']);
+  model.splice(0, model.length, ...model.filter(i => !i.agy?.control));
+  assert.strictEqual(model.length, 2, 'one interaction per model call');
   decoded = model[0];
   const it = decoded;
   assert.strictEqual(it.status, 'complete');

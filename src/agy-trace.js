@@ -78,7 +78,11 @@ function decodeAgyRequest(envelope) {
   const messages = [];
   const openCalls = new Map();   // function name → [tool_use ids not answered yet]
   (req.contents || []).forEach((turn, ti) => {
-    const role = turn?.role === 'model' ? 'assistant' : 'user';
+    // agy sends the tool results under role 'model'; in the Anthropic shape they
+    // are a user turn, so a turn of only functionResponse parts is 'user'.
+    const parts0 = turn?.parts || [];
+    const onlyResults = parts0.length > 0 && parts0.every(p => p && p.functionResponse);
+    const role = turn?.role === 'model' && !onlyResults ? 'assistant' : 'user';
     const content = [];
     (turn?.parts || []).forEach((part, pi) => {
       if (!part || typeof part !== 'object') return;
@@ -114,7 +118,21 @@ function decodeAgyRequest(envelope) {
     if (content.length) messages.push({ role, content });
   });
   body.messages = messages;
-  if (req.generationConfig?.maxOutputTokens) body.max_tokens = req.generationConfig.maxOutputTokens;
+  // generationConfig: the Anthropic-named fields the renderer knows, the
+  // thinking config as `thinking`, anything else under `generationConfig`.
+  const { maxOutputTokens, temperature, thinkingConfig, ...genRest } = req.generationConfig || {};
+  if (maxOutputTokens) body.max_tokens = maxOutputTokens;
+  if (temperature !== undefined) body.temperature = temperature;
+  if (thinkingConfig && typeof thinkingConfig === 'object') body.thinking = thinkingConfig;
+  if (Object.keys(genRest).length) body.generationConfig = genRest;
+  // Cloud Code's own envelope fields, shown under "Other" (never the project).
+  const agyInfo = {};
+  if (env.requestType) agyInfo.requestType = env.requestType;
+  if (env.requestId) agyInfo.requestId = env.requestId;
+  if (req.sessionId) agyInfo.sessionId = req.sessionId;
+  if (req.labels && Object.keys(req.labels).length) agyInfo.labels = req.labels;
+  if (env.userAgent) agyInfo.userAgent = env.userAgent;
+  if (Object.keys(agyInfo).length) body.agy = agyInfo;
 
   const { contents, systemInstruction, tools: _t, ...restReq } = req;
   const { request: _r, ...restEnv } = env;
@@ -167,6 +185,12 @@ class AgyResponseDecoder {
     const inner = obj.response && typeof obj.response === 'object' ? obj.response : obj;
     if (inner.responseId) this.meta.responseId = inner.responseId;
     if (inner.modelVersion) this.meta.modelVersion = inner.modelVersion;
+    // Google's own counts, as sent (the last chunk is the running total).
+    if (inner.usageMetadata && typeof inner.usageMetadata === 'object') this.meta.usageMetadata = inner.usageMetadata;
+    // The closing chunk carries an empty text part (often with the thought
+    // signature): it would render as an empty text block.
+    const cparts = inner.candidates?.[0]?.content?.parts;
+    if (Array.isArray(cparts)) inner.candidates[0].content.parts = cparts.filter(p => !(p && p.text === '' && !p.thought && !p.functionCall));
     for (const p of inner.candidates?.[0]?.content?.parts || []) {
       if (p?.functionCall) this.lastToolUse = { name: p.functionCall.name, input: p.functionCall.args || {} };
       if (p?.inlineData && typeof p.inlineData.data === 'string' && Buffer.byteLength(p.inlineData.data) > IMAGE_INLINE_MAX) {
@@ -212,6 +236,7 @@ class AgyResponseDecoder {
       input_tokens: this.ss.inputTokens || 0,
       output_tokens: this.ss.outputTokens || 0,
       cache_read_input_tokens: this.ss.cacheReadTokens || 0,
+      ...(this.ss.reasoningTokens ? { reasoning_tokens: this.ss.reasoningTokens } : {}),
     };
   }
 }
@@ -279,6 +304,20 @@ class BodyReader {
     if (this.onText) { const tail = this.textDecoder.decode(); if (tail) this.onText(tail); }
     this.onDone(this.onText ? null : Buffer.concat(this.chunks));
   }
+}
+
+const SCRUB_KEYS = /privacy|uri$|url$|project|email|token|notice|credential|secret/i;
+/** A Cloud Code control response, safe to store: account and privacy fields dropped, long strings clipped. */
+function scrubControl(v, depth = 0) {
+  if (depth > 8) return null;
+  if (typeof v === 'string') return v.length > 300 ? v.slice(0, 300) + '…' : v;
+  if (Array.isArray(v)) return v.slice(0, 50).map(x => scrubControl(x, depth + 1));
+  if (v && typeof v === 'object') {
+    const o = {};
+    for (const [k, x] of Object.entries(v)) if (!SCRUB_KEYS.test(k)) o[k] = scrubControl(x, depth + 1);
+    return o;
+  }
+  return v;
 }
 
 function _json(buf) {
@@ -415,9 +454,59 @@ class AgyExchange {
       const json = buf ? _json(buf) : null;
       if (json && this.ctx.hook) { try { this.ctx.hook(this.path, json, this.resStatus); } catch {} }
     }
+    if (this.kind === 'hook') { try { this._recordControl(buf); } catch {} return; }
     if (this.kind !== 'trace') return;
     if (!this.interaction) { if (this.badRequest) return; this._endPending = true; return; }
     this._finish();
+  }
+
+  /**
+   * loadCodeAssist / retrieveUserQuotaSummary: not model calls, but kept
+   * visible in their own lane (`agy.control`). Only the scrubbed response is
+   * stored; an answer identical to the tag's last one for that call is not
+   * stored again (agy repeats them on every start).
+   */
+  _recordControl(buf) {
+    const { store, broadcaster, instanceId, lanes } = this.ctx;
+    const ok = this.resStatus >= 200 && this.resStatus < 300;
+    const json = buf ? _json(buf) : null;
+    const name = this.path.split(':').pop();
+    const shown = json ? scrubControl(json) : (buf ? buf.toString('utf8').slice(0, 2000) : null);
+    const text = typeof shown === 'string' ? shown : JSON.stringify(shown, null, 2);
+    if (lanes) {
+      lanes.control = lanes.control || new Map();
+      const sig = `${this.resStatus}:${text}`;
+      if (lanes.control.get(name) === sig) return;
+      lanes.control.set(name, sig);
+    }
+    const now = Date.now();
+    const it = {
+      id: generateId(),
+      timestamp: this.startedAt,
+      endpoint: `https://${this.ctx.host}${this.path}`,
+      instanceId,
+      request: { model: name, messages: [] },
+      requestHeaders: this.reqHeaders,
+      translatedFrom: 'agy',
+      provider: 'agy',
+      credential: 'agy-subscription',
+      response: {
+        status: this.resStatus, headers: { ...this.resHeaders },
+        body: { type: 'message', role: 'assistant', model: name, content: [{ type: 'text', text: text || '' }], stop_reason: 'end_turn', usage: { input_tokens: 0, output_tokens: 0 } },
+        sseEvents: [],
+        ...(ok ? {} : { error: (json && json.error && json.error.message) || `HTTP ${this.resStatus}` }),
+      },
+      timing: { startedAt: this.startedAt, ttfb: null, duration: now - this.startedAt },
+      usage: null,
+      isStreaming: false,
+      status: ok ? 'complete' : 'error',
+      pricing: { ...ZERO_PRICING },
+      agy: { requestType: name, control: true },
+      subagent: { agentId: 'agy-cloudcode', agentType: 'agy-cloudcode', description: `Cloud Code ${name} (not a model call)` },
+    };
+    store.add(it);
+    store.save(it.id);
+    broadcaster.broadcast({ type: ok ? 'interaction:complete' : 'interaction:error', interaction: sanitizeForDashboard(it), interactionId: it.id, instanceId, error: it.response.error });
   }
 
   _finish() {
@@ -436,6 +525,8 @@ class AgyExchange {
         it.response.body = InteractionStore._reconstructBodyFromSSE(it.response.sseEvents);
         if (it.response.body) {
           it.response.body.usage = it.usage;
+          const md = it.response.sseEvents.filter(e => e.eventType === 'message_delta').pop();
+          if (md?.data?.delta?.stop_reason) it.response.body.stop_reason = md.data.delta.stop_reason;
           // The requested model stays the call's model; Google's modelVersion
           // (what served it) is a separate detail, never a replacement.
           it.response.body.model = it.request.model;
@@ -478,6 +569,6 @@ class AgyExchange {
 }
 
 module.exports = {
-  decodeAgyRequest, isSideCall, AgyResponseDecoder, AgyExchange, BodyReader, classifyPath,
+  decodeAgyRequest, isSideCall, scrubControl, AgyResponseDecoder, AgyExchange, BodyReader, classifyPath,
   ZERO_PRICING, TRACED_PATHS, HOOK_PATHS, IMAGE_INLINE_MAX,
 };

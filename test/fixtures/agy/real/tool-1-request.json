@@ -1,0 +1,163 @@
+{
+  "project": "test-project",
+  "requestId": "agent/00000000-0000-4000-8000-000000000001/1795457277479/00000000-0000-4000-8000-000000000002/1",
+  "request": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "<USER_REQUEST>\nCreate a file out.txt in the current directory containing the word done, using your file writing tool, then reply ok.\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-23T19:07:57+01:00.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Neon (Medium). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.\n</USER_SETTINGS_CHANGE>"
+          }
+        ]
+      }
+    ],
+    "systemInstruction": {
+      "role": "user",
+      "parts": [
+        {
+          "text": "<identity>\nYou are Antigravity, a powerful agentic AI assistant designed by the Google Deepmind team.\nYou are working with a USER to solve their task.\nThe USER will send you requests, which you must always prioritize addressing. User requests are enclosed within <USER_REQUEST> tags.\n</identity>\n<artifacts>\nArtifacts are special markdown (.md) documents that you can create to present structured information to the user.\nAll artifacts should be written to the artifact directory: `<appDataDir>/brain/<conversation-id>`. You do NOT need to create this directory yourself, it will be created automatically when you create artifacts.\n\n# When to Use Artifacts\n\n**Use artifacts for:**\n- Extensive reports and analysis summaries\n- Persistent information you'll update over time (task lists, experiment logs)\n\n**Don't use artifacts for:**\n- Simple one-off answers or very short paragraph content - just respond directly\n- Asking questions or requesting user input - just ask directly\n\n**After creating or updating an artifact**, DO NOT re-summarize the artifact contents in your response to the user. Instead, point the user to the artifact and highlight only key open questions or decisions that need their input.\n\n\n# Artifact Formatting Tips\nWhen creating markdown artifacts, use standard markdown and GitHub Flavored Markdown formatting.\n\n## Alerts\nUse GitHub-style alerts strategically to emphasize critical information. Do not place consecutively or nest:\n  > [!NOTE] Background context, implementation details, or explanations\n  > [!TIP] Performance optimizations, best practices, or efficiency suggestions\n  > [!IMPORTANT] Essential requirements, critical steps, or must-know information\n  > [!WARNING] Breaking changes, compatibility issues, or potential problems\n  > [!CAUTION] High-risk actions that could cause data loss or security vulnerabilities\n\n\n## Mermaid Diagrams\nCreate mermaid diagrams using fenced code blocks with language `mermaid` to visualize relationships, workflows, and architectures.\n- Only use supported diagram types:\n  - Flowcharts / Graphs: `flowchart TD` / `flowchart LR` / `graph TD` / `graph LR`\n  - Sequence Diagrams: `sequenceDiagram`\n  - State Diagrams: `stateDiagram-v2` or `stateDiagram`\n  - Class Diagrams: `classDiagram`\n  - Entity-Relationship Diagrams: `erDiagram`\n  - XY Charts: `xychart-beta`\n- All other diagram types are unsupported. For schedules, timelines, or roadmaps, use directed flowcharts (`flowchart LR` / `flowchart TD`) or Markdown tables instead\n[… truncated for the fixture]"
+        }
+      ]
+    },
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "name": "read_file",
+            "description": "Read the contents of a text, image, pdf, video, or audio file. Each read returns at most 800 lines or 46080 bytes.",
+            "parameters": {
+              "type": "OBJECT",
+              "properties": {
+                "ByteOffset": {
+                  "type": "INTEGER",
+                  "description": "Byte offset into the line range. Use to continue reading when content is truncated by the byte limit."
+                },
+                "EndLine": {
+                  "type": "INTEGER",
+                  "description": "End line to read (inclusive). Omit to read until the end of the file, within the per-read limits."
+                },
+                "Path": {
+                  "type": "STRING",
+                  "description": "The absolute path of the file to read."
+                },
+                "StartLine": {
+                  "type": "INTEGER",
+                  "description": "Start line to read (inclusive). Omit to read from the beginning of the file."
+                }
+              },
+              "required": [
+                "Path"
+              ]
+            }
+          },
+          {
+            "name": "run_command",
+            "description": "Execute a command in the workspace. Operating System: linux. Shell: bash. Each command runs in a new session (working directory changes and environment variables do not persist across calls). Commands that do not finish within the specified wait time continue running in the background as tasks; the system will notify you when they finish, so do not poll their status or set timers to check on them.",
+            "parameters": {
+              "type": "OBJECT",
+              "properties": {
+                "CommandLine": {
+                  "type": "STRING",
+                  "description": "The exact command line string to execute."
+                },
+                "IsDaemon": {
+                  "type": "BOOLEAN",
+                  "description": "Set to true for long-running support processes that are meant to keep running in the background indefinitely and are not expected to finish on their own (e.g., dev servers, file watchers, tunnels). Leave false (the default) for normal commands that are expected to terminate."
+                },
+                "WaitMsBeforeAsync": {
+                  "type": "INTEGER",
+                  "description": "Milliseconds to wait for the command to finish before backgrounding it (500 to 10000). Set to a larger value (e.g. 5000-10000) for commands expected to finish synchronously; set to 500 for commands intended to run in the background."
+                },
+                "toolSummary": {
+                  "type": "STRING",
+                  "description": "Brief 2-5 word noun phrase describing the command task. Capitalize like a sentence. Some examples: 'Git status check', 'Unit test execution', 'Package build', 'Dev server startup'."
+                }
+              },
+              "required": [
+                "CommandLine",
+                "toolSummary",
+                "WaitMsBeforeAsync"
+              ]
+            }
+          },
+          {
+            "name": "write_file",
+            "description": "Create a new file with the given contents, or append to an existing file when Append is true. Parent directories are created automatically. Fails if the file already exists unless Overwrite or Append is true. When creating an artifact, always provide ArtifactMetadata. When creating non-artifact files, do not provide it.",
+            "parameters": {
+              "type": "OBJECT",
+              "properties": {
+                "Append": {
+                  "type": "BOOLEAN",
+                  "description": "Whether to append Content to the end of the file (creating the file if it does not exist). Cannot be combined with Overwrite=true."
+                },
+                "ArtifactMetadata": {
+                  "type": "OBJECT",
+                  "description": "Metadata that defines artifact properties. ONLY provide when creating an artifact file in the artifact directory. Omit this field when creating non-artifact files.",
+                  "properties": {
+                    "RequestFeedback": {
+                      "type": "BOOLEAN",
+                      "description": "Whether to request user feedback on this artifact if its contents are executable (e.g., a plan). The user is given a 'Proceed' button to execute it."
+                    },
+                    "Summary": {
+                      "type": "STRING",
+                      "description": "Detailed multi-line summary of the artifact's contents and purpose."
+                    },
+                    "UserFacing": {
+                      "type": "BOOLEAN",
+                      "description": "Whether this artifact should be presented to the user."
+                    }
+                  },
+                  "required": [
+                    "Summary",
+                    "UserFacing",
+                    "RequestFeedback"
+                  ]
+                },
+                "Content": {
+                  "type": "STRING",
+                  "description": "The full contents to write to the file."
+                },
+                "Overwrite": {
+                  "type": "BOOLEAN",
+                  "description": "Whether to overwrite an existing file, replacing its entire contents."
+                },
+                "Path": {
+                  "type": "STRING",
+                  "description": "The absolute path of the file to create.",
+                  "minLength": "1"
+                }
+              },
+              "required": [
+                "Path",
+                "Content"
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "labels": {
+      "cascade_id": "00000000-0000-4000-8000-000000000001",
+      "last_step_index": "0",
+      "model_enum": "MODEL_PLACEHOLDER_M533",
+      "request_id": "00000000-0000-4000-8000-000000000002-0",
+      "root_cascade_id": "00000000-0000-4000-8000-000000000001",
+      "trajectory_id": "00000000-0000-4000-8000-000000000002",
+      "used_claude": "false",
+      "used_claude_conservative": "false",
+      "used_non_gemini_model": "false"
+    },
+    "generationConfig": {
+      "maxOutputTokens": 262144,
+      "thinkingConfig": {
+        "includeThoughts": true,
+        "thinkingLevel": "MEDIUM"
+      }
+    },
+    "sessionId": "1000000000000000001"
+  },
+  "model": "gemini-4-neon-medium",
+  "userAgent": "antigravity",
+  "requestType": "agent"
+}

@@ -278,7 +278,10 @@ class GeminiProvider extends BaseProvider {
   //                  signature) instead of dropping them; also skips the
   //                  server-side signature cache, which only the :3456 route needs
   //   cacheTokens  — report cachedContentTokenCount as cache_read_input_tokens,
-  //                  input as prompt − cached and output as total − prompt
+  //                  input as prompt − cached, output as total − prompt
+  //                  (candidates + thoughts, like Anthropic's output) and
+  //                  thoughtsTokenCount as reasoning_tokens (the part of
+  //                  output that was thinking)
   createStreamState(opts) {
     return {
       opts: opts || null,
@@ -339,6 +342,8 @@ class GeminiProvider extends BaseProvider {
         const out = um.totalTokenCount ? um.totalTokenCount - prompt
           : (um.candidatesTokenCount || 0) + (um.thoughtsTokenCount || 0);
         if (out > 0) ss.outputTokens = out;
+        // Each chunk's usageMetadata is the running total: the latest wins.
+        if (um.thoughtsTokenCount != null) ss.reasoningTokens = um.thoughtsTokenCount;
       } else {
         ss.inputTokens = um.promptTokenCount || ss.inputTokens;
         ss.outputTokens = um.candidatesTokenCount || ss.outputTokens;
@@ -487,7 +492,8 @@ class GeminiProvider extends BaseProvider {
       type: 'message_delta',
       delta: { stop_reason: ss.finishReason || 'end_turn', stop_sequence: null },
       usage: ss.opts?.cacheTokens
-        ? { input_tokens: ss.inputTokens, output_tokens: ss.outputTokens, cache_read_input_tokens: ss.cacheReadTokens }
+        ? { input_tokens: ss.inputTokens, output_tokens: ss.outputTokens, cache_read_input_tokens: ss.cacheReadTokens,
+            ...(ss.reasoningTokens ? { reasoning_tokens: ss.reasoningTokens } : {}) }
         : { input_tokens: ss.inputTokens, output_tokens: ss.outputTokens },
     }));
 

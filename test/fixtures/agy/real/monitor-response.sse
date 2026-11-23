@@ -1,0 +1,16 @@
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"The agent"}]}}],"usageMetadata":{"promptTokenCount":2508,"totalTokenCount":2510,"thoughtsTokenCount":2},"modelVersion":"gemini-3.5-flash-lite","responseId":"AYEEa6CoEpbm28oPscfX8A0"},"traceId":"ff7ea4e2a999a4ca","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":" is writing a simple text file \"out.txt\" with the content \"done\" in"}]}}],"usageMetadata":{"promptTokenCount":2508,"totalTokenCount":2528,"thoughtsTokenCount":20},"modelVersion":"gemini-3.5-flash-lite","responseId":"AYEEa6CoEpbm28oPscfX8A0"},"traceId":"ff7ea4e2a999a4ca","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":" `/tmp/agy-work1/out.txt`.\nThis is a standard file writing operation in a temporary directory,"}]}}],"usageMetadata":{"promptTokenCount":2508,"totalTokenCount":2553,"thoughtsTokenCount":45},"modelVersion":"gemini-3.5-flash-lite","responseId":"AYEEa6CoEpbm28oPscfX8A0"},"traceId":"ff7ea4e2a999a4ca","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":" which falls under routine tasks (editing/creating scratch files or notes).\nNo risk signals are present.\nSeverity:"}]}}],"usageMetadata":{"promptTokenCount":2508,"totalTokenCount":2577,"thoughtsTokenCount":69},"modelVersion":"gemini-3.5-flash-lite","responseId":"AYEEa6CoEpbm28oPscfX8A0"},"traceId":"ff7ea4e2a999a4ca","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":" 0\nConfidence: 10\nReason: \"\"\n"}]}}],"usageMetadata":{"promptTokenCount":2508,"totalTokenCount":2590,"thoughtsTokenCount":82},"modelVersion":"gemini-3.5-flash-lite","responseId":"AYEEa6CoEpbm28oPscfX8A0"},"traceId":"ff7ea4e2a999a4ca","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"```json\n{\"confidence\": 10, \"reason\":"}]}}],"usageMetadata":{"promptTokenCount":2508,"candidatesTokenCount":13,"totalTokenCount":2685,"thoughtsTokenCount":164},"modelVersion":"gemini-3.5-flash-lite","responseId":"AYEEa6CoEpbm28oPscfX8A0"},"traceId":"ff7ea4e2a999a4ca","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":" \"\", \"severity\": 0}\n```"}]}}],"usageMetadata":{"promptTokenCount":2508,"candidatesTokenCount":22,"totalTokenCount":2694,"thoughtsTokenCount":164},"modelVersion":"gemini-3.5-flash-lite","responseId":"AYEEa6CoEpbm28oPscfX8A0"},"traceId":"ff7ea4e2a999a4ca","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"U1lOVEhFVElDLVNJR05BVFVSRQ==","text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2508,"candidatesTokenCount":22,"totalTokenCount":2612,"thoughtsTokenCount":82},"modelVersion":"gemini-3.5-flash-lite","responseId":"AYEEa6CoEpbm28oPscfX8A0"},"traceId":"ff7ea4e2a999a4ca","metadata":{}}
+
