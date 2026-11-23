@@ -1,0 +1,52 @@
+{
+  "currentTier": {
+    "id": "free-tier",
+    "name": "Antigravity",
+    "description": "Gemini-powered code suggestions and chat in multiple IDEs",
+    "privacyNotice": {
+      "showNotice": true,
+      "noticeText": "[privacy notice text]"
+    },
+    "upgradeSubscriptionUri": "https://accounts.google.com/AccountChooser?Email=user%40example.com&continue=https%3A%2F%2Fone.google.com%2Fai",
+    "upgradeSubscriptionText": "Upgrade to get 1,500 model requests per day with Gemini CLI and Gemini Code Assist's agent mode with Google AI Pro.",
+    "upgradeSubscriptionType": "GOOGLE_ONE"
+  },
+  "allowedTiers": [
+    {
+      "id": "free-tier",
+      "name": "Antigravity",
+      "description": "Gemini-powered code suggestions and chat in multiple IDEs",
+      "privacyNotice": {
+        "showNotice": true,
+        "noticeText": "[privacy notice text]"
+      },
+      "isDefault": true
+    },
+    {
+      "id": "standard-tier",
+      "name": "Antigravity",
+      "description": "Unlimited coding assistant with the most powerful Gemini models",
+      "userDefinedCloudaicompanionProject": true,
+      "privacyNotice": {
+        "noticeText": "[privacy notice text]"
+      },
+      "usesGcpTos": true
+    }
+  ],
+  "cloudaicompanionProject": "test-project",
+  "gcpManaged": false,
+  "upgradeSubscriptionUri": "https://codeassist.google.com/upgrade",
+  "paidTier": {
+    "id": "g1-pro-tier",
+    "name": "Google AI Pro",
+    "description": "Google AI Pro",
+    "upgradeSubscriptionUri": "https://antigravity.google/g1-upgrade",
+    "upgradeSubscriptionText": "You can upgrade to a Google AI Ultra plan to receive higher rate limits.",
+    "availableCredits": [
+      {
+        "creditType": "GOOGLE_ONE_AI",
+        "minimumCreditAmountForUsage": "50"
+      }
+    ]
+  }
+}

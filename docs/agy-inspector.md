@@ -15,7 +15,7 @@ login: Vistaclair never reads, stores or reuses its token (`docs/agy-auth.md`).
 | passive HTTP/1.1 tee parser | `src/agy-h1-tee.js` |
 | envelope → Anthropic body, SSE decode, the interaction | `src/agy-trace.js` |
 | Gemini SSE options `{ keepThoughts, cacheTokens }` | `src/providers/gemini.js` (opt-in; the :3456 route passes none) |
-| tests, fixtures | `test/agy-mitm.test.js`, `test/agy-trace.test.js`, `test/fixtures/agy/` |
+| tests, fixtures | `test/agy-mitm.test.js`, `test/agy-trace.test.js`, `test/fixtures/agy/` (`real/`: redacted captures of agent turns, the safety monitor, loadCodeAssist and quota from agy 1.5.15) |
 
 ## API (for the agy worker engine)
 
@@ -132,7 +132,7 @@ rejects has opened a TLS session with Google that carries no request.
 | Path on a Cloud Code host | Use |
 |---|---|
 | `/v1internal:streamGenerateContent`, `/v1internal:generateContent` | one Inspector interaction each |
-| `/v1internal:loadCodeAssist`, `/v1internal:retrieveUserQuotaSummary` | response JSON → `onCloudCodeResponse` only |
+| `/v1internal:loadCodeAssist`, `/v1internal:retrieveUserQuotaSummary` | response JSON → `onCloudCodeResponse`, and a marked control interaction (below) |
 | anything else | relayed and framed; the body is not read |
 
 - **Request** (`decodeAgyRequest(envelope)`):
@@ -142,7 +142,14 @@ rejects has opened a TLS session with Google that carries no request.
   - `messages` from `contents`: text, thought → `thinking`, functionCall →
     `tool_use` (id = `functionCall.id` or `<name>-<turn>-<part>`),
     functionResponse → `tool_result` (matched by id, else by name in order),
-    inlineData → `image`.
+    inlineData → `image`. agy sends the tool results under role `model`; a
+    turn made only of functionResponse parts becomes a `user` turn, as in the
+    Anthropic shape.
+  - `generationConfig`: `maxOutputTokens` → `max_tokens`, `temperature` →
+    `temperature`, `thinkingConfig` → `thinking` (the "Thinking" section), the
+    rest → `generationConfig`. Cloud Code's envelope (`requestType`,
+    `requestId`, `sessionId`, `labels`, `userAgent`; never `project`) →
+    `agy`. Both show under "Other".
   - `inlineData` over 4 KB becomes `{ type:'image', placeholder:'<mime>, N bytes, sha256:…' }`.
   - `translatedBody` keeps the rest of the envelope (`project`, `requestId`,
     `requestType`, `labels`, `generationConfig`, `sessionId`).
@@ -162,7 +169,14 @@ rejects has opened a TLS session with Google that carries no request.
     kept apart as `interaction.agy.servedAs` (shown as "Served as" in the
     request info) and never replaces the requested model.
 - **Usage:** input = prompt − cached, `cache_read_input_tokens` = cached,
-  output = total − prompt.
+  output = total − prompt (candidates + thoughts, as Anthropic counts output),
+  `reasoning_tokens` = `thoughtsTokenCount` (the thinking part of output; the
+  tooltip and usage list show it). Each chunk's `usageMetadata` is the running
+  total, so the last one wins; `response.meta.usageMetadata` keeps it as sent.
+  `response.body.stop_reason` is the finish reason. The closing chunk's empty
+  text part is dropped, so no empty text block is shown. Google returns thought
+  text only on some calls: on others just a `thoughtSignature`, and then there
+  is a thinking token count but no thinking block.
 - **Pricing:** all zeros, plus `credential:'agy-subscription'` and
   `provider:'agy'`, so `toEntry` shows $0, not "no price".
 - **Live view:** `interaction:start` when the request is complete, `sse_event`
@@ -174,9 +188,20 @@ rejects has opened a TLS session with Google that carries no request.
   agentType }`. `agentType` is the `TypeName` of the `invoke_subagent` call
   seen just before, else `agy-subagent`. `requestType:'image_gen'` is labelled
   `image`.
-- **Side calls:** agy sends its own helper requests on the same connection
-  (the per-tool safety monitor runs on a flash-lite tier, in the agy log
-  `sir_flash_lite` / `MODEL_TIER_FLASH_LITE`). `isSideCall`: a `requestType`
+- **Control calls:** `loadCodeAssist` and `retrieveUserQuotaSummary` are stored
+  as `agy.control` interactions in the lane `agy-cloudcode` (the request info
+  says "Cloud Code call, not a model call"). Only the response is kept, scrubbed
+  by `scrubControl` (keys matching privacy, uri/url, project, email, token,
+  notice, credential or secret are dropped, long strings clipped), and an answer
+  identical to the tag's last one for that call is not stored again (agy asks on
+  every start). The quota answer shows the bucket fractions and reset times.
+- **Side calls:** agy sends its own helper requests on the same connection.
+  The per-tool safety monitor (agy log `sir_flash_lite` /
+  `MODEL_TIER_FLASH_LITE`) is `requestType: 'agent_monitoring'`, model
+  `gemini-3.5-flash-lite`, no tools, `requestId` `agent_monitoring/<uuid>`,
+  thinking level MINIMAL, and answers a JSON rating. It runs only for tools
+  outside agy's own allowlist (seen for `write_file`, not for `read_file` or
+  `ls`). `isSideCall`: a `requestType`
   other than `agent` / `image_gen`, a non-streaming call, or a request without
   tools. Such an interaction has `agy.side = true` and its own lane
   (`subagent.agentType = 'agy-side-call'`, the model in its description), and

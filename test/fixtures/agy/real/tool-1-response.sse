@@ -1,0 +1,6 @@
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"Initial attempt: Calling the file writing tool to create \"out.txt\" in the specified directory and populate it with the text \"done\". If successful, the next step is to reply \"ok\".\n\n\n"}]}}],"usageMetadata":{"promptTokenCount":8638,"totalTokenCount":8722,"thoughtsTokenCount":84},"modelVersion":"gemini-4-neon","responseId":"_YAEa9ehJL2d3boPycak8AU"},"traceId":"c501e770027ff0cf","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"U1lOVEhFVElDLVNJR05BVFVSRQ==","functionCall":{"name":"write_file","args":{"Overwrite":true,"Content":"done","Path":"/tmp/agy-work1/out.txt"},"id":"call_250000"}}]}}],"usageMetadata":{"promptTokenCount":8638,"candidatesTokenCount":36,"totalTokenCount":8758,"thoughtsTokenCount":84},"modelVersion":"gemini-4-neon","responseId":"_YAEa9ehJL2d3boPycak8AU"},"traceId":"c501e770027ff0cf","metadata":{}}
+
+data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8638,"candidatesTokenCount":39,"totalTokenCount":8761,"thoughtsTokenCount":84},"modelVersion":"gemini-4-neon","responseId":"_YAEa9ehJL2d3boPycak8AU"},"traceId":"c501e770027ff0cf","metadata":{}}
+

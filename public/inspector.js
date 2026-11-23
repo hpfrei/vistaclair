@@ -5174,6 +5174,7 @@
     let infoBody = `<div class="info-grid">
       <span class="info-label">Model</span><span class="info-value">${escHtml(req.model || 'unknown')}</span>
       ${interaction.agy?.servedAs ? `<span class="info-label">Served as</span><span class="info-value">${escHtml(interaction.agy.servedAs)}</span>` : ''}
+      ${interaction.agy?.control ? `<span class="info-label">Call</span><span class="info-value">agy Cloud Code call (${escHtml(interaction.agy.requestType)}), not a model call</span>` : ''}
       ${interaction.agy?.side ? `<span class="info-label">Call</span><span class="info-value">agy side call (${escHtml(interaction.agy.requestType || 'no requestType')}), not an agent turn</span>` : ''}
       <span class="info-label">Max tokens</span><span class="info-value">${escHtml(req.max_tokens || '--')}</span>
       <span class="info-label">Temperature</span><span class="info-value">${escHtml(req.temperature !== undefined ? req.temperature : '--')}</span>
