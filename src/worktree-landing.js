@@ -24,8 +24,12 @@
 //                        untracked directory is one entry, never recursed).
 //   changedFiles()       what a branch changes against its base, committed or not.
 //   land()               in the worktree `git rebase <base>`, the check, then
-//                        `git merge --no-ff` into the base. One landing per repo
-//                        at a time. Never --force, never reset.
+//                        `git merge --no-ff` into the base. Rebase and check run
+//                        outside the repo lock (landings check in parallel); the
+//                        merge is serial, and only when the base is where the
+//                        rebase put it, else round again. A tree that passed the
+//                        check in this process is not checked twice. Never
+//                        --force, never reset.
 //   teardown()           merged into the base and nothing real left: unlink the
 //                        links (never following one) and copies, `git worktree remove`,
 //                        `git branch -d`.
@@ -350,18 +354,28 @@ function inProgress(dir) {
   return null;
 }
 
-// --- Per-repo lock ---
+// --- Locks ---
 
-const locks = new Map();   // real repo path -> tail of its queue
+const locks = new Map();   // lock key -> tail of its queue
 
-function withRepoLock(repo, fn) {
-  let key = repo;
-  try { key = fs.realpathSync(repo); } catch {}
+function queued(key, fn) {
   const run = (locks.get(key) || Promise.resolve()).then(() => fn());
   const next = run.catch(() => {});
   locks.set(key, next);
   next.then(() => { if (locks.get(key) === next) locks.delete(key); });
   return run;
+}
+
+const realKey = (prefix, p) => {
+  let key = p;
+  try { key = fs.realpathSync(p); } catch {}
+  return `${prefix}:${key}`;
+};
+
+// The repo's lock: what changes the base (the merge, an undo) runs under it,
+// one at a time. A landing's rebase and check do not.
+function withRepoLock(repo, fn) {
+  return queued(realKey('repo', repo), fn);
 }
 
 // --- The check ---
@@ -422,7 +436,7 @@ function precheck({ repo, worktree, branch, base, links = [] }) {
 }
 
 // Land `branch` into `base`. Resolves { outcome, … }:
-//   landed          { preLandSha, mergeSha, head }
+//   landed          { preLandSha, mergeSha, head, checkReused? }
 //   nothing         no commit the base lacks
 //   dirty           { files }   uncommitted changes in the worktree
 //   link-committed  { files }   the branch commits a dependency link
@@ -433,53 +447,122 @@ function precheck({ repo, worktree, branch, base, links = [] }) {
 //   owner-dirty     { files, checkout }  uncommitted changes where the base is
 //                   checked out, to files the landing changes; nothing changed
 //   busy / error    { message }
+// `onStep(step)`: called as the landing moves on: rebase | check | queue (the
+// check is done, waiting for the repo lock) | merge.
+//
+// The rebase and the check run outside the repo lock, so landings of different
+// branches check in parallel; only the merge is serial. A base that moved since
+// the rebase sends the landing round again (rebase, check, merge), up to
+// LAND_ATTEMPTS times; the last round holds the lock throughout, so a landing
+// cannot be starved by the others. Two landings of one worktree never overlap.
 function land(opts) {
-  return withRepoLock(opts.repo, () => landNow(opts));
+  return queued(realKey('worktree', opts.worktree), () => landNow(opts));
 }
 
-async function landNow({ repo, worktree, branch, base, links = [], message, check = null, checkDir = null, manifest = null }) {
-  // The base can move while the check runs (the owner commits): rebase again.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const stop = precheck({ repo, worktree, branch, base, links });
-    if (stop) return stop;
-    if (manifest?.error) return { outcome: 'manifest-unreadable', file: manifest.file, error: manifest.error };
-    try {
-      git(worktree, ['rebase', '--no-autostash', base]);
-    } catch (e) {
-      let files = [];
-      try { files = git(worktree, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean); } catch {}
-      try { git(worktree, ['rebase', '--abort']); } catch {}
-      return { outcome: 'conflict', files, message: firstLine(e) };
-    }
-    if (check) {
-      const r = await runCheck(check, checkDir && fs.existsSync(checkDir) ? checkDir : worktree);
-      if (!r.ok) return { outcome: 'check-failed', output: r.output, code: r.code };
-    }
-    const tip = git(repo, ['rev-parse', `refs/heads/${base}`]);
-    const head = git(repo, ['rev-parse', `refs/heads/${branch}`]);
-    if (!isAncestor(repo, tip, head)) continue;
-    const checkout = checkoutOf(repo, base);
-    if (!checkout) {
-      // Not checked out anywhere: the same merge commit, without a working tree.
-      const tree = git(repo, ['rev-parse', `${head}^{tree}`]);
-      const mergeSha = git(repo, ['commit-tree', tree, '-p', tip, '-p', head, '-m', message]);
-      if (!gitOk(repo, ['update-ref', '-m', `merge ${branch}`, `refs/heads/${base}`, mergeSha, tip])) continue;
-      return { outcome: 'landed', preLandSha: tip, mergeSha, head };
-    }
-    const owner = ownerBlock(checkout, tip, head);
-    if (owner) return owner;
-    try {
-      git(checkout, ['merge', '--no-ff', '--no-edit', '-m', message, branch]);
-    } catch (e) {
-      // Ours half-done (it should not conflict after the rebase): undo it.
-      let mh = '';
-      try { mh = git(checkout, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']); } catch {}
-      if (mh === head) { try { git(checkout, ['merge', '--abort']); } catch {} }
-      return { outcome: 'error', message: `merge into ${base} failed: ${firstLine(e)}` };
-    }
-    return { outcome: 'landed', preLandSha: tip, mergeSha: git(checkout, ['rev-parse', 'HEAD']), head };
+const LAND_ATTEMPTS = 3;
+const MOVED = Symbol('moved');
+
+// Trees that passed their check in this process (never persisted, never a
+// worker's word): "<repo>\0<check>\0<check dir in the worktree>\0<tree sha>".
+// The merge makes exactly this tree, so a landing whose rebased tree is in
+// here (a re-report after the owner's changes blocked the merge) skips the run.
+const checkedTrees = new Set();
+const CHECKED_MAX = 500;
+
+function checkKey(repo, worktree, check, dir) {
+  try {
+    let r = repo;
+    try { r = fs.realpathSync(repo); } catch {}
+    return [r, check, path.relative(worktree, dir), git(worktree, ['rev-parse', 'HEAD^{tree}'])].join('\0');
+  } catch { return null; }
+}
+
+function rememberChecked(key) {
+  if (!key) return;
+  checkedTrees.add(key);
+  if (checkedTrees.size > CHECKED_MAX) checkedTrees.delete(checkedTrees.values().next().value);
+}
+
+// Everything before the merge, without the repo lock: the cheap checks, the
+// rebase, the check. { stop } ends the landing; else { head, checkReused }:
+// the branch tip that passed.
+async function prepare({ repo, worktree, branch, base, links = [], check = null, checkDir = null, manifest = null }, step) {
+  const stop = precheck({ repo, worktree, branch, base, links });
+  if (stop) return { stop };
+  if (manifest?.error) return { stop: { outcome: 'manifest-unreadable', file: manifest.file, error: manifest.error } };
+  step('rebase');
+  try {
+    git(worktree, ['rebase', '--no-autostash', base]);
+  } catch (e) {
+    let files = [];
+    try { files = git(worktree, ['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean); } catch {}
+    try { git(worktree, ['rebase', '--abort']); } catch {}
+    return { stop: { outcome: 'conflict', files, message: firstLine(e) } };
   }
-  return { outcome: 'error', message: `${base} kept moving during the landing` };
+  let checkReused = false;
+  if (check) {
+    const dir = checkDir && fs.existsSync(checkDir) ? checkDir : worktree;
+    const key = checkKey(repo, worktree, check, dir);
+    if (key && checkedTrees.has(key)) checkReused = true;
+    else {
+      step('check');
+      const r = await runCheck(check, dir);
+      if (!r.ok) return { stop: { outcome: 'check-failed', output: r.output, code: r.code } };
+      rememberChecked(key);
+    }
+  }
+  return { head: git(repo, ['rev-parse', `refs/heads/${branch}`]), checkReused };
+}
+
+// The merge, under the repo lock. MOVED: the base (or the branch) is not what
+// the check saw: the landing goes round again.
+function mergeNow({ repo, branch, base, message }, prepared) {
+  const tip = git(repo, ['rev-parse', `refs/heads/${base}`]);
+  const head = git(repo, ['rev-parse', `refs/heads/${branch}`]);
+  if (head !== prepared.head || !isAncestor(repo, tip, head)) return MOVED;
+  const reused = prepared.checkReused ? { checkReused: true } : {};
+  const checkout = checkoutOf(repo, base);
+  if (!checkout) {
+    // Not checked out anywhere: the same merge commit, without a working tree.
+    const tree = git(repo, ['rev-parse', `${head}^{tree}`]);
+    const mergeSha = git(repo, ['commit-tree', tree, '-p', tip, '-p', head, '-m', message]);
+    if (!gitOk(repo, ['update-ref', '-m', `merge ${branch}`, `refs/heads/${base}`, mergeSha, tip])) return MOVED;
+    return { outcome: 'landed', preLandSha: tip, mergeSha, head, ...reused };
+  }
+  const owner = ownerBlock(checkout, tip, head);
+  if (owner) return owner;
+  try {
+    git(checkout, ['merge', '--no-ff', '--no-edit', '-m', message, branch]);
+  } catch (e) {
+    // Ours half-done (it should not conflict after the rebase): undo it.
+    let mh = '';
+    try { mh = git(checkout, ['rev-parse', '-q', '--verify', 'MERGE_HEAD']); } catch {}
+    if (mh === head) { try { git(checkout, ['merge', '--abort']); } catch {} }
+    return { outcome: 'error', message: `merge into ${base} failed: ${firstLine(e)}` };
+  }
+  return { outcome: 'landed', preLandSha: tip, mergeSha: git(checkout, ['rev-parse', 'HEAD']), head, ...reused };
+}
+
+async function landNow(opts) {
+  const step = (s) => { try { opts.onStep?.(s); } catch {} };
+  for (let attempt = 0; attempt < LAND_ATTEMPTS; attempt++) {
+    let r;
+    if (attempt === LAND_ATTEMPTS - 1) {
+      r = await withRepoLock(opts.repo, async () => {
+        const p = await prepare(opts, step);
+        if (p.stop) return p.stop;
+        step('merge');
+        return mergeNow(opts, p);
+      });
+    } else {
+      const p = await prepare(opts, step);
+      if (p.stop) return p.stop;
+      step('queue');
+      r = await withRepoLock(opts.repo, () => { step('merge'); return mergeNow(opts, p); });
+    }
+    if (r !== MOVED) return r;
+  }
+  return { outcome: 'error', message: `${opts.base} kept moving during the landing` };
 }
 
 // Where the base is checked out: an operation in progress, or uncommitted

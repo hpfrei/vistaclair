@@ -164,12 +164,19 @@
   // A worktree worker's landing (describeRun's `landing`, src/landing-state.js)
   // as its box shows it: `chip` follows "done ·" on the report chip (with its
   // class `cls`), `line` is the line under the caption. null: none to show.
+  // " (check 1:42)": the step a landing is in and for how long (src/worktree-landing.js).
+  function stepText(l) {
+    const words = { rebase: 'rebasing', check: 'check', queue: 'waiting to merge', merge: 'merging' };
+    if (!words[l.step]) return '';
+    const s = l.stepAt ? Math.max(0, Math.round((Date.now() - Date.parse(l.stepAt)) / 1000)) : null;
+    return ` (${words[l.step]}${s == null || Number.isNaN(s) ? '' : ` ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`})`;
+  }
   function landingLabel(l) {
     if (!l) return null;
     const short = (x) => String(x || '').slice(0, 7);
     const base = l.base || 'its base';
     switch (l.state) {
-      case 'landing': return { chip: 'landing…', cls: 'landing', line: `landing on ${base}…`, tip: `Its branch is being rebased onto ${base}, checked and merged.` };
+      case 'landing': return { chip: 'landing…', cls: 'landing', line: `landing on ${base}${stepText(l)}…`, tip: `Its branch is being rebased onto ${base}, checked and merged.` };
       case 'landed': return l.undone
         ? { chip: 'landed, undone', cls: 'undone', line: `landed on ${base} as ${short(l.sha)}, undone by ${short(l.undone)}`, tip: `Merged into ${base} as ${l.sha}, then reverted by ${l.undone}.` }
         : { chip: 'landed', cls: 'landed', line: `landed on ${base} as ${short(l.sha)}`, tip: `Merged into ${base} as ${l.sha}.` };

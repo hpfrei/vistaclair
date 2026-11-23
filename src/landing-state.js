@@ -9,6 +9,8 @@
 //   state    landing | landed | not-landed | nothing (no new commits to land)
 //   current  it belongs to the worker's last report (false: reported since)
 //   undone   the revert's sha when undo_landing reverted it
+//   step, stepAt  while landing: the step it is in (rebase | check | queue | merge,
+//            src/worktree-landing.js onStep) and since when (ISO)
 // `inFlight` (true / false / undefined: unknown, as in a reader of run.json
 // without the server's jobs) says whether a landing job runs now; a recorded
 // `landing` with none running (a restart cut it off) reads not-landed.
@@ -18,7 +20,10 @@ function landingView(w, { inFlight, landings = [] } = {}) {
   const r = w.landingResult || null;
   const running = inFlight === undefined ? !!w.landing || r?.outcome === 'landing' : !!inFlight || !!w.landing;
   if (running) {
-    return { state: 'landing', base: w.base || r?.base || null, sha: null, reason: null, at: w.landing?.at || r?.at || null, current: true, undone: null };
+    return {
+      state: 'landing', base: w.base || r?.base || null, sha: null, reason: null, at: w.landing?.at || r?.at || null, current: true, undone: null,
+      ...(w.landing?.step ? { step: w.landing.step, stepAt: w.landing.stepAt || null } : {}),
+    };
   }
   if (!r) return null;
   const state = r.outcome === 'landed' ? 'landed' : r.outcome === 'nothing' ? 'nothing' : 'not-landed';

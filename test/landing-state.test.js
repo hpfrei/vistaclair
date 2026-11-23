@@ -18,6 +18,9 @@ const worker = (landingResult, extra = {}) => ({ branch: 'orch/r/w1', base: 'mai
 test('landingView: none for a worker without a branch or a landing yet', () => {
   assert.strictEqual(landingView({ lastReport: { status: 'done', at } }), null);
   assert.strictEqual(landingView(worker(undefined), { inFlight: false }), null);
+  assert.deepStrictEqual(
+    [landingView({ ...worker({ outcome: 'landing', report: at, at }), landing: { at, step: 'check', stepAt: at } }, { inFlight: true })].map(v => [v.step, v.stepAt]),
+    [['check', at]]);
 });
 
 test('landingView: landing (a job runs, or w.landing set), landed with sha and undo, not landed with its reason, nothing', () => {
@@ -57,6 +60,10 @@ test('worker box: the report chip says done · landed / landing… / not landed;
   assert.strictEqual(landingLabel(landed).line, 'landed on main as 2a2f67d');
   assert.deepStrictEqual({ ...reportChip(done, { state: 'landing', base: 'main', current: true }) }, { text: 'done · landing…', cls: 'sdk-report-landing' });
   assert.strictEqual(landingLabel({ state: 'landing', base: 'main' }).line, 'landing on main…');
+  // The step it is in and for how long.
+  assert.strictEqual(landingLabel({ state: 'landing', base: 'main', step: 'check', stepAt: new Date(Date.now() - 102000).toISOString() }).line, 'landing on main (check 1:42)…');
+  assert.strictEqual(landingLabel({ state: 'landing', base: 'main', step: 'queue', stepAt: new Date().toISOString() }).line, 'landing on main (waiting to merge 0:00)…');
+  assert.strictEqual(landingLabel({ state: 'landing', base: 'main', step: 'nonsense' }).line, 'landing on main…');
   const nl = { state: 'not-landed', base: 'main', reason: 'its branch conflicts with main in a.txt', current: true };
   assert.deepStrictEqual({ ...reportChip(done, nl) }, { text: 'done · not landed', cls: 'sdk-report-notlanded' });
   assert.strictEqual(landingLabel(nl).line, 'not landed: its branch conflicts with main in a.txt');

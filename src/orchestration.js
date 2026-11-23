@@ -2415,7 +2415,10 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // merges it --no-ff. What stops it goes back to the worker (and the
   // orchestrator hears it as an event); a landing is recorded in run.landings.
   // w.landing marks one in flight in run.json: a restart finds it there,
-  // aborts its rebase and reports it not landed (recoverLandings).
+  // aborts its rebase and reports it not landed (recoverLandings); its
+  // `step` / `stepAt` say what it is doing (rebase | check | queue | merge) and
+  // since when. Landings of different workers rebase and check in parallel
+  // (src/worktree-landing.js); a worker's own landings queue behind each other.
 
   const landingJobs = new Map();   // `${runId}/${workerId}` -> promise of the landing in flight
 
@@ -2583,9 +2586,19 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     landingEvent(run, w, parts, `not landed: ${n.event}.${told}`, 'not landed');
   }
 
+  // The step a landing is in, in run.json (the worker's box says it and for how long).
+  function landingStep(runDir, workerId, step) {
+    const run = loadRun(runDir);
+    const w = run?.workers.find(x => x.id === workerId);
+    if (!w?.landing) return;
+    w.landing.step = step;
+    w.landing.stepAt = new Date().toISOString();
+    saveRun(run);
+  }
+
   // A done report of a worktree worker: land its branch. The quick stops are
   // decided here (the report's answer says them); the rest runs in the
-  // background, one landing per repo at a time. The report and its landing
+  // background; only the merge into the base is one at a time. The report and its landing
   // are one event (`parts`: the report's); `evented` says this took it over.
   // Returns { note (the report's answer, or null), evented }.
   function startLanding(run, w, parts) {
@@ -2633,6 +2646,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
           check: cfg?.check || null,
           checkDir: cfg ? path.join(wt, path.relative(repo, cfg.dir)) : null,
           manifest: cfg?.error ? cfg : null,
+          onStep: (step) => landingStep(run.runDir, w.id, step),
         });
       } catch (e) {
         r = { outcome: 'error', message: String(e.message || e).split('\n')[0] };

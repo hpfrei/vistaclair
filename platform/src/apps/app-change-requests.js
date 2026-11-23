@@ -43,7 +43,7 @@ const OUTCOME_VERIFIED = 'verified';
 const OUTCOME_UNVERIFIED = 'unverified';
 // A tab that exits is only "gone" if nothing relaunched it: launchChangeSession's
 // APP.md pre-flight chains a second session onto the first one's exit.
-const RELAUNCH_GRACE_MS = 2000;
+let relaunchGraceMs = 2000;   // _internals.setRelaunchGraceMs: tests only
 const KEEP_TERMINAL = 20;
 const DEPTH_MIN = 1;
 const DEPTH_MAX = 3;
@@ -1369,7 +1369,7 @@ function onTabExit(tabId) {
     } catch (err) {
       console.warn('[change-requests] tab exit handling failed:', err.message);
     }
-  }, RELAUNCH_GRACE_MS).unref?.();
+  }, relaunchGraceMs).unref?.();
 }
 
 // --- the target session's system prompt ----------------------------------
@@ -1530,7 +1530,9 @@ module.exports = {
   SESSION_STAMPS: { app: STAMP_APP, request: STAMP_REQUEST, workspace: STAMP_WORKSPACE, workspaceDir: STAMP_WORKSPACE_DIR, remote: STAMP_REMOTE },
   _internals: {
     byId, active, maxDepth, verifyInterface, deliver, snapshotCapability, documentsToken,
-    sectionText, readCapability, TERMINAL, REPOLL_GRACE_MS, RELAUNCH_GRACE_MS, DEPTH_MIN, DEPTH_MAX,
+    sectionText, readCapability, TERMINAL, REPOLL_GRACE_MS, DEPTH_MIN, DEPTH_MAX,
     PLATFORM, PRO_TAB, PRO_TAB_PREFIX, STAMP_APP, STAMP_REQUEST,
+    get RELAUNCH_GRACE_MS() { return relaunchGraceMs; },
+    setRelaunchGraceMs(ms) { relaunchGraceMs = ms; },
   },
 };
