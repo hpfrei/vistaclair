@@ -1034,6 +1034,7 @@
       // The caption covers the whole session folder, not the page: the
       // server's totals over its transcript replace what the page counted.
       const t = page.totals;
+      if (t && typeof t.apiUsd === 'number') this.apiCost = t.apiUsd;
       if (t && typeof t.costUsd === 'number') this.setCost(t.costUsd);
       if (t && typeof t.compactions === 'number') this.compactions = t.compactions;
       else this.compactions = Math.max(compactions, this.compactions);
@@ -2282,6 +2283,7 @@
         // that ran in it): replace, never add. Only the toolbar adds,
         // across folders.
         const oc = costOf(run.orchestratorCost ?? run.cost);
+        if (typeof run.orchestratorApiCost === 'number') this.main.apiCost = run.orchestratorApiCost;
         if (oc != null) this.main.setCost(oc);
         if (run.orchestratorState) this.main.setState(run.orchestratorState);
         this.main.renderHeader();
@@ -2314,6 +2316,7 @@
         if (!a.model && w.model) a.model = w.model;
         const c = costOf(w.cost ?? w.costUsd);
         if (c != null) a.cost = c;
+        if (typeof w.apiCost === 'number') a.apiCost = w.apiCost;
         const derived = w.state
           || (w.running ? (w.live?.pausing ? 'pausing' : w.live?.busy ? 'busy' : null) : w.paused ? 'paused' : 'exited');
         if (derived && (w.state || !a.gotStatus || derived === 'exited' || derived === 'paused')) a.setState(derived);
@@ -2407,7 +2410,8 @@
         const chip = reportChip(r, a.landing);
         c.rep.textContent = r ? chip.text : 'none';
         c.rep.className = r ? `sdk-chip sdk-shelf-rep ${chip.cls}` : 'sdk-chip';
-        c.cost.textContent = fmtCost(a.cost);
+        c.cost.textContent = costCaption(a.cost, a.apiCost);
+        c.cost.title = a.apiCost > 0 ? API_NOTE : '';
         const lab = landingLabel(a.landing);
         c.el.title = `${a.label}\n${r ? `${r.status || 'report'}: ${r.summary || ''}` : 'No report.'}${lab ? `\n${a.landing.current ? '' : 'earlier report: '}${lab.line}` : ''}`;
         c.el.classList.toggle('open', this.openIds.has(a.sessId));
@@ -2889,7 +2893,12 @@
       if (info.status === 'exited') meta.push('exited');
       this.metaEl.textContent = meta.join(' · ');
       const costs = this.allAreas().map(a => a.cost).filter(c => typeof c === 'number');
-      this.costEl.textContent = costs.length ? `${fmtCost(costs.reduce((s, c) => s + c, 0))}${this.workers.size ? ' total' : ''}` : '';
+      // An agy member is billed $0; its API-equivalent cost adds as "≈ $X".
+      const api = this.allAreas().reduce((s, a) => s + (a.apiCost > 0 ? a.apiCost : 0), 0);
+      const total = costs.reduce((s, c) => s + c, 0);
+      const shown = api > 0 ? [total > 0 ? fmtCost(total) : '', `\u2248 ${fmtCost(api)}`].filter(Boolean).join(' + ') : costs.length ? fmtCost(total) : '';
+      this.costEl.textContent = shown ? `${shown}${this.workers.size ? ' total' : ''}` : '';
+      this.costEl.title = api > 0 ? API_NOTE : '';
       const running = info.status === 'running';
       const isWorkerTab = info.settings?.orchestration?.role === 'worker';
       this.pauseBtn.classList.toggle('hidden', isWorkerTab);
@@ -3209,6 +3218,7 @@
     _zoom: { step: stepZoom, get: () => _zoom, KEY: ZOOM_KEY, MIN: ZOOM_MIN, MAX: ZOOM_MAX },
     _Area: Area,
     _landing: { landingLabel, reportChip },
+    _cost: { costCaption, API_NOTE },
     _pick: { pickEntries, pickStep, pickKeyOf, pickIndexForKey, pickable, current: () => _pick },
   };
 })();
