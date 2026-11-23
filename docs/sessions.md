@@ -199,6 +199,13 @@ continues the other's. Its exit fires `addExitHook` like a PTY's; the APP.md
 follow-up takes `openCli`'s `engine` and `auth`. Commit pins
 `engine: 'cli'`.
 
+**agy engine** (`engine: 'agy'`, core `src/agy-session.js`): an orchestration
+worker on Google's Antigravity CLI (`launch_cli` `model: 'neon'`, or `engine:
+'agy'` with a `gemini-…` id), on the owner's Google subscription only. It is an
+SDK-kind session in the same panel, one `agy -p` process per turn, with the
+run's hooks fed as synthetic events. Worktree isolation only. See
+`docs/agy-workers.md`.
+
 **Sessions Pro opens on its own** (`launchChangeSession`, a platform change
 request) ask nobody at a form: `openCli` with the mode, `engine: 'sdk'` and
 `auth` given.

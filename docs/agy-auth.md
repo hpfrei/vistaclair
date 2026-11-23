@@ -77,6 +77,8 @@ with what the run printed.
 
 ## Not built
 
-- No agy runs yet: nothing calls `reportAgyAuthFailure`.
+- No Gemini API key or ADC path: agy runs (workers, `docs/agy-workers.md`) use
+  the subscription sign-in only, and their env drops `GEMINI_API_KEY`,
+  `GOOGLE_API_KEY`, `AGY_ADC_AUTH` and `GOOGLE_APPLICATION_CREDENTIALS`.
 - No account detail (email, plan): agy has no status output to read it from.
 - No keyring unlock from the dashboard.

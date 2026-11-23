@@ -396,6 +396,9 @@ function hasNew(repo, branch, base) {
   try { return Number(git(repo, ['rev-list', '--count', `refs/heads/${base}..refs/heads/${branch}`])) > 0; } catch { return false; }
 }
 
+// The per-worktree files an agy session writes (src/agy-worker-config.js AGENTS_FILES).
+const AGY_CONFIG_FILES = ['.agents/hooks.json', '.agents/mcp_config.json'];
+
 // The checks before any landing, without the lock: { outcome } when it stops
 // here, null when there is something to land.
 function precheck({ repo, worktree, branch, base, links = [] }) {
@@ -412,6 +415,9 @@ function precheck({ repo, worktree, branch, base, links = [] }) {
     ? gitRaw(repo, ['diff', '--name-only', '-z', `refs/heads/${base}...refs/heads/${branch}`, '--', ...links.map(l => posix(path.relative(worktree, l.path)))]).split('\0').filter(Boolean)
     : [];
   if (committed.length) return { outcome: 'link-committed', files: committed };
+  // An agy session's own config (src/agy-worker-config.js) never lands.
+  const agyFiles = gitRaw(repo, ['diff', '--name-only', '-z', `refs/heads/${base}...refs/heads/${branch}`, '--', ...AGY_CONFIG_FILES]).split('\0').filter(Boolean);
+  if (agyFiles.length) return { outcome: 'error', message: `the branch commits agy session config (${agyFiles.join(', ')}): remove it from the branch (git rm --cached) and commit`, files: agyFiles };
   return null;
 }
 

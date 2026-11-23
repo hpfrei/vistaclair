@@ -555,7 +555,7 @@ test('launch_cli strict: an unknown parameter is refused with the parameter list
   const { orch, orchSession, run } = await openOrchestrator(t, { isolation: 'none' });
   const iid = orchSession.instanceId;
   const bad = await viaRouter(orch, '/launch', { instanceId: iid, name: 'train', task: 'x', model: 'opus', isolation: 'none' });
-  assert.match(bad.error, /^unknown parameter "name" — launch_cli takes: title \(short name, required\), task \(full brief, required\), model \(fable \| opus \| sonnet \| haiku\), isolation \(worktree \| none\), area \(.+\), after \(.+\), cwd \(.+\), tools \(.+\), host \(.+\), app \(.+\)$/);
+  assert.match(bad.error, /^unknown parameter "name" — launch_cli takes: title \(short name, required\), task \(full brief, required\), model \(fable \| opus \| sonnet \| haiku \| neon \(or, with engine agy, an agy gemini-… id\)\), engine \(.+\), isolation \(worktree \| none\), area \(.+\), after \(.+\), cwd \(.+\), tools \(.+\), host \(.+\), app \(.+\)$/);
   const two = await viaRouter(orch, '/launch', { instanceId: iid, title: 't', prompt: 'x', subagent_type: 'coder' });
   assert.match(two.error, /^unknown parameters "prompt", "subagent_type" — launch_cli takes: title/);
   assert.strictEqual(run().workers.length, 0, 'nothing launched');
@@ -2109,7 +2109,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     const port = server.address().port;
     const plain = await list(port);
     const props = (tools, name) => Object.keys(tools.find(t => t.name === name).inputSchema.properties);
-    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'closeWhenDone', 'profile', 'connectors', 'skills']);
+    assert.deepStrictEqual(props(plain, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'engine', 'after', 'closeWhenDone', 'profile', 'connectors', 'skills']);
     assert.deepStrictEqual(props(plain, 'resume_worker'), ['worker', 'mode', 'message']);
     // No dashboard at all: the same schemas.
     const closed = http.createServer();
@@ -2123,7 +2123,7 @@ test('the orchestrator MCP lists the tools parameter only when the dashboard off
     params = setup().orch.toolParams().params;
     clearPacks();
     const granted = await list(port);
-    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'after', 'closeWhenDone', 'profile', 'connectors', 'skills', 'tools']);
+    assert.deepStrictEqual(props(granted, 'launch_cli'), ['title', 'task', 'cwd', 'isolation', 'area', 'model', 'engine', 'after', 'closeWhenDone', 'profile', 'connectors', 'skills', 'tools']);
     assert.deepStrictEqual(props(granted, 'resume_worker'), ['worker', 'mode', 'message', 'tools']);
     assert.deepStrictEqual(granted.find(t => t.name === 'launch_cli').inputSchema.required, ['title', 'task']);
     assert.deepStrictEqual(granted.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)), plain.filter(t => !['launch_cli', 'resume_worker'].includes(t.name)));
@@ -4128,8 +4128,9 @@ test('launch_cli closeWhenDone without a worktree: closed on a done report once 
 test('the cards: "hard" marks a sub-task, defects go back to their author, early objection, output discipline; length budget', () => {
   const { orchestratorCard, workerCard, WORKER_AGENTS } = require('../src/orchestration');
   const run = { runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run' };
-  // Lengths of the cards before this change (+600 chars allowed).
-  const oldOrch = { worktree: 6724, none: 6284 };
+  // Lengths of the cards before this change (+600 chars allowed); +120 for
+  // the neon (agy worker) sentence of group D.
+  const oldOrch = { worktree: 6844, none: 6404 };
   const oldWorker = { branch: 4142, shared: 3799 };
   for (const isolation of ['worktree', 'none']) {
     const o = orchestratorCard({ ...run, isolation });

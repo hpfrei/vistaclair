@@ -47,6 +47,7 @@ const ENDPOINTS = [
   ['session', 'POST', CR],
   ['session', 'POST', '/pro/apps/deps/depend'],
   ['run', 'POST', '/api/orchestration/hook'],
+  ['run', 'POST', '/api/orchestration/agy-hook'],
   ...['report', 'send-message', 'list-agents'].map(n => ['worker', O(n).method, O(n).path]),
   ...['launch', 'cancel-launch', 'workers', 'end', 'undo-landing', 'resume-worker', 'close-worker', 'stop-worker',
     'owner-items', 'tool-params', 'send-message', 'list-agents'].map(n => ['orchestrator', O(n).method, O(n).path]),
