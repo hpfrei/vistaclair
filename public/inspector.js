@@ -340,7 +340,7 @@
   const _KIND_TAG = { app: 'ai.prompt', ext: 'external' };
 
   // The meta row shared by both cards: activity, usage, cost, tokens, model.
-  function _metaHtml({ lastAt, turns, apiCalls, cost, tokensIn, tokensOut, model, lead = '' }) {
+  function _metaHtml({ lastAt, turns, apiCalls, cost, apiEquivalent, tokensIn, tokensOut, model, lead = '' }) {
     const SC = window.sessionCards;
     const n = turns || apiCalls || 0;
     const unit = turns ? 'turn' : 'API call';
@@ -350,7 +350,9 @@
     return [
       SC.timeHtml(lastAt), lead,
       `<span>${n.toLocaleString()} ${unit}${n !== 1 ? 's' : ''}</span>`,
-      cost != null ? `<span class="sc-cost" title="Cost so far">${formatCost(cost)}</span>` : '',
+      cost != null ? (apiEquivalent
+        ? `<span class="sc-cost" title="${escHtml(API_NOTE)}">\u2248 ${formatCost(cost)}</span>`
+        : `<span class="sc-cost" title="Cost so far">${formatCost(cost)}</span>`) : '',
       tok,
       model ? `<span class="sc-chip">${escHtml(model)}</span>` : '',
     ].filter(Boolean).join('');
@@ -387,6 +389,7 @@
     const running = workers.filter(m => m.status !== 'inactive').length;
     const total = info.workers ?? workers.length;
     let turns = 0, apiCalls = 0, cost = null, tokensIn = 0, tokensOut = 0;
+    const apiEquivalent = members.some(m => m.apiEquivalent);
     for (const m of members) {
       turns += m.turns || 0;
       apiCalls += m.apiCalls || 0;
@@ -406,8 +409,8 @@
         name: m.orchestration.role === 'orchestrator' ? `${label} (earlier orchestrator)` : label.startsWith(prefix) ? label.slice(prefix.length) : label,
         state: _statusOf(m),
         detail: [`${n} ${m.turns ? 'turn' : 'call'}${n !== 1 ? 's' : ''}`, SC.relTime(m.lastAt)].filter(Boolean).join(' · '),
-        aside: m.cost != null ? formatCost(m.cost) : '',
-        title: [label, m.cwd, m.cost != null ? `cost so far ${formatCost(m.cost)}` : '', 'Open this session\'s Inspector tab'].filter(Boolean).join('\n'),
+        aside: m.cost != null ? (m.apiEquivalent ? '\u2248 ' : '') + formatCost(m.cost) : '',
+        title: [label, m.cwd, m.cost != null ? (m.apiEquivalent ? `API-equivalent cost so far \u2248 ${formatCost(m.cost)} (billed $0)` : `cost so far ${formatCost(m.cost)}`) : '', 'Open this session\'s Inspector tab'].filter(Boolean).join('\n'),
         attrs: `data-instance-id="${escHtml(m.instanceId)}"`,
       };
     });
@@ -419,7 +422,7 @@
         icon: '\u{1F9ED}', iconTitle: `Orchestration run ${runId}`, name, status, subTitle: cwd || null,
         sub: [cwd ? SC.dirHtml(cwd) : '', `run ${escHtml(runId)}`].filter(Boolean).join(' · '),
       })
-      + `<span class="sc-meta">${_metaHtml({ lastAt, turns, apiCalls, cost, tokensIn, tokensOut, model: head.model, lead: workersHtml })}</span>`
+      + `<span class="sc-meta">${_metaHtml({ lastAt, turns, apiCalls, cost, apiEquivalent, tokensIn, tokensOut, model: head.model, lead: workersHtml })}</span>`
       + '</button>'
       + SC.workerList(rows, rows.length ? 'Workers' : '')
       + '</div>';
@@ -1665,18 +1668,19 @@
     const label = _laneLabel(lane);
     _setText(lane.el.querySelector('.ln-label'), label);
     _setText(lane.el.querySelector('.ln-rail-label'), label);
-    let out = 0, cost = 0, priced = false, model = '', live = false;
+    let out = 0, cost = 0, priced = false, model = '', live = false, apiEq = false;
     for (const id of lane.ids) {
       const i = v.byId.get(id);
       if (!i) continue;
       out += i.usage?.output_tokens || 0;
       const c = computeCost(i.usage, i.pricing);
-      if (c != null) { cost += c; priced = true; }
+      if (c != null) { cost += c; priced = true; if (i.pricing?.apiEquivalent) apiEq = true; }
       if (i.request?.model) model = i.request.model;
       if (_isLiveInteraction(i)) live = true;
     }
     _setText(lane.el.querySelector('.ln-model'), _shortModel(model));
-    _setText(lane.el.querySelector('.ln-stats'), out ? `\u2193${_fmtTok(out)}${priced ? ' \u00B7 ' + formatCost(cost) : ''}` : '');
+    _setText(lane.el.querySelector('.ln-stats'), out ? `\u2193${_fmtTok(out)}${priced ? ' \u00B7 ' + (apiEq ? '\u2248 ' : '') + formatCost(cost) : ''}` : '');
+    lane.el.querySelector('.ln-stats')?.setAttribute('title', apiEq ? API_NOTE : '');
     lane.el.classList.toggle('is-live', live);
     lane.empty.hidden = lane.ids.length > 0;
   }
@@ -1928,7 +1932,7 @@
     const live = _isLiveInteraction(i);
     _setHtml(tv.el.querySelector('.ln-sep-dur'), live ? 'live'
       : (i.timing?.duration != null ? durationText(i.timing.duration) : ''));
-    _setHtml(tv.el.querySelector('.ln-sep-cost'), costText(computeCost(i.usage, i.pricing)));
+    _setHtml(tv.el.querySelector('.ln-sep-cost'), costText(computeCost(i.usage, i.pricing), i.pricing));
     const use = tv.el.querySelector('.ln-sep-use');
     const u = LANES.usageLine(i.usage);
     const html = u ? u.parts.map(p => `<span class="ln-use-${p.kind}">${escHtml(p.text)}</span>`).join('') : '';
@@ -2837,7 +2841,7 @@
         <span class="entry-model" data-model="${interaction.id}"><span class="entry-model-label" title="${escHtml(model)}">${escHtml(shortModel)}</span></span>
         ${stepChip}${subagentTag}
         <span class="entry-duration" data-duration="${interaction.id}">${durationHtml}</span>
-        <span class="entry-cost" data-costgauge="${interaction.id}">${costText(cost)}</span>
+        <span class="entry-cost" data-costgauge="${interaction.id}">${costText(cost, interaction.pricing)}</span>
         <span class="entry-badge ${statusClass}" data-badge="${interaction.id}">${status}</span>
       </div>
     `;
@@ -4247,7 +4251,8 @@
       const cCw = part(u.cache_creation_input_tokens, pr.cacheCreateCostPerMTok || pr.inputCostPerMTok);
       const cCr = part(u.cache_read_input_tokens, pr.cacheReadCostPerMTok || pr.inputCostPerMTok);
       cost = '<div class="tt-sec">'
-        + _tipRow('cost', formatCost(total), 'tt-hi')
+        + _tipRow(pr.apiEquivalent ? 'API-equivalent' : 'cost', (pr.apiEquivalent ? '\u2248 ' : '') + formatCost(total), 'tt-hi')
+        + (pr.apiEquivalent ? _tipRow('billed', '$0 (Google AI subscription)') : '')
         + _tipRow('input', formatCost(cIn))
         + _tipRow('output', formatCost(cOut))
         + (cCw ? _tipRow('cache write', formatCost(cCw)) : '')
@@ -4433,7 +4438,7 @@
     const costEl = _v.root.querySelector(`[data-costgauge="${interaction.id}"]`);
     if (costEl) {
       const cost = computeCost(interaction.usage, interaction.pricing);
-      costEl.innerHTML = costText(cost);
+      costEl.innerHTML = costText(cost, interaction.pricing);
     }
     updateUserTurnTotals();
   }
@@ -4443,7 +4448,7 @@
     _v.el.timelineList.querySelectorAll('.user-turn-total').forEach(el => el.remove());
 
     const children = [..._v.el.timelineList.children];
-    let sectionCost = 0;
+    let sectionCost = 0, sectionApi = false;
     let lastGroupInSection = null;
 
     for (let i = 0; i < children.length; i++) {
@@ -4453,27 +4458,28 @@
       const isNewSection = el.classList.contains('new-user-turn') && lastGroupInSection;
       if (isNewSection) {
         // Close previous section
-        insertTurnTotal(lastGroupInSection, sectionCost);
-        sectionCost = 0;
+        insertTurnTotal(lastGroupInSection, sectionCost, sectionApi);
+        sectionCost = 0; sectionApi = false;
       }
 
       const turnId = el.dataset.turnId;
       const interaction = _v.items.find(it => it.id === turnId);
       if (interaction) {
         const cost = computeCost(interaction.usage, interaction.pricing);
-        if (cost != null) sectionCost += cost;
+        if (cost != null) { sectionCost += cost; if (interaction.pricing?.apiEquivalent) sectionApi = true; }
       }
       lastGroupInSection = el;
     }
     // Close final section
-    if (lastGroupInSection) insertTurnTotal(lastGroupInSection, sectionCost);
+    if (lastGroupInSection) insertTurnTotal(lastGroupInSection, sectionCost, sectionApi);
   }
 
-  function insertTurnTotal(afterEl, cost) {
+  function insertTurnTotal(afterEl, cost, apiEq) {
     if (!cost) return;
     const el = document.createElement('div');
     el.className = 'user-turn-total';
-    el.innerHTML = `\u03A3 ${formatCost(cost)}`;
+    el.innerHTML = `\u03A3 ${apiEq ? '\u2248 ' : ''}${formatCost(cost)}`;
+    if (apiEq) el.title = API_NOTE;
     afterEl.after(el);
   }
 
@@ -6183,8 +6189,9 @@
     return `<span class="entry-duration-label" style="color:${_gaugeColor(_durationPct(ms))}">${formatDuration(ms)}</span>`;
   }
 
-  function costText(cost) {
+  function costText(cost, pricing) {
     if (cost == null) return '';
+    if (pricing?.apiEquivalent) return `<span class="entry-cost-label" title="${escHtml(API_NOTE)}" style="color:${_gaugeColor(_costPct(cost))}">\u2248 ${formatCost(cost)}</span>`;
     return `<span class="entry-cost-label" style="color:${_gaugeColor(_costPct(cost))}">${formatCost(cost)}</span>`;
   }
 
@@ -6213,6 +6220,9 @@
   }
 
   function formatCost(cost) { return window.sessionCards.formatCost(cost); }
+  // An agy call is billed $0 (the Google AI subscription); its pricing carries
+  // Google's API list rates with apiEquivalent:true, shown as "\u2248 $X".
+  const API_NOTE = 'API-equivalent: what this would cost at Google\'s API list prices. Billed: $0 (the Google AI subscription pays).';
 
   function renderUsage(usage, pricing) {
     let html = '';
@@ -6228,7 +6238,9 @@
       html += `<div class="usage-item"><span class="usage-dot reasoning"></span>${escHtml(usage.reasoning_tokens.toLocaleString())} reasoning</div>`;
     const cost = computeCost(usage, pricing);
     if (cost != null)
-      html += `<div class="usage-item usage-cost">${formatCost(cost)}</div>`;
+      html += pricing?.apiEquivalent
+        ? `<div class="usage-item usage-cost" title="${escHtml(API_NOTE)}">\u2248 ${formatCost(cost)} at API prices \u00B7 billed $0</div>`
+        : `<div class="usage-item usage-cost">${formatCost(cost)}</div>`;
     return html;
   }
 
@@ -6237,14 +6249,14 @@
     if (bar) bar.innerHTML = renderUsage(usage, pricing);
   }
 
-  function costGauge(cost) {
+  function costGauge(cost, apiEq) {
     const pct = Math.min(cost / 100, 1);
     const w = 40, h = 10, fill = pct * w;
     const hue = Math.round((1 - pct) * 120);
     const sat = pct > 0.9 ? '80%' : '70%';
     const lit = pct > 0.9 ? '30%' : '45%';
     const color = `hsl(${hue},${sat},${lit})`;
-    return `<span class="footer-cost-gauge"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" rx="2" fill="var(--bg)" stroke="var(--border)" stroke-width="0.5"/><rect width="${fill}" height="${h}" rx="2" fill="${color}"/></svg><span class="footer-cost-label" style="color:${color}">${formatCost(cost)}</span></span>`;
+    return `<span class="footer-cost-gauge"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" rx="2" fill="var(--bg)" stroke="var(--border)" stroke-width="0.5"/><rect width="${fill}" height="${h}" rx="2" fill="${color}"/></svg><span class="footer-cost-label" style="color:${color}">${apiEq ? '\u2248 ' : ''}${formatCost(cost)}</span></span>`;
   }
 
   /* A CLI tab's footer and \u03a3 figures cover every turn of its session, not
@@ -6302,7 +6314,7 @@
     if (!page && !own) return;
     const source = v ? v.items : [];
     let inputTokens = 0, outputTokens = 0, cacheRead = 0, cacheCreate = 0, toolCallCount = 0, totalCost = 0;
-    let hasCost = false;
+    let hasCost = false, apiEq = false;
     const sess = v ? _sessionTotalsOf(v.instanceId) : null;
     // Without the server's figures, the turns held here add up to the
     // session's only when they are all of them (no older page, not loading);
@@ -6312,6 +6324,7 @@
     if (sess) {
       ({ toolCalls: toolCallCount, inputTokens, outputTokens, cacheRead, cacheCreate, hasCost } = sess);
       totalCost = sess.cost;
+      apiEq = !!sess.apiEquivalent;
     } else if (!waiting) {
       for (const i of source) {
         if (i.usage) {
@@ -6320,7 +6333,7 @@
           cacheRead += i.usage.cache_read_input_tokens || 0;
           cacheCreate += i.usage.cache_creation_input_tokens || 0;
           const cost = computeCost(i.usage, i.pricing);
-          if (cost != null) { totalCost += cost; hasCost = true; }
+          if (cost != null) { totalCost += cost; hasCost = true; if (i.pricing?.apiEquivalent) apiEq = true; }
         }
         toolCallCount += extractToolCalls(i).length;
       }
@@ -6376,8 +6389,8 @@
       // Footer cost section with gauge
       const costEl = document.getElementById('footerCost');
       if (costEl) {
-        costEl.innerHTML = hasCost ? costGauge(totalCost) : '<span class="footer-placeholder">price</span>';
-        costEl.title = scanNote;
+        costEl.innerHTML = hasCost ? costGauge(totalCost, apiEq) : '<span class="footer-placeholder">price</span>';
+        costEl.title = apiEq ? `${API_NOTE} ${scanNote}` : scanNote;
       }
     }
 
@@ -6394,7 +6407,7 @@
     } else if (!waiting) {
       for (const i of source) {
         const c = computeCost(i.usage, i.pricing);
-        if (c != null) { visibleCost += c; hasVisibleCost = true; }
+        if (c != null) { visibleCost += c; hasVisibleCost = true; if (i.pricing?.apiEquivalent) apiEq = true; }
         if (i.timing?.duration) { visibleTime += i.timing.duration; hasVisibleTime = true; }
       }
     }
@@ -6406,8 +6419,8 @@
         : '';
     }
     if (tlCostEl) {
-      tlCostEl.textContent = hasVisibleCost ? `${approx}\u03A3 ${formatCost(visibleCost)}` : '';
-      tlCostEl.title = scanNote;
+      tlCostEl.textContent = hasVisibleCost ? `${approx}\u03A3 ${apiEq ? '\u2248 ' : ''}${formatCost(visibleCost)}` : '';
+      tlCostEl.title = apiEq ? `${API_NOTE} ${scanNote}` : scanNote;
     }
   }
 

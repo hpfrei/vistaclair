@@ -119,6 +119,10 @@
   const oneLine = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
   const fmtCost = (usd) => typeof usd === 'number' && isFinite(usd)
     ? `$${usd < 0.1 ? usd.toFixed(3) : usd.toFixed(2)}` : '';
+  // The caption's cost. An agy session is billed $0 (the Google AI subscription);
+  // its calls at Google's API list prices show as "≈ $X" with the billed note.
+  const API_NOTE = 'API-equivalent: what these calls would cost at Google\'s API list prices. Billed: $0 (the Google AI subscription pays).';
+  const costCaption = (billed, api) => (api > 0 && !(billed > 0)) ? `\u2248 ${fmtCost(api)}` : fmtCost(billed);
   const fmtSecs = (ms) => ms >= 60000 ? `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s` : `${(ms / 1000).toFixed(1)}s`;
   const fmtAgo = (ms) => ms < 60000 ? `${Math.max(0, Math.floor(ms / 1000))}s` : ms < 3600000 ? `${Math.floor(ms / 60000)}m`
     : ms < 86400000 ? `${Math.floor(ms / 3600000)}h` : `${Math.floor(ms / 86400000)}d`;
@@ -408,6 +412,7 @@
       this.state = null;
       this.gotStatus = false;
       this.cost = null;
+      this.apiCost = 0;              // agy: API-equivalent USD (the billed cost stays 0)
       this.lastReport = null;
       this.lastActivityAt = null;    // ms: a worker's last sign of work (describeRun)
       this.idleSince = null;         // ms: when this box last saw it go idle
@@ -727,8 +732,8 @@
       // The last report heads the TODO table once ended, or when there is no TODO.
       this.finalEl.classList.toggle('hidden', !(r?.summary && (ended || !this.todo?.rows?.length)));
       if (r?.summary) this.finalEl.textContent = `${r.superseded ? 'earlier ' : ''}${r.status || 'report'}: ${r.summary}`;
-      this.costEl.textContent = fmtCost(this.cost);
-      this.costEl.title = this.credential ? `Billed to ${BILL_TEXT[authOf(this.credential)]}` : '';
+      this.costEl.textContent = costCaption(this.cost, this.apiCost);
+      this.costEl.title = this.apiCost > 0 ? API_NOTE : this.credential ? `Billed to ${BILL_TEXT[authOf(this.credential)]}` : '';
       this.renderBill();
       const m = this.shownModel();
       this.modelBtn.textContent = m ? `${fmtModel(m)}${this.mappedTo ? ` → ${fmtModel(this.mappedTo)}` : ''} ▾` : 'model ▾';
@@ -911,7 +916,7 @@
       set(h.ctx, ctx ? `ctx ${ctx}` : '', this.ctxEl.title);
       h.ctx.classList.toggle('hot', this.ctxEl.classList.contains('hot'));
       h.ctx.classList.toggle('warm', this.ctxEl.classList.contains('warm'));
-      set(h.cost, fmtCost(this.cost), this.costEl.title);
+      set(h.cost, costCaption(this.cost, this.apiCost), this.costEl.title);
     }
 
     // ---- TODO.md / NOTES.md ----
@@ -1239,6 +1244,7 @@
 
     applyStatus(p) {
       this.gotStatus = true;
+      if (typeof p.apiUsd === 'number') this.apiCost = p.apiUsd;
       if (typeof p.costUsd === 'number') this.setCost(p.costUsd);
       if (p.model !== undefined) { this.model = p.model || null; this._modelBefore = undefined; }
       if (p.actualModel !== undefined) this.actualModel = p.actualModel || null;

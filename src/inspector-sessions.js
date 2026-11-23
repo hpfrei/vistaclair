@@ -115,7 +115,7 @@ class InspectorSessions {
         instanceId, kind: kindOf(instanceId),
         label: null, cwd: null, model: null, sessId: null,
         firstAt: at || Date.now(), lastAt: at || Date.now(),
-        turns: 0, apiCalls: 0, cost: 0, hasCost: false, tokensIn: 0, tokensOut: 0,
+        turns: 0, apiCalls: 0, cost: 0, hasCost: false, apiEquivalent: false, tokensIn: 0, tokensOut: 0,
         totals: null, inflight: new Set(),
       };
       if (rec.kind === 'cli') {
@@ -188,7 +188,7 @@ class InspectorSessions {
             rec.tokensIn += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
             rec.tokensOut += u.output_tokens || 0;
             const cost = toEntry(0, { usage: i.usage, pricing: i.pricing, model: i.request?.model }, this.getPricing)[8];
-            if (cost != null) { rec.cost += cost; rec.hasCost = true; }
+            if (cost != null) { rec.cost += cost; rec.hasCost = true; if (i.pricing?.apiEquivalent) rec.apiEquivalent = true; }
           }
         }
         this._changed();
@@ -319,6 +319,8 @@ class InspectorSessions {
         turns: t ? t.turns : rec.turns,
         apiCalls: t ? t.apiCalls : rec.apiCalls,
         cost: t ? (t.hasCost ? t.cost : null) : (rec.hasCost ? rec.cost : null),
+        // The cost is the API list price of calls billed $0 (agy), not a bill.
+        apiEquivalent: t ? !!t.apiEquivalent : rec.apiEquivalent,
         // Tokens in (cache reads and writes included) and out; null before any.
         tokensIn: t ? (t.inputTokens || 0) + (t.cacheRead || 0) + (t.cacheCreate || 0) || null : rec.tokensIn || null,
         tokensOut: t ? t.outputTokens || null : rec.tokensOut || null,
