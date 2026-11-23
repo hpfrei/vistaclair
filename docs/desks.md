@@ -150,6 +150,13 @@ kind's own parts.
 - For CLIs, `extraMenuItems` gives what the × menu gives: Close, Close and
   remove interaction, and every add-on action from
   `dashboard.registerTabAction`.
+  Close and remove interaction (`cli:closeTab` with `forget`) deletes the
+  saved session once the tab really closed (a refused close removes nothing)
+  and pushes `cli:savedSessions` to every client. The Sessions tab's
+  checkboxes and **Remove selected (N)** send `cli:deleteSavedSessions { ids }`:
+  each id goes through the single-row delete (`deleteSavedOne` in
+  `src/ws/cli-handler.js`); the one answer carries `deleted` / `skipped`
+  (running sessions, orchestrators and workers needing a confirm are skipped).
 
 ### Registry: `window.tabHosts`
 

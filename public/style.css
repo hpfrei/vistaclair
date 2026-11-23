@@ -347,6 +347,9 @@ body.nav-loading .view-nav {
 .sc-toolbar h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-bright, var(--text)); }
 .sc-count { font-size: 11px; color: var(--text-dim); }
 .sc-push { margin-left: auto; }
+.sc-sel-all { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-dim); cursor: pointer; }
+.sc-card { position: relative; }
+.sc-sel { position: absolute; top: 8px; right: 10px; cursor: pointer; line-height: 0; }
 .sc-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));

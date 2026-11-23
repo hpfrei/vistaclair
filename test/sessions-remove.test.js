@@ -1,0 +1,94 @@
+// The Sessions tab's removals through the real cli-handler and a real
+// CliSessionManager on a throwaway data home: "Close and remove interaction"
+// (cli:closeTab with forget) drops the saved-session record and pushes the new
+// list to every client; a plain close, or a refused one, keeps it; the batch
+// cli:deleteSavedSessions removes exactly the given ids.
+//
+//   node --test test/
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const HOME = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vc-sessrm-')));
+process.env.VISTACLAIR_HOME = HOME;
+process.env.HOME = HOME;
+process.env.VISTACLAIR_DASHBOARD_PORT = '';
+
+const test = require('node:test');
+const assert = require('node:assert');
+const WebSocket = require('ws');
+const CliSessionManager = require('../src/cli-sessions');
+const { handleMessage } = require('../src/ws/cli-handler');
+
+test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
+
+function setup(ids, { closeCheck } = {}) {
+  const broadcasts = [];
+  const mgr = new CliSessionManager(1, { broadcast: (m) => broadcasts.push(m) }, { deleteSessionData() {} });
+  const cwd = path.join(HOME, 'proj');
+  fs.mkdirSync(cwd, { recursive: true });
+  for (const h of mgr.listSaved()) mgr.forgetSaved(h.id);   // one history file per process
+  for (const id of ids) mgr.saveToHistory({ sessId: id, cwd, title: `t-${id}`, settings: {} });
+  const sent = [];
+  const ws = { readyState: WebSocket.OPEN, send: (d) => sent.push(JSON.parse(d)) };
+  const bc = { cliSessionManager: mgr, broadcast: (m) => broadcasts.push(m), orchestration: closeCheck ? { closeCheck } : undefined };
+  const call = (msg) => handleMessage(ws, msg, bc);
+  const listed = () => mgr.listSaved().map(h => h.id).sort();
+  // An open tab of a saved session.
+  const openTab = (tabId, sessId) => {
+    mgr.sessions.set(tabId, {
+      sessId, cwd, title: `t-${sessId}`, running: true, getSettings: () => ({}), kill() {},
+      instanceId: `cli-${tabId}`,
+    });
+  };
+  return { mgr, call, listed, openTab, sent, broadcasts };
+}
+
+test('close with forget removes the saved session and pushes the list', () => {
+  const t = setup(['a', 'b']);
+  t.openTab('tab-1', 'a');
+  t.call({ type: 'cli:closeTab', tabId: 'tab-1', forget: true });
+  assert.deepStrictEqual(t.listed(), ['b']);
+  const push = t.broadcasts.filter(m => m.type === 'cli:savedSessions').pop();
+  assert.ok(push, 'every client gets the refreshed list');
+  assert.deepStrictEqual(push.sessions.map(s => s.id), ['b']);
+});
+
+test('close without forget keeps the saved session', () => {
+  const t = setup(['a', 'b']);
+  t.openTab('tab-1', 'a');
+  t.call({ type: 'cli:closeTab', tabId: 'tab-1', forget: false });
+  assert.deepStrictEqual(t.listed(), ['a', 'b']);
+});
+
+test('a refused close removes nothing', () => {
+  const t = setup(['a', 'b'], { closeCheck: () => ({ ok: false, reason: 'busy', canForce: true }) });
+  t.openTab('tab-1', 'a');
+  t.call({ type: 'cli:closeTab', tabId: 'tab-1', forget: true });
+  assert.deepStrictEqual(t.listed(), ['a', 'b']);
+  assert.ok(t.mgr.sessions.has('tab-1'));
+  assert.strictEqual(t.sent.find(m => m.type === 'cli:closeRefused')?.forget, true);
+});
+
+test('the batch delete removes exactly the given ids and answers one list', () => {
+  const t = setup(['a', 'b', 'c', 'd']);
+  t.call({ type: 'cli:deleteSavedSessions', ids: ['a', 'c', 'nope'] });
+  assert.deepStrictEqual(t.listed(), ['b', 'd']);
+  const answers = t.sent.filter(m => m.type === 'cli:savedSessions');
+  assert.strictEqual(answers.length, 1);
+  assert.deepStrictEqual(answers[0].sessions.map(s => s.id).sort(), ['b', 'd']);
+  assert.strictEqual(answers[0].deleted, 2);
+  assert.strictEqual(answers[0].skipped, 1);
+});
+
+test('the batch skips a running session and an orchestrator, and counts them', () => {
+  const t = setup(['a', 'b', 'o']);
+  t.mgr.patchSavedSettings('o', () => ({ orchestration: { role: 'orchestrator', runId: 'r1' } }));
+  t.openTab('tab-1', 'a');
+  t.call({ type: 'cli:deleteSavedSessions', ids: ['a', 'b', 'o'] });
+  assert.deepStrictEqual(t.listed(), ['a', 'o']);
+  const ans = t.sent.find(m => m.type === 'cli:savedSessions');
+  assert.strictEqual(ans.deleted, 1);
+  assert.strictEqual(ans.skipped, 2);
+});
