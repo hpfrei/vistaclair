@@ -84,7 +84,7 @@ async function withEnv(vars, fn) {
 
 // --- The probe ---------------------------------------------------------------
 
-test('parseProbe: exit 0 is signed in and exposes no model list', () => {
+test('parseProbe: exit 0 is signed in; only tab-separated id lines count as a model list', () => {
   const s = parseProbe({ exitCode: 0, stdout: 'Fetching...\ngemini-3-pro\n', stderr: '' });
   assert.deepEqual(s, { state: 'signed-in', installed: true, signedIn: true });
 });

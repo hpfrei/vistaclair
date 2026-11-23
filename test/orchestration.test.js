@@ -527,7 +527,7 @@ test('an orchestrator run keeps the caller prompt, stamps and hooks, and adds it
   const h = orch.launchWorker(orchSession.instanceId, { title: 'Docs', task: 'x', model: 'haiku' });
   assert.strictEqual(mgr.sessions.get(h.tabId).settings.model, 'haiku');
   assert.strictEqual(orch.listWorkers(orchSession.instanceId, { detail: 'all' }).detail.find(x => x.name === h.worker).model, 'haiku');
-  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'bad', task: 'x', model: 'gpt' }), /model must be one of fable, opus, sonnet, haiku/);
+  assert.throws(() => orch.launchWorker(orchSession.instanceId, { title: 'bad', task: 'x', model: 'gpt' }), /not a worker model. Valid: Claude: fable, opus, sonnet, haiku/);
 });
 
 test('launch_cli guards: orchestrator only, at most 5 running, cwd inside the root', async (t) => {
@@ -555,7 +555,7 @@ test('launch_cli strict: an unknown parameter is refused with the parameter list
   const { orch, orchSession, run } = await openOrchestrator(t, { isolation: 'none' });
   const iid = orchSession.instanceId;
   const bad = await viaRouter(orch, '/launch', { instanceId: iid, name: 'train', task: 'x', model: 'opus', isolation: 'none' });
-  assert.match(bad.error, /^unknown parameter "name" — launch_cli takes: title \(short name, required\), task \(full brief, required\), model \(fable \| opus \| sonnet \| haiku \| neon \(or, with engine agy, an agy gemini-… id\)\), engine \(.+\), isolation \(worktree \| none\), area \(.+\), after \(.+\), cwd \(.+\), tools \(.+\), host \(.+\), app \(.+\)$/);
+  assert.match(bad.error, /^unknown parameter "name" — launch_cli takes: title \(short name, required\), task \(full brief, required\), model \(fable \| opus \| sonnet \| haiku \| neon \| argon \| hydrogen \| flash .+\), engine \(.+\), isolation \(worktree \| none\), area \(.+\), after \(.+\), cwd \(.+\), tools \(.+\), host \(.+\), app \(.+\)$/);
   const two = await viaRouter(orch, '/launch', { instanceId: iid, title: 't', prompt: 'x', subagent_type: 'coder' });
   assert.match(two.error, /^unknown parameters "prompt", "subagent_type" — launch_cli takes: title/);
   assert.strictEqual(run().workers.length, 0, 'nothing launched');
@@ -4128,13 +4128,13 @@ test('launch_cli closeWhenDone without a worktree: closed on a done report once 
 test('the cards: "hard" marks a sub-task, defects go back to their author, early objection, output discipline; length budget', () => {
   const { orchestratorCard, workerCard, WORKER_AGENTS } = require('../src/orchestration');
   const run = { runId: 'abc123', orchestrator: 'orch-abc123', runDir: '/tmp/run' };
-  // Lengths of the cards before this change (+600 chars allowed); +120 for
-  // the neon (agy worker) sentence of group D.
+  // Lengths of the cards before this change (+600 chars allowed); +900 for
+  // the worker-models paragraph of group D (Claude and agy choices).
   const oldOrch = { worktree: 6844, none: 6404 };
   const oldWorker = { branch: 4142, shared: 3799 };
   for (const isolation of ['worktree', 'none']) {
     const o = orchestratorCard({ ...run, isolation });
-    assert.ok(o.length <= oldOrch[isolation] + 600, `orchestrator card ${isolation}: ${o.length}`);
+    assert.ok(o.length <= oldOrch[isolation] + 600 + 900, `orchestrator card ${isolation}: ${o.length}`);
     assert.match(o, /"hard" in a brief marks a SUB-TASK for the architect, never a whole task/);
     assert.match(o, /it works in its main thread and delegates mechanical steps \(runner\) and surveys \(explorer\) downward/);
     assert.match(o, /A defect or follow-up in a worker's own deliverable goes back to that worker with resume_worker \("continue" if its context is under ~150k tokens, else "fresh"\), not to a new worker/);

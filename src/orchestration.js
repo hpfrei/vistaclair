@@ -155,7 +155,7 @@ const { transcriptTotals, MODEL_RE } = require('./sdk-session');
 const { LATE_RE } = require('./ask-lifecycle');
 const agyConfig = require('./agy-worker-config');
 const agyAuth = require('./agy-auth');
-const { resolveAgyModel, NEON_MODEL } = require('./agy-session');
+const { resolveAgyModel, isAgyModelName, agyNamesText, NEON_MODEL } = require('./agy-session');
 
 // How many workers of a run may run at once: run.maxWorkers, set by the owner
 // in the orchestrator tab's header (setRunMaxWorkers), clamped to
@@ -167,9 +167,9 @@ const MAX_WORKER_LIMIT = 10;
 // The model a worker may be launched on (launch_cli `model`), as Claude Code's
 // Agent tool takes it. Unset: the dashboard's default model for new tabs.
 const WORKER_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
-// 'neon': an agy worker (Google Gemini on the owner's Google AI subscription,
-// src/agy-session.js, docs/agy-workers.md), model gemini-4-neon-medium.
-const AGY_WORKER_MODELS = ['neon'];
+// An agy worker (Google Gemini on the owner's Google AI subscription,
+// src/agy-session.js, docs/agy-workers.md): a short name (neon, argon,
+// hydrogen, flash, with an effort suffix) or a gemini-… id as `model`.
 const AGY_NUDGES = 3;
 // An agy orchestrator (docs/agy-workers.md "Orchestrator on agy"): at most
 // AGY_AUTO_TURNS automatic turns (event pushes, Stop continuations) in
@@ -321,8 +321,8 @@ function areaOf(area) {
 // the router refuses any other key and names these, to fix the call from.
 const TOOL_PARAMS = {
   launch_cli: {
-    title: 'short name, required', task: 'full brief, required', model: `${[...WORKER_MODELS, ...AGY_WORKER_MODELS].join(' | ')} (or, with engine agy, an agy gemini-… id)`,
-    engine: 'agy: a Gemini worker on the Google subscription (model neon or gemini-…)',
+    title: 'short name, required', task: 'full brief, required', model: `${WORKER_MODELS.join(' | ')} | neon | argon | hydrogen | flash (+ -low|-medium|-high|-xhigh) | a gemini-… id (agy)`,
+    engine: 'agy: optional, implied by an agy model name',
     isolation: 'worktree | none', area: 'repo-relative files or globs it will change',
     after: 'workers it waits for', cwd: 'directory inside the run root', tools: 'add-on tools, by name',
     host: 'another machine, for a remote worker', app: 'with host: the app it runs in',
@@ -412,7 +412,7 @@ function maxWorkersOf(run) {
 }
 
 // `hosts`: the host provider's machines (hostList); none → no remote rule.
-function orchestratorCard(run, { hosts = [] } = {}) {
+function orchestratorCard(run, { hosts = [], agyModels = null } = {}) {
   const dir = orchestratorDir(run);
   const remote = hosts.length
     ? `Remote workers: launch_cli \`host\` runs a worker on another machine: ${hosts.map(h => `\`${h.name}\`${h.available ? '' : ` (unavailable now: ${h.reason || 'no reason given'})`}`).join(', ')}. The owner approves each remote launch on a card first (the platform, not a question for you), so launch_cli returns at once (state pending-approval) and a "remote" event says when it started or why not. It runs in an app's directory there (\`app\`, default the run's app); give no cwd, isolation, area or tools. It reports and takes SendMessage like any worker; close_worker or end_run stops it. It cannot be resumed: launch a new one with its brief and last report.`
@@ -437,7 +437,8 @@ function orchestratorCard(run, { hosts = [] } = {}) {
     ]],
     ['D. Shaping the work', [
       'One worker per deliverable, from diagnosis to a gated, landed fix. A test build is its own deliverable: one per owner test session, launched `after` the fixes it bundles, unless the owner wants one urgent fix built alone.',
-      'Pick the worker\'s model for its typical step: haiku for mechanical jobs (installs, device commands, file moves, searches; isolation none), sonnet for most work (fixes, builds, gates, docs, diagnosis), opus only when the whole task is hard design, rendering or pipeline work: it works in its main thread and delegates mechanical steps (runner) and surveys (explorer) downward. "hard" in a brief marks a SUB-TASK for the architect, never a whole task. neon: a Gemini worker on the owner\'s Google subscription ($0, its 5 h quota caps it; worktree only, Gemini subagents).',
+      'Pick the worker\'s model for its typical step: haiku for mechanical jobs (installs, device commands, file moves, searches; isolation none), sonnet for most work (fixes, builds, gates, docs, diagnosis), opus only when the whole task is hard design, rendering or pipeline work: it works in its main thread and delegates mechanical steps (runner) and surveys (explorer) downward. "hard" in a brief marks a SUB-TASK for the architect, never a whole task. ',
+      workerModelsText(agyModels),
       `A brief is self-contained: goal, area, the objective check that proves done (a test or the gate; required, the coder's escalation depends on it), constraints, what is ruled out, and a narrowed subagent menu if needed (workers run at most ${MAX_SUBAGENTS} subagents at once). The worker knows only what you write.`,
       'For a fix to something the owner saw, the brief says: reproduce it offline from the owner\'s evidence and show it fixed with a check that fails without the fix, before any device build. Not reproducible: the worker reports blocked and you decide whether to spend the owner\'s time.',
       'Before launching a wave of more than 3 workers, send the owner a 5-line plan with a cost estimate as a message (not an owner item) and go on without waiting. Design workers deliver a "smallest useful slice" and a "not worth building" list.',
@@ -496,19 +497,36 @@ function workerCard(run, worker) {
   ].join('\n');
 }
 
-// launch_cli asks for an agy worker: engine "agy", or model "neon".
+// launch_cli asks for an agy worker: engine "agy", or an agy model name
+// (neon, argon, hydrogen, flash, with an effort suffix; or a gemini-… id).
 function agyWanted({ engine, model } = {}) {
-  return engine === 'agy' || AGY_WORKER_MODELS.includes(model);
+  return engine === 'agy' || isAgyModelName(model);
 }
 
-// The agy model id of a launch, or null for a Claude worker. Throws for an
-// engine other than agy, a non-Gemini id, a remote host or isolation none.
-function agyLaunchModel({ engine, model, host, isolation } = {}) {
+// The model choices, for an error: Claude, then agy.
+function workerModelNames() {
+  return `Claude: ${WORKER_MODELS.join(', ')} (or a full claude-… id); agy: ${agyNamesText()}`;
+}
+
+// The agy model id of a launch, or null for a Claude worker. Throws for a
+// model that is neither, an engine other than agy, a non-Gemini id, a remote
+// host or isolation none. `liveIds`: the ids of the last `agy models` probe.
+function agyLaunchModel({ engine, model, host, isolation } = {}, liveIds = null) {
   if (engine !== undefined && engine !== null && engine !== '' && engine !== 'agy') throw new Error('engine must be "agy" (or left out: a Claude worker)');
-  if (!agyWanted({ engine, model })) return null;
+  if (!agyWanted({ engine, model })) {
+    if (model && !WORKER_MODELS.includes(model) && !/^claude-/i.test(String(model))) throw new Error(`model "${model}" is not a worker model. Valid: ${workerModelNames()}`);
+    return null;
+  }
+  const id = resolveAgyModel(model || 'neon', { liveIds });
   if (host !== undefined && host !== null && host !== '') throw new Error('an agy worker cannot run on a remote host');
   if (isolation === 'none') throw new Error('an agy worker needs isolation "worktree": its .agents config lives in its own worktree');
-  return resolveAgyModel(model || 'neon');
+  return id;
+}
+
+// The model-choice text of both cards: what a worker can run on and how.
+function workerModelsText(liveIds) {
+  const live = Array.isArray(liveIds) && liveIds.length ? ` Live agy ids now: ${liveIds.filter(x => /^gemini-/i.test(x)).join(', ')}.` : '';
+  return `Worker models (launch_cli \`model\`). Claude: ${WORKER_MODELS.join(', ')} (or a full claude-… id): the model alone, nothing else. agy (Gemini; Google subscription, $0, capped by its 5 h quota): ${agyNamesText()}: the model alone is enough (no engine), with isolation "worktree" (never a remote host).${live}`;
 }
 
 // What an agy worker's card adds: its tools under agy's names, and what it lacks.
@@ -558,7 +576,7 @@ function agyOrchestratorNote(run) {
     `- the project is ${run.root}. Your working directory is your session folder; read project files by their full path (read_file, view_file, grep_search, run_command for read-only commands such as git -C ${run.root} log).`,
     `- you write only ${orchestratorFiles(run).join(', ')} (write_file / edit_file); every other write is denied. Code changes go to workers.`,
     '- read-only helpers are agy\'s own subagents (invoke_subagent), one at a time; swarm is off. They write only where you may. There are no Claude subagents for you.',
-    '- workers run on Claude (fable, opus, sonnet, haiku) or on agy (neon): launch_cli `model` picks it. Work for another provider\'s model is always a separate worker.',
+    '- workers run on Claude or on agy: the model list and how to launch each is rule D of this card (launch_cli `model` picks it). Work for another provider\'s model is always a separate worker.',
     '- the owner form ("AskUserQuestion" in this card) is the integrated server\'s `vista-AskUserQuestion` tool, through call_mcp_tool. agy\'s ask_question is denied.',
     'Worker events, messages and owner text can arrive in the middle of a turn, as a system message: read and act on them.',
   ].join('\n');
@@ -638,6 +656,11 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // The agy sign-in state as last probed (agy-auth's cached answer; never a
   // new probe here): signed-in | signed-out | keyring-locked | not-installed |
   // unknown, or null when nothing probed yet.
+  // The ids of the last `agy models` probe (cached; never starts one), or null.
+  function agyLiveIds() {
+    try { return (agyAuthStatus || agyAuth.authStatus).peek?.()?.models || null; } catch { return null; }
+  }
+
   function agyState() {
     if (!agyAuth.findAgyBin()) return 'not-installed';
     try { return (agyAuthStatus || agyAuth.authStatus).peek?.()?.state || null; } catch { return null; }
@@ -960,7 +983,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     saveRun(run);
     runDirs.set(runId, runDir);
 
-    const card = orchestratorCard(run, { hosts: hostList() });
+    const card = orchestratorCard(run, { hosts: hostList(), agyModels: agyLiveIds() });
     // `settings` still carries workerAppendSystemPrompt: the launch drops it
     // (the orchestrator and a plain session never get the lean prompt).
     const { workerAppendSystemPrompt: _w, ...rest } = settings;
@@ -982,7 +1005,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // card's agy note. It has no Claude billing: agy runs on the subscription.
   function agyOrchestratorOf(run) {
     if (run.orchestratorEngine !== 'agy') return {};
-    const card = orchestratorCard(run, { hosts: hostList() });
+    const card = orchestratorCard(run, { hosts: hostList(), agyModels: agyLiveIds() });
     const base = run.base?.appendSystemPrompt;
     return {
       engine: 'agy', auth: undefined, model: run.orchestratorModel || NEON_MODEL,
@@ -1110,7 +1133,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
     if (run.pausing) throw new Error('this run is being paused: launch nothing new');
     if (typeof args.title !== 'string' || !args.title.trim()) throw new Error('title is required: a short name for the worker (part of its address)');
     if (typeof args.task !== 'string' || !args.task.trim()) throw new Error('task is required: the complete brief, non-empty');
-    if (args.model && !WORKER_MODELS.includes(args.model) && !agyWanted(args)) throw new Error(`model must be one of ${[...WORKER_MODELS, ...AGY_WORKER_MODELS].join(', ')} (or, with engine "agy", an agy Gemini id gemini-…)`);
+    agyLaunchModel(args, agyLiveIds());   // refuses a name that is no worker model up front
     const paused = run.workers.filter(w => w.paused);
     if (paused.length) {
       throw new Error(`paused workers must be resumed (resume_worker) before new ones are launched: ${paused.map(w => w.name).join(', ')}`);
@@ -1155,7 +1178,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   // `after` as worker ids). Throws, having changed nothing.
   function launchSpec(run, { title, task, cwd, isolation, model, tools, area, after, host, app, closeWhenDone, profile, connectors, skills, engine } = {}) {
     title = cleanTitle(title);
-    const agyModel = agyLaunchModel({ engine, model, host, isolation });
+    const agyModel = agyLaunchModel({ engine, model, host, isolation }, agyLiveIds());
     if (agyModel) model = agyModel;
     if (host !== undefined && host !== null && host !== '') return remoteSpec(run, { title, task, host, app, cwd, isolation, area, tools, model, after, closeWhenDone, profile, connectors, skills });
     if (app !== undefined && app !== null && app !== '') throw new Error('app is for a remote worker (with host)');
@@ -3414,7 +3437,7 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   }
 
   function orchestratorSettings(run) {
-    const card = orchestratorCard(run, { hosts: hostList() });
+    const card = orchestratorCard(run, { hosts: hostList(), agyModels: agyLiveIds() });
     return {
       ...run.base.stamps,
       engine: run.engine || 'cli',
@@ -5536,4 +5559,4 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   };
 }
 
-module.exports = { createOrchestration, orchestratorCard, workerCard, WORKER_AGENTS, MAX_WORKERS, DEFAULT_MAX_WORKERS, MIN_WORKER_LIMIT, MAX_WORKER_LIMIT, clampMaxWorkers, maxWorkersOf, MAX_SUBAGENTS };
+module.exports = { createOrchestration, orchestratorCard, agyLaunchModel, workerModelsText, workerCard, WORKER_AGENTS, MAX_WORKERS, DEFAULT_MAX_WORKERS, MIN_WORKER_LIMIT, MAX_WORKER_LIMIT, clampMaxWorkers, maxWorkersOf, MAX_SUBAGENTS };

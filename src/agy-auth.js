@@ -63,10 +63,23 @@ const SIGN_IN_RE = /please sign in|sign in to|authentication required|not logged
 // every other line of output stay here. `result` is { notFound?, exitCode,
 // stdout, stderr }. A bare non-zero exit with no known message is 'unknown':
 // not provably signed out.
+// The ids in `agy models` output: tab-separated `id<TAB>Label` lines.
+function parseAgyModelList(stdout) {
+  const ids = [];
+  for (const line of String(stdout || '').split('\n')) {
+    const id = line.split('\t')[0].trim();
+    if (line.includes('\t') && /^[a-z0-9][a-z0-9._-]*$/i.test(id) && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
 function parseProbe(result) {
   if (!result || result.notFound) return { state: 'not-installed', installed: false, signedIn: false };
   const text = `${result.stderr || ''}\n${result.stdout || ''}`;
-  if (result.exitCode === 0) return { state: 'signed-in', installed: true, signedIn: true };
+  if (result.exitCode === 0) {
+    const models = parseAgyModelList(result.stdout);
+    return { state: 'signed-in', installed: true, signedIn: true, ...(models.length ? { models } : {}) };
+  }
   if (KEYRING_RE.test(text)) return { state: 'keyring-locked', installed: true, signedIn: false };
   if (SIGN_IN_RE.test(text)) return { state: 'signed-out', installed: true, signedIn: false };
   return { state: 'unknown', installed: true, signedIn: false };
@@ -185,6 +198,7 @@ module.exports = {
   agyEnv,
   findAgyBin,
   parseProbe,
+  parseAgyModelList,
   createRunner,
   AuthStatus,
   LoginProcess,

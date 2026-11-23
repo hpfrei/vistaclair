@@ -16,8 +16,9 @@ Service) and only the unmodified `agy` binary touches them.
 ## Status
 
 `agy models` (~0.4 s, cached 30 s, `AuthStatus`). agy has no status command, so
-only the exit code and a few message patterns are read; the model list is
-dropped. `state`:
+the exit code and a few message patterns are read, and the `id<TAB>Label` lines
+of a signed-in answer are kept as `models` (the ids; `parseAgyModelList`), which
+the orchestration validates agy worker names against and puts on its card. `state`:
 
 | state | when |
 |---|---|

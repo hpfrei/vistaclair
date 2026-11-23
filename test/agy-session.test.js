@@ -323,7 +323,8 @@ test('8. launch_cli({ model: "neon" }) gives an agy worker on gemini-4-neon-medi
   await refused({ model: 'neon', isolation: 'none' }, /isolation "worktree"/);
   await refused({ engine: 'agy', model: 'claude-sonnet-4-6' }, /only Google/);
   await refused({ engine: 'agy', model: 'gpt-5' }, /only Google/);
-  await refused({ model: 'gemini-3.8-flash-low' }, /model must be one of/);
+  await refused({ model: 'gemini-3.8-flash-low', isolation: 'none' }, /isolation "worktree"/);   // a gemini id implies agy
+  await refused({ model: 'bogus' }, /not a worker model. Valid: Claude: fable, opus, sonnet, haiku; agy|not a worker model/);
   await refused({ engine: 'codex' }, /engine must be "agy"/);
   await refused({ model: 'neon', host: 'elsewhere' }, /remote host/);
   const flash = await h.launch({ title: 'agy flash', task: 'Report done.', engine: 'agy', model: 'gemini-3.8-flash-low' });

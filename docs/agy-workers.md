@@ -18,7 +18,7 @@ touches its global config or its credentials (`docs/agy-auth.md`).
 | launch, nudges, blocked, the `/agy-hook` route | `src/orchestration.js` (`agyLaunchModel`, `agyWorkerNote`, `decideHook` `Stop` / `AgyBlocked`, `agyHook`) |
 | landing refusal of committed `.agents` files | `src/worktree-landing.js` `precheck` |
 | the orchestrator on agy (dialog, run, cap, blocked) | `src/orchestration.js` (`AGY_ORCHESTRATOR`, `agyOrchestratorOf`, `agyOrchestratorPolicy`, `agyOrchestratorNote`, `agyAutoTurn`), `public/new-cli.js` |
-| tests (a fake agy) | `test/agy-session.test.js`, `test/agy-hook.test.js`, `test/agy-orchestrator.test.js`, `test/fixtures/fake-agy.js` |
+| tests (a fake agy) | `test/agy-model-names.test.js` (names, validation, cards), `test/agy-session.test.js`, `test/agy-hook.test.js`, `test/agy-orchestrator.test.js`, `test/fixtures/fake-agy.js` |
 
 ## Launch
 
@@ -26,20 +26,33 @@ touches its global config or its credentials (`docs/agy-auth.md`).
 
 | Arguments | Worker |
 |---|---|
-| `model: 'neon'` | agy, `gemini-4-neon-medium` |
+| `model: 'neon'` / `'argon'` / `'hydrogen'` | agy, `gemini-4-<tier>-medium` |
+| `model: '<tier>-<effort>'` (`hydrogen-high`) | agy, `gemini-4-<tier>-<effort>`; efforts low / medium / high / xhigh (argon: no xhigh) |
+| `model: 'flash'` / `'flash-<effort>'` | agy, `gemini-3.8-flash-<low\|medium\|high>` (default medium) |
+| `model: 'gemini-…'` (any full agy id) | agy, that id |
 | `engine: 'agy'` (model left out) | agy, `gemini-4-neon-medium` |
-| `engine: 'agy', model: 'gemini-…'` | agy, that id (e.g. `gemini-3.8-flash-low`) |
-| `fable` / `opus` / `sonnet` / `haiku` | Claude, unchanged |
+| `fable` / `opus` / `sonnet` / `haiku` / `claude-…` | Claude, unchanged |
 
-Refused: `claude-*` / `gpt-*` agy ids, a `gemini-…` id without `engine: 'agy'`,
-an engine other than `agy`, `host`, isolation `none` (also when it is the run's
-default), a repo that tracks `.agents/hooks.json` or `.agents/mcp_config.json`,
-and a machine without `agy`. `profile`, `connectors` and `skills` have no effect,
-and the launch result's `note` says so. The worker record gets `engine: 'agy'`
-and the model id. Its settings get `engine: 'agy'`. The rest of the launch path
-(queue, `after`, area, worktree, cap) is the Claude path. The orchestrator card
-and the schema describe neon. The run's sub/API setting applies only to its
-Claude sessions: agy always runs on the subscription login.
+An agy model name implies the engine (`agyWanted`, `isAgyModelName`); `engine`
+is optional. The name is checked up front (`agyLaunchModel`, before anything
+starts): a name that is neither a Claude model nor an agy name / id is refused
+with the list of valid ones. When the cached `agy models` probe holds an id list
+(`AuthStatus.peek().models`, `docs/agy-auth.md`) the resolved id must be in it;
+without one only the `gemini-…` pattern is checked. The probe is never started
+for a launch.
+
+Refused: `claude-*` / `gpt-*` agy ids, an effort a tier lacks, an engine other
+than `agy`, `host`, isolation `none` (also when it is the run's default), a repo
+that tracks `.agents/hooks.json` or `.agents/mcp_config.json`, and a machine
+without `agy`. `profile`, `connectors` and `skills` have no effect, and the
+launch result's `note` says so. The worker record gets `engine: 'agy'` and the
+model id. Its settings get `engine: 'agy'`. The rest of the launch path (queue,
+`after`, area, worktree, cap) is the Claude path. Both orchestrator cards (rule
+D; `workerModelsText`) and the `launch_cli` `model` / `engine` descriptions list
+the Claude and the agy choices and how to launch each (an agy model: isolation
+worktree, $0 on the Google subscription, capped by its 5 h quota); the card
+adds the live ids when the cached probe has them. The run's sub/API setting
+applies only to its Claude sessions: agy always runs on the subscription login.
 
 ## Orchestrator on agy (neon)
 
