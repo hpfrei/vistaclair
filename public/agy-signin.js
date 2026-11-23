@@ -247,6 +247,9 @@
     switch (msg.type) {
       case 'agy-auth:status':
         last = msg;
+        // The Models tab's Gemini section draws from this.
+        state.agyAuth = msg.status || null;
+        document.dispatchEvent(new CustomEvent('agy-auth:state'));
         // The status sent on connect is the server's cached one: ask agy
         // afresh once per connection.
         if (statusWs !== state.ws) { statusWs = state.ws; sendWs({ type: 'agy-auth:status', refresh: true }); }

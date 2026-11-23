@@ -428,3 +428,45 @@ test('the dashboard module sends the pasted code with \\r and shows the four sta
   for (const s of ['not-installed', 'signed-out', 'keyring-locked', 'signed-in']) assert.ok(src.includes(`'${s}'`), s);
   assert.ok(src.includes("'agy-auth:needed'"));
 });
+
+// --- The Models tab section (Gemini provider) ---------------------------------------
+
+test('Models tab: the Antigravity section renders for every state', () => {
+  const { renderAgyAuthSection, INSTALL_CMD } = require('../public/agy-auth-section');
+  const section = (state) => renderAgyAuthSection(state ? { state } : null);
+  for (const st of ['signed-in', 'signed-out', 'keyring-locked', 'not-installed', 'unknown', null]) {
+    const html = section(st);
+    assert.match(html, /id="agyAuthSection"/, String(st));
+    assert.match(html, /Antigravity \(Google AI subscription\)/);
+    assert.match(html, /API key above is separate from the Antigravity subscription/);
+  }
+  assert.match(section('signed-out'), /signed out[\s\S]*data-agy-signin[^>]*>Sign in to Antigravity</);
+  assert.match(section('signed-in'), /signed in[\s\S]*data-agy-signin[^>]*>Sign in with another account</);
+  assert.match(section('unknown'), /data-agy-signin/);
+  // Nothing to click when agy is missing or the keyring is locked: the reason is shown instead.
+  assert.doesNotMatch(section('not-installed'), /data-agy-signin/);
+  assert.match(section('not-installed'), /not installed/);
+  assert.ok(section('not-installed').includes(INSTALL_CMD));
+  assert.equal(INSTALL_CMD, 'curl -fsSL https://antigravity.google/cli/install.sh | bash');
+  assert.doesNotMatch(section('keyring-locked'), /data-agy-signin/);
+  assert.match(section('keyring-locked'), /keyring locked[\s\S]*Secret Service/);
+  assert.match(section(null), /checking/);
+});
+
+test('Models tab: the section is drawn under the gemini provider and fed by agy-signin.js', () => {
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  assert.match(read('public/capabilities.js'), /prov\.key === 'gemini'[\s\S]{0,120}renderAgyAuthSection\(state\.agyAuth/);
+  assert.match(read('public/agy-signin.js'), /state\.agyAuth = msg\.status/);
+  const html = read('public/index.html');
+  assert.ok(html.indexOf('agy-auth-section.js') > 0 && html.indexOf('agy-auth-section.js') < html.indexOf('capabilities.js'));
+});
+
+test('findAgyBin finds ~/.local/bin/agy when PATH lacks it (a service-started server)', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-home-'));
+  try {
+    fs.mkdirSync(path.join(home, '.local/bin'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.local/bin/agy'), '#!/bin/sh\n', { mode: 0o755 });
+    assert.equal(findAgyBin({ env: { PATH: '/usr/bin:/bin' }, home }), path.join(home, '.local/bin/agy'));
+    assert.equal(findAgyBin({ env: {}, home }), path.join(home, '.local/bin/agy'));
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
