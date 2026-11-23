@@ -568,11 +568,50 @@ test('launch_cli strict: an unknown parameter is refused with the parameter list
   assert.match((await viaRouter(orch, '/stop-worker', { instanceId: iid, worker: 'w1', why: 'x' })).error, /stop_worker takes: worker .*reason/);
   assert.match((await viaRouter(orch, '/undo-landing', { instanceId: iid, sha: 'abc' })).error, /undo_landing takes: landing .*worker/);
   assert.match((await viaRouter(orch, '/end', { instanceId: iid, force: true })).error, /^unknown parameter "force" — end_run takes no parameters$/);
-  assert.match((await viaRouter(orch, '/workers', { instanceId: iid, all: true })).error, /list_workers takes no parameters/);
+  assert.match((await viaRouter(orch, '/workers', { instanceId: iid, all: true })).error, /^unknown parameter "all" — list_workers takes: detail /);
   assert.match((await viaRouter(orch, '/send-message', { instanceId: iid, to: 'x', text: 'hi' })).error, /SendMessage takes: to .*message/);
   assert.match((await viaRouter(orch, '/owner-items', { instanceId: iid, what: 'x' })).error, /owner_items takes: action/);
   assert.match((await viaRouter(orch, '/report', { instanceId: iid, status: 'done', summary: 's', files: [] })).error, /report takes: status .*summary .*filesChanged/);
   assert.ok(Array.isArray((await viaRouter(orch, '/workers', { instanceId: iid })).workers), 'no extra key: answered');
+});
+
+test('list_workers accepts its documented `detail` through the router: addresses, ids, "open" and "all"', async (t) => {
+  const { orch, orchSession } = await openOrchestrator(t, { isolation: 'none' });
+  const iid = orchSession.instanceId;
+  const a = await viaRouter(orch, '/launch', { instanceId: iid, title: 'one', task: 'x' });
+  assert.ok(a.worker && !a.error, 'launched');
+  const byAddr = await viaRouter(orch, '/workers', { instanceId: iid, detail: [a.worker] });
+  assert.ok(!byAddr.error, byAddr.error);
+  assert.deepStrictEqual(byAddr.detail.map(w => w.name), [a.worker]);
+  assert.ok(!('workers' in byAddr), 'the entries replace the short lines');
+  const byId = await viaRouter(orch, '/workers', { instanceId: iid, detail: ['w1'] });
+  assert.ok(!byId.error, byId.error);
+  assert.deepStrictEqual(byId.detail.map(w => w.id), ['w1']);
+  for (const k of ['cwd', 'brief', 'todo', 'notes', 'cost', 'lastReport', 'state']) assert.ok(k in byId.detail[0], `full entry has ${k}`);
+  for (const word of ['open', 'all']) {
+    const r = await viaRouter(orch, '/workers', { instanceId: iid, detail: word });
+    assert.ok(!r.error, r.error);
+    assert.strictEqual(r.detail.length, 1, word);
+  }
+  const missing = await viaRouter(orch, '/workers', { instanceId: iid, detail: ['w1', 'w99'] });
+  assert.deepStrictEqual(missing.notFound, ['w99']);
+});
+
+test('every property of every tool schema in lib/orchestrator-mcp.js is accepted by checkParams', () => {
+  const { TOOL_PARAMS, checkParams } = require('../src/orchestration');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'orchestrator-mcp.js'), 'utf8');
+  const from = src.indexOf('const ORCHESTRATOR_TOOLS = [');
+  const to = src.indexOf('const roleTools');
+  assert.ok(from > 0 && to > from, 'tool arrays found');
+  const tools = require('vm').runInNewContext(`${src.slice(from, to)}; [...ORCHESTRATOR_TOOLS, ...WORKER_TOOLS, ...MESSAGING_TOOLS]`);
+  assert.ok(tools.length >= 12);
+  for (const t of tools) {
+    assert.ok(TOOL_PARAMS[t.name], `${t.name} has TOOL_PARAMS`);
+    for (const prop of Object.keys(t.inputSchema.properties || {})) {
+      assert.doesNotThrow(() => checkParams(t.name, { instanceId: 'x', [prop]: 'v' }), `${t.name}.${prop}`);
+    }
+  }
+  assert.throws(() => checkParams('list_workers', { bogus: 1 }), /unknown parameter "bogus"/);
 });
 
 test('launch_cli strict: title required and non-blank, task non-blank, queued launches checked at call time', async (t) => {

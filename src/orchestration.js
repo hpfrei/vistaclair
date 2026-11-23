@@ -329,13 +329,13 @@ const TOOL_PARAMS = {
     closeWhenDone: 'close it once done, landed and clean', profile: 'lean | full (default lean)', connectors: 'true: keep the claude.ai connectors', skills: 'true: keep skills and slash commands',
   },
   cancel_launch: { id: 'the queued launch\'s id, required' },
-  list_workers: {},
+  list_workers: { detail: 'worker addresses or ids (array), "open" or "all": their full entries instead of the short lines' },
   resume_worker: { worker: 'address or id, required', mode: 'continue | fresh, required', message: 'what it does first', tools: 'add-on tools, by name' },
   close_worker: { worker: 'address or id, required' },
   stop_worker: { worker: 'address or id, required', reason: 'why it is stopped' },
   end_run: {},
   undo_landing: { landing: 'merge sha', worker: 'or a worker\'s address or id' },
-  owner_items: { action: 'list | add | resolve | drop | reorder', items: 'add: the items', item: 'add: one item', id: 'resolve / drop: the item\'s id', answer: 'resolve: the answer', order: 'reorder: the open items\' ids' },
+  owner_items: { action: 'list | add | resolve | drop | reorder', items: 'add: the items', item: 'add: one item', id: 'resolve / drop: the item\'s id', ids: 'resolve / drop: several items\' ids at once', answer: 'resolve: the answer', order: 'reorder: the open items\' ids' },
   report: { status: 'started | blocked | done | failed | paused, required', summary: 'required', filesChanged: 'paths', verified: 'the one check you ran', open: 'what is still open', ownerItems: 'what only the owner can do or decide' },
   SendMessage: { to: 'recipient\'s address, required', message: 'the message, required' },
   ListAgents: {},
@@ -5559,4 +5559,4 @@ function createOrchestration({ mgr, broadcaster, pendingQuestions, coreRoot, dat
   };
 }
 
-module.exports = { createOrchestration, orchestratorCard, agyLaunchModel, workerModelsText, workerCard, WORKER_AGENTS, MAX_WORKERS, DEFAULT_MAX_WORKERS, MIN_WORKER_LIMIT, MAX_WORKER_LIMIT, clampMaxWorkers, maxWorkersOf, MAX_SUBAGENTS };
+module.exports = { createOrchestration, TOOL_PARAMS, checkParams, orchestratorCard, agyLaunchModel, workerModelsText, workerCard, WORKER_AGENTS, MAX_WORKERS, DEFAULT_MAX_WORKERS, MIN_WORKER_LIMIT, MAX_WORKER_LIMIT, clampMaxWorkers, maxWorkersOf, MAX_SUBAGENTS };
