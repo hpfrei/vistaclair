@@ -366,6 +366,26 @@ test('10. with interception off the worker runs with no MITM tag and no proxy en
   assert.strictEqual(second.env.SSL_CERT_FILE, h.mitm.bundlePath());
 });
 
+test('11. agy native subagents: invoke_subagent runs, the write fence holds inside the subagent, swarm is denied', { skip: SKIP }, async (t) => {
+  const h = await harness(t, { scenario: ['subagent'] });
+  await h.launch({ title: 'agy sub', task: 'Use a subagent, then report done.', model: 'neon' });
+  await idleWithReport(h);
+  const [run] = h.runs();
+  assert.ok(!run.invoke.denied, 'invoke_subagent is allowed');
+  assert.strictEqual(run.subOutside.denied, true);
+  assert.match(run.subOutside.reason, /outside your worktree/);
+  assert.ok(!fs.existsSync(path.join(path.dirname(run.cwd), 'outside-sub.txt')));
+  assert.strictEqual(fs.readFileSync(path.join(h.worker().worktree.path, 'sub-made.txt'), 'utf8'), 'by the subagent\n');
+  assert.strictEqual(run.swarm.denied, true);
+  assert.strictEqual(run.swarm.reason, 'swarm (uncapped parallel subagents) is off; spawn one subagent at a time with invoke_subagent');
+  const pre = run.events.filter(e => e.hook === 'PreToolUse').map(e => e.answers[0].reason || '').join(' ');
+  assert.doesNotMatch(pre, /worker-tools/);
+  // The worker's transcript shows its own steps, not the subagent conversation's.
+  const text = fs.readFileSync(path.join(h.worker().sessionDir, 'transcript.jsonl'), 'utf8');
+  assert.doesNotMatch(text, /SUBAGENT-TEXT/);
+  assert.match(text, /invoke_subagent/);
+});
+
 test('resolveAgyModel and the landing refusal of committed agy config', async () => {
   const { resolveAgyModel } = AgySession;
   assert.strictEqual(resolveAgyModel('neon'), 'gemini-4-neon-medium');

@@ -428,7 +428,7 @@ function orchestratorCard(run, { hosts = [] } = {}) {
     ]],
     ['D. Shaping the work', [
       'One worker per deliverable, from diagnosis to a gated, landed fix. A test build is its own deliverable: one per owner test session, launched `after` the fixes it bundles, unless the owner wants one urgent fix built alone.',
-      'Pick the worker\'s model for its typical step: haiku for mechanical jobs (installs, device commands, file moves, searches; isolation none), sonnet for most work (fixes, builds, gates, docs, diagnosis), opus only when the whole task is hard design, rendering or pipeline work: it works in its main thread and delegates mechanical steps (runner) and surveys (explorer) downward. "hard" in a brief marks a SUB-TASK for the architect, never a whole task. neon: a Gemini worker on the owner\'s Google subscription ($0, its 5 h quota caps it; worktree only, no subagents).',
+      'Pick the worker\'s model for its typical step: haiku for mechanical jobs (installs, device commands, file moves, searches; isolation none), sonnet for most work (fixes, builds, gates, docs, diagnosis), opus only when the whole task is hard design, rendering or pipeline work: it works in its main thread and delegates mechanical steps (runner) and surveys (explorer) downward. "hard" in a brief marks a SUB-TASK for the architect, never a whole task. neon: a Gemini worker on the owner\'s Google subscription ($0, its 5 h quota caps it; worktree only, Gemini subagents).',
       `A brief is self-contained: goal, area, the objective check that proves done (a test or the gate; required, the coder's escalation depends on it), constraints, what is ruled out, and a narrowed subagent menu if needed (workers run at most ${MAX_SUBAGENTS} subagents at once). The worker knows only what you write.`,
       'For a fix to something the owner saw, the brief says: reproduce it offline from the owner\'s evidence and show it fixed with a check that fails without the fix, before any device build. Not reproducible: the worker reports blocked and you decide whether to spend the owner\'s time.',
       'Before launching a wave of more than 3 workers, send the owner a 5-line plan with a cost estimate as a message (not an owner item) and go on without waiting. Design workers deliver a "smallest useful slice" and a "not worth building" list.',
@@ -509,7 +509,8 @@ function agyWorkerNote(worker) {
     `You run on agy (Google's Antigravity CLI, model ${worker.model}), not Claude Code. Where this card names Claude tools, use these instead:`,
     '- report to the orchestrator: `mcp_orchestrator_report`; messages: `mcp_orchestrator_SendMessage`, `mcp_orchestrator_ListAgents`.',
     '- your own tools (read_file, write_file, edit_file, run_command, search_web …) for the work itself. You may write only inside your worktree and your session folder; other writes are denied.',
-    '- there are no Claude subagents (runner, explorer, coder, architect) for you: do the work yourself. agy\'s own subagents, ask_question, schedule and workflows are denied.',
+    '- there are no Claude subagents (runner, explorer, coder, architect) for you. Use agy\'s own subagents (invoke_subagent), one at a time; swarm is off. They write only where you may. Work for another provider\'s model is a separate worker: ask the orchestrator.',
+    '- ask_question, schedule and workflows are denied.',
     'Messages from the orchestrator can arrive in the middle of a turn, as a system message: read and follow them.',
   ].join('\n');
 }

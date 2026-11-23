@@ -117,7 +117,7 @@ A new message to a blocked worker starts a turn as usual.
 | `<worktree>/.agents/hooks.json` | group `vistaclair`: SessionStart, PreInvocation, Stop as flat lists; Pre/PostToolUse as `{matcher:'.*', hooks}`. Each is `node lib/agy-hook.js <event>`, timeout 10 s |
 | `<worktree>/.agents/mcp_config.json` | `buildMcpServers` (orchestrator with eager `report`/`SendMessage`/`ListAgents`, the integrated server, tool-pack servers), each wrapped `env -u HTTPS_PROXY -u HTTP_PROXY -u ALL_PROXY … -u SSL_CERT_FILE`. No `*TOKEN*`/`*KEY*`/`*SECRET*` value is written: the servers inherit the token from agy's env |
 | `<runDir>/sessions/<name>.agy-settings.json` | `permissions.allow [mcp(*), read_file(*), write_file(*), command(*), read_url(*)]`, `trustedWorkspaces [worktree]` |
-| `<runDir>/sessions/<name>.agy-policy.json` | `writeRoots` (worktree, session folder), `mainConversation`, `pausing`, `sessionStartText` (the role card with `mcp__x__y` → `mcp_x_y`), `allowSubagentTypes`; `settings.agyPolicy` overrides |
+| `<runDir>/sessions/<name>.agy-policy.json` | `writeRoots` (worktree, session folder), `mainConversation`, `pausing`, `sessionStartText` (the role card with `mcp__x__y` → `mcp_x_y`); `settings.agyPolicy` overrides |
 
 - `excludeAgents` appends `/.agents/hooks.json` and `/.agents/mcp_config.json`
   to `git rev-parse --git-path info/exclude`.
@@ -125,7 +125,7 @@ A new message to a blocked worker starts a turn as usual.
 - `kill()` removes the `.agents` files, the settings and policy files, the
   session token, the tool packs and the MITM tag.
 - The role card is a parameter (`settings.appendSystemPrompt`). The
-  orchestration adds `agyWorkerNote` (agy tool names, no subagents) for workers.
+  orchestration adds `agyWorkerNote` (agy tool names, native subagents) for workers.
 
 ## Hook policy (`lib/agy-hook.js` `decide`)
 
@@ -133,12 +133,30 @@ A new message to a blocked worker starts a turn as usual.
 |---|---|
 | `read_file`, `view_file`, `search_web`, `read_url`, `list_resources`, `read_resource`, `manage_task`, `run_command`, browser tools | allow |
 | `write_file`, `edit_file`, `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `sed_file`, `notebook_edit` | allow inside a `writeRoots` entry (symlinks and `..` resolved); else, or with no path argument, deny |
-| `mcp_*`, `call_mcp_tool` | allow; while `pausing`, `mcp_worker-tools_Agent` and `call_mcp_tool` `Agent` are denied |
-| `invoke_subagent` | allow only for `TypeName` in `allowSubagentTypes` (`image-generator`) |
+| `mcp_*`, `call_mcp_tool` | allow |
+| `invoke_subagent`, `browser_subagent` | allow, any `TypeName`; denied while `pausing` |
+| `define_subagent`, `manage_subagents` | allow |
+| `swarm` | deny: "swarm (uncapped parallel subagents) is off; spawn one subagent at a time with invoke_subagent" |
 | `send_message` | allow outside `mainConversation` (a subagent answering); deny in it |
-| `ask_question`, `ask_permission`, `ask_custom_permission`, `define_subagent`, `manage_subagents`, `swarm`, `browser_subagent`, `run_workflow`, `schedule` | deny, the reason naming the Vistaclair tool |
+| `ask_question`, `ask_permission`, `ask_custom_permission`, `run_workflow`, `schedule` | deny, the reason naming the Vistaclair tool |
 | unknown name | allow; reported once per spawn (`unknown-tool` → the server log) |
 | no or broken policy file, hook error, 8 s self-timeout | deny |
+
+## Subagents
+
+agy workers use agy's own (Gemini) subagents. There is no Claude-subagent
+bridge: work for another provider's model is a separate worker (`launch_cli`).
+
+- A subagent runs inside the worker's agy process, so its model calls go through
+  the same MITM tag and land under the worker's instance. The decoder gives
+  each other conversation its own lane (`subagent.agentType` = the
+  `invoke_subagent` `TypeName`, `docs/agy-inspector.md`).
+- Its tool calls reach the hook with the subagent's `conversationId`, so the
+  write fence holds inside it.
+- Its steps are left out of the worker's transcript. The worker sees the result
+  as the `invoke_subagent` tool result.
+- There is no hard cap on subagents: `swarm` (uncapped parallel fan-out) is
+  the guarded case. While pausing, no new subagent starts.
 
 ## Stop, close, restart
 
@@ -160,10 +178,14 @@ A new message to a blocked worker starts a turn as usual.
   connections were ALPN http/1.1, `match: true`, 0 mismatches.
 - **A message sent while the worker was busy** was injected at PreInvocation
   and quoted in the worker's answer.
+- **A native subagent** (`invoke_subagent`, typed `research` by agy) read
+  README.md and the worker reported its line. 7 calls were stored under the
+  worker's instance, 3 of them in the subagent's lane, with 0 mismatches.
 
 ## Not built
 
-- Claude subagents for agy workers (worker-tools MCP `Agent`).
+- Cross-provider subagents (a Claude model under an agy worker, or the other
+  way round): use separate workers.
 - Quota pause, auto-continue at the reset, queueing agy launches, the owner
   item.
 - An orchestrator on agy.
