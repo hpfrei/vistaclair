@@ -452,7 +452,7 @@
           if (rec) { rec.el.classList.toggle('desk-win-busy', busy); rec.busyDot.style.display = busy ? '' : 'none'; }
         }
         if (deskBusy) any = true;
-        const b = els.strip?.querySelectorAll('.desk-tab').find(x => x.dataset.deskId === d.id);
+        const b = Array.from(els.strip?.querySelectorAll('.desk-tab') || []).find(x => x.dataset.deskId === d.id);
         if (b) b.classList.toggle('instance-running', deskBusy);
       }
       els.headerTab?.classList.toggle('instance-running', any);
