@@ -2685,7 +2685,13 @@ Platform cron jobs survive server restarts. Use this for recurring automation (p
 <!-- API:SECTION key=licensing -->
 ### App Licensing
 
-Paid/freemium apps: declare `"auth": { "email": true, "license": "<product>" }` or the object form `{ "product", "tiers": { "<slug>": { ..features } }, "free": { ..features }, "graceHours" }` and read `ctx.license.entitlement(accountId)` (`{ licensed, status, tier, features, expiresAt }`) where you enforce tier limits; the platform adds `/api/auth/license/{claim,release,products}` and `license` on `/api/auth/me` (statuses `active`, `grace`, `free`, `invalid`, `none`, `unreachable`), and a login method is required. The backend is the platform's licence provider, a slot that is **empty by default**: the owner is always entitled, every other account gets the `free` tier (without `free`: `402 license_required`), `claim` answers `503 licensing_unavailable`, `products` is `{ product, variants: [] }`. Also available: `ctx.license.refresh`, `validate(key)`, `release`, `products()`. Do NOT hand-roll key validation, entitlement caching or `http.fetch` calls to a licence service, and do not add licence tables to the app DB; declare `auth.license` and read entitlements.
+Selling paid content: entitlement comes from the licence app `licencing`, through its tools, by the app's own account id. Shapes and errors: `licencing/docs/CONTRACT.md`.
+
+- **`ctx.license` is not that route.** The platform's licence provider slot is empty: with `manifest.auth.license` set, the owner is always entitled and every other account gets the `free` tier (without `free`: `402 license_required` on every `/api/*` route), `claim` answers `503 licensing_unavailable`, `products` is `{ product, variants: [] }`. Do NOT gate paid content on `ctx.license.*`, `/api/auth/me.license` or the `auth.license` route gate; a subscription sold that way never unlocks.
+- **`auth.license`** (`"<product>"` or `{ product, tiers, free, graceHours }`) is only the declaration of product and tiers that the platform's own gate and `ctx.license` read. For `licencing` the app sends the same declaration itself: `ctx.tools.call('licencing', 'declare_requirements', { product, tiers, features, free?, featureSchema? })` in `setup`. `featureSchema` types every feature (`type`, `default`, `min`/`max`, `unit`, `period`); the catalogue's feature values are the truth for quotas, so read limits from the entitlement and do not hard-code them. Declare the dependency on `licencing` (see "Calling other apps' tools").
+- **Purchase sequence:** `list_plans { product }` (plans, tiers, `featureSchema`) → `checkout_link { product, plan, account }` (returns `url` and `sessionId`; remember the `sessionId` for the account) → the buyer pays and returns → `claim_checkout { product, sessionId, account }` (`{ claimed:false, pending:true }` until the payment is booked: retry; `claimed:true` binds the account's seat) → `get_entitlement { product, account }` on every request that enforces a limit (`licensed`, `status`, `tier`, `features`, `expiresAt`). An account with no seat gets `licensed:false, status:'none'` with the free features. `activate_seat` / `release_seat` for a key the buyer holds, `portal_link` for billing.
+- **Unreachable `licencing` is "uncertain", not "free":** a failed tool call or `status: 'unreachable'` is neither licensed nor unlicensed. Answer 503 (or serve a recent good answer for a short, stated window); never fall through to the free tier.
+- Do NOT hand-roll key validation, entitlement caching or `http.fetch` calls to a licence service, and do not add licence tables to the app DB.
 
 <!-- /API:SECTION -->
 
@@ -2702,7 +2708,7 @@ capability's section (`ctx.dbQuery` → `db`, `ctx.events` → `events`, `ctx.re
 <!-- API:DETAIL key=routes-ctx -->
 ### The routes.js contract and the full `ctx` member list
 
-Routes are loaded into vistaclair's Express app at `/apps/<name>/` when the user clicks Start — no separate port or process. The loader pre-applies `express.json({ limit: '10mb' })` on the router and serves `public/` as static fallback after your routes. `setup` may return a cleanup function (may be async) that is called on Stop.
+Routes are loaded into vistaclair's Express app at `/apps/<name>/` when the user clicks Start — no separate port or process. The loader pre-applies `express.json({ limit: '10mb' })` on the router and serves `public/` as static fallback after your routes. A global body-parser hook has already read JSON and urlencoded bodies before your router runs and keeps the exact bytes as `req.rawBody` (a `Buffer`): a webhook that verifies a signature (HMAC, Stripe) must hash `req.rawBody`, never `JSON.stringify(req.body)`; it is unset for other content types and for bodiless requests, so fail closed when it is missing. `setup` may return a cleanup function (may be async) that is called on Stop.
 
 For OAuth redirect URIs, derive from request headers — never hardcode `localhost`:
 `${req.headers['x-forwarded-proto'] || req.protocol || 'http'}://${req.headers['x-forwarded-host'] || req.headers.host}${ctx.basePath}/callback`
@@ -2752,7 +2758,7 @@ The `ctx` object provides:
 - `ctx.identity.hashPassword(plain)` / `ctx.identity.verifyPassword(plain, stored)` — scrypt password hashing (used by the turnkey auth module; call directly only for bespoke auth)
 - `ctx.identity.randomToken(bytes?)` — random hex token (e.g. email-verification links)
 - `ctx.auth.require` / `ctx.auth.findOrCreateTgAccount(tgUser)` / `ctx.auth.accountById(id)` / `ctx.auth.publicAccount(row)` — **only when `manifest.auth` is set**; account-keyed multi-user auth (see "Multi-user, email/password, and linking")
-- `ctx.license.entitlement(accountId)` / `refresh` / `validate(key)` / `release` / `products()` — **only when `manifest.auth.license` is set**; licence entitlements + tier features from the platform licence server (see App Licensing)
+- `ctx.license.entitlement(accountId)` / `refresh` / `validate(key)` / `release` / `products()` — **only when `manifest.auth.license` is set**; answers the free tier for every non-owner (no provider): do not gate paid content on it, use the `licencing` app's tools (see App Licensing)
 - `ctx.getDb()` — raw MariaDB pool
 - `ctx.dbName` — app's database name (`vc_<appname>`)
 - `ctx.dbQuery(sql, params)` — query the app's database

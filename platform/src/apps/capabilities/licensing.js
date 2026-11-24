@@ -1,4 +1,4 @@
-// Capability: licensing — `manifest.auth.license` + `ctx.license.entitlement/refresh/validate/release/products` — paid/freemium apps against the platform licence server: key claim + seats, tier features, revocation/grace, checkout links. No bridge methods; frontends read `/api/auth/me`
+// Capability: licensing — `manifest.auth.license` + `ctx.license.entitlement/refresh/validate/release/products` — the platform's licence-provider slot (empty: free tier for every non-owner). Paid content gets entitlement from the `licencing` app's tools. No bridge methods; frontends read `/api/auth/me`
 //
 // One file per capability: the metadata the registry/prompts read, the
 // routes.js ctx members it contributes (buildCtx) and the iframe bridge
@@ -14,8 +14,8 @@ module.exports = {
   aliases: ['license'],
   ctx: ['license'],
   keywords: /\b(licen[cs]e|licen[cs]ing|paid app|premium|paywall|entitlement|subscription tier|checkout|seat limit|freemium)\b/i,
-  summary: '`ctx.license.*` — paid/freemium apps, seats, tiers',
-  migration: 'Hand-rolled licence-key validation, entitlement caching, or `http.fetch` calls to the licence server with an app-held secret → declare `manifest.auth.license` and read `ctx.license.entitlement()` / `me.license`.',
+  summary: 'paid content: `licencing` app tools; `ctx.license` is free-only',
+  migration: 'Hand-rolled licence-key validation, entitlement caching, or `http.fetch` calls to the licence server with an app-held secret → ask the `licencing` app by account: `ctx.tools.call(\'licencing\', \'get_entitlement\', { product, account })`. `ctx.license` answers the free tier (no provider).',
 
   buildCtx(app) {
     const name = app.name;
