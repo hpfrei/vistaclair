@@ -1712,6 +1712,9 @@
         endRemoving(msg, false);
         break;
       case 'cli:fileUploaded': {
+        // Success needs nothing here: the server already typed the file's path
+        // into the session. A failed upload would otherwise vanish silently.
+        if (msg.error) window.dashboard.showToast?.({ sender: 'CLI', title: 'Upload failed', message: msg.error, level: 'warning' });
         break;
       }
       // --- Pause / resume ---

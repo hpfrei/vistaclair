@@ -2064,6 +2064,9 @@ function handleMessage(msg) {
     case 'cli:closeRefused':
     case 'cli:deleteRefused':
     case 'cli:deleteSavedSessionsDone':
+    case 'cli:fileUploaded':
+    case 'cli:landing':
+    case 'cli:worktree':
     case 'cli:paused':
       if (window.directoriesModule?.handleShellMessage?.(msg)) break;
       window.cliModule?.handleMessage(msg);
@@ -2081,6 +2084,10 @@ function handleMessage(msg) {
     case 'model:list':
     case 'provider:list':
     case 'prefs:claudeAuth':
+    case 'model:refresh:scanned':
+    case 'model:refresh:status':
+    case 'model:refresh:error':
+    case 'model:refresh:done':
       window.capabilitiesModule?.handleMessage(msg);
       break;
 
@@ -2098,6 +2105,7 @@ function handleMessage(msg) {
     case 'rule:error':
     case 'rule:source':
     case 'rule:saved':
+    case 'rule:restored':
       window.rulesModule?.handleMessage(msg);
       break;
 
