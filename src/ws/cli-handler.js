@@ -64,6 +64,15 @@ function deleteSavedOne(bc, id, force) {
   return { done: true };
 }
 
+// The one whole-run delete (the run card's, and an orchestrator tab's Close and
+// remove interaction): orchestration.deleteRun, its outcome to the requester;
+// every other client hears orchestration:run { deleted } and the tab list.
+function deleteRunAndReply(send, bc, msg) {
+  const runId = String(msg.runId || '');
+  actionResult(send, 'deleteRun', { ...msg, runId }, () => bc.orchestration.deleteRun(runId, { force: msg.force === true }));
+  send(bc.cliSessionManager.savedSessionsMessage());
+}
+
 function handleMessage(ws, msg, bc) {
   const send = (data) => ws.send(JSON.stringify(data));
   // A reply after an await: the requester may have gone meanwhile.
@@ -107,6 +116,18 @@ function handleMessage(ws, msg, bc) {
         clearPendingQuestionsForTab(msg.tabId);
         settle(mgr.getExternal(msg.tabId).call('close'), null, (e) => actionReply(sendLater, 'close', msg, { error: e.message }));
         break;
+      }
+      // Close and remove interaction on an orchestrator tab the owner confirmed
+      // (the dashboard dialog, `deleteRun: true`): the whole run goes through
+      // orchestration.deleteRun, the run card's Delete run, with its guards
+      // (a member mid-turn, a dirty worktree: cli:actionResult { refused }, the
+      // client asks again with `force`). Unconfirmed it stays refused below.
+      if (msg.tabId && msg.forget && msg.deleteRun === true) {
+        const st = mgr.get(msg.tabId)?.getSettings?.().orchestration;
+        if (st?.role === 'orchestrator' && st.runId) {
+          deleteRunAndReply(send, bc, { runId: st.runId, force: msg.force === true });
+          break;
+        }
       }
       if (msg.tabId) {
         // A run member closes only when orchestration allows it: a worker once
@@ -395,8 +416,7 @@ function handleMessage(ws, msg, bc) {
       actionResult(send, 'resumeRun', msg, () => bc.orchestration.resumeRun(String(msg.runId || ''), { fresh: msg.fresh === true }));
       break;
     case 'cli:deleteRun':
-      actionResult(send, 'deleteRun', msg, () => bc.orchestration.deleteRun(String(msg.runId || ''), { force: msg.force === true }));
-      send(mgr.savedSessionsMessage());
+      deleteRunAndReply(send, bc, msg);
       break;
     // --- Agent SDK panel ---
     case 'sdk:send': {

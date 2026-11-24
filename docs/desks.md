@@ -153,10 +153,17 @@ kind's own parts.
   Close and remove interaction (`cli:closeTab` with `forget`) deletes the
   saved session once the tab really closed (a refused close removes nothing)
   through `deleteSavedOne`, the Sessions tab row's own delete (a worker's run
-  record and worktree go with it; an orchestrator, and a worker with unfinished
-  work or a dirty worktree, are refused as the row's delete refuses them:
-  `cli:actionResult` / `cli:deleteRefused` to the requester), and pushes
-  `cli:savedSessions` to every client. Every card with a
+  record and worktree go with it; a worker with unfinished work or a dirty
+  worktree is refused as the row's delete refuses it: `cli:actionResult` /
+  `cli:deleteRefused` to the requester), and pushes `cli:savedSessions` to every
+  client. On an **orchestrator** tab it deletes the whole run: the dashboard
+  confirms first (naming the run and its workers; cancel leaves the tab), then
+  sends `cli:closeTab` with `forget` and `deleteRun`, and the server calls
+  `orchestration.deleteRun`, the run card's Delete run (its refusal for a
+  working member or a dirty worktree comes back as `cli:actionResult`
+  `deleteRun` `refused` and is asked again with `force`). Without `deleteRun`
+  the server still refuses an orchestrator. Other clients hear
+  `orchestration:run` `deleted` and the tab list. Every card with a
   **Delete permanently** (an idle session, a run whose orchestrator is not
   running) has a **Select** box on that row; with the toolbar's Select all,
   **Remove selected (N)** sends `cli:deleteSavedSessions { ids, runIds }` after
