@@ -152,7 +152,11 @@ kind's own parts.
   `dashboard.registerTabAction`.
   Close and remove interaction (`cli:closeTab` with `forget`) deletes the
   saved session once the tab really closed (a refused close removes nothing)
-  and pushes `cli:savedSessions` to every client. Every card with a
+  through `deleteSavedOne`, the Sessions tab row's own delete (a worker's run
+  record and worktree go with it; an orchestrator, and a worker with unfinished
+  work or a dirty worktree, are refused as the row's delete refuses them:
+  `cli:actionResult` / `cli:deleteRefused` to the requester), and pushes
+  `cli:savedSessions` to every client. Every card with a
   **Delete permanently** (an idle session, a run whose orchestrator is not
   running) has a **Select** box on that row; with the toolbar's Select all,
   **Remove selected (N)** sends `cli:deleteSavedSessions { ids, runIds }` after

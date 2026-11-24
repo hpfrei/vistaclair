@@ -173,3 +173,15 @@ test('with no answer, the 60 s safety timeout clears the button and asks for the
   for (const q of t.queue) if (q.fn && q.ms === 0) q.fn();   // requestSavedSessions(0)
   assert.ok(t.sent.some(m => m.type === 'cli:getSavedSessions'), 'the list is requested again');
 });
+
+test('Close and remove interaction: the server\'s pushed list drops the session\'s card', () => {
+  const t = setup();
+  t.cli.handleMessage(saved([plain('s1'), plain('s2')], []));
+  assert.ok(t.html().includes('data-id="s1"') || t.html().includes('s1'), 's1 is listed');
+  const before = (t.html().match(/Delete permanently/g) || []).length;
+  // The server answered the close with the list without s1.
+  t.cli.handleMessage(saved([plain('s2')], []));
+  assert.strictEqual((t.html().match(/Delete permanently/g) || []).length, before - 1, 'one card fewer');
+  assert.ok(!t.html().includes('/p/s1'), 's1\'s card is gone');
+  assert.ok(t.html().includes('/p/s2'));
+});

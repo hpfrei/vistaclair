@@ -123,10 +123,14 @@ function handleMessage(ws, msg, bc) {
         const forgetId = msg.forget ? mgr.get(msg.tabId)?.sessId : null;
         clearPendingQuestionsForTab(msg.tabId);
         mgr.remove(msg.tabId);
-        // The same deletion as the Sessions tab's row, then every client's
-        // Sessions tab hears the new list.
+        // The Sessions tab row's own delete (deleteSavedOne: a worker's run
+        // record and worktree go with it, an orchestrator and a worker with
+        // unsaved work are refused), then every client's Sessions tab hears
+        // the new list. A refusal reaches the requester as the row's does.
         if (forgetId) {
-          mgr.deleteSavedSession(forgetId);
+          const r = deleteSavedOne(bc, forgetId, false);
+          if (r.error) send({ type: 'cli:actionResult', action: 'delete', error: r.error });
+          else if (r.refused) send({ type: 'cli:deleteRefused', sessionId: forgetId, canForce: true, reason: r.refused });
           bc.broadcast(mgr.savedSessionsMessage());
         }
         mgr.broadcastTabs();

@@ -23,7 +23,7 @@ const { handleMessage } = require('../src/ws/cli-handler');
 
 test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
 
-function setup(ids, { closeCheck, deleteRun } = {}) {
+function setup(ids, { closeCheck, deleteRun, orchestration } = {}) {
   const broadcasts = [];
   const mgr = new CliSessionManager(1, { broadcast: (m) => broadcasts.push(m) }, { deleteSessionData() {} });
   const cwd = path.join(HOME, 'proj');
@@ -32,13 +32,13 @@ function setup(ids, { closeCheck, deleteRun } = {}) {
   for (const id of ids) mgr.saveToHistory({ sessId: id, cwd, title: `t-${id}`, settings: {} });
   const sent = [];
   const ws = { readyState: WebSocket.OPEN, send: (d) => sent.push(JSON.parse(d)) };
-  const bc = { cliSessionManager: mgr, broadcast: (m) => broadcasts.push(m), orchestration: closeCheck || deleteRun ? { closeCheck, deleteRun } : undefined };
+  const bc = { cliSessionManager: mgr, broadcast: (m) => broadcasts.push(m), orchestration: orchestration || (closeCheck || deleteRun ? { closeCheck, deleteRun } : undefined) };
   const call = (msg) => handleMessage(ws, msg, bc);
   const listed = () => mgr.listSaved().map(h => h.id).sort();
   // An open tab of a saved session.
-  const openTab = (tabId, sessId) => {
+  const openTab = (tabId, sessId, settings = {}) => {
     mgr.sessions.set(tabId, {
-      sessId, cwd, title: `t-${sessId}`, running: true, getSettings: () => ({}), kill() {},
+      sessId, cwd, title: `t-${sessId}`, running: true, getSettings: () => settings, kill() {},
       instanceId: `cli-${tabId}`,
     });
   };
@@ -53,6 +53,40 @@ test('close with forget removes the saved session and pushes the list', () => {
   const push = t.broadcasts.filter(m => m.type === 'cli:savedSessions').pop();
   assert.ok(push, 'every client gets the refreshed list');
   assert.deepStrictEqual(push.sessions.map(s => s.id), ['b']);
+});
+
+// "Close and remove interaction" is the Sessions tab row's delete: a worker's
+// run record is told (noteMemberDeleted: its run card drops it), an unfinished
+// or dirty worker and an orchestrator are refused as the row refuses them.
+test('close with forget on a worker goes through the row delete: the run is told', () => {
+  const noted = [];
+  const orchestration = { closeCheck: () => ({ ok: true }), memberDirty: () => [], noteMemberDeleted: (e, o) => noted.push([e.id, o]) };
+  const t = setup(['w1', 'b'], { orchestration });
+  t.openTab('tab-1', 'w1', { orchestration: { role: 'worker', runId: 'r1', workerId: 'x' } });
+  t.call({ type: 'cli:closeTab', tabId: 'tab-1', forget: true });
+  assert.deepStrictEqual(t.listed(), ['b']);
+  assert.deepStrictEqual(noted.map(n => n[0]), ['w1'], 'the run record learns the worker is deleted');
+  assert.deepStrictEqual(t.broadcasts.filter(m => m.type === 'cli:savedSessions').pop().sessions.map(s => s.id), ['b']);
+});
+
+test('close with forget on a worker with a dirty worktree keeps it and asks, like the row', () => {
+  const orchestration = { closeCheck: () => ({ ok: true }), memberDirty: () => [{ path: '/w' }], noteMemberDeleted() { throw new Error('must not run'); } };
+  const t = setup(['w1'], { orchestration });
+  t.openTab('tab-1', 'w1', { orchestration: { role: 'worker', runId: 'r1', workerId: 'x' } });
+  t.call({ type: 'cli:closeTab', tabId: 'tab-1', forget: true });
+  assert.deepStrictEqual(t.listed(), ['w1']);
+  const ask = t.sent.find(m => m.type === 'cli:deleteRefused');
+  assert.strictEqual(ask?.sessionId, 'w1');
+  assert.match(ask.reason, /uncommitted/);
+});
+
+test('close with forget on an orchestrator is refused like the row (its run is deleted as a run)', () => {
+  const orchestration = { closeCheck: () => ({ ok: true }) };
+  const t = setup(['o'], { orchestration });
+  t.openTab('tab-1', 'o', { orchestration: { role: 'orchestrator', runId: 'r1' } });
+  t.call({ type: 'cli:closeTab', tabId: 'tab-1', forget: true });
+  assert.deepStrictEqual(t.listed(), ['o']);
+  assert.match(t.sent.find(m => m.type === 'cli:actionResult')?.error || '', /Delete run/);
 });
 
 test('close without forget keeps the saved session', () => {
