@@ -241,10 +241,11 @@ other string is passed through. With a provider the entitlement cache stays:
 72) of access after the provider becomes unreachable. A seat is
 `vc:<app>:acct:<accountId>`. There is no setting for a URL and no code
 installs a provider outside tests, so the no-provider case above is the live
-one. A paid app takes entitlement from the licence app `licencing` through its
-tools (`ctx.tools.call('licencing', 'get_entitlement', { product, account })`),
-not from `ctx.license` (`_api-reference.md`, "App Licensing"). Tests:
-`test/app-license-provider.test.js`.
+one. Paid content needs a licence app installed on the same Vistaclair, asked
+through its tools by account id (`_api-reference.md`, "App Licensing"; for
+example `licencing`, when installed); without one a build session tells the
+user a licence app is needed first. Nothing in the platform depends on such an
+app. Tests: `test/app-license-provider.test.js`.
 
 ## Platform extras & toolchains
 

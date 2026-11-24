@@ -189,7 +189,7 @@ BEFORE using it — app-lint checks (`unread-capability`). Advertise what you us
 - `apps` — `ctx.apps.access(app)` — another app's bot/number/URL
 - `sites` — `ctx.sites` — own web servers per app **(inlined)**
 - `analytics` — `ctx.analytics` — site stats, no IPs stored
-- `licensing` — paid content: `licencing` app tools; `ctx.license` is free-only
+- `licensing` — `ctx.license` is free-tier only; paid content needs a licence app
 - `platform-cron` — `platform.cron.schedule/list` — cross-app persistent jobs
 - `sysmon` — `sysmon.get/subscribe/processes` — host RAM/CPU/disk; `<vc-sysmon>`
 - `print` — `print.status/pdf` — print a PDF
