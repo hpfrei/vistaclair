@@ -2230,7 +2230,7 @@
             </div>
             <div class="app-help-cap">
               <strong>App Licensing (auth.license)</strong>
-              <span>Turnkey paid or freemium apps: one manifest field gates routes behind a licence key from the platform's licence provider &mdash; key claim, per-key account seats, tiers with feature maps, revocation and checkout links. Apps just read entitlements.</span>
+              <span>Paid content gets its entitlement from the licence app <code>licencing</code> through its tools, by account. The platform's own licence provider slot is empty: <code>auth.license</code> and <code>ctx.license</code> answer the free tier for every non-owner.</span>
             </div>
           </div>
         </div>

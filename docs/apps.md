@@ -210,7 +210,7 @@ gate, the surface-kit "Plans" block, and the `subscribed` principal for spend.
 Its backend is a **provider slot** in `src/apps/app-license.js`
 (`setProvider(p)` / `getProvider()`); no code path here makes a network call.
 
-**No provider (the default today)**: the owner is always entitled
+**No provider**: the owner is always entitled
 (`ownerEntitlement`, every declared tier merged); everyone else gets the free
 tier (`freeEntitlement`: `auth.license.free`, or none, so a non-freemium app
 answers 402 `license_required`). `claim` returns `licensing_unavailable`
@@ -239,9 +239,12 @@ a machineId that holds no seat; the platform activates once and retries),
 other string is passed through. With a provider the entitlement cache stays:
 `licenseCacheTtlMinutes` (default 30) freshness, `licenseGraceHours` (default
 72) of access after the provider becomes unreachable. A seat is
-`vc:<app>:acct:<accountId>`. There is no setting for a URL: App licensing is
-to be recoded later as a vc app that installs itself as the provider.
-Tests: `test/app-license-provider.test.js`.
+`vc:<app>:acct:<accountId>`. There is no setting for a URL and no code
+installs a provider outside tests, so the no-provider case above is the live
+one. A paid app takes entitlement from the licence app `licencing` through its
+tools (`ctx.tools.call('licencing', 'get_entitlement', { product, account })`),
+not from `ctx.license` (`_api-reference.md`, "App Licensing"). Tests:
+`test/app-license-provider.test.js`.
 
 ## Platform extras & toolchains
 
