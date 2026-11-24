@@ -674,10 +674,30 @@
   window.dashboard._tabHooks.onChange(() => renderTabStrip());
 
   function closeTab(tabId, forget) {
+    // Close and remove interaction on an orchestrator tab deletes its whole run
+    // (the run card's Delete run), after one confirm naming the run and its
+    // workers; cancel leaves the tab open. A refusal (a member mid-turn, a
+    // dirty worktree) comes back as cli:actionResult and is asked again.
+    const st = tabs.get(tabId)?.settings?.orchestration;
+    if (forget && st?.role === 'orchestrator' && st.runId) { confirmDeleteRunTab(tabId, st.runId); return; }
     sendWs({ type: 'cli:closeTab', tabId, forget });
     // A run member may be refused (cli:closeRefused); the server's tab
     // list removes it once it is really closed.
     if (!tabs.get(tabId)?.settings?.orchestration) removeTab(tabId);
+  }
+
+  async function confirmDeleteRunTab(tabId, runId) {
+    const run = (_savedData?.runs || []).find(r => r.runId === runId);
+    const n = run?.workers?.total ?? run?.workerCount;
+    const name = run?.title || run?.orchestrator || tabs.get(tabId)?.title || '';
+    const ok = await showConfirm(`Delete run ${runId}${name && name !== runId ? ` ("${name}")` : ''} permanently?\n\n`
+      + (n == null ? '' : `It has ${n} worker${n === 1 ? '' : 's'}. `)
+      + 'This closes the orchestrator and every worker and removes the whole run.\n\n'
+      + 'This is not a rollback: your code, commits and merged work are not touched.\n\n'
+      + 'Removed: the conversation history of the orchestrator and every worker, their TODO/NOTES, '
+      + "the run's session folder and its git worktrees. Unmerged branches are kept.\n\n"
+      + 'This cannot be undone.', { confirmLabel: 'Delete run', danger: true });
+    if (ok) sendWs({ type: 'cli:closeTab', tabId, forget: true, deleteRun: true });
   }
 
   // The CLI part of the tab's right-click menu (TabHost puts the desk items
@@ -2312,5 +2332,5 @@
   _mobileBar?.onTabChange(null);
 
   // Expose module
-  window.cliModule = { handleMessage, handleAskMessage, tabs, updateStreamingState, switchTab, computeTabLabel, modelPickerOptions, fillModelMapSelect, tabHost };
+  window.cliModule = { handleMessage, handleAskMessage, cliMenuItems, tabs, updateStreamingState, switchTab, computeTabLabel, modelPickerOptions, fillModelMapSelect, tabHost };
 })();
