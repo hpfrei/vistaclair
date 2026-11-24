@@ -2230,7 +2230,7 @@
             </div>
             <div class="app-help-cap">
               <strong>App Licensing (auth.license)</strong>
-              <span>Paid content gets its entitlement from the licence app <code>licencing</code> through its tools, by account. The platform's own licence provider slot is empty: <code>auth.license</code> and <code>ctx.license</code> answer the free tier for every non-owner.</span>
+              <span>The platform has no licence provider: <code>auth.license</code> and <code>ctx.license</code> answer the free tier for every non-owner. Paid content needs a licence app installed on the same Vistaclair (for example <code>licencing</code>, when it is installed), asked through its tools by account.</span>
             </div>
           </div>
         </div>
