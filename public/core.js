@@ -2063,6 +2063,7 @@ function handleMessage(msg) {
     case 'cli:actionResult':
     case 'cli:closeRefused':
     case 'cli:deleteRefused':
+    case 'cli:deleteSavedSessionsDone':
     case 'cli:paused':
       if (window.directoriesModule?.handleShellMessage?.(msg)) break;
       window.cliModule?.handleMessage(msg);

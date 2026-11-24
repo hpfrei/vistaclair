@@ -7,6 +7,14 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
+// Like the browser's NodeList: indexable, iterable, forEach, but no array
+// methods (find, filter, map...). Code that needs them must use Array.from.
+function nodeList(items) {
+  const l = { length: items.length, item: (i) => items[i] || null, forEach: (fn, th) => items.forEach(fn, th), [Symbol.iterator]: () => items[Symbol.iterator]() };
+  items.forEach((n, i) => { l[i] = n; });
+  return l;
+}
+
 function makeDom() {
   let constructed = 0;
   class ClassList {
@@ -77,7 +85,7 @@ function makeDom() {
       const sels = sel.split(',');
       const walk = (n) => { for (const c of n.children) { if (sels.some(s => matches(c, s))) out.push(c); walk(c); } };
       walk(this);
-      return out;
+      return doc.strictNodeLists ? nodeList(out) : out;
     }
     querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
     closest(sel) { let n = this; while (n) { if (n.tagName && matches(n, sel)) return n; n = n.parentNode; } return null; }
